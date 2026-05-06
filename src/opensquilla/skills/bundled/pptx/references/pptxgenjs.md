@@ -3,9 +3,7 @@
 Public API quick reference for the PptxGenJS library. See the upstream docs
 at https://gitbrent.github.io/PptxGenJS/ for the full surface.
 
-This file is original OpenSquilla content. PptxGenJS itself is MIT-licensed
-upstream; this cheatsheet documents its public function/parameter names,
-which are facts about the library, not derivative content.
+PptxGenJS is MIT-licensed upstream.
 
 ## Install
 

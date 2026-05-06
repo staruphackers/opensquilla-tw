@@ -6,11 +6,11 @@ class Opensquilla < Formula
   include Language::Python::Virtualenv
 
   desc "Microkernel Python agent runtime with MCP tools and multi-channel messaging"
-  homepage "https://github.com/Token-Rhythm/opensquilla"
-  url "https://github.com/Token-Rhythm/opensquilla/archive/refs/tags/v0.1.0.tar.gz"
+  homepage "https://github.com/OpenSquilla/opensquilla"
+  url "https://github.com/OpenSquilla/opensquilla/archive/refs/tags/v0.1.0.tar.gz"
   sha256 "0000000000000000000000000000000000000000000000000000000000000000"
-  license "MIT"
-  head "https://github.com/Token-Rhythm/opensquilla.git", branch: "main"
+  license "Apache-2.0"
+  head "https://github.com/OpenSquilla/opensquilla.git", branch: "main"
 
   depends_on "python@3.13"
 
@@ -40,15 +40,15 @@ class Opensquilla < Formula
       tarballs do not carry. If you want squilla-router ML routing, use a
       source checkout with Git LFS plus the `recommended` profile:
 
-        git lfs pull --include="src/opensquilla/contrib/squilla_router/models/**"
+        git lfs pull --include="src/opensquilla/squilla_router/models/**"
         uv sync --extra recommended
 
       Service units (launchd / systemd / Task Scheduler) ship in
       service-units/. For macOS, install the LaunchAgent:
 
-        envsubst < service-units/launchd/com.tokenrhythm.opensquilla.plist \\
-          > ~/Library/LaunchAgents/com.tokenrhythm.opensquilla.plist
-        launchctl load ~/Library/LaunchAgents/com.tokenrhythm.opensquilla.plist
+        envsubst < service-units/launchd/ai.opensquilla.gateway.plist \\
+          > ~/Library/LaunchAgents/ai.opensquilla.gateway.plist
+        launchctl load ~/Library/LaunchAgents/ai.opensquilla.gateway.plist
 
       See service-units/README.md for the per-platform install + opt-in
       walkthrough.

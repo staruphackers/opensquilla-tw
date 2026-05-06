@@ -7,7 +7,7 @@ from opensquilla.skills.loader import SkillLoader
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLED = ROOT / "src" / "opensquilla" / "skills" / "bundled"
 NOTICES = ROOT / "THIRD_PARTY_NOTICES.md"
-ORIGINALS = {"memory", "pptx"}
+ORIGINALS = {"memory"}
 
 
 def test_all_bundled_skills_have_complete_provenance(tmp_path: Path) -> None:
@@ -25,15 +25,16 @@ def test_all_bundled_skills_have_complete_provenance(tmp_path: Path) -> None:
             "openclaw-derived",
             "clawhub-mit0",
         }, skill.name
-        assert provenance.license in {"MIT", "MIT-0"}, skill.name
         assert provenance.maintained_by == "OpenSquilla", skill.name
         if provenance.origin == "openclaw-derived":
             assert provenance.upstream_url == "https://github.com/openclaw/openclaw"
+            assert provenance.license == "MIT", skill.name
         elif provenance.origin == "clawhub-mit0":
             assert provenance.upstream_url.startswith("https://clawhub.ai/"), skill.name
             assert provenance.license == "MIT-0", skill.name
         else:
             assert skill.name in ORIGINALS
+            assert provenance.license == "Apache-2.0", skill.name
 
 
 def test_third_party_notices_match_bundled_provenance(tmp_path: Path) -> None:

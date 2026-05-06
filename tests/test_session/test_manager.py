@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -393,6 +394,82 @@ async def test_compact_with_result_returns_source_and_persists(manager):
     assert all(entry.role != "system" for entry in transcript)
     summaries = await manager.get_summaries("agent:main:main")
     assert [summary.summary_text for summary in summaries] == [result.summary]
+
+
+def _fail_next_transcript_insert(monkeypatch: pytest.MonkeyPatch, storage: SessionStorage) -> None:
+    original_execute = storage.conn.execute
+    failed = False
+
+    def execute(sql: str, params: Any = ()):
+        nonlocal failed
+        if (
+            not failed
+            and isinstance(sql, str)
+            and sql.lstrip().upper().startswith("INSERT INTO TRANSCRIPT_ENTRIES")
+        ):
+            failed = True
+            raise RuntimeError("rewrite insert failed")
+        return original_execute(sql, params)
+
+    monkeypatch.setattr(storage.conn, "execute", execute)
+
+
+@pytest.mark.asyncio
+async def test_compact_rewrite_failure_keeps_session_state_atomic(
+    manager,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    node = await manager.create("agent:main:main")
+    for index in range(20):
+        await manager.append_message("agent:main:main", "user", f"msg {index} " + ("x" * 500))
+    original_transcript = await manager.get_transcript("agent:main:main")
+    original_summaries = await manager.get_summaries("agent:main:main")
+    original_node = await manager._storage.get_session("agent:main:main")
+
+    _fail_next_transcript_insert(monkeypatch, manager._storage)
+
+    with pytest.raises(RuntimeError, match="rewrite insert failed"):
+        await manager.compact("agent:main:main", context_window_tokens=1000)
+
+    assert await manager.get_transcript("agent:main:main") == original_transcript
+    assert await manager.get_summaries("agent:main:main") == original_summaries
+    current_node = await manager._storage.get_session("agent:main:main")
+    assert current_node is not None
+    assert original_node is not None
+    assert current_node.session_id == node.session_id
+    assert current_node.compaction_count == original_node.compaction_count
+    assert current_node.updated_at == original_node.updated_at
+
+
+@pytest.mark.asyncio
+async def test_persist_compaction_result_rewrite_failure_keeps_session_state_atomic(
+    manager,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    node = await manager.create("agent:main:main")
+    for index in range(4):
+        await manager.append_message("agent:main:main", "user", f"msg {index}", token_count=5)
+    original_transcript = await manager.get_transcript("agent:main:main")
+    original_summaries = await manager.get_summaries("agent:main:main")
+    original_node = await manager._storage.get_session("agent:main:main")
+
+    _fail_next_transcript_insert(monkeypatch, manager._storage)
+
+    with pytest.raises(RuntimeError, match="rewrite insert failed"):
+        await manager.persist_compaction_result(
+            "agent:main:main",
+            "short summary",
+            [{"role": "assistant", "content": "latest reply"}],
+        )
+
+    assert await manager.get_transcript("agent:main:main") == original_transcript
+    assert await manager.get_summaries("agent:main:main") == original_summaries
+    current_node = await manager._storage.get_session("agent:main:main")
+    assert current_node is not None
+    assert original_node is not None
+    assert current_node.session_id == node.session_id
+    assert current_node.compaction_count == original_node.compaction_count
+    assert current_node.updated_at == original_node.updated_at
 
 
 @pytest.mark.asyncio

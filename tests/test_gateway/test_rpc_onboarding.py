@@ -53,6 +53,7 @@ async def test_onboarding_catalog_returns_providers_and_channels(tmp_path, monke
     assert "providers" in payload
     assert "channels" in payload
     assert "searchProviders" in payload
+    assert "routerProfiles" in payload
     assert "imageGenerationProviders" in payload
     assert "memoryEmbeddingProviders" in payload
     types = {c["type"] for c in payload["channels"]}
@@ -70,6 +71,8 @@ async def test_onboarding_catalog_returns_providers_and_channels(tmp_path, monke
         "ollama",
         "none",
     } <= memory_provider_ids
+    router_profile_ids = {p["profileId"] for p in payload["routerProfiles"]["profiles"]}
+    assert {"openrouter", "deepseek", "openai"} <= router_profile_ids
 
 
 @pytest.mark.asyncio
@@ -85,6 +88,106 @@ async def test_provider_configure_redacts_api_key(tmp_path, monkeypatch):
     assert res.payload["changed"] is True
     assert res.payload["entry"]["api_key"] == "***"
     assert res.payload["restartRequired"] is False
+
+
+@pytest.mark.asyncio
+async def test_router_configure_recommended_profile(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENSQUILLA_GATEWAY_CONFIG_PATH", str(tmp_path / "c.toml"))
+    from opensquilla.gateway.config import GatewayConfig
+
+    ctx = _admin_ctx()
+    ctx.config = GatewayConfig(llm={"provider": "deepseek", "model": "deepseek-chat"})
+    ctx.config.config_path = str(tmp_path / "c.toml")
+
+    res = await get_dispatcher().dispatch(
+        "r1",
+        "onboarding.router.configure",
+        {"mode": "recommended"},
+        ctx,
+    )
+
+    assert res.error is None, res.error
+    assert ctx.config.squilla_router.enabled is True
+    assert ctx.config.squilla_router.tier_profile == "deepseek"
+    persisted = tomllib.loads((tmp_path / "c.toml").read_text())
+    assert persisted["squilla_router"]["tier_profile"] == "deepseek"
+    assert "tiers" not in persisted["squilla_router"]
+
+
+@pytest.mark.asyncio
+async def test_provider_configure_recomputes_existing_router_profile(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENSQUILLA_GATEWAY_CONFIG_PATH", str(tmp_path / "c.toml"))
+    from opensquilla.gateway.config import GatewayConfig
+
+    ctx = _admin_ctx()
+    ctx.config = GatewayConfig(
+        llm={"provider": "deepseek", "model": "deepseek-chat"},
+        squilla_router={"tier_profile": "deepseek"},
+    )
+    ctx.config.config_path = str(tmp_path / "c.toml")
+
+    res = await get_dispatcher().dispatch(
+        "r1",
+        "onboarding.provider.configure",
+        {
+            "providerId": "openai",
+            "model": "gpt-5.4-mini",
+            "apiKeyEnv": "OPENAI_API_KEY",
+        },
+        ctx,
+    )
+
+    assert res.error is None, res.error
+    assert ctx.config.llm.provider == "openai"
+    assert ctx.config.squilla_router.tier_profile == "openai"
+    persisted = tomllib.loads((tmp_path / "c.toml").read_text())
+    assert persisted["squilla_router"]["tier_profile"] == "openai"
+    assert "tiers" not in persisted["squilla_router"]
+
+
+@pytest.mark.asyncio
+async def test_provider_configure_recomputes_openrouter_mix_router(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENSQUILLA_GATEWAY_CONFIG_PATH", str(tmp_path / "c.toml"))
+    from opensquilla.gateway.config import GatewayConfig
+
+    ctx = _admin_ctx()
+    ctx.config = GatewayConfig(llm={"provider": "openrouter", "model": "deepseek/x"})
+    ctx.config.config_path = str(tmp_path / "c.toml")
+
+    res = await get_dispatcher().dispatch(
+        "r1",
+        "onboarding.provider.configure",
+        {
+            "providerId": "deepseek",
+            "model": "deepseek-chat",
+            "apiKeyEnv": "DEEPSEEK_API_KEY",
+        },
+        ctx,
+    )
+
+    assert res.error is None, res.error
+    assert ctx.config.llm.provider == "deepseek"
+    assert ctx.config.squilla_router.enabled is True
+    assert ctx.config.squilla_router.tier_profile == "deepseek"
+    persisted = tomllib.loads((tmp_path / "c.toml").read_text())
+    assert persisted["squilla_router"]["tier_profile"] == "deepseek"
+    assert "tiers" not in persisted["squilla_router"]
+
+
+@pytest.mark.asyncio
+async def test_router_catalog_rpc(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENSQUILLA_GATEWAY_CONFIG_PATH", str(tmp_path / "c.toml"))
+
+    res = await get_dispatcher().dispatch(
+        "r1",
+        "onboarding.router.catalog",
+        {},
+        _read_ctx(),
+    )
+
+    assert res.error is None, res.error
+    profile_ids = {p["profileId"] for p in res.payload["profiles"]}
+    assert {"openrouter", "deepseek"} <= profile_ids
 
 
 @pytest.mark.asyncio
@@ -374,6 +477,42 @@ async def test_provider_configure_calls_provider_selector_sync(tmp_path, monkeyp
     assert sync_calls[0].provider == "openrouter"
     assert sync_calls[0].model == "m"
     assert sync_calls[0].api_key == "k"
+
+
+@pytest.mark.asyncio
+async def test_provider_configure_syncs_env_key_to_provider_selector(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENSQUILLA_GATEWAY_CONFIG_PATH", str(tmp_path / "c.toml"))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "from-env")
+    from opensquilla.gateway.config import GatewayConfig
+
+    sync_calls: list[object] = []
+
+    class FakeSelector:
+        def sync_primary(self, provider_config):
+            sync_calls.append(provider_config)
+
+    ctx = _admin_ctx()
+    ctx.config = GatewayConfig()
+    ctx.config.config_path = str(tmp_path / "c.toml")
+    ctx.provider_selector = FakeSelector()
+
+    res = await get_dispatcher().dispatch(
+        "r1",
+        "onboarding.provider.configure",
+        {
+            "providerId": "openrouter",
+            "model": "deepseek/deepseek-v4-flash",
+            "apiKeyEnv": "OPENROUTER_API_KEY",
+        },
+        ctx,
+    )
+
+    assert res.error is None, res.error
+    assert len(sync_calls) == 1
+    assert sync_calls[0].api_key == "from-env"
+    assert "llm.api_key" in ctx.config._runtime_secret_paths
+    persisted = tomllib.loads((tmp_path / "c.toml").read_text())
+    assert "api_key" not in persisted["llm"]
 
 
 @pytest.mark.asyncio

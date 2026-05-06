@@ -1,11 +1,7 @@
 # Third-party notices for `html-to-pdf` skill
 
-Inspired by `generate-pdf` on the ClawHub registry
-(<https://clawhub.ai/generate-pdf>, MIT-0). The OpenSquilla version is
-independently authored: SKILL.md instructional text, the render script,
-and the WeasyPrint reference were written from the WeasyPrint
-documentation (<https://doc.courtbouillon.org/weasyprint/>) and the CSS
-Paged Media specification, not copied from the upstream package.
+Source: ClawHub `generate-pdf`
+(<https://clawhub.ai/generate-pdf>, MIT-0).
 
 ## Runtime dependency
 
@@ -17,5 +13,5 @@ install.
 
 ## License
 
-This skill, as part of OpenSquilla, is licensed under the project's MIT
-license. The WeasyPrint runtime carries its own BSD-3-Clause license.
+The ClawHub source is MIT-0. The OpenSquilla project license is Apache-2.0.
+The WeasyPrint runtime carries its own BSD-3-Clause license.

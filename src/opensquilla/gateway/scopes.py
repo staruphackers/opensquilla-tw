@@ -123,6 +123,7 @@ METHOD_SCOPES: dict[str, str] = {
     # OpenSquilla-only — onboarding catalog and status are operator-readable.
     "onboarding.status": READ_SCOPE,
     "onboarding.catalog": READ_SCOPE,
+    "onboarding.router.catalog": READ_SCOPE,
     # ----- write -----
     "wake": WRITE_SCOPE,
     "send": WRITE_SCOPE,
@@ -178,6 +179,7 @@ METHOD_SCOPES: dict[str, str] = {
     "sessions.delete": ADMIN_SCOPE,
     # OpenSquilla-only — onboarding mutations require admin scope.
     "onboarding.provider.configure": ADMIN_SCOPE,
+    "onboarding.router.configure": ADMIN_SCOPE,
     "onboarding.memory_embedding.configure": ADMIN_SCOPE,
     "onboarding.search.configure": ADMIN_SCOPE,
     "onboarding.imageGeneration.configure": ADMIN_SCOPE,

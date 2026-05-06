@@ -48,6 +48,7 @@ _CHANNEL_DEFAULT_ALLOW: frozenset[str] = frozenset(
         "memory_get",
         "memory_search",
         "pdf",
+        "publish_artifact",
         "read_file",
         "session_status",
         "sessions_history",

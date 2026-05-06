@@ -15,7 +15,9 @@ from typing import Any, Protocol, cast
 
 import structlog
 
-from opensquilla.contrib.squilla_router.controller import (
+from opensquilla.engine.pipeline import TurnContext
+from opensquilla.engine.pricing import lookup_price
+from opensquilla.squilla_router.controller import (
     derive_prompt_policy,
     derive_thinking_mode,
     get_prompt_hint,
@@ -23,8 +25,6 @@ from opensquilla.contrib.squilla_router.controller import (
     synthetic_one_hot,
     thinking_mode_to_level,
 )
-from opensquilla.engine.pipeline import TurnContext
-from opensquilla.engine.pricing import lookup_price
 
 log = structlog.get_logger(__name__)
 
@@ -234,7 +234,7 @@ def _get_strategy(config: object) -> RouterStrategy:
             return _strategy
         if _strategy_key is not None and _strategy_key != key:
             _history_store.clear()
-        from opensquilla.contrib.squilla_router.v4_phase3 import V4Phase3Strategy
+        from opensquilla.squilla_router.v4_phase3 import V4Phase3Strategy
 
         strategy = cast(
             RouterStrategy,
@@ -334,6 +334,24 @@ def _record_thinking_metadata(ctx: TurnContext, router_cfg: object, tier_cfg: di
     if not getattr(router_cfg, "auto_thinking", True):
         return
     level = _tier_thinking_level(tier_cfg)
+    if level is None:
+        return
+    ctx.metadata["thinking_requested"] = True
+    ctx.metadata["thinking_level"] = level
+
+
+def _record_controller_thinking_metadata(
+    ctx: TurnContext,
+    router_cfg: object,
+    tier_cfg: dict,
+    thinking_mode: str | None,
+) -> None:
+    if not getattr(router_cfg, "auto_thinking", True):
+        return
+    if thinking_mode is not None:
+        level = thinking_mode_to_level(thinking_mode)
+    else:
+        level = _tier_thinking_level(tier_cfg)
     if level is None:
         return
     ctx.metadata["thinking_requested"] = True
@@ -528,22 +546,6 @@ def _finalize_decision(
         tiers=tiers,
     )
 
-    complaint_terms: list[str] = []
-    complaint_upgrade_applied = False
-    if getattr(router_cfg, "complaint_upgrade_enabled", True):
-        complaint_terms = _detect_complaint(
-            message,
-            max_chars=int(getattr(router_cfg, "complaint_upgrade_max_chars", 160)),
-        )
-        if complaint_terms:
-            upgraded_tier = _upgrade_tier(
-                final_tier,
-                valid_tiers,
-                int(getattr(router_cfg, "complaint_upgrade_steps", 1)),
-            )
-            complaint_upgrade_applied = upgraded_tier != final_tier
-            final_tier = upgraded_tier
-
     now = time.monotonic()
     window = float(getattr(router_cfg, "kv_cache_anti_downgrade_window_seconds", 600))
     previous_entry = _previous_final_entry(
@@ -557,6 +559,29 @@ def _finalize_decision(
         previous_route_class = previous_entry.get("final_route_class") or previous_entry.get(
             "route_class"
         )
+
+    complaint_terms: list[str] = []
+    complaint_upgrade_applied = False
+    if getattr(router_cfg, "complaint_upgrade_enabled", True):
+        complaint_terms = _detect_complaint(
+            message,
+            max_chars=int(getattr(router_cfg, "complaint_upgrade_max_chars", 160)),
+        )
+        if complaint_terms:
+            upgrade_start_tier = final_tier
+            if (
+                previous_tier in valid_tiers
+                and _tier_index(previous_tier, valid_tiers)
+                > _tier_index(upgrade_start_tier, valid_tiers)
+            ):
+                upgrade_start_tier = previous_tier
+            upgraded_tier = _upgrade_tier(
+                upgrade_start_tier,
+                valid_tiers,
+                int(getattr(router_cfg, "complaint_upgrade_steps", 1)),
+            )
+            complaint_upgrade_applied = upgraded_tier != final_tier
+            final_tier = upgraded_tier
 
     anti_downgrade_applied = False
     if (
@@ -614,7 +639,7 @@ def _apply_controller(
     ctx.metadata["prompt_policy"] = prompt_policy
 
     if rollout_phase == "observe":
-        _record_thinking_metadata(ctx, router_cfg, tier_cfg)
+        _record_controller_thinking_metadata(ctx, router_cfg, tier_cfg, thinking_mode)
         return
 
     # prompt_only or full: inject prompt hint. P2 is tracked for observability
@@ -627,10 +652,7 @@ def _apply_controller(
         ctx.message = _inject_prompt_hint(ctx.message, hint)
 
     if rollout_phase == "full" and getattr(router_cfg, "auto_thinking", True):
-        level = thinking_mode_to_level(thinking_mode)
-        if level is not None:
-            ctx.metadata["thinking_requested"] = True
-            ctx.metadata["thinking_level"] = level
+        _record_controller_thinking_metadata(ctx, router_cfg, tier_cfg, thinking_mode)
     else:
         _record_thinking_metadata(ctx, router_cfg, tier_cfg)
 

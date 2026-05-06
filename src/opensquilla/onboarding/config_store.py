@@ -18,6 +18,7 @@ except ModuleNotFoundError:  # pragma: no cover
     import tomli as tomllib  # type: ignore[import-not-found, no-redef]
 
 from opensquilla.gateway.config import GatewayConfig
+from opensquilla.paths import default_opensquilla_home
 
 log = structlog.get_logger(__name__)
 
@@ -30,18 +31,30 @@ class PersistResult:
     warnings: list[str] = field(default_factory=list)
 
 
-def default_config_path() -> Path:
+def resolve_config_path(path: str | Path | None = None) -> tuple[Path, str]:
+    """Return (resolved_path, source) using gateway-equivalent precedence.
+
+    source is one of: "explicit", "env", "cwd", "home".
+    Mirrors GatewayConfig.load (see gateway/config.py) so the CLI never
+    silently writes to a different file than the gateway will read.
+    """
+    if path is not None:
+        return Path(path).expanduser(), "explicit"
     explicit = os.environ.get("OPENSQUILLA_GATEWAY_CONFIG_PATH")
     if explicit:
-        return Path(explicit).expanduser()
-    home = os.environ.get("HOME")
-    if home:
-        return Path(home).expanduser() / ".opensquilla" / "config.toml"
-    return Path.home() / ".opensquilla" / "config.toml"
+        return Path(explicit).expanduser(), "env"
+    cwd_candidate = Path.cwd() / "opensquilla.toml"
+    if cwd_candidate.is_file():
+        return cwd_candidate, "cwd"
+    return default_opensquilla_home() / "config.toml", "home"
+
+
+def default_config_path() -> Path:
+    return resolve_config_path(None)[0]
 
 
 def _resolve_path(path: str | Path | None) -> Path:
-    return Path(path).expanduser() if path else default_config_path()
+    return resolve_config_path(path)[0]
 
 
 def load_config(path: str | Path | None = None) -> GatewayConfig:

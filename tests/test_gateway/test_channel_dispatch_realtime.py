@@ -9,17 +9,19 @@ import pytest
 
 from opensquilla.channels.stream_policy import resolve_channel_stream_policy
 from opensquilla.channels.types import Attachment, IncomingMessage, OutgoingMessage
-from opensquilla.engine.types import DoneEvent, TextDeltaEvent
+from opensquilla.engine.types import ArtifactEvent, DoneEvent, TextDeltaEvent
 from opensquilla.gateway.attachment_ingest import (
     MAX_STAGED_PDF_BYTES,
     MAX_TOTAL_ATTACHMENT_BYTES,
     AttachmentTotalTooLargeError,
 )
 from opensquilla.gateway.channel_dispatch import (
+    _artifact_fallback_lines,
     _dispatch_combined_message_after_debounce,
     _ingest_channel_message_attachments,
     _run_turn_batch_path,
     _run_turn_with_streaming,
+    _RuntimeChannelStreamRelay,
 )
 from opensquilla.gateway.config import AgentEntryConfig, GatewayConfig
 
@@ -124,6 +126,164 @@ async def test_direct_channel_turn_emits_run_heartbeat_while_stream_is_quiet() -
 
     assert any(event_name == "session.event.run_heartbeat" for _, event_name, _ in bridge.events)
     assert channel.sent[-1].content == "ok"
+
+
+@pytest.mark.asyncio
+async def test_direct_channel_batch_turn_sends_artifact_fallback() -> None:
+    artifact = {
+        "id": "art-channel",
+        "kind": "artifact_ref",
+        "name": "report.txt",
+        "mime": "text/plain",
+        "size": 4,
+        "sha256": "f" * 64,
+        "session_id": "session-1",
+        "session_key": "agent:main:channel-test",
+        "source": "publish_artifact",
+        "created_at": "2026-05-06T12:00:00Z",
+        "download_url": "/api/v1/artifacts/art-channel?sessionKey=agent%3Amain%3Achannel-test",
+        "store": "artifacts",
+    }
+
+    class FakeTurnRunner:
+        async def run(self, message: str, session_key: str, **kwargs):
+            yield ArtifactEvent(**artifact)
+            yield DoneEvent()
+
+    channel = _FakeChannel()
+    bridge = _FakeEventBridge()
+    config = SimpleNamespace(
+        agent_stream_heartbeat_interval_seconds=0.0,
+        agent_stream_idle_timeout_seconds=1.0,
+    )
+
+    await _run_turn_batch_path(
+        channel,
+        FakeTurnRunner(),
+        _message(),
+        "agent:main:channel-test",
+        _tool_ctx(),
+        bridge,
+        None,
+        config,
+    )
+
+    assert channel.sent[-1].content == "Generated file: report.txt -> available in WebUI"
+    assert "/api/v1/artifacts" not in channel.sent[-1].content
+    assert "sessionKey" not in channel.sent[-1].content
+    event_artifact = bridge.events[-1][2]
+    assert bridge.events[-1] == (
+        "agent:main:channel-test",
+        "session.event.artifact",
+        event_artifact,
+    )
+    assert event_artifact["download_url"] == "/api/v1/artifacts/art-channel"
+    assert "session_key" not in event_artifact
+    assert "sessionKey" not in json.dumps(event_artifact)
+
+
+def test_channel_artifact_fallback_uses_only_channel_safe_absolute_links() -> None:
+    assert _artifact_fallback_lines(
+        [
+            {
+                "id": "art-1",
+                "name": "report.txt",
+                "download_url": "/api/v1/artifacts/art-1?sessionKey=secret",
+            }
+        ]
+    ) == ["Generated file: report.txt -> available in WebUI"]
+
+    assert _artifact_fallback_lines(
+        [
+            {
+                "id": "art-2",
+                "name": "signed.txt",
+                "signed_download_url": "https://gateway.example/artifacts/art-2?sig=short",
+            }
+        ]
+    ) == [
+        "Generated file: signed.txt -> "
+        "https://gateway.example/artifacts/art-2?sig=short"
+    ]
+
+    assert _artifact_fallback_lines(
+        [
+            {
+                "id": "art-3",
+                "name": "bad.txt",
+                "channel_download_url": "/api/v1/artifacts/art-3?token=long",
+            }
+        ]
+    ) == ["Generated file: bad.txt -> available in WebUI"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_channel_stream_relay_emits_artifact_fallback() -> None:
+    class StreamingChannel:
+        def __init__(self) -> None:
+            self.chunks: list[str] = []
+
+        async def send_streaming(self, chunks, **kwargs):
+            async for chunk in chunks:
+                self.chunks.append(chunk)
+
+    class FakeTaskRuntime:
+        async def enqueue(self, envelope, message: str, *, stream_event_sink=None):
+            return None
+
+    channel = StreamingChannel()
+    relay = _RuntimeChannelStreamRelay.maybe_start(channel, _message(), FakeTaskRuntime())
+
+    assert relay is not None
+
+    await relay.emit(
+        {
+            "kind": "artifact",
+            "id": "art-stream",
+            "name": "stream.txt",
+            "download_url": "/api/v1/artifacts/art-stream?sessionKey=secret",
+        }
+    )
+    await relay.close()
+
+    assert channel.chunks == ["Generated file: stream.txt -> available in WebUI"]
+    assert relay.text_emitted is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_channel_stream_relay_appends_artifact_fallback_to_text() -> None:
+    class StreamingChannel:
+        def __init__(self) -> None:
+            self.chunks: list[str] = []
+
+        async def send_streaming(self, chunks, **kwargs):
+            async for chunk in chunks:
+                self.chunks.append(chunk)
+
+    class FakeTaskRuntime:
+        async def enqueue(self, envelope, message: str, *, stream_event_sink=None):
+            return None
+
+    channel = StreamingChannel()
+    relay = _RuntimeChannelStreamRelay.maybe_start(channel, _message(), FakeTaskRuntime())
+
+    assert relay is not None
+
+    await relay.emit(TextDeltaEvent(text="done"))
+    await relay.emit(
+        {
+            "kind": "artifact",
+            "id": "art-stream",
+            "name": "stream.txt",
+            "download_url": "/api/v1/artifacts/art-stream?sessionKey=secret",
+        }
+    )
+    await relay.close()
+
+    assert channel.chunks == [
+        "done",
+        "\n\nGenerated file: stream.txt -> available in WebUI",
+    ]
 
 
 @pytest.mark.asyncio
@@ -572,9 +732,12 @@ async def test_debounce_channel_turn_honors_attachment_persistence_config(tmp_pa
     )
 
     persisted = json.loads(session_manager.entries[-1]["content"])
-    assert persisted["attachments"][0]["data"] == base64.b64encode(b"%PDF-1.4\nbody\n").decode(
-        "ascii"
-    )
+    assert persisted["attachments"][0] == {
+        "name": "doc.pdf",
+        "mime": "application/pdf",
+        "size": len(b"%PDF-1.4\nbody\n"),
+        "missing_reason": "attachment persistence disabled",
+    }
     assert "sha256_ref" not in persisted["attachments"][0]
     assert not (tmp_path / "transcripts").exists()
     assert runtime.enqueue_calls[0]["attachments"][0]["_was_staged"] is True

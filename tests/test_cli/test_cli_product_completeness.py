@@ -289,6 +289,40 @@ def test_skills_install_and_uninstall_fall_back_when_gateway_unavailable(monkeyp
     assert json.loads(uninstall.stdout)["message"] == "missing"
 
 
+def test_skills_install_fallback_exposes_github_source_without_token(monkeypatch):
+    _install_fake_gateway(monkeypatch, FailingConnectGatewayClient)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    from opensquilla.skills.hub.installer import InstallResult, SkillInstaller
+
+    async def fake_install(self, identifier: str, source: str, force: bool = False):
+        assert source == "github"
+        assert identifier == "https://github.com/acme/skillpack/tree/main/skills/demo"
+        assert "github" in self._router.source_ids
+        return InstallResult(
+            success=True,
+            name="demo",
+            message="installed from github",
+            path="/tmp/demo",
+        )
+
+    monkeypatch.setattr(SkillInstaller, "install", fake_install)
+
+    install = runner.invoke(
+        app,
+        [
+            "skills",
+            "install",
+            "https://github.com/acme/skillpack/tree/main/skills/demo",
+            "--source",
+            "github",
+            "--json",
+        ],
+    )
+
+    assert install.exit_code == 0, install.stdout
+    assert json.loads(install.stdout)["name"] == "demo"
+
+
 def test_skills_install_rpc_error_does_not_fall_back_to_local_installer(monkeypatch):
     fake = _install_fake_gateway(monkeypatch, RPCFailGatewayClient)
     from opensquilla.skills.hub.installer import SkillInstaller

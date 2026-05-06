@@ -174,7 +174,7 @@
   overflow: hidden;
 }
 .sk-group__head {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   padding: 10px var(--sp-4);
   cursor: pointer;
   user-select: none;
@@ -205,6 +205,12 @@
   background: var(--bg);
   color: var(--text-muted);
   font-variant-numeric: tabular-nums;
+}
+.sk-group__meta {
+  flex: 1 1 260px;
+  min-width: 180px;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
 }
 .sk-group:not([open]) {
   /* When collapsed, drop the bottom border on the head */
@@ -304,6 +310,11 @@
 
 .sk-registry { padding: 0; display: flex; flex-direction: column; gap: var(--sp-4); }
 .sk-registry__head { display: flex; gap: var(--sp-2); align-items: center; }
+.sk-github-install {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
 .sk-registry__results { display: flex; flex-direction: column; }
 .sk-registry__hint {
   display: flex;
@@ -517,5 +528,7 @@
   .sk-stage__actions { width: 100%; }
   .sk-search-input { flex: 1; width: 100%; }
   .sk-search-wrap { flex: 1; }
+  .sk-registry__head,
+  .sk-github-install { flex-direction: column; align-items: stretch; }
   .sk-grid { grid-template-columns: 1fr; }
 }

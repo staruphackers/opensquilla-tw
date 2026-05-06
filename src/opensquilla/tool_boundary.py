@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -25,6 +25,7 @@ class ToolResult:
     tool_name: str
     content: str
     is_error: bool = False
+    artifacts: list[dict[str, Any]] = field(default_factory=list)
 
 
 AgentToolHandler = Callable[[ToolCall], Awaitable[ToolResult]]

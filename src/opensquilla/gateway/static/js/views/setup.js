@@ -9,6 +9,12 @@
  */
 
 const SetupView = (() => {
+  // Web setup flow is gated off while provider configuration via the browser
+  // is being stabilised. Flip to true once the underlying RPC paths are
+  // verified end-to-end. The route stays mounted so links/bookmarks still
+  // resolve and users see a clear status instead of a broken form.
+  const SETUP_UI_AVAILABLE = false;
+
   let _el = null;
   let _rpc = null;
   let _catalog = null;
@@ -17,6 +23,10 @@ const SetupView = (() => {
 
   async function render(el) {
     _el = el;
+    if (!SETUP_UI_AVAILABLE) {
+      _renderUnavailable();
+      return;
+    }
     _rpc = App.getRpc();
     await _rpc.waitForConnection();
 
@@ -322,6 +332,33 @@ const SetupView = (() => {
         UI.toast('Save failed: ' + err.message, 'err');
       }
     });
+  }
+
+  function _renderUnavailable() {
+    _el.innerHTML = `
+      <section class="setup setup--unavailable">
+        <div class="setup-unavailable" role="status" aria-live="polite">
+          <span class="setup-unavailable__badge">Under Maintenance</span>
+          <h2 class="setup-unavailable__title">Web setup is temporarily unavailable</h2>
+          <p class="setup-unavailable__lede">
+            The browser-based provider configuration flow is being stabilised
+            after several issues surfaced in testing. To prevent broken saves
+            we have disabled the controls on this page. The page itself is
+            kept in place so existing links keep resolving.
+          </p>
+          <div class="setup-unavailable__cta">
+            <h3>Configure providers in the meantime</h3>
+            <ul>
+              <li>Run <code>opensquilla onboard</code> for interactive first-run setup.</li>
+              <li>Use <code>opensquilla providers configure</code> for LLM provider edits.</li>
+              <li>Edit the active config file, normally <code>~/.opensquilla/config.toml</code>.</li>
+            </ul>
+          </div>
+          <p class="setup-unavailable__foot">
+            We will re-enable this view once the regressions are resolved.
+          </p>
+        </div>
+      </section>`;
   }
 
   function _imageFieldDefault(spec, field) {

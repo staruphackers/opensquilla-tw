@@ -24,6 +24,8 @@ from typing import Any, Final, SupportsInt, TypeGuard, cast
 
 import structlog
 
+from opensquilla.artifacts import artifact_marker, artifact_payload
+from opensquilla.attachment_refs import is_attachment_ref, read_attachment_ref_bytes
 from opensquilla.bootstrap_types import BootstrapFileReport
 from opensquilla.engine.agent import Agent, ToolHandler
 from opensquilla.engine.cache_break_monitor import notify_compaction
@@ -33,6 +35,7 @@ from opensquilla.engine.tool_text_compat import strip_synthetic_tool_call_text
 from opensquilla.engine.types import (
     AgentConfig,
     AgentEvent,
+    ArtifactEvent,
     CompactionEvent,
     DoneEvent,
     ErrorEvent,
@@ -93,9 +96,46 @@ _COMPACTION_SUMMARY_CONTEXT_MAX_CHARS: Final[int] = 16_000
 _DEFAULT_PREFLIGHT_COMPACT_RATIO: Final[float] = 0.85
 _COMPACTION_FAILURE_LIMIT: Final[int] = 3
 _COMPACTION_CIRCUIT_COOLDOWN_SECONDS: Final[float] = 300.0
+_T3_NOT_APPLICABLE: Final[str] = "not_applicable"
+_T3_HANDLED: Final[str] = "handled"
+_T3_FLUSH_FAILED: Final[str] = "flush_failed"
+_T3_COMPACT_FAILED: Final[str] = "compact_failed"
+_SAFE_FLUSH_OUTPUT_COVERAGE_STATUSES: Final[frozenset[str]] = frozenset(
+    {"ok", "unverifiable"}
+)
+_SAFE_FLUSH_OBLIGATION_STATUSES: Final[frozenset[str]] = frozenset(
+    {"ok", "backfilled", "unverifiable"}
+)
 _IMAGE_GENERATION_TOOL_NAMES: Final[frozenset[str]] = frozenset(
     {"image_generate"}
 )
+
+# Tools that are safe to run concurrently within a single LLM turn.
+# Any tool name absent from this set is treated as mutex (serial dispatch).
+# See docs/dev/tool-concurrency-spec.md for the dispatch contract.
+_SAFE_TOOL_NAMES: frozenset[str] = frozenset({
+    "agents_list",
+    "git_diff",
+    "git_log",
+    "git_status",
+    "glob_search",
+    "grep_search",
+    "image",
+    "list_dir",
+    "memory_get",
+    "memory_search",
+    "pdf",
+    "read_file",
+    "read_spreadsheet",
+    "session_search",
+    "session_status",
+    "sessions_history",
+    "sessions_list",
+    "skill_list",
+    "skill_view",
+    "tts",
+    "web_fetch",
+})
 
 # Per-call-chain owner tracking for session-lock re-entry detection.
 # A ContextVar is copied into child asyncio Tasks created while a turn is
@@ -1027,6 +1067,28 @@ class TurnRunner:
             on_bootstrap_source_write=_on_bootstrap_source_write,
         )
 
+    async def _with_artifact_context(
+        self,
+        tool_context: ToolContext,
+        session_key: str,
+    ) -> ToolContext:
+        attachments_cfg = getattr(self._config, "attachments", None)
+        media_root = self._attachment_media_root()
+        session_id = await self._resolve_session_id_for_log(session_key)
+        if not session_id:
+            session_id = session_key.split(":")[-1] or session_key
+        return replace(
+            tool_context,
+            artifact_media_root=str(media_root),
+            artifact_session_id=session_id,
+            artifact_max_bytes=getattr(attachments_cfg, "artifact_max_bytes", None),
+            artifact_disk_budget_bytes=getattr(
+                attachments_cfg,
+                "artifact_disk_budget_bytes",
+                None,
+            ),
+        )
+
     async def _capture_turn_memory(
         self,
         *,
@@ -1303,6 +1365,7 @@ class TurnRunner:
         # access them, even if cancellation fires before the stream loop.
         final_text_parts: list[str] = []
         turn_segments: list[dict] = []
+        turn_artifacts: list[dict[str, Any]] = []
         try:
             runtime_message = message
             semantic_input = semantic_message if semantic_message is not None else message
@@ -1352,6 +1415,7 @@ class TurnRunner:
 
             # 2. Build tools (filtered by tool_context)
             if tool_context is not None:
+                tool_context = await self._with_artifact_context(tool_context, session_key)
                 tool_context = self._with_runtime_write_callbacks(tool_context, agent_id)
 
             tool_metadata: dict[str, Any] = {}
@@ -1627,14 +1691,14 @@ class TurnRunner:
             cast(Any, agent)._session_flush_service = self._session_flush_service
 
             # 6. Pre-flight compaction (before loading history into Agent)
-            t3_upgrade_handled = await self._maybe_compact_on_t3_upgrade(
+            t3_upgrade_result = await self._maybe_compact_on_t3_upgrade(
                 session_key,
                 turn,
                 agent_config.context_window_tokens,
                 compaction_provider=provider,
                 compaction_model=resolved_model,
             )
-            if not t3_upgrade_handled:
+            if t3_upgrade_result in {_T3_NOT_APPLICABLE, _T3_FLUSH_FAILED}:
                 await self._maybe_preflight_compact(
                     session_key,
                     agent_config.context_window_tokens,
@@ -1657,7 +1721,11 @@ class TurnRunner:
             )
 
             # 8. Build extra messages for attachments
-            extra_msgs = self._build_attachment_messages(effective_runtime_message, attachments)
+            extra_msgs = self._build_attachment_messages(
+                effective_runtime_message,
+                attachments,
+                media_root=self._attachment_media_root(),
+            )
 
             # 9. Stream events (final_text_parts/turn_segments are declared
             # up-front above so the CancelledError handler can read them)
@@ -1720,6 +1788,8 @@ class TurnRunner:
                                 segment["input"] = event.arguments
                                 break
                     turn_segments.append(_persisted_tool_result_segment(event))
+                elif isinstance(event, ArtifactEvent):
+                    turn_artifacts.append(artifact_payload(event))
                 elif isinstance(event, ErrorEvent):
                     # Agent emits ErrorEvent(code="timeout") when
                     # asyncio.timeout() fires. Rewrite to the stable user
@@ -1875,10 +1945,20 @@ class TurnRunner:
             # (Hallucination warning is emitted inside the DoneEvent branch
             # above so it precedes the terminal done event for all consumers.)
 
-            if (final_text or turn_segments) and self._session_manager is not None:
+            if (
+                final_text or turn_segments or turn_artifacts
+            ) and self._session_manager is not None:
+                persisted_content = (
+                    json.dumps(
+                        {"text": final_text, "artifacts": turn_artifacts},
+                        ensure_ascii=False,
+                    )
+                    if turn_artifacts
+                    else final_text
+                )
                 append_kwargs: dict[str, Any] = {
                     "role": "assistant",
-                    "content": final_text,
+                    "content": persisted_content,
                     "tool_calls": turn_segments if turn_segments else None,
                 }
                 if _accepts_keyword_arg(self._session_manager.append_message, "token_count"):
@@ -2028,12 +2108,19 @@ class TurnRunner:
             # lets future turns (and users reading history) recognise the
             # response is incomplete.
             partial_text = "".join(final_text_parts).rstrip()
-            if (partial_text or turn_segments) and self._session_manager is not None:
+            if (
+                partial_text or turn_segments or turn_artifacts
+            ) and self._session_manager is not None:
                 try:
                     # Neutral marker: under Proposal C, new user input does not
                     # cancel a turn (it queues). Cancellation now means ESC /
                     # Stop / idle timeout. "[interrupted]" is accurate for all.
                     body = f"{partial_text}\n\n[interrupted]" if partial_text else "[interrupted]"
+                    if turn_artifacts:
+                        body = json.dumps(
+                            {"text": body, "artifacts": turn_artifacts},
+                            ensure_ascii=False,
+                        )
                     await self._session_manager.append_message(
                         session_key,
                         role="assistant",
@@ -2782,8 +2869,7 @@ class TurnRunner:
 
     @staticmethod
     def _resolve_docs_path() -> str | None:
-        docs_dir = Path(__file__).resolve().parents[3] / "docs"
-        return "docs/" if docs_dir.is_dir() else None
+        return None
 
     def _resolve_memory_source_dir(self, agent_id: str):
         from opensquilla.agents.scope import resolve_agent_memory_source_dir
@@ -3314,23 +3400,23 @@ class TurnRunner:
         *,
         compaction_provider: Any | None = None,
         compaction_model: str | None = None,
-    ) -> bool:
+    ) -> str:
         """Flush memory and compact transcript when the router upgrades into t3.
 
-        Returns True when this method handled the lower→t3 transition (whether
-        maintenance succeeded or failed), signalling the caller to skip the
-        generic preflight compaction for this turn.
+        Returns a status string so the caller can distinguish non-applicable
+        routes, flush failures that may still fall back to generic preflight,
+        and compact failures that should trip the circuit without retrying.
         """
         router_cfg = getattr(self._config, "squilla_router", None)
         if not getattr(router_cfg, "upgrade_to_t3_compaction_enabled", False):
-            return False
+            return _T3_NOT_APPLICABLE
 
         routed_tier = turn.metadata.get("routed_tier")
         if routed_tier != "t3":
-            return False
+            return _T3_NOT_APPLICABLE
 
         if not turn.metadata.get("routing_applied", False):
-            return False
+            return _T3_NOT_APPLICABLE
 
         routing_extra = turn.metadata.get("routing_extra", {})
         previous = routing_extra.get("previous_tier")
@@ -3340,26 +3426,26 @@ class TurnRunner:
             if final == "t3" and base in {"t0", "t1", "t2"}:
                 previous = base
             else:
-                return False
+                return _T3_NOT_APPLICABLE
 
         if previous not in {"t0", "t1", "t2"}:
-            return False
+            return _T3_NOT_APPLICABLE
 
         if session_key.startswith(("cron:", "subagent:")):
-            return False
+            return _T3_NOT_APPLICABLE
 
         if self._session_manager is None:
-            return False
+            return _T3_NOT_APPLICABLE
 
         if self._compaction_circuit_open(session_key):
-            return True
+            return _T3_HANDLED
 
         try:
             transcript = await self._session_manager.get_transcript(session_key)
         except KeyError:
-            return True
+            return _T3_HANDLED
         if not transcript:
-            return True
+            return _T3_HANDLED
 
         log.info(
             "t3_upgrade_compaction.triggered",
@@ -3369,50 +3455,69 @@ class TurnRunner:
             context_window_tokens=context_window_tokens,
         )
 
-        if self._session_flush_service is None:
-            log.warning(
-                "t3_upgrade_compaction.flush_failed",
-                session_key=session_key,
-                error="flush_service_unavailable",
-            )
-            return True
-
-        flush_t0 = time.monotonic()
-        try:
-            from opensquilla.session.keys import parse_agent_id
-
-            receipt = await self._session_flush_service.execute(
-                transcript,
-                session_key,
-                agent_id=parse_agent_id(session_key),
-                message_window=0,
-                segment_mode="auto",
-            )
-            if getattr(receipt, "mode", None) == "error":
+        if self._pre_compaction_flush_enabled():
+            if self._session_flush_service is None:
                 log.warning(
                     "t3_upgrade_compaction.flush_failed",
                     session_key=session_key,
-                    error=getattr(receipt, "error", ""),
+                    error="flush_service_unavailable",
                 )
                 self._record_compaction_failure(session_key)
-                return True
-            log.info(
-                "t3_upgrade_compaction.flush_done",
-                session_key=session_key,
-                mode=getattr(receipt, "mode", "unknown"),
-                message_count=getattr(receipt, "message_count", 0),
-                duration_ms=int((time.monotonic() - flush_t0) * 1000),
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            log.warning(
-                "t3_upgrade_compaction.flush_failed",
-                session_key=session_key,
-                error=str(exc),
-            )
-            self._record_compaction_failure(session_key)
-            return True
+                return _T3_FLUSH_FAILED
+
+            flush_t0 = time.monotonic()
+            try:
+                from opensquilla.session.keys import parse_agent_id
+
+                receipt = await self._session_flush_service.execute(
+                    transcript,
+                    session_key,
+                    agent_id=parse_agent_id(session_key),
+                    message_window=0,
+                    segment_mode="auto",
+                    timeout=self._pre_compaction_flush_timeout_seconds(),
+                )
+                if not self._flush_receipt_allows_destructive_compaction(receipt):
+                    log.warning(
+                        "t3_upgrade_compaction.flush_failed",
+                        session_key=session_key,
+                        error=getattr(receipt, "error", None) or "degraded_flush_receipt",
+                        mode=getattr(receipt, "mode", "unknown"),
+                        integrity_status=getattr(receipt, "integrity_status", None),
+                        indexed_chunk_count=getattr(receipt, "indexed_chunk_count", None),
+                        output_coverage_status=getattr(
+                            receipt,
+                            "output_coverage_status",
+                            None,
+                        ),
+                        invalid_candidate_count=getattr(
+                            receipt,
+                            "invalid_candidate_count",
+                            None,
+                        ),
+                        candidate_missing_ids=getattr(receipt, "candidate_missing_ids", None),
+                        obligation_status=getattr(receipt, "obligation_status", None),
+                        obligation_missing_ids=getattr(receipt, "obligation_missing_ids", None),
+                    )
+                    self._record_compaction_failure(session_key)
+                    return _T3_FLUSH_FAILED
+                log.info(
+                    "t3_upgrade_compaction.flush_done",
+                    session_key=session_key,
+                    mode=getattr(receipt, "mode", "unknown"),
+                    message_count=getattr(receipt, "message_count", 0),
+                    duration_ms=int((time.monotonic() - flush_t0) * 1000),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "t3_upgrade_compaction.flush_failed",
+                    session_key=session_key,
+                    error=str(exc),
+                )
+                self._record_compaction_failure(session_key)
+                return _T3_FLUSH_FAILED
 
         try:
             compaction_config = None
@@ -3450,8 +3555,9 @@ class TurnRunner:
                 error=str(exc),
             )
             self._record_compaction_failure(session_key)
+            return _T3_COMPACT_FAILED
 
-        return True
+        return _T3_HANDLED
 
     async def _maybe_preflight_compact(
         self,
@@ -3496,7 +3602,16 @@ class TurnRunner:
             threshold=threshold,
             ratio=ratio,
         )
-        if self._session_flush_service is not None:
+        if self._pre_compaction_flush_enabled():
+            if self._session_flush_service is None:
+                log.warning(
+                    "preflight_compaction.flush_failed",
+                    session_key=session_key,
+                    error="flush_service_unavailable",
+                )
+                self._record_compaction_failure(session_key)
+                return
+
             try:
                 from opensquilla.session.keys import parse_agent_id
 
@@ -3506,12 +3621,29 @@ class TurnRunner:
                     agent_id=parse_agent_id(session_key),
                     message_window=0,
                     segment_mode="auto",
+                    timeout=self._pre_compaction_flush_timeout_seconds(),
                 )
-                if getattr(receipt, "mode", None) == "error":
+                if not self._flush_receipt_allows_destructive_compaction(receipt):
                     log.warning(
                         "preflight_compaction.flush_failed",
                         session_key=session_key,
-                        error=getattr(receipt, "error", ""),
+                        error=getattr(receipt, "error", None) or "degraded_flush_receipt",
+                        mode=getattr(receipt, "mode", "unknown"),
+                        integrity_status=getattr(receipt, "integrity_status", None),
+                        indexed_chunk_count=getattr(receipt, "indexed_chunk_count", None),
+                        output_coverage_status=getattr(
+                            receipt,
+                            "output_coverage_status",
+                            None,
+                        ),
+                        invalid_candidate_count=getattr(
+                            receipt,
+                            "invalid_candidate_count",
+                            None,
+                        ),
+                        candidate_missing_ids=getattr(receipt, "candidate_missing_ids", None),
+                        obligation_status=getattr(receipt, "obligation_status", None),
+                        obligation_missing_ids=getattr(receipt, "obligation_missing_ids", None),
                     )
                     self._record_compaction_failure(session_key)
                     return
@@ -3556,6 +3688,70 @@ class TurnRunner:
         self._record_compaction_success(session_key)
         if result:
             notify_compaction(session_key)
+
+    def _pre_compaction_flush_enabled(self) -> bool:
+        from opensquilla.memory.flush_config import is_session_flush_enabled
+
+        if not is_session_flush_enabled():
+            return False
+
+        memory_cfg = getattr(self._config, "memory", None)
+        if memory_cfg is None:
+            return self._session_flush_service is not None
+
+        raw_enabled = getattr(memory_cfg, "flush_enabled", True)
+        if isinstance(raw_enabled, str):
+            return raw_enabled.strip().lower() not in {"0", "false", "no", "off"}
+        return bool(raw_enabled)
+
+    def _pre_compaction_flush_timeout_seconds(self) -> float:
+        memory_cfg = getattr(self._config, "memory", None)
+        raw_timeout = getattr(memory_cfg, "flush_timeout_seconds", 5.0)
+        try:
+            timeout = float(raw_timeout)
+        except (TypeError, ValueError):
+            return 5.0
+        return max(timeout, 0.0)
+
+    @staticmethod
+    def _receipt_value(receipt: Any, name: str, default: Any) -> Any:
+        if isinstance(receipt, Mapping):
+            return receipt.get(name, default)
+        return getattr(receipt, name, default)
+
+    @staticmethod
+    def _receipt_int(value: Any) -> int:
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _flush_receipt_allows_destructive_compaction(self, receipt: Any) -> bool:
+        if self._receipt_value(receipt, "mode", None) != "llm":
+            return False
+        if self._receipt_int(self._receipt_value(receipt, "indexed_chunk_count", 0)) <= 0:
+            return False
+        integrity_status = str(
+            self._receipt_value(receipt, "integrity_status", "unverified") or "unverified"
+        )
+        if integrity_status != "ok":
+            return False
+        output_coverage_status = str(
+            self._receipt_value(receipt, "output_coverage_status", "unverified")
+            or "unverified"
+        )
+        if output_coverage_status not in _SAFE_FLUSH_OUTPUT_COVERAGE_STATUSES:
+            return False
+        if self._receipt_int(self._receipt_value(receipt, "invalid_candidate_count", 0)) > 0:
+            return False
+        if self._receipt_value(receipt, "candidate_missing_ids", []):
+            return False
+        obligation_status = str(
+            self._receipt_value(receipt, "obligation_status", "unverified") or "unverified"
+        )
+        if obligation_status not in _SAFE_FLUSH_OBLIGATION_STATUSES:
+            return False
+        return not self._receipt_value(receipt, "obligation_missing_ids", [])
 
     def _compaction_circuit_open(self, session_key: str) -> bool:
         state = getattr(self, "_compaction_failures", {}).get(session_key)
@@ -3636,12 +3832,13 @@ class TurnRunner:
             if entry.role not in ("user", "assistant"):
                 continue
             raw_content = entry.content or ""
-            # Only user messages are persisted as attachment envelopes (see
-            # rpc_sessions._persist_user_message). Applying the unpack heuristic
-            # to assistant content risks misinterpreting a hallucinated JSON
-            # blob as a multimodal message.
+            # User messages may carry attachment envelopes; assistant messages
+            # may carry artifact metadata. Both become text-only safe markers
+            # for model-context replay.
             if raw_content and entry.role == "user":
                 content: Any = self._maybe_unpack_attachments(raw_content)
+            elif raw_content and entry.role == "assistant":
+                content = self._maybe_unpack_assistant_artifacts(raw_content)
             else:
                 content = raw_content
             history.extend(reconstruct_messages_from_entry(entry.role, content, entry.tool_calls))
@@ -3729,8 +3926,10 @@ class TurnRunner:
             # emit a marker (the engine never re-sends the bytes anyway).
             data = att.get("data")
             sha_ref = att.get("sha256_ref")
+            missing_reason = att.get("missing_reason")
             if not (
                 (isinstance(data, str) and data) or (isinstance(sha_ref, str) and sha_ref)
+                or (isinstance(missing_reason, str) and missing_reason)
             ):
                 continue
             name = att.get("name")
@@ -3742,7 +3941,44 @@ class TurnRunner:
         return "\n".join([text, *omitted]).strip()
 
     @staticmethod
-    def _build_attachment_messages(message: str, attachments: list[dict]) -> list | None:
+    def _maybe_unpack_assistant_artifacts(content: str) -> str:
+        if not content or not content.lstrip().startswith("{"):
+            return content
+        try:
+            parsed = json.loads(content)
+        except (json.JSONDecodeError, ValueError):
+            return content
+        if not isinstance(parsed, dict) or "artifacts" not in parsed:
+            return content
+        text = parsed.get("text")
+        artifacts = parsed.get("artifacts")
+        if not isinstance(text, str) or not isinstance(artifacts, list):
+            return content
+        markers = [
+            artifact_marker(artifact)
+            for artifact in artifacts
+            if isinstance(artifact, dict)
+        ]
+        if not markers:
+            return text
+        return "\n".join([text, *markers]).strip()
+
+    @staticmethod
+    def _attachment_media_root_from_config(config: Any | None) -> Path:
+        attachments_cfg = getattr(config, "attachments", None)
+        media_root_raw = getattr(attachments_cfg, "media_root", None)
+        return Path(media_root_raw) if media_root_raw else Path(".opensquilla") / "media"
+
+    def _attachment_media_root(self) -> Path:
+        return self._attachment_media_root_from_config(self._config)
+
+    @staticmethod
+    def _build_attachment_messages(
+        message: str,
+        attachments: list[dict],
+        *,
+        media_root: Path | None = None,
+    ) -> list | None:
         """Build a multimodal user message that carries the attachments.
 
         The engine sees one normalised attachment shape. Provider
@@ -3780,13 +4016,29 @@ class TurnRunner:
                 raise ValueError(
                     f"attachments[{index}] media type {att_type!r} is not allowed"
                 )
-            data = att.get("data")
-            if not isinstance(data, str) or not data:
-                raise ValueError(f"attachments[{index}].data is required")
-            try:
-                raw_bytes = base64.b64decode(data, validate=True)
-            except (binascii.Error, ValueError) as exc:
-                raise ValueError(f"attachments[{index}].data must be valid base64") from exc
+            if is_attachment_ref(att):
+                missing_ref_marker = ""
+                if media_root is None:
+                    raise ValueError(f"attachments[{index}] media_root is required")
+                try:
+                    raw_bytes = read_attachment_ref_bytes(att, media_root=media_root)
+                except FileNotFoundError:
+                    raw_bytes = b""
+                    missing_ref_marker = "[attachment unavailable: material file is missing]"
+                except ValueError as exc:
+                    raw_bytes = b""
+                    missing_ref_marker = f"[attachment unavailable: {exc}]"
+                data = base64.b64encode(raw_bytes).decode("ascii") if raw_bytes else ""
+            else:
+                missing_ref_marker = ""
+                data_raw = att.get("data")
+                if not isinstance(data_raw, str) or not data_raw:
+                    raise ValueError(f"attachments[{index}].data is required")
+                data = data_raw
+                try:
+                    raw_bytes = base64.b64decode(data, validate=True)
+                except (binascii.Error, ValueError) as exc:
+                    raise ValueError(f"attachments[{index}].data must be valid base64") from exc
             if media_type in _ENGINE_TEXT_FAMILY_MIMES:
                 max_bytes = _MAX_TEXT_ATTACHMENT_BYTES
             elif media_type == "application/pdf" and att.get("_was_staged") is True:
@@ -3800,6 +4052,10 @@ class TurnRunner:
 
             name_raw = att.get("name")
             filename = _sanitize_attachment_filename(name_raw)
+            if missing_ref_marker:
+                wrapped = _render_file_context_block(filename, media_type, missing_ref_marker)
+                attachment_blocks.append(ContentBlockText(text=wrapped))
+                continue
 
             if media_type.startswith("image/"):
                 attachment_blocks.append(

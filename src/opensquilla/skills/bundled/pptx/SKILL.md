@@ -3,9 +3,9 @@ name: pptx
 description: "Read, edit, or create PowerPoint .pptx files. Trigger this skill whenever the user mentions a deck, slides, slide deck, presentation, or a `.pptx` filename — whether the goal is to extract text, modify an existing deck, build one from scratch, or prepare slides for review. Three execution paths are supported: text extraction (always available), template editing (unzip → patch slide XML → repack), and creation from scratch (python-pptx for Python or PptxGenJS for Node)."
 homepage: https://python-pptx.readthedocs.io/
 provenance:
-  origin: opensquilla-original
-  license: MIT
-  upstream_url: ""
+  origin: clawhub-mit0
+  license: MIT-0
+  upstream_url: https://clawhub.ai/ivangdavila/powerpoint-pptx
   maintained_by: OpenSquilla
 metadata:
   {
@@ -311,7 +311,5 @@ has passed.
 - Do not embed external macro logic (`.pptm` / VBA). Bundled Codex sandboxes
   do not execute the embedded code, and security scanners flag mixed
   content.
-- This skill is original OpenSquilla content; it is not derived from the
-  Anthropic Agent Skills `pptx` reference, OpenClaw skills, or any
-  ClawHub-published `pptx` skill. It documents the public APIs of
-  python-pptx (MIT) and PptxGenJS (MIT). See `THIRD_PARTY_NOTICES.md`.
+- Source and runtime dependency notices are recorded in
+  `THIRD_PARTY_NOTICES.md`.

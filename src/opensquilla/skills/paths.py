@@ -35,16 +35,15 @@ def legacy_taps_file() -> Path:
 
 
 def resolve_managed_skills_dir(config_value: str | None) -> Path | None:
-    """Resolve the managed-skills directory, or ``None`` when it does not exist.
+    """Resolve the managed-skills directory.
 
     Precedence: explicit ``config_value`` > :func:`default_managed_skills_dir`.
-    Returning ``None`` when the directory is absent lets the loader skip the
-    layer quietly, matching the treatment of the personal/project layers.
+    The default path is returned even before it exists so a long-running gateway
+    can see skills installed later without rebuilding its ``SkillLoader``.
     """
-    candidate = (
-        Path(config_value).expanduser() if config_value else default_managed_skills_dir()
-    )
-    return candidate if candidate.is_dir() else None
+    if config_value:
+        return Path(config_value).expanduser()
+    return default_managed_skills_dir()
 
 
 def default_bundled_skills_dir() -> Path:
@@ -79,8 +78,9 @@ def resolve_skill_layer_dirs(
     """Resolve every skill-layer dir from config-derived inputs.
 
     Callers (gateway boot and the ``opensquilla skills`` CLI) pass the same config
-    values so both end up with the same inventory. Directories that do not
-    exist on disk collapse to ``None`` — the loader skips missing layers.
+    values so both end up with the same inventory. Most directories that do not
+    exist on disk collapse to ``None``; the default managed directory is kept so
+    a running gateway can observe skills installed after boot.
 
     Args:
         allow_bundled: Honor the BUNDLED layer (config.skills.allow_bundled).

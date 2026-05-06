@@ -22,6 +22,7 @@ SECRET_PATTERNS = {
 LOCAL_PATH_PATTERNS = {
     "windows_user_path": re.compile(r"C:\\Users\\[A-Za-z0-9_.-]+"),
     "windows_drive_d_repo": re.compile(r"\bD:\\[A-Za-z0-9_.-]+\\"),
+    "linux_user_home_path": re.compile(r"/home/(?!node/)[A-Za-z0-9_.-]{2,}/"),
     "posix_user_home_path": re.compile(r"/Users/[A-Za-z0-9_.-]{2,}/"),
 }
 
@@ -45,6 +46,8 @@ def _tracked_text_files() -> list[Path]:
             ".bin", ".onnx", ".pkl", ".joblib", ".woff2",
             ".png", ".jpg", ".jpeg", ".gif", ".ico",
         }:
+            continue
+        if not path.exists():
             continue
         paths.append(path)
     return paths
@@ -105,7 +108,6 @@ def test_pytest_default_collection_excludes_private_agent_artifacts() -> None:
 def test_public_testing_guidance_documents_the_private_boundary() -> None:
     required_docs = [
         Path("CONTRIBUTING.md"),
-        Path("docs/testing.md"),
         Path(".github/pull_request_template.md"),
     ]
 
@@ -128,7 +130,7 @@ def test_public_testing_guidance_documents_the_private_boundary() -> None:
 def test_public_docs_do_not_use_key_shaped_placeholders() -> None:
     violations: list[str] = []
     placeholder_pattern = re.compile(r"sk-or-v1-[A-Za-z0-9_-]+")
-    for path in [Path("README.md"), Path("CONTRIBUTING.md"), Path("docs/testing.md")]:
+    for path in [Path("README.md"), Path("CONTRIBUTING.md")]:
         text = _read_text(path)
         if placeholder_pattern.search(text):
             violations.append(path.as_posix())

@@ -1,11 +1,7 @@
 # Third-party notices for `multi-search-engine` skill
 
-Inspired by `multi-search-engine` on the ClawHub registry
-(<https://clawhub.ai/multi-search-engine>, MIT-0). The OpenSquilla version
-is independently authored: SKILL.md instructional text, the search script,
-and the engine selection guide were written for OpenSquilla's existing
-`httpx` + `beautifulsoup4` stack and were not copied from the upstream
-package.
+Source: ClawHub `multi-search-engine`
+(<https://clawhub.ai/multi-search-engine>, MIT-0).
 
 ## Runtime dependencies
 
@@ -22,5 +18,4 @@ hints but does not enforce per-site policies.
 
 ## License
 
-This skill, as part of OpenSquilla, is licensed under the project's MIT
-license.
+The ClawHub source is MIT-0. The OpenSquilla project license is Apache-2.0.

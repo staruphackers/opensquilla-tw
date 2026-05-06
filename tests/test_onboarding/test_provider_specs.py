@@ -1,4 +1,4 @@
-"""Tests for provider catalog (Phase 1)."""
+"""Tests for the provider catalog."""
 
 from __future__ import annotations
 
@@ -58,13 +58,14 @@ from opensquilla.onboarding.provider_specs import (  # noqa: E402
 )
 
 EXPECTED_SUPPORTED = {
-    "openrouter", "openai", "azure", "anthropic", "ollama", "deepseek",
-    "gemini", "dashscope", "bailian_coding", "moonshot", "minimax",
-    "minimax_openai", "minimax_cn", "minimax_global", "mistral", "groq",
-    "zhipu", "qianfan", "siliconflow", "aihubmix", "volcengine",
-    "byteplus", "vllm", "lm_studio", "ovms",
+    "openrouter", "openai", "anthropic", "ollama", "deepseek",
+    "gemini", "dashscope", "moonshot", "zhipu", "qianfan",
+    "volcengine",
 }
-EXPECTED_UNSUPPORTED = {
+EXPECTED_DISABLED = {
+    "azure", "bailian_coding", "minimax", "minimax_openai", "minimax_cn",
+    "minimax_global", "mistral", "groq", "aihubmix", "byteplus", "vllm",
+    "lm_studio", "siliconflow", "ovms",
     "volcengine_coding_plan", "byteplus_coding_plan",
     "openai_codex", "github_copilot",
 }
@@ -75,9 +76,9 @@ def test_catalog_includes_all_supported_providers():
     assert ids == EXPECTED_SUPPORTED
 
 
-def test_catalog_includes_unsupported_providers_disabled():
+def test_catalog_marks_unverified_and_unsupported_providers_disabled():
     specs = {s.provider_id: s for s in list_provider_setup_specs()}
-    for pid in EXPECTED_UNSUPPORTED:
+    for pid in EXPECTED_DISABLED:
         assert pid in specs
         assert specs[pid].runtime_supported is False
 
@@ -135,3 +136,10 @@ def test_payload_has_redaction_safe_shape():
         assert "default" in f
         if f.get("secret"):
             assert f.get("default") in (None, "", False)
+
+
+def test_payload_exposes_only_verified_runtime_supported_providers():
+    payload = provider_catalog_payload()
+
+    assert {row["providerId"] for row in payload} == EXPECTED_SUPPORTED
+    assert all(row["runtimeSupported"] is True for row in payload)

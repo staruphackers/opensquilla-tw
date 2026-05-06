@@ -11,8 +11,8 @@ SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "build_wheelhous
 REPO_ROOT = SCRIPT_PATH.parents[1]
 WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "wheelhouse-release.yml"
 INTERNAL_RELEASE_MARKERS = (
-    "Token-Rhythm",
-    "github.com/Token-Rhythm/opensquilla",
+    "INTERNAL_ORG_NAME",
+    "github.com/internal-org/opensquilla",
     ".internal/evidence",
     "INTERNAL_RELEASE_NOTE.md",
     "LOCAL_AGENT_NOTES.md",
@@ -137,7 +137,7 @@ def test_release_wheel_allows_router_provenance_markdown() -> None:
         "opensquilla/skills/bundled/example/references/private-notes.md"
     )
     unrelated_router_doc = (
-        "opensquilla/contrib/squilla_router/models/v4.2_phase3_inference/README.md"
+        "opensquilla/squilla_router/models/v4.2_phase3_inference/README.md"
     )
 
     violations = module.forbidden_release_wheel_entries(
@@ -186,12 +186,12 @@ def test_release_wheel_content_scanner_flags_internal_markers(tmp_path: Path) ->
         archive.writestr("opensquilla/__init__.py", "__version__ = '0.1.0'\n")
         archive.writestr(
             "opensquilla-0.1.0.dist-info/METADATA",
-            "Project-URL: Repository, https://github.com/Token-Rhythm/opensquilla\n",
+            "Project-URL: Repository, https://github.com/internal-org/opensquilla\n",
         )
 
     assert module.forbidden_release_text_hits(wheel_path) == [
-        "opensquilla-0.1.0.dist-info/METADATA: Token-Rhythm",
-        "opensquilla-0.1.0.dist-info/METADATA: github.com/Token-Rhythm/opensquilla",
+        "opensquilla-0.1.0.dist-info/METADATA: INTERNAL_ORG_NAME",
+        "opensquilla-0.1.0.dist-info/METADATA: github.com/internal-org/opensquilla",
     ]
 
 

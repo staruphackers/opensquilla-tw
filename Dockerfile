@@ -45,7 +45,7 @@ COPY src/ ./src/
 RUN python - <<'PY'
 from pathlib import Path
 
-root = Path("src/opensquilla/contrib/squilla_router/models")
+root = Path("src/opensquilla/squilla_router/models")
 required = [
     root / "v4.2_phase3_inference" / "lgbm_main.bin",
     root / "v4.2_phase3_inference" / "router.runtime.yaml",
@@ -65,7 +65,7 @@ for path in required:
 if missing or pointers:
     raise SystemExit(
         "Squilla router v4 model assets are unavailable in this build context. "
-        'Run `git lfs pull --include="src/opensquilla/contrib/squilla_router/models/**"` '
+        'Run `git lfs pull --include="src/opensquilla/squilla_router/models/**"` '
         f"before docker build. Missing={missing} Pointers={pointers}"
     )
 PY

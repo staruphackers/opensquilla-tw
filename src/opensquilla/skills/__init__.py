@@ -3,10 +3,13 @@
 Six-layer architecture (low→high precedence):
 - Extra: config-specified additional directories
 - Bundled: Ship with OpenSquilla in src/opensquilla/skills/bundled/
-- Managed: $OPENSQUILLA_STATE_DIR/skills/ (default ~/.opensquilla/skills/)
-- Personal: ~/.agents/skills/
+- Managed: Local installs in $OPENSQUILLA_STATE_DIR/skills/ (default ~/.opensquilla/skills/)
+- Personal: Local user installs in ~/.agents/skills/
 - Project: {workspace}/.agents/skills/
 - Workspace: {workspace}/skills/
+
+Only Bundled skills are shipped with OpenSquilla. Managed, Personal, Project,
+Workspace, and Extra layers are local directories discovered at runtime.
 """
 
 from __future__ import annotations

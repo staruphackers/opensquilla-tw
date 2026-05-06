@@ -41,6 +41,30 @@ def test_live_subagent_completion_event_uses_same_renderer() -> None:
     assert "_appendSubagentCompletion(payload)" in source
 
 
+def test_chat_renders_live_and_historical_artifacts_as_header_auth_downloads() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+
+    assert "session.event.artifact" in source
+    assert "_appendArtifact(payload)" in source
+    assert "_renderArtifacts(msg.artifacts || [])" in source
+    assert "data-artifact-download" in source
+    assert "headers['x-opensquilla-session-key'] = _sessionKey" in source
+    assert "url.searchParams.delete('sessionKey')" in source
+    assert "fetch(downloadUrl" in source
+    assert "Authorization" in source
+
+
+def test_chat_markdown_export_includes_artifact_download_entries() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+    start = source.index("function _exportMarkdown()")
+    end = source.index("  /* ── Pending Queue", start)
+    export_body = source[start:end]
+
+    assert "artifacts: msg.artifacts || []" in source
+    assert "_artifactMarkdownLines(msg.artifacts || [])" in export_body
+    assert "[Download" in source
+
+
 def test_chat_resets_stream_timeout_on_run_heartbeat() -> None:
     source = CHAT_JS.read_text(encoding="utf-8")
 

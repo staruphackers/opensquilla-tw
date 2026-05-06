@@ -113,8 +113,8 @@ class PriceEntry:
     output_per_m: float
 
 
-# Canonical non-discount prices that must override OpenRouter's temporary or
-# routed discounted prices. Values are USD per 1M tokens from official provider pricing.
+# Canonical non-discount prices that must override OpenRouter's promotional or routed
+# discounted prices. Values are USD per 1M tokens from official provider pricing.
 _PRICE_OVERRIDES: list[tuple[str, PriceEntry]] = [
     ("deepseek/deepseek-v4-pro", PriceEntry(1.74, 3.48)),
 ]

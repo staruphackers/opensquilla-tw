@@ -141,7 +141,7 @@ max_skills_prompt_chars = 8000
 # The default lexical strategy is dependency-free. "semantic" and "hybrid"
 # are legacy experimental modes that need the bundled BGE ONNX backend
 # (onnxruntime + transformers tokenizer + the int8 ONNX export shipped under
-# contrib/squilla_router/models/v4.2_phase3_inference/bge_onnx/). Install via
+# squilla_router/models/v4.2_phase3_inference/bge_onnx/). Install via
 # `uv sync --extra recommended`. If unavailable, they degrade to lexical-only.
 # filter_strategy = "lexical"   # "lexical" | "semantic" | "hybrid"
 # filter_lexical_top_n = 20
@@ -168,7 +168,7 @@ strategy = "v4_phase3"
 # Bundled router prerequisites:
 #   1. install with `uv sync --extra model-router` or `uv sync --extra recommended`
 #   2. hydrate model assets via:
-#      git lfs pull --include="src/opensquilla/contrib/squilla_router/models/**"
+#      git lfs pull --include="src/opensquilla/squilla_router/models/**"
 default_tier = "t1"
 confidence_threshold = 0.5
 v4_use_aux_head = true
@@ -186,26 +186,28 @@ provider = "openrouter"
 model = "deepseek/deepseek-v4-flash"
 description = "S tier: fast DeepSeek V4 Flash route for trivial chat, short rewrites, extraction, and low-risk simple Q&A"
 supports_image = false
+thinking_level = "high"
 
 [squilla_router.tiers.t1]
 provider = "openrouter"
 model = "deepseek/deepseek-v4-flash"
 description = "M tier: default balanced text model for normal agent work, coding assistance, debugging, and moderate analysis"
 supports_image = false
+thinking_level = "high"
 
 [squilla_router.tiers.t2]
 provider = "openrouter"
 model = "z-ai/glm-5.1"
 description = "L tier: stronger text model for multi-step coding, structured reasoning, larger context synthesis, and harder analysis"
 supports_image = false
-thinking_level = "low"
+thinking_level = "high"
 
 [squilla_router.tiers.t3]
 provider = "openrouter"
 model = "anthropic/claude-opus-4.7"
 description = "XL tier: highest-quality text reasoning model for difficult planning, deep review, complex debugging, and high-stakes synthesis"
 supports_image = false
-thinking_level = "medium"
+thinking_level = "high"
 
 [squilla_router.tiers.image_model]
 provider = "openrouter"

@@ -808,18 +808,21 @@ def build_flush_service(
     provider_selector: Any,
     config: GatewayConfig | None = None,
 ) -> Any:
-    """Construct a :class:`SessionFlushService` gated by OPENSQUILLA_SESSION_FLUSH.
+    """Construct a :class:`SessionFlushService` gated by flush config.
 
-    Returns ``None`` when the kill-switch env var is explicitly disabled;
-    otherwise returns a service wired to the gateway's tool registry and
-    provider selector. ``agent_id`` is threaded through the callable
-    signature for future multi-agent support, but today OpenSquilla uses a
-    single ModelSelector so we just call its ``resolve()`` and ignore the
-    agent id.
+    Returns ``None`` when the kill-switch env var or gateway memory config
+    disables flush. Otherwise returns a service wired to the gateway's tool
+    registry and provider selector. ``agent_id`` is threaded through the
+    callable signature for future multi-agent support, but today OpenSquilla
+    uses a single ModelSelector so we just call its ``resolve()`` and ignore
+    the agent id.
     """
     from opensquilla.memory.flush_config import is_session_flush_enabled
 
     if not is_session_flush_enabled():
+        return None
+    memory_cfg = getattr(config, "memory", None)
+    if memory_cfg is not None and not getattr(memory_cfg, "flush_enabled", True):
         return None
 
     from opensquilla.memory.session_flush import SessionFlushService
@@ -838,10 +841,19 @@ def build_flush_service(
         except Exception:  # noqa: BLE001
             return None
 
+    service_kwargs: dict[str, Any] = {}
+    if memory_cfg is not None:
+        service_kwargs["default_timeout"] = getattr(
+            memory_cfg,
+            "flush_timeout_seconds",
+            30.0,
+        )
+
     return SessionFlushService(
         provider_selector=_resolve_provider,
         tool_registry=tool_registry,
         tool_handler=tool_handler,
+        **service_kwargs,
     )
 
 
@@ -901,7 +913,6 @@ def _squilla_router_bundle_dir(router_cfg: Any) -> Path:
         return Path(configured).expanduser()
     return (
         Path(__file__).resolve().parents[1]
-        / "contrib"
         / "squilla_router"
         / "models"
         / "v4.2_phase3_inference"

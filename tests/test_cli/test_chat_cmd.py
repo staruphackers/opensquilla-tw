@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -14,7 +15,7 @@ from typer.testing import CliRunner
 from opensquilla.cli import chat_cmd
 from opensquilla.cli.main import app
 from opensquilla.cli.repl.session_state import ChatSessionState
-from opensquilla.engine.types import DoneEvent, TextDeltaEvent
+from opensquilla.engine.types import ArtifactEvent, DoneEvent, TextDeltaEvent
 from opensquilla.session.compaction import CompactionConfig
 from opensquilla.tools.types import CallerKind, ToolContext
 
@@ -23,7 +24,11 @@ runner = CliRunner()
 
 class TestChatCommand:
     def test_chat_help(self) -> None:
-        result = runner.invoke(app, ["chat", "--help"])
+        result = runner.invoke(
+            app,
+            ["chat", "--help"],
+            env={"COLUMNS": "120", "NO_COLOR": "1", "TERM": "dumb"},
+        )
         assert result.exit_code == 0
         assert "--model" in result.output
         assert "--session" in result.output
@@ -496,6 +501,54 @@ async def test_standalone_turnrunner_stream_uses_heartbeat_wrapper(monkeypatch) 
     assert result.text == "ok"
     assert renderer.pulses >= 1
     assert renderer.finalized is True
+
+
+@pytest.mark.asyncio
+async def test_standalone_turnrunner_stream_collects_artifacts(monkeypatch) -> None:
+    artifact = {
+        "id": "art-chat",
+        "kind": "artifact_ref",
+        "name": "report.txt",
+        "mime": "text/plain",
+        "size": 4,
+        "sha256": "e" * 64,
+        "session_id": "session-1",
+        "session_key": "agent:main:standalone:test",
+        "source": "publish_artifact",
+        "created_at": "2026-05-06T12:00:00Z",
+        "download_url": "/api/v1/artifacts/art-chat?sessionKey=agent%3Amain%3Astandalone%3Atest",
+        "store": "artifacts",
+    }
+
+    class FakeTurnRunner:
+        async def run(self, message: str, session_key: str, **kwargs):
+            yield ArtifactEvent(**artifact)
+            yield TextDeltaEvent(text="ok")
+            yield DoneEvent()
+
+    monkeypatch.setattr("opensquilla.engine.runtime.TurnRunner", FakeTurnRunner)
+    monkeypatch.setattr(chat_cmd, "StreamingRenderer", _RecordingRenderer)
+    svc = SimpleNamespace(
+        config=SimpleNamespace(
+            agent_stream_heartbeat_interval_seconds=0.0,
+            agent_stream_idle_timeout_seconds=1.0,
+        ),
+        session_manager=_FakeSessionManager(),
+    )
+    tool_ctx = ToolContext(caller_kind=CallerKind.CLI, channel_kind="cli", channel_id="cli:chat")
+
+    result = await chat_cmd._stream_response_turnrunner(
+        FakeTurnRunner(),
+        "agent:main:standalone:test",
+        tool_ctx,
+        "hello",
+        svc=svc,
+    )
+
+    assert result.text == "ok"
+    assert result.artifacts[0]["download_url"] == "/api/v1/artifacts/art-chat"
+    assert "session_key" not in result.artifacts[0]
+    assert "sessionKey" not in json.dumps(result.artifacts[0])
 
 
 @pytest.mark.asyncio
@@ -1513,6 +1566,42 @@ async def test_gateway_stream_renders_task_group_status_without_buffer_pollution
     assert "waiting" in renderer.statuses[0]
     assert "synthesizing" in renderer.statuses[1]
     assert "complete" in renderer.statuses[2]
+
+
+@pytest.mark.asyncio
+async def test_gateway_stream_collects_artifact_events(monkeypatch) -> None:
+    artifact = {
+        "id": "art-chat",
+        "kind": "artifact_ref",
+        "name": "report.txt",
+        "mime": "text/plain",
+        "size": 4,
+        "sha256": "e" * 64,
+        "session_id": "session-1",
+        "session_key": "agent:main:abc123",
+        "source": "publish_artifact",
+        "created_at": "2026-05-06T12:00:00Z",
+        "download_url": "/api/v1/artifacts/art-chat?sessionKey=agent%3Amain%3Aabc123",
+    }
+
+    class ArtifactGatewayClient(_FakeGatewayClient):
+        async def send_message(self, session_key, message, attachments=None, elevated=None):
+            yield {"event": "session.event.artifact", **artifact}
+            yield {"event": "session.event.text_delta", "text": "answer"}
+            yield {"event": "session.event.done"}
+
+    monkeypatch.setattr(chat_cmd, "StreamingRenderer", _RecordingRenderer)
+    result = await chat_cmd._stream_response_gateway(
+        ArtifactGatewayClient(),
+        "agent:main:abc123",
+        "hello",
+        {"mode": None},
+    )
+
+    assert result.text == "answer"
+    assert result.artifacts[0]["download_url"] == "/api/v1/artifacts/art-chat"
+    assert "session_key" not in result.artifacts[0]
+    assert "sessionKey" not in json.dumps(result.artifacts[0])
 
 
 @pytest.mark.asyncio

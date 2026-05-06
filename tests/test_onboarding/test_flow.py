@@ -3,6 +3,38 @@
 from __future__ import annotations
 
 
+def test_interactive_provider_choice_offers_only_verified_supported_providers():
+    from opensquilla.onboarding.flow import OnboardOptions, _ask_provider_choice
+
+    captured: dict[str, list[str]] = {}
+
+    class _Question:
+        def ask(self) -> str:
+            return "openrouter (OpenRouter)"
+
+    class _Questionary:
+        def select(self, _message: str, *, choices: list[str]) -> _Question:
+            captured["choices"] = choices
+            return _Question()
+
+    _ask_provider_choice(_Questionary(), OnboardOptions())
+
+    offered = {choice.split(" ")[0] for choice in captured["choices"]}
+    assert offered == {
+        "openrouter",
+        "openai",
+        "anthropic",
+        "ollama",
+        "deepseek",
+        "gemini",
+        "dashscope",
+        "moonshot",
+        "zhipu",
+        "qianfan",
+        "volcengine",
+    }
+
+
 def test_noninteractive_provider_configure_writes_config(tmp_path, monkeypatch):
     target = tmp_path / "c.toml"
     monkeypatch.setenv("OPENSQUILLA_GATEWAY_CONFIG_PATH", str(target))

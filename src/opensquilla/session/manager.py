@@ -745,29 +745,23 @@ class SessionManager:
         if result.removed_count == 0:
             return result
 
-        # Replace transcript with kept entries only. The summary is stored in
-        # SessionSummary so runtime can inject it as request-scoped context
-        # without changing the cacheable system prompt or durable message prefix.
-        await self._storage.delete_transcript(node.session_id)
         removed_entries = entries[: len(entries) - len(result.kept_entries)]
         kept_entries = entries[len(removed_entries) :]
-        await self._storage.save_summary(
-            SessionSummary(
-                session_id=node.session_id,
-                session_key=session_key,
-                summary_text=result.summary,
-                covered_through_id=max((entry.id or 0) for entry in removed_entries)
-                if removed_entries
-                else 0,
-            )
+        summary_record = SessionSummary(
+            session_id=node.session_id,
+            session_key=session_key,
+            summary_text=result.summary,
+            covered_through_id=max((entry.id or 0) for entry in removed_entries)
+            if removed_entries
+            else 0,
         )
-
-        for entry in kept_entries:
-            await self._storage.append_transcript_entry(entry)
-
         node.compaction_count = (node.compaction_count or 0) + 1
         node.updated_at = _now_ms()
-        await self._storage.upsert_session(node)
+        await self._storage.rewrite_compacted_session(
+            node=node,
+            summary=summary_record,
+            entries=kept_entries,
+        )
         return result
 
     async def persist_compaction_result(
@@ -793,31 +787,30 @@ class SessionManager:
             return
 
         entries = await self._storage.get_transcript(node.session_id)
-        await self._storage.delete_transcript(node.session_id)
         removed_entries = entries[: max(0, len(entries) - len(kept_entries))]
         preserved_entries = entries[len(removed_entries) :]
 
         # Store summary out-of-band. New compactions must not prepend a
         # transcript system marker because history loading would make that
         # marker provider-visible and cache-hostile.
+        summary_record = None
         if summary:
-            await self._storage.save_summary(
-                SessionSummary(
-                    session_id=node.session_id,
-                    session_key=session_key,
-                    summary_text=summary,
-                    covered_through_id=max((entry.id or 0) for entry in removed_entries)
-                    if removed_entries
-                    else 0,
-                )
+            summary_record = SessionSummary(
+                session_id=node.session_id,
+                session_key=session_key,
+                summary_text=summary,
+                covered_through_id=max((entry.id or 0) for entry in removed_entries)
+                if removed_entries
+                else 0,
             )
 
         # Insert kept entries, preserving original metadata where possible
+        rewritten_entries: list[TranscriptEntry] = []
         for index, raw in enumerate(kept_entries):
             if index < len(preserved_entries):
                 preserved = preserved_entries[index]
                 if preserved.role == raw.get("role") and preserved.content == raw.get("content"):
-                    await self._storage.append_transcript_entry(preserved)
+                    rewritten_entries.append(preserved)
                     continue
             entry = TranscriptEntry(
                 session_id=node.session_id,
@@ -826,11 +819,15 @@ class SessionManager:
                 content=raw.get("content", ""),
                 tool_calls=raw.get("tool_calls"),
             )
-            await self._storage.append_transcript_entry(entry)
+            rewritten_entries.append(entry)
 
         node.compaction_count = (node.compaction_count or 0) + 1
         node.updated_at = _now_ms()
-        await self._storage.upsert_session(node)
+        await self._storage.rewrite_compacted_session(
+            node=node,
+            summary=summary_record,
+            entries=rewritten_entries,
+        )
         _log.info(
             "persist_compaction.done",
             session_key=session_key,

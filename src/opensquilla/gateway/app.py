@@ -493,5 +493,12 @@ def create_gateway_app(
     )
 
     register_upload_routes(app, config=config, store=get_upload_store())
+    from opensquilla.gateway.artifacts import register_artifact_routes  # noqa: PLC0415
+
+    register_artifact_routes(
+        app,
+        config=config,
+        session_manager=session_manager,
+    )
 
     return app

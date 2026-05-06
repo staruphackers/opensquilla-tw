@@ -68,6 +68,22 @@ _PROVIDER_LABELS: dict[str, str] = {
     "github_copilot": "GitHub Copilot (OAuth)",
 }
 
+_ONBOARDING_VERIFIED_PROVIDER_IDS = frozenset(
+    {
+        "openrouter",
+        "openai",
+        "anthropic",
+        "ollama",
+        "deepseek",
+        "gemini",
+        "dashscope",
+        "moonshot",
+        "zhipu",
+        "qianfan",
+        "volcengine",
+    }
+)
+
 
 def _fields_for(spec: ProviderSpec) -> tuple[ProviderSetupField, ...]:
     return (
@@ -116,12 +132,16 @@ def _fields_for(spec: ProviderSpec) -> tuple[ProviderSetupField, ...]:
 
 
 def _to_setup_spec(spec: ProviderSpec) -> ProviderSetupSpec:
+    runtime_supported = (
+        spec.runtime_supported
+        and spec.provider_id in _ONBOARDING_VERIFIED_PROVIDER_IDS
+    )
     return ProviderSetupSpec(
         provider_id=spec.provider_id,
         label=_PROVIDER_LABELS.get(spec.provider_id, spec.provider_id),
         backend=spec.backend,
         provider_kind=spec.provider_kind,
-        runtime_supported=spec.runtime_supported,
+        runtime_supported=runtime_supported,
         env_key=spec.env_key,
         default_base_url=spec.default_base_url,
         requires_api_key=spec.requires_api_key(),
@@ -169,4 +189,5 @@ def provider_catalog_payload() -> list[dict[str, Any]]:
             ],
         }
         for s in list_provider_setup_specs()
+        if s.runtime_supported
     ]

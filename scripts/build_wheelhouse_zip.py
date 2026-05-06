@@ -30,7 +30,7 @@ DEFAULT_RUNTIME_PYTHON_VERSION = "3.12.13"
 PYTHON_BUILD_STANDALONE_REPO = "astral-sh/python-build-standalone"
 LFS_POINTER_LINE = "version https://git-lfs.github.com/spec/v1"
 RELEASE_NOTICE_RELS = ("LICENSE", "THIRD_PARTY_NOTICES.md")
-WHEEL_ROUTER_PREFIX = "opensquilla/contrib/squilla_router/models"
+WHEEL_ROUTER_PREFIX = "opensquilla/squilla_router/models"
 ROUTER_PROVENANCE_WHEEL_PATH = (
     f"{WHEEL_ROUTER_PREFIX}/v4.2_phase3_inference/PROVENANCE.md"
 )
@@ -58,8 +58,8 @@ REQUIRED_RUNTIME_MODULE_RELS = (
 FORBIDDEN_RELEASE_SEGMENTS = {".git", ".github", ".omx"}
 FORBIDDEN_RELEASE_ROOTS = {"docs", "tests", "scripts"}
 FORBIDDEN_RELEASE_TEXT_MARKERS = (
-    "Token-Rhythm",
-    "github.com/Token-Rhythm/opensquilla",
+    "INTERNAL_ORG_NAME",
+    "github.com/internal-org/opensquilla",
     ".internal/evidence",
     "INTERNAL_RELEASE_NOTE.md",
     "LOCAL_AGENT_NOTES.md",
@@ -1010,7 +1010,7 @@ def main(argv: list[str] | None = None) -> int:
     include_router_assets = args.profile == "recommended"
 
     if include_router_assets:
-        model_root = repo_root / "src" / "opensquilla" / "contrib" / "squilla_router" / "models"
+        model_root = repo_root / "src" / "opensquilla" / "squilla_router" / "models"
         asset_check = check_router_assets(model_root)
         if not asset_check.ok:
             for path in asset_check.missing_files:
@@ -1018,7 +1018,7 @@ def main(argv: list[str] | None = None) -> int:
             for path in asset_check.pointer_files:
                 print(f"Git LFS pointer file is not hydrated: {path}", file=sys.stderr)
             print(
-                'Run: git lfs pull --include="src/opensquilla/contrib/squilla_router/models/**"',
+                'Run: git lfs pull --include="src/opensquilla/squilla_router/models/**"',
                 file=sys.stderr,
             )
             return 1

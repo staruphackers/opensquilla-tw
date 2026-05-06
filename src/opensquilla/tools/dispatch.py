@@ -227,6 +227,9 @@ def build_tool_handler(
         # Dispatch to handler — set request-scoped context for tools that need agent_id
         token = current_tool_context.set(effective_ctx)
         try:
+            artifact_start = (
+                len(effective_ctx.published_artifacts) if effective_ctx is not None else 0
+            )
             result = await registered.handler(**tool_call.arguments)
             if not _has_live_approval_surface(effective_ctx):
                 pending = _extract_pending_approval(result)
@@ -261,11 +264,17 @@ def build_tool_handler(
                     )
 
             denial = is_denial_payload(result)
+            artifacts = (
+                list(effective_ctx.published_artifacts[artifact_start:])
+                if effective_ctx is not None
+                else []
+            )
             return ToolResult(
                 tool_use_id=tool_call.tool_use_id,
                 tool_name=tool_call.tool_name,
                 content=result,
                 is_error=denial,
+                artifacts=artifacts,
             )
         except Exception as exc:
             # Stable failure envelope, no raw exception leakage.

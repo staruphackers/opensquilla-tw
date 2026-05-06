@@ -92,3 +92,178 @@ def test_channels_list_redacts_secrets(tmp_path, monkeypatch):
     result = runner.invoke(app, ["channels", "list"])
     assert "supersecret" not in result.stdout
     assert "***" in result.stdout
+
+
+def test_channels_edit_updates_only_provided_fields(tmp_path, monkeypatch):
+    target = _setenv(monkeypatch, tmp_path)
+    runner.invoke(
+        app,
+        ["channels", "add", "slack", "--name", "w",
+         "--token", "xoxb-original",
+         "--field", "slack_channel_id=C111"],
+    )
+    result = runner.invoke(
+        app,
+        ["channels", "edit", "w", "--field", "slack_channel_id=C222"],
+    )
+    assert result.exit_code == 0, result.stdout
+    text = target.read_text()
+    assert "C222" in text
+    assert "C111" not in text
+    assert "xoxb-original" in text
+
+
+def test_channels_edit_unknown_name_fails(tmp_path, monkeypatch):
+    _setenv(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["channels", "edit", "missing"])
+    assert result.exit_code != 0
+
+
+def test_channels_edit_preserves_enabled_when_unchanged(tmp_path, monkeypatch):
+    target = _setenv(monkeypatch, tmp_path)
+    runner.invoke(
+        app,
+        ["channels", "add", "slack", "--name", "w",
+         "--token", "xoxb-x", "--disabled"],
+    )
+    assert "enabled = false" in target.read_text()
+    r = runner.invoke(
+        app, ["channels", "edit", "w", "--field", "slack_channel_id=C9"]
+    )
+    assert r.exit_code == 0, r.stdout
+    text = target.read_text()
+    assert "enabled = false" in text
+    assert "C9" in text
+
+
+def test_channels_edit_preserves_agent_id_when_unchanged(tmp_path, monkeypatch):
+    target = _setenv(monkeypatch, tmp_path)
+    runner.invoke(
+        app,
+        ["channels", "add", "slack", "--name", "w",
+         "--token", "xoxb-x", "--agent-id", "ops"],
+    )
+    assert 'agent_id = "ops"' in target.read_text()
+    r = runner.invoke(
+        app, ["channels", "edit", "w", "--field", "slack_channel_id=C9"]
+    )
+    assert r.exit_code == 0, r.stdout
+    assert 'agent_id = "ops"' in target.read_text()
+
+
+def test_channels_edit_preserves_non_secret_bool_when_unchanged(
+    tmp_path, monkeypatch
+):
+    target = _setenv(monkeypatch, tmp_path)
+    runner.invoke(
+        app,
+        ["channels", "add", "slack", "--name", "w",
+         "--token", "xoxb-x", "--field", "reply_in_thread=true"],
+    )
+    assert "reply_in_thread = true" in target.read_text()
+    r = runner.invoke(
+        app, ["channels", "edit", "w", "--field", "slack_channel_id=C9"]
+    )
+    assert r.exit_code == 0, r.stdout
+    assert "reply_in_thread = true" in target.read_text()
+
+
+def test_channels_add_token_resolves_to_alias_order_not_field_order(
+    tmp_path, monkeypatch
+):
+    """For wecom, --token should resolve to the literal 'token' field
+    (alias index 0), not 'corp_secret' (alias index 5) which would happen
+    under naive spec-field-order resolution.
+    """
+    _setenv(monkeypatch, tmp_path)
+    result = runner.invoke(
+        app,
+        ["channels", "add", "wecom",
+         "--name", "wc",
+         "--token", "wecom-token",
+         "--field", "corp_id=cid",
+         "--field", "corp_secret=cs",
+         "--field", "agent_id_int=1000",
+         "--field", "encoding_aes_key=" + "a" * 43],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "wecom.token" in result.stdout
+    assert "wecom.corp_secret" not in result.stdout
+
+
+def test_channels_add_token_flag_echoes_resolved_field(tmp_path, monkeypatch):
+    _setenv(monkeypatch, tmp_path)
+    result = runner.invoke(
+        app, ["channels", "add", "matrix",
+              "--name", "m",
+              "--token", "syt-abc",
+              "--field", "homeserver_url=https://matrix.org",
+              "--field", "user_id=@me:matrix.org"]
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "--token" in result.stdout
+    assert "matrix.access_token" in result.stdout
+
+
+def test_channels_add_token_flag_for_slack_resolves_to_token(tmp_path, monkeypatch):
+    _setenv(monkeypatch, tmp_path)
+    result = runner.invoke(
+        app, ["channels", "add", "slack", "--name", "w", "--token", "xoxb-x"]
+    )
+    assert result.exit_code == 0, result.stdout
+    assert "slack.token" in result.stdout
+
+
+def test_channels_describe_slack(tmp_path, monkeypatch):
+    _setenv(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["channels", "describe", "slack"])
+    assert result.exit_code == 0
+    out = result.stdout
+    assert "token" in out
+    assert "signing_secret" in out
+    assert "webhook" in out.lower()
+    assert "api.slack.com" in out
+
+
+def test_channels_describe_unknown_type_fails(tmp_path, monkeypatch):
+    _setenv(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["channels", "describe", "no-such-type"])
+    assert result.exit_code != 0
+
+
+def test_channels_types_lists_all_supported(tmp_path, monkeypatch):
+    _setenv(monkeypatch, tmp_path)
+    result = runner.invoke(app, ["channels", "types"])
+    assert result.exit_code == 0
+    out = result.stdout
+    for t in ("slack", "telegram", "discord", "feishu",
+              "dingtalk", "wecom", "qq", "msteams", "matrix"):
+        assert t in out
+    assert "transport" in out.lower()
+
+
+def test_channels_add_restart_notice_disambiguates(tmp_path, monkeypatch):
+    _setenv(monkeypatch, tmp_path)
+    result = runner.invoke(
+        app, ["channels", "add", "slack", "--name", "w", "--token", "x"]
+    )
+    assert result.exit_code == 0
+    out = result.stdout.lower()
+    assert "gateway process" in out
+    assert "not the same as" in out
+    assert "channels restart" in out
+
+
+def test_channels_add_echoes_resolved_path_and_source(tmp_path, monkeypatch):
+    monkeypatch.delenv("OPENSQUILLA_GATEWAY_CONFIG_PATH", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "opensquilla.toml").write_text("")
+    monkeypatch.chdir(project)
+    result = runner.invoke(
+        app, ["channels", "add", "slack", "--name", "w", "--token", "x"]
+    )
+    assert result.exit_code == 0, result.stdout
+    assert str(project / "opensquilla.toml") in result.stdout
+    assert "cwd" in result.stdout.lower()

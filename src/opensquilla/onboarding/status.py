@@ -20,6 +20,7 @@ class OnboardingStatus:
     config_path: str | None
     has_config: bool
     llm_configured: bool
+    llm_source: str
     image_generation_configured: bool
     image_generation_enabled: bool
     image_generation_source: str
@@ -32,21 +33,30 @@ class OnboardingStatus:
     warnings: tuple[str, ...] = ()
 
 
-def _llm_configured(cfg: GatewayConfig) -> bool:
+def _llm_status(cfg: GatewayConfig) -> tuple[bool, str]:
     llm = cfg.llm
     if not llm.provider or not llm.model:
-        return False
+        return False, "none"
     try:
         spec = get_provider_setup_spec(llm.provider)
     except KeyError:
-        return False
+        return False, "none"
     if not spec.runtime_supported:
-        return False
-    if spec.requires_api_key and not llm.api_key:
-        return False
+        return False, "none"
     if spec.requires_base_url and not llm.base_url:
-        return False
-    return True
+        return False, "none"
+    if not spec.requires_api_key:
+        return True, "none"
+    if llm.api_key and "llm.api_key" in getattr(cfg, "_runtime_secret_paths", set()):
+        return True, "env"
+    if llm.api_key:
+        return True, "explicit"
+    env_key = getattr(llm, "api_key_env", "") or spec.env_key
+    if env_key and os.environ.get(env_key):
+        return True, "env"
+    if env_key:
+        return False, "missing_env"
+    return False, "none"
 
 
 def _search_configured(cfg: GatewayConfig) -> bool:
@@ -128,7 +138,7 @@ def _image_generation_status(
 def get_onboarding_status(config: GatewayConfig) -> OnboardingStatus:
     path = Path(config.config_path).expanduser() if config.config_path else default_config_path()
     has_config = path.exists()
-    llm_ok = _llm_configured(config)
+    llm_ok, llm_source = _llm_status(config)
     (
         image_ok,
         image_enabled,
@@ -141,6 +151,7 @@ def get_onboarding_status(config: GatewayConfig) -> OnboardingStatus:
         config_path=str(path),
         has_config=has_config,
         llm_configured=llm_ok,
+        llm_source=llm_source,
         image_generation_configured=image_ok,
         image_generation_enabled=image_enabled,
         image_generation_source=image_source,

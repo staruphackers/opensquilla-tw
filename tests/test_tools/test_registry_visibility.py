@@ -105,6 +105,42 @@ def test_owner_schema_keeps_canonical_tools_and_subagents_stays_explicit_only() 
     assert "subagents" in surfaced_names
 
 
+def test_channel_runtime_profile_exposes_publish_artifact() -> None:
+    import opensquilla.tools.builtin  # noqa: F401
+    from opensquilla.tools.registry import filter_by_profile, get_default_registry, resolve_profile
+
+    registry = get_default_registry()
+    channel_ctx = ToolContext(is_owner=False, caller_kind=CallerKind.CHANNEL)
+
+    names = {
+        tool.name
+        for tool in filter_by_profile(
+            registry.to_tool_definitions(channel_ctx),
+            resolve_profile(channel_ctx),
+        )
+    }
+
+    assert "publish_artifact" in names
+
+
+def test_subagent_schema_hides_publish_artifact_without_artifact_context() -> None:
+    import opensquilla.tools.builtin  # noqa: F401
+    from opensquilla.tools.registry import get_default_registry
+    from opensquilla.tools.types import SUBAGENT_TOOL_DENY
+
+    registry = get_default_registry()
+    subagent_ctx = ToolContext(
+        is_owner=True,
+        caller_kind=CallerKind.SUBAGENT,
+        interaction_mode=InteractionMode.UNATTENDED,
+        denied_tools=set(SUBAGENT_TOOL_DENY),
+    )
+
+    names = {tool.name for tool in registry.to_tool_definitions(subagent_ctx)}
+
+    assert "publish_artifact" not in names
+
+
 def test_owner_only_tools_are_hidden_from_non_owner_schema() -> None:
     import opensquilla.tools.builtin  # noqa: F401
     from opensquilla.tools.registry import get_default_registry

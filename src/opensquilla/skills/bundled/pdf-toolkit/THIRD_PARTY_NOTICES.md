@@ -1,10 +1,6 @@
 # Third-party notices for `pdf-toolkit` skill
 
-Inspired by the `pdf` skill on the ClawHub registry
-(<https://clawhub.ai/pdf>, MIT-0). The OpenSquilla version is independently
-authored: SKILL.md instructional text and helper scripts here were written
-from the pypdf, pdfplumber, and reportlab documentation, not copied from the
-upstream package.
+Source: ClawHub `pdf` (<https://clawhub.ai/pdf>, MIT-0).
 
 ## Runtime dependencies
 
@@ -26,6 +22,6 @@ were chosen to keep the two from competing in skill retrieval.
 
 ## License
 
-This skill, as part of OpenSquilla, is licensed under the project's MIT
-license. The runtime dependencies carry their own permissive licenses
-(BSD-3-Clause and MIT respectively).
+The ClawHub source is MIT-0. The OpenSquilla project license is Apache-2.0.
+The runtime dependencies carry their own permissive licenses (BSD-3-Clause and
+MIT respectively).

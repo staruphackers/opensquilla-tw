@@ -8,6 +8,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## [0.1.0-alpha.1] - 2026-05-06
+
+### Added
+
+- OOTB startup path: `compose.yaml` + `start.sh` + `start.ps1` + Quickstart section in README.
+- Legacy `memory.*` config fields: 16 deprecated keys silently dropped with a single aggregated `DeprecationWarning`.
+- Agent CLI no-key error: three-section actionable panel (Symptom / Cause / Next steps).
+- Tool concurrency: same-turn safe `tool_calls` dispatched concurrently via `asyncio.gather` (22 safe tools enrolled in `_SAFE_TOOL_NAMES`; mutex tools remain serial).
 - PID file lock to prevent two gateway instances from sharing the same state directory.
 - Core observability counters: `opensquilla_queue_depth`, `in_flight_turns_total`, `turn_cancellations_total`, `queue_full_errors_total`.
 - CI matrix on `ubuntu-latest` and `windows-latest` × Python 3.11/3.12, including a metric-name drift check and a tracemalloc leak smoke step.
@@ -19,6 +31,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- Internal SquillaRouter package moved from `opensquilla.contrib.squilla_router`
+  to `opensquilla.squilla_router`; bundled model assets now live under
+  `src/opensquilla/squilla_router/models/`.
 - `TurnRunner` and `TaskRuntime` share a single per-session `asyncio.Lock` (injected via `session_lock_provider`), removing the two-layer lock dictionary and the reverse-acquire risk it created.
 
 ### Fixed

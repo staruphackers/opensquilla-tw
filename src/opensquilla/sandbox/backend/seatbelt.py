@@ -1,12 +1,11 @@
-"""macOS Seatbelt backend — Phase 2 profile-only implementation.
+"""macOS Seatbelt backend with SBPL profile rendering.
 
-This module deliberately does not run commands yet. It exists so the
-architecture (backend abstraction, policy translation, availability probe)
-is in place when a follow-up pass wires up ``sandbox-exec``.
+This module deliberately renders profiles only and does not run commands yet.
+It keeps the backend abstraction, policy translation, and availability probe
+ready for future ``sandbox-exec`` execution support.
 
 The Seatbelt profile language (SBPL) is a TinyScheme-derived DSL. The
-minimum viable profile for opensquilla maps a :class:`SandboxPolicy` to three
-rules:
+baseline profile for opensquilla maps a :class:`SandboxPolicy` to three rules:
 
 1. ``(deny default)`` — start from a deny-by-default posture.
 2. ``(allow file-read* (subpath "<workspace>"))`` plus ``file-write*`` if
@@ -39,8 +38,8 @@ def _render_sbpl_skeleton(policy: SandboxPolicy) -> str:
     """Render the three-rule SBPL profile for ``policy``.
 
     The output is intentionally small and readable: each rule is on its own
-    line so the upcoming real implementation can extend it with additional
-    allow rules (cache dirs, homebrew prefix, etc.) without reformatting.
+    line so future execution support can extend it with additional allow rules
+    (cache dirs, homebrew prefix, etc.) without reformatting.
     """
     lines: list[str] = [
         "(version 1)",

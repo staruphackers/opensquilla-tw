@@ -13,8 +13,11 @@ from pathlib import Path
 from typing import Any
 
 import typer
+from rich.panel import Panel
+from rich.text import Text
 
 from opensquilla.cli.attachments import attachments_from_paths
+from opensquilla.cli.ui import console
 
 
 @dataclass
@@ -30,6 +33,7 @@ class AgentRunResult:
     thinking: str | None = None
     transcript_path: str | None = None
     usage_path: str | None = None
+    artifacts: list[dict[str, Any]] | None = None
 
 
 def _cli_sender_id() -> str:
@@ -52,6 +56,12 @@ def _resolve_permissions_profile(value: str | None) -> str:
         allowed = ", ".join(sorted(_AGENT_PERMISSION_PROFILES))
         raise ValueError(f"permissions must be one of: {allowed}")
     return profile
+
+
+def _public_artifacts(artifacts: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    from opensquilla.artifacts import artifact_payload
+
+    return [artifact_payload(artifact) for artifact in artifacts or []]
 
 
 async def run_agent_once(
@@ -77,7 +87,8 @@ async def run_agent_once(
 ) -> AgentRunResult:
     """Run a single agent turn through build_services() and TurnRunner.run()."""
     from opensquilla.agents.scope import resolve_agent_workspace_dir
-    from opensquilla.engine.types import DoneEvent, ErrorEvent, TextDeltaEvent
+    from opensquilla.artifacts import artifact_payload
+    from opensquilla.engine.types import ArtifactEvent, DoneEvent, ErrorEvent, TextDeltaEvent
     from opensquilla.gateway import attachment_ingest as _attachment_ingest
     from opensquilla.gateway import build_services, build_turn_runner_from_services
     from opensquilla.gateway.config import GatewayConfig
@@ -136,6 +147,7 @@ async def run_agent_once(
 
     text_parts: list[str] = []
     errors: list[dict[str, str]] = []
+    artifacts: list[dict[str, Any]] = []
     done: DoneEvent | None = None
 
     try:
@@ -221,6 +233,8 @@ async def run_agent_once(
                 text_parts.append(event.text)
             elif isinstance(event, ErrorEvent):
                 errors.append({"message": event.message, "code": event.code})
+            elif isinstance(event, ArtifactEvent):
+                artifacts.append(artifact_payload(event))
             elif isinstance(event, DoneEvent):
                 done = event
         usage = _usage_from_done(done, effective_model)
@@ -246,6 +260,7 @@ async def run_agent_once(
         thinking=thinking or getattr(getattr(service_cfg, "llm", None), "thinking", None),
         transcript_path=transcript_path,
         usage_path=usage_path,
+        artifacts=artifacts,
     )
 
 
@@ -480,6 +495,34 @@ def _write_json(path: str, payload: dict[str, Any]) -> None:
     target.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def _print_no_provider_error() -> None:
+    """Print a three-section diagnostic panel when no LLM provider is configured."""
+    body = Text.assemble(
+        ("Symptom\n", "bold red"),
+        "No LLM provider configured.\n\n",
+        ("Cause\n", "bold yellow"),
+        (
+            "No API key was found. The following environment variables were all empty:\n"
+            "  OPENROUTER_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY,\n"
+            "  DEEPSEEK_API_KEY, GEMINI_API_KEY, DASHSCOPE_API_KEY, and others.\n"
+            "The config file ~/.opensquilla/config.toml also has no [llm].api_key set.\n\n"
+        ),
+        ("Next steps\n", "bold green"),
+        (
+            "Option 1 (recommended) — run the interactive setup wizard:\n"
+            "  opensquilla onboard\n\n"
+            "Option 2 — set an environment variable for your provider:\n"
+            "  export OPENROUTER_API_KEY=sk-or-...        # POSIX / macOS / Linux\n"
+            "  setx OPENROUTER_API_KEY \"sk-or-...\"  "
+            "# Windows cmd: set OPENROUTER_API_KEY=...\n\n"
+            "Option 3 — edit ~/.opensquilla/config.toml and add:\n"
+            "  [llm]\n"
+            "  api_key = \"your-key-here\"\n"
+        ),
+    )
+    console.print(Panel(body, title="No Provider Configured", border_style="red"))
+
+
 def run_agent_command(
     message: str = typer.Option(..., "--message", "-m", help="Message to send"),
     agent_id: str = typer.Option("main", "--agent", help="Agent identifier"),
@@ -564,6 +607,7 @@ def run_agent_command(
             permissions=permissions,
         )
     )
+    artifacts = _public_artifacts(result.artifacts)
     payload = {
         "status": result.status,
         "agent_id": result.agent_id,
@@ -576,12 +620,24 @@ def run_agent_command(
         "thinking": result.thinking,
         "transcript_path": result.transcript_path,
         "usage_path": result.usage_path,
+        "artifacts": artifacts,
     }
     if json_output:
         typer.echo(json.dumps(payload, ensure_ascii=False))
     else:
         if result.text:
             typer.echo(result.text)
+        for artifact in artifacts:
+            name = artifact.get("name") if isinstance(artifact.get("name"), str) else "artifact"
+            target = (
+                artifact.get("download_url")
+                if isinstance(artifact.get("download_url"), str)
+                else artifact.get("id", "")
+            )
+            typer.echo(f"Generated file: {name} -> {target}")
         if result.errors:
             for error in result.errors:
+                if error.get("code") == "no_provider":
+                    _print_no_provider_error()
+                    raise typer.Exit(1)
                 typer.echo(f"Error: {error['message']}", err=True)

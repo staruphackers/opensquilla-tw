@@ -291,7 +291,12 @@ def _router_step_from_decision(decision: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def _estimate_cost(model: str, usage: dict[str, Any], *, provider: str | None = None) -> dict[str, Any]:
+def _estimate_cost(
+    model: str,
+    usage: dict[str, Any],
+    *,
+    provider: str | None = None,
+) -> dict[str, Any]:
     input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
     output_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
     price = lookup_price(model)
@@ -302,7 +307,11 @@ def _estimate_cost(model: str, usage: dict[str, Any], *, provider: str | None = 
     provider_billed_cost = None
     cost_source = "opensquilla_static_estimate"
     billing_scope = "static_estimate"
-    if provider == "openrouter" and isinstance(raw_billed_cost, int | float) and raw_billed_cost > 0:
+    if (
+        provider == "openrouter"
+        and isinstance(raw_billed_cost, int | float)
+        and raw_billed_cost > 0
+    ):
         provider_billed_cost = float(raw_billed_cost)
         cost_source = "provider_billed"
         billing_scope = "provider_response"
@@ -405,7 +414,7 @@ def _run_gateway_case_batch(
     env["OPENSQUILLA_GATEWAY_CONFIG_PATH"] = str(config_path)
     env["OPENSQUILLA_STATE_DIR"] = str(tmp_path / "state")
     env["OPENSQUILLA_MEMORY_DREAM_DISABLED"] = "1"
-    env["OPENSQUILLA_TOOL_PROFILE"] = "minimal"
+    env["OPENSQUILLA_TOOL_PROFILE"] = "channel_default"
     env["OPENSQUILLA_TURN_CALL_LOG"] = "1"
     env["OPENSQUILLA_TURN_CALL_LOG_DIR"] = str(turn_log_dir)
     env["OPENSQUILLA_LLM_PROVIDER"] = provider
@@ -668,7 +677,10 @@ def _run_provider(provider: str, *, max_tokens: int, timeout_seconds: float) -> 
         "profile_slots_missing": missing_slots,
         "models_covered": models_covered,
         "natural_cases_ok": bool(natural_cases)
-        and all(row.get("failure_kind") in (None, "router_selected_unexpected_tier") for row in natural_cases),
+        and all(
+            row.get("failure_kind") in (None, "router_selected_unexpected_tier")
+            for row in natural_cases
+        ),
         "coverage_cases_ok": bool(coverage_cases) and all(row.get("ok") for row in coverage_cases)
         if coverage_cases
         else True,

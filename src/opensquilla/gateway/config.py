@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 # fmt: off
+import json
 import os
 import threading
 import warnings
@@ -69,6 +70,8 @@ class AttachmentsConfig(BaseSettings):
     persist_transcripts: bool = True
     media_root: str | None = None  # default resolved from cache dir at boot
     transcript_disk_budget_bytes: int = 2 * 1024 * 1024 * 1024  # 2 GB
+    artifact_max_bytes: int = 30 * 1024 * 1024
+    artifact_disk_budget_bytes: int = 512 * 1024 * 1024
 
 
 class RateLimitConfig(BaseSettings):
@@ -141,6 +144,7 @@ class LlmProviderConfig(BaseSettings):
     provider: str = "openrouter"
     model: str = "deepseek/deepseek-v4-flash"
     api_key: str = ""
+    api_key_env: str = ""
     base_url: str = "https://openrouter.ai/api/v1"
     proxy: str = ""  # explicit HTTP proxy URL (e.g. http://127.0.0.1:7890)
     max_tokens: int = 0  # 0 = auto-resolve from model catalog; >0 = explicit override
@@ -148,7 +152,7 @@ class LlmProviderConfig(BaseSettings):
     # When unset, squilla_router may suggest thinking for selected tiers.
     thinking: str | None = None
     # OpenRouter-only: map model id -> upstream provider name. Mapped models
-    # send provider.only=[name] and disable upstream fallback for reproducibility.
+    # send provider.only=[name] while allowing OpenRouter fallback within that pin.
     provider_routing: dict[str, str] = Field(default_factory=dict)
 
 
@@ -159,6 +163,51 @@ class LlmProviderConfig(BaseSettings):
 # before either calls set()), which would emit duplicate warnings.
 _LEGACY_ENABLED_WARN_LOCK = threading.Lock()
 _LEGACY_ENABLED_WARNED = False
+
+# Deprecated memory.* field names (dotted notation as they appear in config.toml).
+# These were removed from the schema; old configs containing them must not cause
+# ValidationError — they are silently dropped and a single aggregated
+# DeprecationWarning is emitted per process.
+_DEPRECATED_MEMORY_FIELDS: frozenset[str] = frozenset(
+    {
+        "memory.profile",
+        "memory.cost.embedding_cache",
+        "memory.cost.rerank_cache",
+        "memory.cost.llm_judge_cache",
+        "memory.facts_enabled",
+        "memory.facts_top_k",
+        "memory.facts_max_chars",
+        "memory.multi_hop_enabled",
+        "memory.multi_hop_max_depth",
+        "memory.multi_hop_score_threshold",
+        "memory.recall_frequency",
+        "memory.recall_top_k_default",
+        "memory.semantic_chunking_enabled",
+        "memory.eviction_policy",
+        "memory.summary_model",
+        "memory.summary_max_tokens",
+    }
+)
+
+# Dedupe state for the aggregated legacy memory-field DeprecationWarning.
+_LEGACY_MEMORY_FIELDS_LOCK = threading.Lock()
+_LEGACY_MEMORY_FIELDS_WARNED: bool = False
+# Accumulates all deprecated field names seen this process (for log detail).
+_LEGACY_MEMORY_FIELDS_SEEN: set[str] = set()
+
+# Leaf-name views derived from ``_DEPRECATED_MEMORY_FIELDS`` so the dotted list
+# above is the single source of truth. Each pydantic ``before`` validator only
+# sees its own model's leaf keys, not the dotted form.
+_DEPRECATED_COST_LEAVES: frozenset[str] = frozenset(
+    k.removeprefix("memory.cost.")
+    for k in _DEPRECATED_MEMORY_FIELDS
+    if k.startswith("memory.cost.")
+)
+_DEPRECATED_MEMORY_LEAVES: frozenset[str] = frozenset(
+    k.removeprefix("memory.")
+    for k in _DEPRECATED_MEMORY_FIELDS
+    if k.startswith("memory.") and not k.startswith("memory.cost.")
+)
 
 
 # Pydantic-style truthy/falsy string sets (case-insensitive). Mirrors the
@@ -351,12 +400,97 @@ class MemoryEmbeddingConfig(BaseModel):
         return self.provider
 
 
+def _handle_deprecated_memory_fields(
+    found: dict[str, object],
+    source: str,
+) -> None:
+    """Pop deprecated fields, accumulate to the process set, emit one aggregated warning.
+
+    ``found`` maps leaf field name -> popped value (already removed from input dict).
+    ``source`` is ``"MemoryConfig"`` or ``"MemoryCostConfig"`` for log detail.
+    """
+    import datetime
+    import logging
+
+    global _LEGACY_MEMORY_FIELDS_WARNED
+
+    if not found:
+        return
+
+    # Snapshot the aggregate under the same lock as the one-shot warning so the
+    # warning count reflects the fields seen before the sentinel flips.
+    with _LEGACY_MEMORY_FIELDS_LOCK:
+        _LEGACY_MEMORY_FIELDS_SEEN.update(found.keys())
+        should_warn = not _LEGACY_MEMORY_FIELDS_WARNED
+        if should_warn:
+            _LEGACY_MEMORY_FIELDS_WARNED = True
+            warning_fields = sorted(_LEGACY_MEMORY_FIELDS_SEEN)
+        else:
+            warning_fields = []
+
+    # Write per-field detail to a timestamped log file.
+    try:
+        logs_dir = default_opensquilla_home() / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        iso_now = datetime.datetime.now(tz=datetime.UTC).strftime(
+            "%Y%m%dT%H%M%SZ"
+        )
+        log_path = logs_dir / f"legacy_config_{iso_now}.log"
+        with log_path.open("a", encoding="utf-8") as fh:
+            for leaf, value in found.items():
+                entry = {
+                    "timestamp": datetime.datetime.now(tz=datetime.UTC).isoformat(),
+                    "field": leaf,
+                    "source": source,
+                    "value_repr": str(value)[:200],
+                }
+                fh.write(json.dumps(entry) + "\n")
+    except OSError:
+        pass  # log write failure is non-fatal
+
+    if should_warn:
+        n = len(warning_fields)
+        first_three = ", ".join(warning_fields[:3])
+        try:
+            logs_dir = default_opensquilla_home() / "logs"
+            log_ref = str(logs_dir)
+        except Exception:
+            log_ref = "~/.opensquilla/logs"
+        warnings.warn(
+            f"OpenSquilla: {n} legacy memory.* config field(s) ignored "
+            f"(e.g. {first_three}); see {log_ref} for details. "
+            f"These fields will be removed in 0.2.0.",
+            DeprecationWarning,
+            stacklevel=6,
+        )
+        logging.getLogger(__name__).warning(
+            "OpenSquilla: %d legacy memory.* config field(s) ignored (e.g. %s); "
+            "see %s for details. These fields will be removed in 0.2.0.",
+            n,
+            first_three,
+            log_ref,
+        )
+
+
 class MemoryCostConfig(BaseModel):
     """Stable memory implementation cost knobs."""
 
     model_config = ConfigDict(extra="forbid")
 
     query_embedding_cache: Literal["off", "shadow", "on"] = "on"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_deprecated_cost_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        found = {
+            f"memory.cost.{k}": data.pop(k)
+            for k in list(data)
+            if k in _DEPRECATED_COST_LEAVES
+        }
+        _handle_deprecated_memory_fields(found, "MemoryCostConfig")
+        return data
 
 
 class MemoryConfig(BaseSettings):
@@ -365,6 +499,28 @@ class MemoryConfig(BaseSettings):
         env_nested_delimiter="__",
         extra="forbid",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _drop_deprecated_memory_fields(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        found = {
+            f"memory.{k}": data.pop(k)
+            for k in list(data)
+            if k in _DEPRECATED_MEMORY_LEAVES
+        }
+        cost_data = data.get("cost")
+        if isinstance(cost_data, dict):
+            found.update(
+                {
+                    f"memory.cost.{k}": cost_data.pop(k)
+                    for k in list(cost_data)
+                    if k in _DEPRECATED_COST_LEAVES
+                }
+            )
+        _handle_deprecated_memory_fields(found, "MemoryConfig")
+        return data
 
     cost: MemoryCostConfig = Field(default_factory=MemoryCostConfig)
 
@@ -446,6 +602,7 @@ def _default_tiers() -> dict:
                 "extraction, and low-risk simple Q&A"
             ),
             "supports_image": False,
+            "thinking_level": "high",
         },
         "t1": {
             "provider": "openrouter",
@@ -455,6 +612,7 @@ def _default_tiers() -> dict:
                 "debugging, and moderate analysis"
             ),
             "supports_image": False,
+            "thinking_level": "high",
         },
         "t2": {
             "provider": "openrouter",
@@ -464,7 +622,7 @@ def _default_tiers() -> dict:
                 "larger context synthesis, and harder analysis"
             ),
             "supports_image": False,
-            "thinking_level": "low",
+            "thinking_level": "high",
         },
         "t3": {
             "provider": "openrouter",
@@ -474,7 +632,7 @@ def _default_tiers() -> dict:
                 "deep review, complex debugging, and high-stakes synthesis"
             ),
             "supports_image": False,
-            "thinking_level": "medium",
+            "thinking_level": "high",
         },
         "image_model": {
             "provider": "openrouter",
@@ -1406,6 +1564,20 @@ class GatewayConfig(BaseSettings):
         data: dict[str, Any] = self.model_dump(exclude_none=True, exclude_defaults=False)
         if not data.get("agents"):
             data.pop("agents", None)
+        llm = data.get("llm")
+        if isinstance(llm, dict):
+            if not llm.get("api_key_env"):
+                llm.pop("api_key_env", None)
+            elif not llm.get("api_key"):
+                llm.pop("api_key", None)
+        router = data.get("squilla_router")
+        if isinstance(router, dict) and router.get("tier_profile"):
+            try:
+                defaults = _router_tier_profile_defaults(str(router["tier_profile"]))
+            except ValueError:
+                defaults = None
+            if defaults is not None and router.get("tiers") == defaults:
+                router.pop("tiers", None)
         for path in sorted(self._runtime_secret_paths):
             _delete_path(data, path)
         return data

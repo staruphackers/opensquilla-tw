@@ -49,7 +49,7 @@ function Test-SquillaRouterAssets {
         return
     }
 
-    $modelRoot = 'src/opensquilla/contrib/squilla_router/models'
+    $modelRoot = 'src/opensquilla/squilla_router/models'
     $required = @(
         "$modelRoot/v4.2_phase3_inference/lgbm_main.bin",
         "$modelRoot/v4.2_phase3_inference/router.runtime.yaml",
@@ -87,7 +87,7 @@ function Test-SquillaRouterAssets {
             $message = "install.ps1: Git LFS pointer files detected: $($pointers -join ', ')"
             if ($WarnOnly) { Write-Host $message } else { Write-Error $message }
         }
-        $lfsMessage = 'install.ps1: run `git lfs install` once, then `git lfs pull --include="src/opensquilla/contrib/squilla_router/models/**"`.'
+        $lfsMessage = 'install.ps1: run `git lfs install` once, then `git lfs pull --include="src/opensquilla/squilla_router/models/**"`.'
         $coreMessage = 'install.ps1: or retry with `$env:OPENSQUILLA_INSTALL_PROFILE="core"` for the minimal runtime.'
         if ($WarnOnly) {
             Write-Host $lfsMessage

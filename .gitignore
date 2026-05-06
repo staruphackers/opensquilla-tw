@@ -26,6 +26,7 @@ benchmarks/
 specs/
 # Local agent/editor instructions and runtime state.
 AGENTS.md
+!src/opensquilla/identity/templates/bootstrap/AGENTS.md
 CLAUDE.md
 GEMINI.md
 .codex
@@ -49,12 +50,7 @@ site/
 plugins/
 crontab-*
 ~/
-/docs/*
-!/docs/testing.md
-!/docs/architecture/
-!/docs/architecture/module-contracts.md
-!/docs/concepts/
-!/docs/concepts/prompt-cache.md
+/docs/
 /reference-*
 /reference-mem
 /bench-mem

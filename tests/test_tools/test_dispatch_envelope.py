@@ -176,3 +176,45 @@ async def test_dispatch_unknown_tool_in_skill_name_context_raises_unsupported_su
     assert payload["error_class"] == "UnsupportedSurface"
     assert payload["tool"] == "shell"
     assert "skill" in payload["user_message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_attaches_published_artifacts_to_tool_result() -> None:
+    registry = ToolRegistry()
+    artifact = {
+        "id": "art-dispatch",
+        "kind": "artifact_ref",
+        "name": "report.txt",
+        "mime": "text/plain",
+        "size": 4,
+        "sha256": "1" * 64,
+        "session_id": "session-1",
+        "session_key": "agent:main:demo",
+        "source": "publish_artifact",
+        "created_at": "2026-05-06T12:00:00Z",
+        "download_url": "/api/v1/artifacts/art-dispatch",
+    }
+
+    async def publish() -> str:
+        ctx = current_tool_context.get()
+        assert ctx is not None
+        ctx.published_artifacts.append(artifact)
+        return "published"
+
+    registry.register(ToolSpec(name="publish", description="publish", parameters={}), publish)
+    handler = build_tool_handler(registry)
+    ctx = ToolContext(session_key="agent:main:demo")
+    token = current_tool_context.set(ctx)
+    try:
+        result = await handler(
+            ToolCall(
+                tool_use_id="tc-5",
+                tool_name="publish",
+                arguments={},
+            )
+        )
+    finally:
+        current_tool_context.reset(token)
+
+    assert result.content == "published"
+    assert result.artifacts == [artifact]

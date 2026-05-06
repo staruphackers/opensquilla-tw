@@ -14,6 +14,7 @@ from opensquilla.onboarding.config_store import (
     default_config_path,
     load_config,
     persist_config,
+    resolve_config_path,
     validate_config_payload,
 )
 
@@ -21,8 +22,66 @@ from opensquilla.onboarding.config_store import (
 def test_default_config_path_under_home(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.delenv("OPENSQUILLA_GATEWAY_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("OPENSQUILLA_STATE_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)  # no opensquilla.toml here
     p = default_config_path()
     assert p == tmp_path / ".opensquilla" / "config.toml"
+
+
+def test_default_path_uses_env_when_set(tmp_path, monkeypatch):
+    target = tmp_path / "explicit.toml"
+    monkeypatch.setenv("OPENSQUILLA_GATEWAY_CONFIG_PATH", str(target))
+    monkeypatch.chdir(tmp_path)
+    assert default_config_path() == target
+
+
+def test_default_path_prefers_cwd_when_present(tmp_path, monkeypatch):
+    monkeypatch.delenv("OPENSQUILLA_GATEWAY_CONFIG_PATH", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "opensquilla.toml").write_text("")
+    monkeypatch.chdir(project)
+    assert default_config_path() == project / "opensquilla.toml"
+
+
+def test_resolve_config_path_ignores_cwd_directory(tmp_path, monkeypatch):
+    monkeypatch.delenv("OPENSQUILLA_GATEWAY_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("OPENSQUILLA_STATE_DIR", raising=False)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    (tmp_path / "opensquilla.toml").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    path, source = resolve_config_path(None)
+
+    assert path == home / ".opensquilla" / "config.toml"
+    assert source == "home"
+
+
+def test_default_path_falls_back_to_home(tmp_path, monkeypatch):
+    monkeypatch.delenv("OPENSQUILLA_GATEWAY_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("OPENSQUILLA_STATE_DIR", raising=False)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.chdir(tmp_path)  # no opensquilla.toml in cwd
+    assert default_config_path() == home / ".opensquilla" / "config.toml"
+
+
+def test_resolve_config_path_returns_source(tmp_path, monkeypatch):
+    monkeypatch.delenv("OPENSQUILLA_GATEWAY_CONFIG_PATH", raising=False)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "opensquilla.toml").write_text("")
+    monkeypatch.chdir(project)
+    path, source = resolve_config_path(None)
+    assert path == project / "opensquilla.toml"
+    assert source == "cwd"
 
 
 def test_persist_creates_file_with_mode_0600(tmp_path):
@@ -100,6 +159,31 @@ def test_persist_omits_runtime_secret_paths(tmp_path):
 
     data = tomllib.loads(target.read_text())
     assert "api_key" not in data["llm"]
+
+
+def test_env_sourced_llm_key_is_not_persisted(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-from-env")
+    from opensquilla.gateway.llm_runtime import resolve_llm_runtime_config
+
+    cfg = GatewayConfig(
+        llm={
+            "provider": "openrouter",
+            "model": "deepseek/deepseek-v4-flash",
+            "api_key": "",
+            "api_key_env": "OPENROUTER_API_KEY",
+        }
+    )
+
+    runtime = resolve_llm_runtime_config(cfg)
+    assert runtime.api_key == "sk-from-env"
+
+    target = tmp_path / "config.toml"
+    persist_config(cfg, path=target)
+
+    data = tomllib.loads(target.read_text())
+    assert data["llm"]["api_key_env"] == "OPENROUTER_API_KEY"
+    assert "api_key" not in data["llm"]
+    assert "sk-from-env" not in target.read_text()
 
 
 def test_load_nonexistent_returns_default(tmp_path):

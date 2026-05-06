@@ -17,6 +17,10 @@ DEFAULT_DENYLIST: list[str] = [
     r":\(\)\s*\{.*:\|:.*\}",  # fork bomb
     r">\s*/dev/sda",  # overwrite block device
     r"chmod\s+-R\s+777\s+/",  # world-writable root
+    r"(?i)\bFormat-Volume\b",  # PowerShell filesystem format
+    r"(?i)\bClear-Disk\b",  # PowerShell disk wipe
+    r"(?i)\bStop-Computer\b",  # PowerShell system shutdown
+    r"(?i)\bRestart-Computer\b",  # PowerShell system reboot
 ]
 
 DEFAULT_DENYLIST_WIN: list[str] = [

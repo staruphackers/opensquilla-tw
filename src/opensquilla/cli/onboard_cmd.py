@@ -11,6 +11,7 @@ from opensquilla.onboarding.flow import (
     run_interactive_onboard,
     run_noninteractive_provider_configure,
 )
+from opensquilla.onboarding.next_steps import format_next_steps
 from opensquilla.onboarding.status import get_onboarding_status
 
 
@@ -18,7 +19,14 @@ def onboard_command(
     provider: str = typer.Option("", "--provider"),
     model: str = typer.Option("", "--model"),
     api_key: str = typer.Option("", "--api-key"),
+    api_key_env: str = typer.Option("", "--api-key-env"),
     base_url: str = typer.Option("", "--base-url"),
+    router: str = typer.Option(
+        "recommended",
+        "--router",
+        help="recommended | openrouter-mix | disabled",
+    ),
+    minimal: bool = typer.Option(False, "--minimal"),
     skip_channels: bool = typer.Option(False, "--skip-channels"),
     skip_search: bool = typer.Option(False, "--skip-search"),
     if_needed: bool = typer.Option(False, "--if-needed"),
@@ -33,10 +41,17 @@ def onboard_command(
     if provider and model:
         result = run_noninteractive_provider_configure(
             provider,
-            {"model": model, "api_key": api_key, "base_url": base_url},
+            {
+                "model": model,
+                "api_key": api_key,
+                "api_key_env": api_key_env,
+                "base_url": base_url,
+                "router": router,
+            },
         )
         typer.echo(f"Provider configured: {provider}")
         typer.echo(f"Config: {result.path}")
+        typer.echo(format_next_steps(load_config(result.path), config_path=result.path))
         return
 
     options = OnboardOptions(
@@ -46,7 +61,10 @@ def onboard_command(
         provider_id=provider or None,
         model=model or None,
         api_key=api_key or None,
+        api_key_env=api_key_env or None,
         base_url=base_url or None,
+        router_mode=router,
+        minimal=minimal,
     )
     result = run_interactive_onboard(options)
     if "tty_required" in result.warnings:
@@ -55,12 +73,114 @@ def onboard_command(
 
 
 def configure_command(
+    section_arg: str = typer.Argument(
+        "",
+        help="provider | router | channels | search | image-generation | memory-embedding",
+    ),
     section: str = typer.Option(
         "", "--section",
-        help="providers | channels | search | image-generation",
+        help="provider | router | channels | search | image-generation | memory-embedding",
     ),
+    provider: str = typer.Option("", "--provider"),
+    model: str = typer.Option("", "--model"),
+    api_key: str = typer.Option("", "--api-key"),
+    api_key_env: str = typer.Option("", "--api-key-env"),
+    base_url: str = typer.Option("", "--base-url"),
+    router: str = typer.Option("", "--router", help="recommended | openrouter-mix | disabled"),
+    search_provider: str = typer.Option("", "--search-provider"),
+    max_results: int = typer.Option(5, "--max-results"),
+    channel_type: str = typer.Option("", "--channel-type"),
+    name: str = typer.Option("", "--name"),
+    token: str = typer.Option("", "--token"),
+    image_provider: str = typer.Option("", "--image-provider"),
+    primary: str = typer.Option("", "--primary"),
+    memory_provider: str = typer.Option("", "--memory-provider"),
+    onnx_dir: str = typer.Option("", "--onnx-dir"),
 ) -> None:
     """Reconfigure a section (providers/channels/search/image-generation)."""
-    result = run_interactive_configure(section or None)
-    if result is not None:
-        typer.echo(f"Saved: {result.path}")
+    selected = section or section_arg
+    if selected:
+        from opensquilla.onboarding.setup_engine import SetupEngine
+
+        normalized = selected.strip().lower()
+        try:
+            if normalized in {"provider", "providers"} and provider and model:
+                engine = SetupEngine()
+                engine.apply(
+                    "provider",
+                    {
+                        "providerId": provider,
+                        "model": model,
+                        "apiKey": api_key,
+                        "apiKeyEnv": api_key_env,
+                        "baseUrl": base_url,
+                    },
+                )
+                result = engine.persist()
+                typer.echo(f"Saved: {result.path}")
+                return
+            if normalized == "router" and router:
+                engine = SetupEngine()
+                engine.apply("router", {"mode": router})
+                result = engine.persist()
+                typer.echo(f"Saved: {result.path}")
+                return
+            if normalized == "search" and search_provider:
+                engine = SetupEngine()
+                engine.apply(
+                    "search",
+                    {
+                        "providerId": search_provider,
+                        "apiKey": api_key,
+                        "maxResults": max_results,
+                    },
+                )
+                result = engine.persist()
+                typer.echo(f"Saved: {result.path}")
+                return
+            if normalized in {"channel", "channels"} and channel_type and name:
+                engine = SetupEngine()
+                entry = {"type": channel_type, "name": name}
+                if token:
+                    entry["token"] = token
+                engine.apply("channel", {"entry": entry})
+                result = engine.persist()
+                typer.echo(f"Saved: {result.path}")
+                return
+            if normalized in {"image-generation", "image_generation"} and image_provider:
+                engine = SetupEngine()
+                engine.apply(
+                    "image-generation",
+                    {
+                        "providerId": image_provider,
+                        "primary": primary,
+                        "apiKey": api_key,
+                        "baseUrl": base_url,
+                        "enabled": True,
+                    },
+                )
+                result = engine.persist()
+                typer.echo(f"Saved: {result.path}")
+                return
+            if normalized in {"memory-embedding", "memory_embedding"} and memory_provider:
+                engine = SetupEngine()
+                engine.apply(
+                    "memory-embedding",
+                    {
+                        "providerId": memory_provider,
+                        "model": model,
+                        "apiKey": api_key,
+                        "baseUrl": base_url,
+                        "onnxDir": onnx_dir,
+                    },
+                )
+                result = engine.persist()
+                typer.echo(f"Saved: {result.path}")
+                return
+        except (KeyError, TypeError, ValueError) as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(code=2) from exc
+
+    interactive_result = run_interactive_configure(selected or None)
+    if interactive_result is not None:
+        typer.echo(f"Saved: {interactive_result.path}")

@@ -60,7 +60,7 @@ jobs:
 
       - name: Hydrate router assets
         shell: bash
-        run: git lfs pull --include="src/opensquilla/contrib/squilla_router/models/**"
+        run: git lfs pull --include="src/opensquilla/squilla_router/models/**"
 
       - name: Set up Python
         uses: actions/setup-python@v5

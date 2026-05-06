@@ -13,6 +13,7 @@ and cross-origin/wrong-scope variants.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
 from pathlib import Path
@@ -186,13 +187,15 @@ def test_unknown_uuid_rejected(store: UploadStore) -> None:
         asyncio.run(store.get("u-doesnotexist"))
 
 
-def test_file_uuid_resolved_via_store_inlines_bytes(store: UploadStore) -> None:
-    """validate -> resolve -> inline bytes round-trip.
+def test_file_uuid_resolved_via_store_returns_material_ref(
+    store: UploadStore,
+    tmp_path: Path,
+) -> None:
+    """validate -> resolve -> content-addressed material ref.
 
     The validator accepts the ``{file_uuid, mime, name}`` envelope and the
-    resolver materialises it via the upload store. This locks the contract that
-    the engine never observes a file_uuid; the resolved record carries base64
-    ``data`` instead.
+    resolver materialises it via the upload store. Runtime receives a stable
+    material ref; it must not carry the upload uuid or long-lived base64 data.
     """
 
     from opensquilla.gateway.rpc_sessions import (
@@ -206,19 +209,49 @@ def test_file_uuid_resolved_via_store_inlines_bytes(store: UploadStore) -> None:
     validated = _validate_attachments(
         [{"file_uuid": file_uuid, "mime": "application/pdf", "name": "r.pdf"}]
     )
-    resolved = asyncio.run(_resolve_attachments(validated, store=store))
+    resolved = asyncio.run(
+        _resolve_attachments(
+            validated,
+            store=store,
+            material_root=tmp_path,
+            session_id="s1",
+        )
+    )
     assert len(resolved) == 1
     item = resolved[0]
     assert "file_uuid" not in item
+    assert "data" not in item
+    assert item["kind"] == "attachment_ref"
     assert item["type"] == "application/pdf"
+    assert item["mime"] == "application/pdf"
     assert item["name"] == "r.pdf"
-    import base64 as _b
+    assert item["size"] == len(pdf)
+    sha = hashlib.sha256(pdf).hexdigest()
+    assert item["sha256"] == sha
+    assert item["material_id"] == sha
+    assert item["store"] == "transcript"
+    assert item["scope"] == "s1"
+    assert (tmp_path / "transcripts" / "s1" / sha).read_bytes() == pdf
 
-    assert _b.b64decode(item["data"]) == pdf
+
+def test_file_uuid_resolution_requires_material_target(store: UploadStore) -> None:
+    from opensquilla.gateway.rpc_sessions import (
+        _resolve_attachments,
+        _validate_attachments,
+    )
+
+    file_uuid = asyncio.run(store.put("r.pdf", "application/pdf", b"%PDF-1.4\nbody\n"))
+    validated = _validate_attachments(
+        [{"file_uuid": file_uuid, "mime": "application/pdf", "name": "r.pdf"}]
+    )
+
+    with pytest.raises(ValueError, match="material target"):
+        asyncio.run(_resolve_attachments(validated, store=store))
 
 
 def test_file_uuid_resolution_revalidates_mime_from_staged_bytes(
     store: UploadStore,
+    tmp_path: Path,
 ) -> None:
     from opensquilla.gateway.rpc_sessions import (
         _resolve_attachments,
@@ -231,14 +264,26 @@ def test_file_uuid_resolution_revalidates_mime_from_staged_bytes(
     validated = _validate_attachments(
         [{"file_uuid": file_uuid, "mime": "text/plain", "name": "misnamed.txt"}]
     )
-    resolved = asyncio.run(_resolve_attachments(validated, store=store))
+    resolved = asyncio.run(
+        _resolve_attachments(
+            validated,
+            store=store,
+            material_root=tmp_path,
+            session_id="s1",
+        )
+    )
 
     item = resolved[0]
     assert item["type"] == "application/pdf"
+    assert item["mime"] == "application/pdf"
     assert item["_was_staged"] is True
+    assert "data" not in item
 
 
-def test_file_uuid_resolution_allows_large_staged_pdf(store: UploadStore) -> None:
+def test_file_uuid_resolution_allows_large_staged_pdf(
+    store: UploadStore,
+    tmp_path: Path,
+) -> None:
     from opensquilla.gateway.rpc_sessions import (
         _MAX_ATTACHMENT_BYTES,
         _MAX_STAGED_PDF_BYTES,
@@ -253,14 +298,21 @@ def test_file_uuid_resolution_allows_large_staged_pdf(store: UploadStore) -> Non
     validated = _validate_attachments(
         [{"file_uuid": file_uuid, "mime": "application/pdf", "name": "large.pdf"}]
     )
-    resolved = asyncio.run(_resolve_attachments(validated, store=store))
-
-    import base64 as _b
+    resolved = asyncio.run(
+        _resolve_attachments(
+            validated,
+            store=store,
+            material_root=tmp_path,
+            session_id="s1",
+        )
+    )
 
     item = resolved[0]
     assert item["type"] == "application/pdf"
     assert item["_was_staged"] is True
-    assert _b.b64decode(item["data"]) == pdf
+    assert item["size"] == len(pdf)
+    assert item["sha256"] == hashlib.sha256(pdf).hexdigest()
+    assert "data" not in item
 
 
 def test_file_uuid_resolution_rejects_large_staged_image() -> None:
@@ -288,7 +340,14 @@ def test_file_uuid_resolution_rejects_large_staged_image() -> None:
         [{"file_uuid": "u-large-image", "mime": "image/png", "name": "large.png"}]
     )
     with pytest.raises(ValueError, match="exceeds"):
-        asyncio.run(_resolve_attachments(validated, store=store))
+        asyncio.run(
+            _resolve_attachments(
+                validated,
+                store=store,
+                material_root=Path.cwd(),
+                session_id="s1",
+            )
+        )
 
 
 def test_file_uuid_resolution_rejects_large_staged_text_family() -> None:
@@ -316,10 +375,17 @@ def test_file_uuid_resolution_rejects_large_staged_text_family() -> None:
         [{"file_uuid": "u-large-text", "mime": "text/csv", "name": "large.csv"}]
     )
     with pytest.raises(ValueError, match="exceeds"):
-        asyncio.run(_resolve_attachments(validated, store=store))
+        asyncio.run(
+            _resolve_attachments(
+                validated,
+                store=store,
+                material_root=Path.cwd(),
+                session_id="s1",
+            )
+        )
 
 
-def test_file_uuid_resolution_rejects_aggregate_raw_bytes_above_cap() -> None:
+def test_file_uuid_resolution_rejects_aggregate_raw_bytes_above_cap(tmp_path: Path) -> None:
     from opensquilla.gateway.rpc_sessions import (
         _resolve_attachments,
         _validate_attachments,
@@ -348,7 +414,14 @@ def test_file_uuid_resolution_rejects_aggregate_raw_bytes_above_cap() -> None:
     )
 
     with pytest.raises(ValueError, match="total raw bytes"):
-        asyncio.run(_resolve_attachments(validated, store=store))
+        asyncio.run(
+            _resolve_attachments(
+                validated,
+                store=store,
+                material_root=tmp_path,
+                session_id="s1",
+            )
+        )
 
 
 def test_uuid_expires_after_ttl(tmp_path: Path) -> None:
@@ -404,7 +477,6 @@ def test_post_restart_returns_specific_error_for_lost_uuid(tmp_path: Path) -> No
 
 def test_upload_route_rejects_oversize_text_family() -> None:
     pytest.importorskip("starlette.testclient")
-    pytest.importorskip("multipart")
     from starlette.applications import Starlette
     from starlette.testclient import TestClient
 

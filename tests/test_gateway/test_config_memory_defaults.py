@@ -26,14 +26,14 @@ def test_memory_core_defaults_keep_single_stable_path() -> None:
 @pytest.mark.parametrize(
     "payload",
     [
-        {"profile": "balanced"},
+        # profile and recall_frequency are deprecated and silently dropped (not raised).
+        # Unknown non-deprecated cost sub-fields are still rejected.
         {"cost": {"derived_cache": "shadow"}},
         {"cost": {"facts_lane": "shadow"}},
         {"cost": {"cheap_model_lane": "shadow"}},
         {"cost": {"fact_links_lane": "shadow"}},
         {"cost": {"temporal_events_lane": "shadow"}},
         {"cost": {"multi_hop_recall": "shadow"}},
-        {"recall_frequency": {"enabled": True}},
     ],
 )
 def test_rejected_memory_lanes_are_not_configurable(payload: dict[str, object]) -> None:

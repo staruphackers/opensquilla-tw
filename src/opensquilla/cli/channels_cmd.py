@@ -11,11 +11,14 @@ from rich.table import Table
 
 from opensquilla.cli.gateway_rpc import confirm_or_exit, run_gateway_sync
 from opensquilla.cli.output import print_json
-from opensquilla.onboarding.channel_specs import get_channel_setup_spec
+from opensquilla.onboarding.channel_specs import (
+    get_channel_setup_spec,
+    list_channel_setup_specs,
+)
 from opensquilla.onboarding.config_store import (
-    default_config_path,
     load_config,
     persist_config,
+    resolve_config_path,
 )
 from opensquilla.onboarding.mutations import (
     list_channel_entries,
@@ -65,9 +68,61 @@ def _parse_field_pairs(pairs: list[str], type_name: str) -> dict[str, Any]:
 
 def _print_restart_notice() -> None:
     typer.secho(
-        "Channel changes require restarting the gateway to take effect.",
+        "Restart the gateway PROCESS to apply (this is not the same as "
+        "'opensquilla channels restart <name>', which only restarts an "
+        "already-loaded adapter).",
         fg=typer.colors.YELLOW,
     )
+
+
+_SOURCE_LABEL = {
+    "explicit": "from --config",
+    "env": "from OPENSQUILLA_GATEWAY_CONFIG_PATH",
+    "cwd": "found in cwd",
+    "home": "default in $HOME",
+}
+
+
+def _resolve_and_announce(config_path: Path | None) -> Path:
+    target, source = resolve_config_path(config_path)
+    typer.secho(
+        f"Config: {target} ({_SOURCE_LABEL[source]})",
+        fg=typer.colors.CYAN,
+    )
+    return target
+
+
+def _resolve_token_field(type_name: str) -> str:
+    """Pick the secret field that --token maps to, in alias-tuple order.
+
+    Walking _TOKEN_ALIASES first (rather than spec field order) means
+    operators get the field whose name matches their flag intent first
+    — e.g. wecom.token over wecom.corp_secret. Errors out for types
+    whose secret fields don't include any aliased name.
+    """
+    spec = get_channel_setup_spec(type_name)
+    secret_names = {f.name for f in spec.fields if f.secret}
+    for alias in _TOKEN_ALIASES:
+        if alias in secret_names:
+            return alias
+    typer.secho(
+        f"--token is not supported for channel type {type_name!r}; "
+        f"use --field <name>=... instead.",
+        fg=typer.colors.RED,
+        err=True,
+    )
+    raise typer.Exit(code=2)
+
+
+def _apply_token(payload: dict[str, Any], type_name: str, token: str) -> None:
+    if not token:
+        return
+    field_name = _resolve_token_field(type_name)
+    typer.secho(
+        f"--token resolved to {type_name}.{field_name}",
+        fg=typer.colors.CYAN,
+    )
+    payload[field_name] = token
 
 
 def _render_channels_table(entries: list[dict[str, Any]], *, title: str) -> None:
@@ -138,7 +193,11 @@ def channels_list(
     config_path: Path | None = typer.Option(None, "--config"),
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
 ) -> None:
-    target = config_path or default_config_path()
+    target = (
+        resolve_config_path(config_path)[0]
+        if json_output
+        else _resolve_and_announce(config_path)
+    )
     cfg = load_config(target)
     entries = list_channel_entries(cfg)
     if json_output:
@@ -232,20 +291,14 @@ def channels_add(
     config_path: Path | None = typer.Option(None, "--config"),
 ) -> None:
     """Add or update a channel entry."""
-    target = config_path or default_config_path()
+    target = _resolve_and_announce(config_path)
     payload: dict[str, Any] = {
         "type": type_name,
         "name": name,
         "enabled": enabled,
         "agent_id": agent_id,
     }
-    if token:
-        spec = get_channel_setup_spec(type_name)
-        token_field = next(
-            (f.name for f in spec.fields if f.name in _TOKEN_ALIASES),
-            "token",
-        )
-        payload[token_field] = token
+    _apply_token(payload, type_name, token)
     payload.update(_parse_field_pairs(fields, type_name))
 
     cfg = load_config(target)
@@ -257,7 +310,6 @@ def channels_add(
 
     persist = persist_config(result.config, path=target, restart_required=True)
     typer.echo(f"Channel saved: {name} ({type_name})")
-    typer.echo(f"Config: {persist.path}")
     if persist.backup_path:
         typer.echo(f"Backup: {persist.backup_path}")
     _print_restart_notice()
@@ -268,7 +320,7 @@ def channels_remove(
     name: str = typer.Argument(...),
     config_path: Path | None = typer.Option(None, "--config"),
 ) -> None:
-    target = config_path or default_config_path()
+    target = _resolve_and_announce(config_path)
     cfg = load_config(target)
     try:
         result = remove_channel(cfg, name=name)
@@ -285,7 +337,7 @@ def channels_enable(
     name: str = typer.Argument(...),
     config_path: Path | None = typer.Option(None, "--config"),
 ) -> None:
-    target = config_path or default_config_path()
+    target = _resolve_and_announce(config_path)
     cfg = load_config(target)
     try:
         result = set_channel_enabled(cfg, name=name, enabled=True)
@@ -302,7 +354,7 @@ def channels_disable(
     name: str = typer.Argument(...),
     config_path: Path | None = typer.Option(None, "--config"),
 ) -> None:
-    target = config_path or default_config_path()
+    target = _resolve_and_announce(config_path)
     cfg = load_config(target)
     try:
         result = set_channel_enabled(cfg, name=name, enabled=False)
@@ -312,3 +364,151 @@ def channels_disable(
     persist_config(result.config, path=target, restart_required=True)
     typer.echo(f"Channel disabled: {name}")
     _print_restart_notice()
+
+
+@channels_app.command("edit")
+def channels_edit(
+    name: str = typer.Argument(..., help="Existing channel name."),
+    token: str = typer.Option("", "--token"),
+    enabled: bool | None = typer.Option(None, "--enabled/--disabled"),
+    agent_id: str = typer.Option("", "--agent-id"),
+    fields: list[str] = typer.Option(
+        [], "--field", "-f", help="Repeatable key=value channel field."
+    ),
+    config_path: Path | None = typer.Option(None, "--config"),
+) -> None:
+    """Edit an existing channel; blank fields keep current values."""
+    target = _resolve_and_announce(config_path)
+    cfg = load_config(target)
+    existing = next(
+        (
+            e.model_dump(mode="python")
+            for e in cfg.channels.channels
+            if e.name == name
+        ),
+        None,
+    )
+    if existing is None:
+        typer.secho(f"Error: no channel named {name!r}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+    type_name = existing["type"]
+
+    overrides: dict[str, Any] = {"type": type_name, "name": name}
+    if enabled is not None:
+        overrides["enabled"] = enabled
+    if agent_id:
+        overrides["agent_id"] = agent_id
+    _apply_token(overrides, type_name, token)
+    overrides.update(_parse_field_pairs(fields, type_name))
+    # Patch semantics: every field not explicitly overridden retains its
+    # existing value. upsert_channel's secret-merge guards against blanks
+    # in the add path; this seeding handles non-secret partial updates
+    # in the edit path.
+    payload = {**existing, **overrides}
+
+    try:
+        result = upsert_channel(cfg, entry_payload=payload)
+    except (ValueError, KeyError) as exc:
+        typer.secho(f"Error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+
+    persist = persist_config(result.config, path=target, restart_required=True)
+    typer.echo(f"Channel updated: {name} ({type_name})")
+    if persist.backup_path:
+        typer.echo(f"Backup: {persist.backup_path}")
+    _print_restart_notice()
+
+
+@channels_app.command("types")
+def channels_types(
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
+) -> None:
+    """List supported channel types."""
+    specs = list_channel_setup_specs()
+    if json_output:
+        print_json([
+            {
+                "type": s.type,
+                "label": s.label,
+                "transport": s.transport,
+                "requires_public_url": s.requires_public_url,
+                "dependency_extra": s.dependency_extra,
+            }
+            for s in specs
+        ])
+        return
+    table = Table(title="Supported channel types")
+    table.add_column("type", no_wrap=True)
+    table.add_column("label")
+    table.add_column("transport", no_wrap=True)
+    table.add_column("public URL", no_wrap=True)
+    table.add_column("extras", no_wrap=True)
+    for s in specs:
+        table.add_row(
+            s.type, s.label, s.transport,
+            "yes" if s.requires_public_url else "no",
+            s.dependency_extra or "—",
+        )
+    Console(width=140, force_terminal=False).print(table)
+
+
+@channels_app.command("describe")
+def channels_describe(
+    type_name: str = typer.Argument(..., help="Channel type, e.g. slack."),
+    json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
+) -> None:
+    """Show the field schema, transport, and docs hint for a channel type."""
+    try:
+        spec = get_channel_setup_spec(type_name)
+    except KeyError as exc:
+        typer.secho(f"Error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2) from exc
+
+    if json_output:
+        print_json({
+            "type": spec.type,
+            "label": spec.label,
+            "description": spec.description,
+            "transport": spec.transport,
+            "requires_public_url": spec.requires_public_url,
+            "dependency_extra": spec.dependency_extra,
+            "restart_required": spec.restart_required,
+            "docs_hint": spec.docs_hint,
+            "fields": [
+                {
+                    "name": f.name, "label": f.label, "type": f.field_type,
+                    "required": f.required, "default": f.default,
+                    "choices": list(f.choices), "secret": f.secret,
+                    "description": f.description,
+                }
+                for f in spec.fields
+            ],
+        })
+        return
+
+    console = Console(width=160, force_terminal=False)
+    typer.echo(f"{spec.label} ({spec.type})")
+    typer.echo(spec.description)
+    typer.echo(
+        f"transport={spec.transport}  "
+        f"public_url={'yes' if spec.requires_public_url else 'no'}  "
+        f"extras={spec.dependency_extra or '—'}  "
+        f"docs={spec.docs_hint}"
+    )
+    table = Table(title="Fields")
+    table.add_column("name", no_wrap=True)
+    table.add_column("type", no_wrap=True)
+    table.add_column("required", no_wrap=True)
+    table.add_column("secret", no_wrap=True)
+    table.add_column("default")
+    table.add_column("choices")
+    for f in spec.fields:
+        table.add_row(
+            f.name,
+            f.field_type,
+            "yes" if f.required else "no",
+            "yes" if f.secret else "no",
+            "" if f.default is None else str(f.default),
+            ",".join(f.choices) if f.choices else "—",
+        )
+    console.print(table)

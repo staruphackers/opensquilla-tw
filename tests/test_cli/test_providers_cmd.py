@@ -68,7 +68,7 @@ def test_providers_configure_ollama_no_key_required(tmp_path, monkeypatch):
     assert "ollama" in target.read_text()
 
 
-def test_providers_configure_vllm_requires_base_url(tmp_path, monkeypatch):
+def test_providers_configure_vllm_is_hidden_until_runtime_verified(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENSQUILLA_GATEWAY_CONFIG_PATH", str(tmp_path / "c.toml"))
     result = runner.invoke(
         app,
@@ -76,4 +76,4 @@ def test_providers_configure_vllm_requires_base_url(tmp_path, monkeypatch):
     )
     assert result.exit_code != 0
     combined = (result.stdout + (result.stderr or "")).lower()
-    assert "base_url" in combined or "base url" in combined
+    assert "not runtime-supported" in combined

@@ -12,6 +12,7 @@ from opensquilla.gateway.boot import (
     _configured_agent_ids,
     _register_dream_crons,
     _warn_workspace_state_mismatch,
+    build_flush_service,
     build_services,
     dispatch_task_runtime_turn,
     validate_squilla_router_runtime,
@@ -20,6 +21,7 @@ from opensquilla.gateway.config import AgentEntryConfig, GatewayConfig
 from opensquilla.gateway.routing import build_cli_route_envelope, build_cron_route_envelope
 from opensquilla.onboarding.mutations import upsert_channel
 from opensquilla.scheduler.types import CronJob, JobStatus
+from opensquilla.tools.registry import ToolRegistry
 
 
 class _FakeDreamScheduler:
@@ -77,6 +79,27 @@ def test_build_turn_runner_from_services_wires_memory_services(
     assert captured["model_catalog"] is services.model_catalog
 
 
+def test_build_flush_service_respects_memory_flush_enabled_config() -> None:
+    service = build_flush_service(
+        tool_registry=ToolRegistry(),
+        provider_selector=SimpleNamespace(resolve=lambda: object()),
+        config=GatewayConfig(memory={"flush_enabled": False}),
+    )
+
+    assert service is None
+
+
+def test_build_flush_service_uses_configured_memory_timeout() -> None:
+    service = build_flush_service(
+        tool_registry=ToolRegistry(),
+        provider_selector=SimpleNamespace(resolve=lambda: object()),
+        config=GatewayConfig(memory={"flush_timeout_seconds": 0.25}),
+    )
+
+    assert service is not None
+    assert service._default_timeout == 0.25
+
+
 def test_router_boot_validation_does_not_load_heavy_runtime(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -92,7 +115,7 @@ def test_router_boot_validation_does_not_load_heavy_runtime(
     real_import = builtins.__import__
 
     def guarded_import(name: str, *args: Any, **kwargs: Any) -> Any:
-        if name == "opensquilla.contrib.squilla_router.v4_phase3":
+        if name == "opensquilla.squilla_router.v4_phase3":
             raise AssertionError("boot validation must not load V4Phase3Strategy")
         return real_import(name, *args, **kwargs)
 

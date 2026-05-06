@@ -247,7 +247,7 @@ class LocalEmbeddingProvider:
     """Local embedding provider — ONNX-only backend.
 
     Loads the bundled v4 router BGE ONNX export
-    (``contrib/squilla_router/models/v4.2_phase3_inference/bge_onnx/``) via
+    (``squilla_router/models/v4.2_phase3_inference/bge_onnx/``) via
     ``onnxruntime`` + ``transformers.AutoTokenizer``. There is no
     sentence-transformers / torch path: the project ships an INT8 BGE
     ONNX so the FP32 sentence-transformers download is unnecessary
@@ -272,7 +272,6 @@ class LocalEmbeddingProvider:
 
     _BUNDLED_V4_ONNX_DIR = (
         Path(__file__).resolve().parents[1]
-        / "contrib"
         / "squilla_router"
         / "models"
         / "v4.2_phase3_inference"
@@ -379,7 +378,7 @@ class LocalEmbeddingProvider:
                 f"LocalEmbeddingProvider could not locate a bundled ONNX dir "
                 f"for model {self._model_name!r}; got onnx_dir={self._onnx_dir!r}. "
                 "The bundled v4 router export should ship at "
-                "src/opensquilla/contrib/squilla_router/models/v4.2_phase3_inference/bge_onnx/."
+                "src/opensquilla/squilla_router/models/v4.2_phase3_inference/bge_onnx/."
             )
         onnx_files = sorted(self._onnx_dir.glob("*.onnx"))
         if not onnx_files:

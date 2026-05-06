@@ -1067,6 +1067,37 @@
   font-size: var(--fs-xs);
 }
 
+.msg-artifacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: var(--sp-2) 0;
+}
+
+.msg-artifact-chip {
+  align-items: center;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text);
+  cursor: pointer;
+  display: grid;
+  grid-template-areas:
+    "icon name"
+    "icon meta";
+  grid-template-columns: 18px minmax(0, 1fr);
+  min-height: 42px;
+  max-width: min(320px, 70vw);
+  padding: var(--sp-2) var(--sp-3);
+  text-align: left;
+}
+
+.msg-artifact-chip:hover,
+.msg-artifact-chip:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+
 .msg.user .msg-body.msg-body--has-attachments {
   align-items: flex-end;
   background: transparent;
@@ -1440,11 +1471,11 @@
   }
 }
 
-/* On phones, hide non-essential chat-input-bar buttons to give the textarea
-   meaningful width. New session is reachable via the /new slash command and
-   the session input in the chat header; Export is rarely needed on mobile. */
+/* On phones, hide Export — rarely needed on mobile. The "new chat" (+) button
+   stays visible because the session-chip popover is a switcher, not a creator,
+   so the toolbar button is the only discoverable way to start a fresh chat. */
 @media (max-width: 480px) {
-  #chat-btn-new, #chat-btn-export { display: none !important; }
+  #chat-btn-export { display: none !important; }
 }
 
 .chat-pill {

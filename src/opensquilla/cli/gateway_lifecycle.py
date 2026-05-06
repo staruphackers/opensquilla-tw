@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -577,7 +577,8 @@ def _windows_pid_running(pid: int) -> bool:
 
     process_query_limited_information = 0x1000
     still_active = 259
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    ctypes_mod = cast(Any, ctypes)
+    kernel32 = ctypes_mod.WinDLL("kernel32", use_last_error=True)
     handle = kernel32.OpenProcess(process_query_limited_information, False, int(pid))
     if not handle:
         return False

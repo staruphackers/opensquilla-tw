@@ -19,6 +19,14 @@ const SkillsView = (() => {
     project: 'Project',
     extra: 'Extra',
   };
+  const _LAYER_HELP = {
+    workspace: 'Workspace skills are local to the active workspace.',
+    bundled: 'Bundled skills ship with OpenSquilla.',
+    managed: 'Managed skills are locally installed into OpenSquilla state.',
+    personal: 'Personal skills are local user installs, not bundled.',
+    project: 'Project skills are local to the current project.',
+    extra: 'Extra skills come from configured local directories.',
+  };
 
   function _ensureCss() {
     if (document.querySelector('link[data-view-css="skills"]')) return;
@@ -43,7 +51,7 @@ const SkillsView = (() => {
           <div class="sk-stage__title-block">
             <span class="sk-stage__eyebrow">Control · Skills</span>
             <h2 class="sk-stage__title">Skills</h2>
-            <p class="sk-stage__subtitle">Composable agent capabilities — workspace, bundled, and managed packs.</p>
+            <p class="sk-stage__subtitle">Composable agent capabilities: bundled OpenSquilla skills plus local managed, personal, project, and workspace packs.</p>
           </div>
           <div class="sk-stage__actions">
             <div class="sk-search-wrap" id="sk-search-wrap">
@@ -71,15 +79,22 @@ const SkillsView = (() => {
             <div class="sk-registry__head">
               <div class="sk-search-wrap sk-search-wrap--lg">
                 <span class="sk-search-icon">${icons.search()}</span>
-                <input class="sk-search-input sk-search-input--lg" type="search" id="skills-registry-search" placeholder="Search ClawHub Community source..." autocomplete="off" />
+                <input class="sk-search-input sk-search-input--lg" type="search" id="skills-registry-search" placeholder="Search community skills..." autocomplete="off" />
               </div>
               <button class="btn btn--primary" id="skills-registry-search-btn">Search</button>
+            </div>
+            <div class="sk-github-install">
+              <div class="sk-search-wrap sk-search-wrap--lg">
+                <span class="sk-search-icon">${icons.download()}</span>
+                <input class="sk-search-input sk-search-input--lg" type="url" id="skills-github-url" placeholder="https://github.com/owner/repo/tree/main/path/to/skill" autocomplete="off" />
+              </div>
+              <button class="btn btn--primary" id="skills-github-install">Install GitHub URL</button>
             </div>
             <div id="skills-registry-results" class="sk-registry__results">
               <div class="sk-registry__hint">
                 <div class="sk-registry__hint-icon">${icons.skills()}</div>
-                <p>Search ClawHub Community source skills to browse and install.</p>
-                <p class="sk-dim">Try queries like <code>git</code>, <code>memory</code>, or <code>shell</code>.</p>
+                <p>Search ClawHub skills to browse and install.</p>
+                <p class="sk-dim">Paste a GitHub skill URL above for direct install.</p>
               </div>
             </div>
           </div>
@@ -121,10 +136,20 @@ const SkillsView = (() => {
     // Registry search
     const searchBtn = _el.querySelector('#skills-registry-search-btn');
     const searchInput = _el.querySelector('#skills-registry-search');
+    const githubBtn = _el.querySelector('#skills-github-install');
+    const githubInput = _el.querySelector('#skills-github-url');
     if (searchBtn) {
       searchBtn.addEventListener('click', () => _searchRegistry(searchInput.value));
       searchInput.addEventListener('keydown', (e) => {
         if (e.key === 'Enter') _searchRegistry(searchInput.value);
+      });
+    }
+    if (githubBtn && githubInput) {
+      githubBtn.addEventListener('click', () => {
+        if (githubInput.value.trim()) _installSkill(githubInput.value.trim(), 'github', githubBtn);
+      });
+      githubInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && githubInput.value.trim()) _installSkill(githubInput.value.trim(), 'github', githubBtn);
       });
     }
 
@@ -283,8 +308,9 @@ const SkillsView = (() => {
       html += `<details class="sk-group" open>
         <summary class="sk-group__head">
           <span class="sk-group__caret">▾</span>
-          <span class="sk-group__label">${_esc(_LAYER_LABEL[layer] || layer)}</span>
+          <span class="sk-group__label">${_esc(_layerLabel(layer))}</span>
           <span class="sk-group__count">${list.length}</span>
+          <span class="sk-group__meta">${_esc(_layerHelp(layer))}</span>
         </summary>
         <div class="sk-grid">
           ${list.map(_renderCard).join('')}
@@ -332,7 +358,7 @@ const SkillsView = (() => {
     } else {
       statusChip = `<span class="sk-chip sk-chip--warn" title="${_esc(statusDetail)}">needs deps</span>`;
     }
-    const layerChip = `<span class="sk-chip">${_esc(skill.layer || 'unknown')}</span>`;
+    const layerChip = `<span class="sk-chip" title="${_esc(_layerHelp(skill.layer))}">${_esc(_layerLabel(skill.layer))}</span>`;
 
     let missingHtml = '';
     if (status === 'needs_setup') {
@@ -440,7 +466,7 @@ const SkillsView = (() => {
     if (!_el || !_rpc || !query.trim()) return;
     const wrap = _el.querySelector('#skills-registry-results');
     if (!wrap) return;
-    wrap.innerHTML = `<div class="sk-registry__loading"><span class="sk-spinner"></span> Searching ClawHub Community source...</div>`;
+    wrap.innerHTML = `<div class="sk-registry__loading"><span class="sk-spinner"></span> Searching ClawHub...</div>`;
 
     try {
       const data = await _rpc.call('skills.search', { query: query.trim(), limit: 20 });
@@ -513,6 +539,14 @@ const SkillsView = (() => {
     const firstSent = s.split(/(?<=\.)\s+(?=[A-Z])/)[0] || s;
     const base = firstSent.length <= n ? firstSent : firstSent.slice(0, n).replace(/\s+\S*$/, '') + '…';
     return base;
+  }
+
+  function _layerLabel(layer) {
+    return _LAYER_LABEL[layer] || layer || 'Unknown';
+  }
+
+  function _layerHelp(layer) {
+    return _LAYER_HELP[layer] || 'Configured local skill directory.';
   }
 
   return { render, destroy };

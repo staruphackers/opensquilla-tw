@@ -15,11 +15,20 @@ def test_default_bundled_skills_have_release_provenance(tmp_path: Path) -> None:
 
     for name in DEFAULTS:
         provenance = skills[name].provenance
-        assert provenance.origin in {"opensquilla-original", "openclaw-derived"}
-        assert provenance.license in {"MIT", "MIT-0"}
+        assert provenance.origin in {
+            "opensquilla-original",
+            "openclaw-derived",
+            "clawhub-mit0",
+        }
         assert provenance.maintained_by == "OpenSquilla"
         if provenance.origin == "openclaw-derived":
             assert provenance.upstream_url.startswith("https://")
+            assert provenance.license == "MIT"
+        elif provenance.origin == "clawhub-mit0":
+            assert provenance.upstream_url.startswith("https://clawhub.ai/")
+            assert provenance.license == "MIT-0"
+        else:
+            assert provenance.license == "Apache-2.0"
 
 
 def test_provenance_survives_snapshot_roundtrip(tmp_path: Path) -> None:

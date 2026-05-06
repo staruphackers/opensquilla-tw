@@ -338,3 +338,126 @@ async def test_config_apply_rejects_explicit_remote_without_memory_api_key(tmp_p
     assert res.error is not None
     assert res.error.code == "INVALID_REQUEST"
     assert "memory.embedding.remote.api_key" in res.error.message
+
+
+def _slack_channel_entry(name: str = "work", token: str = "xoxb-test-token") -> dict:
+    return {
+        "type": "slack",
+        "name": name,
+        "enabled": True,
+        "agent_id": "main",
+        "debounce_window_s": 0.0,
+        "status_reactions_enabled": False,
+        "token": token,
+        "slack_channel_id": "C001",
+        "signing_secret": None,
+        "reply_in_thread": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_config_patch_channels_reports_restart_required(tmp_path):
+    cfg = GatewayConfig(config_path=str(tmp_path / "c.toml"))
+    res = await get_dispatcher().dispatch(
+        "r1",
+        "config.patch",
+        {"patches": {"channels.channels": [_slack_channel_entry()]}},
+        _admin_ctx(cfg),
+    )
+
+    assert res.error is None, res.error
+    assert res.payload["restartRequired"] is True
+
+
+@pytest.mark.asyncio
+async def test_config_patch_same_channels_does_not_report_restart_required(tmp_path):
+    cfg = GatewayConfig(
+        config_path=str(tmp_path / "c.toml"),
+        channels={"channels": [_slack_channel_entry()]},
+    )
+    res = await get_dispatcher().dispatch(
+        "r1",
+        "config.patch",
+        {"patches": {"channels.channels": [_slack_channel_entry()]}},
+        _admin_ctx(cfg),
+    )
+
+    assert res.error is None, res.error
+    assert res.payload["restartRequired"] is False
+
+
+@pytest.mark.asyncio
+async def test_config_apply_channels_token_change_reports_restart_required(tmp_path):
+    cfg = GatewayConfig(
+        config_path=str(tmp_path / "c.toml"),
+        channels={"channels": [_slack_channel_entry(token="xoxb-old")]},
+    )
+    payload = cfg.model_dump(mode="python")
+    payload["channels"]["channels"][0]["token"] = "xoxb-new"
+
+    res = await get_dispatcher().dispatch(
+        "r1",
+        "config.apply",
+        {"config": payload},
+        _admin_ctx(cfg),
+    )
+
+    assert res.error is None, res.error
+    assert res.payload["restartRequired"] is True
+
+
+@pytest.mark.asyncio
+async def test_config_apply_unchanged_channels_does_not_report_restart_required(tmp_path):
+    cfg = GatewayConfig(
+        config_path=str(tmp_path / "c.toml"),
+        channels={"channels": [_slack_channel_entry()]},
+    )
+    payload = cfg.model_dump(mode="python")
+
+    res = await get_dispatcher().dispatch(
+        "r1",
+        "config.apply",
+        {"config": payload},
+        _admin_ctx(cfg),
+    )
+
+    assert res.error is None, res.error
+    assert res.payload["restartRequired"] is False
+
+
+@pytest.mark.asyncio
+async def test_config_set_channel_token_rotation_reports_restart_required(tmp_path):
+    cfg = GatewayConfig(
+        config_path=str(tmp_path / "c.toml"),
+        channels={"channels": [_slack_channel_entry(token="xoxb-old")]},
+    )
+    res = await get_dispatcher().dispatch(
+        "r1",
+        "config.set",
+        {
+            "path": "channels.channels",
+            "value": [_slack_channel_entry(token="xoxb-new")],
+        },
+        _admin_ctx(cfg),
+    )
+
+    assert res.error is None, res.error
+    assert res.payload["restartRequired"] is True
+
+
+@pytest.mark.asyncio
+async def test_config_patch_disabling_channel_reports_restart_required(tmp_path):
+    cfg = GatewayConfig(
+        config_path=str(tmp_path / "c.toml"),
+        channels={"channels": [_slack_channel_entry()]},
+    )
+    disabled_entry = {**_slack_channel_entry(), "enabled": False}
+    res = await get_dispatcher().dispatch(
+        "r1",
+        "config.patch",
+        {"patches": {"channels.channels": [disabled_entry]}},
+        _admin_ctx(cfg),
+    )
+
+    assert res.error is None, res.error
+    assert res.payload["restartRequired"] is True

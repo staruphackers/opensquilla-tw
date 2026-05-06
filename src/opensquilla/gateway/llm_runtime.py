@@ -6,6 +6,13 @@ import os
 from dataclasses import dataclass
 from typing import Any
 
+OPENROUTER_DEFAULT_PROVIDER_ROUTING = {
+    "deepseek/deepseek-v4-flash": "deepseek",
+    "z-ai/glm-5.1": "z-ai",
+    "anthropic/claude-opus-4.7": "anthropic",
+    "moonshotai/kimi-k2.6": "moonshotai",
+}
+
 
 @dataclass(frozen=True)
 class LlmRuntimeConfig:
@@ -29,6 +36,13 @@ def provider_base_url_env_name(provider: str) -> str:
     return f"{normalized}_BASE_URL"
 
 
+def _resolve_provider_routing(provider: str, configured: Any) -> dict[str, str]:
+    routing = dict(configured or {})
+    if provider != "openrouter":
+        return routing
+    return {**OPENROUTER_DEFAULT_PROVIDER_ROUTING, **routing}
+
+
 def resolve_llm_runtime_config(config: Any) -> LlmRuntimeConfig:
     """Resolve provider credentials from provider-specific env before config."""
     from opensquilla.provider.registry import get_provider_spec
@@ -36,11 +50,13 @@ def resolve_llm_runtime_config(config: Any) -> LlmRuntimeConfig:
     llm = config.llm
     provider = str(llm.provider or "").strip().lower()
     spec = get_provider_spec(provider)
-    api_key_env_name = spec.env_key
+    runtime_secret_paths: set[str] = getattr(config, "_runtime_secret_paths", set())
+    explicit_api_key = llm.api_key if "llm.api_key" not in runtime_secret_paths else ""
+    api_key_env_name = "" if explicit_api_key else (getattr(llm, "api_key_env", "") or spec.env_key)
     base_url_env_name = provider_base_url_env_name(provider)
     env_api_key = os.environ.get(api_key_env_name, "") if api_key_env_name else ""
     env_base_url = os.environ.get(base_url_env_name, "")
-    api_key = env_api_key or llm.api_key
+    api_key = explicit_api_key or env_api_key or llm.api_key
     base_url = env_base_url or llm.base_url or spec.default_base_url
     proxy = os.environ.get("OPENSQUILLA_LLM_PROXY", "") or getattr(llm, "proxy", "")
 
@@ -57,7 +73,10 @@ def resolve_llm_runtime_config(config: Any) -> LlmRuntimeConfig:
         api_key=api_key,
         base_url=base_url,
         proxy=proxy,
-        provider_routing=dict(getattr(llm, "provider_routing", {})),
+        provider_routing=_resolve_provider_routing(
+            provider,
+            getattr(llm, "provider_routing", {}),
+        ),
         api_key_from_env=bool(env_api_key),
         base_url_from_env=bool(env_base_url),
     )

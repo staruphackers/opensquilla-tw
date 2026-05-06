@@ -296,17 +296,19 @@ def _workspace_strict_candidate_marker(
     tool_name: str,
     candidate: Path,
     original_path: str | None = None,
+    strict_root: Path | None = None,
 ) -> str | None:
     """Return a per-candidate blocked marker for directory/search tools."""
 
-    blocked = _workspace_strict_read_block(
-        tool_name,
-        candidate,
-        original_path or str(candidate),
-    )
-    if blocked is None:
+    root = strict_root if strict_root is not None else _strict_read_workspace_root()
+    if root is None:
         return None
-    return f"[blocked] {candidate}: outside active workspace {blocked['workspace']}"
+    resolved = candidate.expanduser().resolve(strict=False)
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        return f"[blocked] {candidate}: outside active workspace {root}"
+    return None
 
 
 def _sensitive_access_block(tool_name: str, resolved: Path, original_path: str) -> dict | None:
@@ -764,13 +766,14 @@ async def list_dir(path: str) -> str:
         raise NotADirectoryError(f"Not a directory: {path}")
 
     loop = asyncio.get_event_loop()
+    strict_root = _strict_read_workspace_root()
 
     def _list() -> list[str]:
         dirs: list[str] = []
         files: list[str] = []
         blocked_entries: list[str] = []
         for entry in sorted(p.iterdir(), key=lambda e: e.name):
-            marker = _workspace_strict_candidate_marker("list_dir", entry)
+            marker = _workspace_strict_candidate_marker("list_dir", entry, strict_root=strict_root)
             if marker is not None:
                 blocked_entries.append(marker)
                 continue
@@ -810,11 +813,16 @@ async def glob_search(pattern: str, path: str | None = None) -> str:
     root = _workspace_root()
 
     loop = asyncio.get_event_loop()
+    strict_root = _strict_read_workspace_root()
 
     def _glob() -> list[str]:
         matches: list[str] = []
         for candidate in sorted(base.glob(pattern), key=lambda item: str(item)):
-            marker = _workspace_strict_candidate_marker("glob_search", candidate)
+            marker = _workspace_strict_candidate_marker(
+                "glob_search",
+                candidate,
+                strict_root=strict_root,
+            )
             if marker is not None:
                 matches.append(marker)
                 continue
@@ -860,6 +868,7 @@ async def grep_search(
     root = _workspace_root()
 
     loop = asyncio.get_event_loop()
+    strict_root = _strict_read_workspace_root()
 
     def _search() -> list[str]:
         try:
@@ -890,7 +899,11 @@ async def grep_search(
             for fp in base.rglob("*"):
                 if len(results) >= max_results:
                     break
-                marker = _workspace_strict_candidate_marker("grep_search", fp)
+                marker = _workspace_strict_candidate_marker(
+                    "grep_search",
+                    fp,
+                    strict_root=strict_root,
+                )
                 if marker is not None:
                     results.append(marker)
                     continue

@@ -15,6 +15,8 @@ wrapped text context.
 from __future__ import annotations
 
 import base64
+import hashlib
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -67,6 +69,26 @@ def _build(message: str, attachments: list[dict[str, Any]]) -> list:
     return TurnRunner._build_attachment_messages(message, attachments)  # type: ignore[arg-type]
 
 
+def _ref(tmp_path: Path, payload: bytes, *, name: str, mime: str) -> dict[str, Any]:
+    sha = hashlib.sha256(payload).hexdigest()
+    session_id = "s1"
+    material_dir = tmp_path / "transcripts" / session_id
+    material_dir.mkdir(parents=True, exist_ok=True)
+    (material_dir / sha).write_bytes(payload)
+    return {
+        "kind": "attachment_ref",
+        "type": mime,
+        "mime": mime,
+        "name": name,
+        "size": len(payload),
+        "sha256": sha,
+        "material_id": sha,
+        "store": "transcript",
+        "scope": session_id,
+        "_was_staged": True,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Test 1 — regression: image MIME still produces ContentBlockImage.
 # ---------------------------------------------------------------------------
@@ -85,6 +107,18 @@ def test_image_emits_image_block() -> None:
     assert image_blocks[0].media_type == "image/png"
 
 
+def test_image_ref_hydrates_for_current_provider_call(tmp_path: Path) -> None:
+    out = TurnRunner._build_attachment_messages(
+        "describe",
+        [_ref(tmp_path, b"\x89PNG\r\n\x1a\n", name="p.png", mime="image/png")],
+        media_root=tmp_path,
+    )
+    assert out is not None
+    image_blocks = [b for b in out[0].content if isinstance(b, ContentBlockImage)]
+    assert len(image_blocks) == 1
+    assert image_blocks[0].data == _b64(b"\x89PNG\r\n\x1a\n")
+
+
 # ---------------------------------------------------------------------------
 # Test 2 — application/pdf is locally extracted and wrapped as text.
 # ---------------------------------------------------------------------------
@@ -101,6 +135,20 @@ def test_pdf_emits_extracted_text_block() -> None:
     wrapped = next(b for b in text_blocks if b.text.startswith("<file "))
     assert 'name="report.pdf"' in wrapped.text
     assert 'mime="application/pdf"' in wrapped.text
+    assert "Hello PDF Text" in wrapped.text
+
+
+def test_pdf_ref_hydrates_for_current_provider_call(tmp_path: Path) -> None:
+    pdf_bytes = _sample_pdf_bytes()
+    out = TurnRunner._build_attachment_messages(
+        "summarise",
+        [_ref(tmp_path, pdf_bytes, name="report.pdf", mime="application/pdf")],
+        media_root=tmp_path,
+    )
+    assert out is not None
+    text_blocks = [b for b in out[0].content if isinstance(b, ContentBlockText)]
+    wrapped = next(b for b in text_blocks if b.text.startswith("<file "))
+    assert 'name="report.pdf"' in wrapped.text
     assert "Hello PDF Text" in wrapped.text
 
 
@@ -209,6 +257,23 @@ def test_large_text_attachment_is_truncated_before_provider_prompt() -> None:
     )
     assert "[attachment text truncated:" in wrapped.text
     assert "TAIL_SHOULD_NOT_APPEAR" not in wrapped.text
+
+
+def test_text_ref_hydrates_for_current_provider_call(tmp_path: Path) -> None:
+    payload = b"hello from ref\n"
+    out = TurnRunner._build_attachment_messages(
+        "read",
+        [_ref(tmp_path, payload, name="notes.txt", mime="text/plain")],
+        media_root=tmp_path,
+    )
+    assert out is not None
+    wrapped = next(
+        b
+        for b in out[0].content
+        if isinstance(b, ContentBlockText) and b.text.startswith("<file ")
+    )
+    assert 'name="notes.txt"' in wrapped.text
+    assert "hello from ref" in wrapped.text
 
 
 # ---------------------------------------------------------------------------

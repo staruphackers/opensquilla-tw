@@ -1,10 +1,10 @@
 import pytest
 
-from opensquilla.contrib.squilla_router.v4_phase3 import V4Phase3Strategy
 from opensquilla.engine.pipeline import TurnContext
 from opensquilla.engine.steps import squilla_router as squilla_router_step
 from opensquilla.engine.steps.squilla_router import apply_squilla_router
 from opensquilla.gateway.config import GatewayConfig
+from opensquilla.squilla_router.v4_phase3 import V4Phase3Strategy
 
 
 class FakeStrategy:
@@ -182,6 +182,30 @@ async def test_p2_prompt_hint_is_recorded_but_not_injected(
 
 
 @pytest.mark.asyncio
+async def test_v4_thinking_mode_overrides_explicit_tier_thinking_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_strategy(
+        monkeypatch,
+        "t2",
+        0.92,
+        {
+            "route_class": "R2",
+            "thinking_mode": "T2",
+            "prompt_policy": "P1",
+        },
+    )
+    ctx = make_context("Analyze this implementation path.")
+
+    routed = await apply_squilla_router(ctx)
+
+    assert routed.metadata["routed_tier"] == "t2"
+    assert routed.metadata["thinking_mode"] == "T2"
+    assert routed.metadata["thinking_requested"] is True
+    assert routed.metadata["thinking_level"] == "medium"
+
+
+@pytest.mark.asyncio
 async def test_confidence_gate_promotes_low_confidence_t0_to_default_t1_and_reconciles_thinking(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -353,6 +377,48 @@ async def test_anti_downgrade_uses_previous_turn_not_window_highest(
 
 
 @pytest.mark.asyncio
+async def test_anti_downgrade_keeps_previous_high_tier_without_margin_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_key = "test-anti-downgrade-ignore-margin"
+    fake_strategy(
+        monkeypatch,
+        "t3",
+        0.95,
+        {
+            "route_class": "R3",
+            "thinking_mode": "T3",
+            "prompt_policy": "P2",
+            "margin": 0.99,
+        },
+    )
+    routed1 = await apply_squilla_router(
+        make_context("Architecture review.", session_key=session_key)
+    )
+    assert routed1.metadata["routed_tier"] == "t3"
+
+    fake_strategy(
+        monkeypatch,
+        "t1",
+        0.99,
+        {
+            "route_class": "R1",
+            "thinking_mode": "T1",
+            "prompt_policy": "P1",
+            "margin": 0.99,
+        },
+    )
+    routed2 = await apply_squilla_router(make_context("Follow-up.", session_key=session_key))
+    extra = routed2.metadata["routing_extra"]
+
+    assert routed2.metadata["routed_tier"] == "t3"
+    assert routed2.model == "anthropic/claude-opus-4.7"
+    assert extra["anti_downgrade_applied"] is True
+    assert extra["previous_tier"] == "t3"
+    assert extra["kv_cache_window_seconds"] == 600
+
+
+@pytest.mark.asyncio
 async def test_complaint_upgrade_promotes_tier_thinking_and_blocks_compressed_prompt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -379,6 +445,47 @@ async def test_complaint_upgrade_promotes_tier_thinking_and_blocks_compressed_pr
     assert routed.metadata["thinking_level"] == "medium"
     assert routed.metadata["prompt_policy"] == "P1"
     assert "[RESPONSE_POLICY:" not in routed.message
+
+
+@pytest.mark.asyncio
+async def test_complaint_upgrade_starts_from_previous_experienced_tier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_key = "test-complaint-upgrade-previous-tier"
+    fake_strategy(
+        monkeypatch,
+        "t2",
+        0.9,
+        {
+            "route_class": "R2",
+            "thinking_mode": "T2",
+            "prompt_policy": "P1",
+        },
+    )
+    routed1 = await apply_squilla_router(
+        make_context("Analyze this tricky failure.", session_key=session_key)
+    )
+    assert routed1.metadata["routed_tier"] == "t2"
+
+    fake_strategy(
+        monkeypatch,
+        "t1",
+        0.9,
+        {
+            "route_class": "R1",
+            "thinking_mode": "T1",
+            "prompt_policy": "P0",
+        },
+    )
+    routed2 = await apply_squilla_router(make_context("答非所问", session_key=session_key))
+    extra = routed2.metadata["routing_extra"]
+
+    assert routed2.metadata["routed_tier"] == "t3"
+    assert routed2.model == "anthropic/claude-opus-4.7"
+    assert extra["previous_tier"] == "t2"
+    assert extra["complaint_detected"] is True
+    assert extra["complaint_upgrade_applied"] is True
+    assert extra["anti_downgrade_applied"] is False
 
 
 @pytest.mark.asyncio
@@ -582,7 +689,7 @@ async def test_observe_rollout_records_decisions_without_applying_model_or_promp
     assert routed.metadata["routed_model"] == "z-ai/glm-5.1"
     assert routed.metadata["routing_applied"] is False
     assert routed.metadata["thinking_mode"] == "T2"
-    assert routed.metadata["thinking_level"] == "low"
+    assert routed.metadata["thinking_level"] == "medium"
     assert "[RESPONSE_POLICY:" not in routed.message
 
 

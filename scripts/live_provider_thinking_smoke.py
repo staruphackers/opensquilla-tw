@@ -19,7 +19,6 @@ from opensquilla.provider.registry import get_provider_spec
 from opensquilla.provider.selector import ProviderConfig, _build_provider
 from opensquilla.provider.types import ChatConfig, DoneEvent, ErrorEvent, Message, TextDeltaEvent
 
-
 _MODEL_ENV = {
     "volcengine": "VOLCENGINE_MODEL",
     "deepseek": "DEEPSEEK_MODEL",

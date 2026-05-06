@@ -59,15 +59,27 @@ def _sync_provider_selector(ctx: RpcContext, llm_cfg: Any) -> None:
     selector = getattr(ctx, "provider_selector", None)
     if selector is None or llm_cfg is None or not hasattr(selector, "sync_primary"):
         return
+    config = getattr(ctx, "config", None)
+    if config is not None:
+        from opensquilla.gateway.llm_runtime import resolve_llm_runtime_config
+
+        runtime = resolve_llm_runtime_config(config)
+        api_key = runtime.api_key
+        base_url = runtime.base_url
+        proxy = runtime.proxy
+    else:
+        api_key = llm_cfg.api_key
+        base_url = llm_cfg.base_url
+        proxy = getattr(llm_cfg, "proxy", "")
     from opensquilla.provider.selector import ProviderConfig
 
     selector.sync_primary(
         ProviderConfig(
             provider=llm_cfg.provider,
             model=llm_cfg.model,
-            api_key=llm_cfg.api_key,
-            base_url=llm_cfg.base_url,
-            proxy=getattr(llm_cfg, "proxy", ""),
+            api_key=api_key,
+            base_url=base_url,
+            proxy=proxy,
             provider_routing=getattr(llm_cfg, "provider_routing", {}),
         )
     )
@@ -99,6 +111,12 @@ def _sync_search_provider(config: Any) -> None:
 def _persist(ctx: RpcContext, new_cfg: Any, *, restart_required: bool) -> str:
     from opensquilla.onboarding.config_store import persist_config
 
+    if (
+        ctx.config is not None
+        and ctx.config is not new_cfg
+        and hasattr(new_cfg, "inherit_runtime_secrets")
+    ):
+        new_cfg.inherit_runtime_secrets(ctx.config)
     path = _config_path_for(ctx, new_cfg) or _config_path_for(ctx, ctx.config)
     persist = persist_config(new_cfg, path=path, restart_required=restart_required)
     # Preserve the resolved path on the running config so subsequent saves
@@ -123,6 +141,7 @@ def _status_payload(ctx: RpcContext) -> dict[str, Any]:
         "configPath": _config_path_for(ctx, cfg) or s.config_path,
         "hasConfig": s.has_config,
         "llmConfigured": s.llm_configured,
+        "llmSource": s.llm_source,
         "imageGenerationConfigured": s.image_generation_configured,
         "imageGenerationEnabled": s.image_generation_enabled,
         "imageGenerationSource": s.image_generation_source,
@@ -148,12 +167,14 @@ async def _onboarding_catalog(params: Any, ctx: RpcContext) -> dict[str, Any]:
         image_generation_provider_catalog_payload,
     )
     from opensquilla.onboarding.provider_specs import provider_catalog_payload
+    from opensquilla.onboarding.router_specs import router_catalog_payload
     from opensquilla.onboarding.search_specs import search_provider_catalog_payload
 
     return {
         "providers": provider_catalog_payload(),
         "channels": channel_catalog_payload(),
         "searchProviders": search_provider_catalog_payload(),
+        "routerProfiles": router_catalog_payload(),
         "memoryEmbeddingProviders": [
             {
                 "providerId": "auto",
@@ -214,12 +235,39 @@ async def _provider_configure(params: Any, ctx: RpcContext) -> dict[str, Any]:
         provider_id=provider_id,
         model=model,
         api_key=params.get("apiKey", "") if isinstance(params, dict) else "",
+        api_key_env=params.get("apiKeyEnv", "") if isinstance(params, dict) else "",
         base_url=params.get("baseUrl", "") if isinstance(params, dict) else "",
         proxy=params.get("proxy", "") if isinstance(params, dict) else "",
     )
     _apply_inplace(ctx, res.config)
     _sync_provider_selector(ctx, res.config.llm)
     _sync_image_generation(res.config)
+    config_path = _persist(ctx, res.config, restart_required=res.restart_required)
+    return {
+        "changed": res.changed,
+        "restartRequired": res.restart_required,
+        "configPath": config_path,
+        "entry": res.public_payload,
+        "warnings": res.warnings,
+    }
+
+
+@_d.method("onboarding.router.catalog", scope="operator.read")
+async def _router_catalog(params: Any, ctx: RpcContext) -> dict[str, Any]:
+    from opensquilla.onboarding.router_specs import router_catalog_payload
+
+    return router_catalog_payload()
+
+
+@_d.method("onboarding.router.configure", scope="operator.admin")
+async def _router_configure(params: Any, ctx: RpcContext) -> dict[str, Any]:
+    from opensquilla.onboarding.mutations import upsert_router
+
+    cfg = _active_config(ctx)
+    mode = params.get("mode", "recommended") if isinstance(params, dict) else "recommended"
+    default_tier = params.get("defaultTier") if isinstance(params, dict) else None
+    res = upsert_router(cfg, mode=mode, default_tier=default_tier)
+    _apply_inplace(ctx, res.config)
     config_path = _persist(ctx, res.config, restart_required=res.restart_required)
     return {
         "changed": res.changed,

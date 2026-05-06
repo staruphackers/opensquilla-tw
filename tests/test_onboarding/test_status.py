@@ -27,7 +27,66 @@ def test_provider_with_key_is_configured():
     )
     s = get_onboarding_status(cfg)
     assert s.llm_configured is True
+    assert s.llm_source == "explicit"
     assert s.needs_onboarding is False
+
+
+def test_provider_with_env_key_is_configured(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-from-env")
+    cfg = GatewayConfig()
+    cfg.llm = LlmProviderConfig(
+        provider="openrouter",
+        model="m",
+        api_key="",
+        api_key_env="OPENROUTER_API_KEY",
+        base_url="https://openrouter.ai/api/v1",
+    )
+
+    s = get_onboarding_status(cfg)
+
+    assert s.llm_configured is True
+    assert s.llm_source == "env"
+    assert s.needs_onboarding is False
+
+
+def test_runtime_secret_marker_keeps_env_source_after_resolution(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-from-env")
+    from opensquilla.gateway.llm_runtime import resolve_llm_runtime_config
+
+    cfg = GatewayConfig()
+    cfg.llm = LlmProviderConfig(
+        provider="openrouter",
+        model="m",
+        api_key="",
+        api_key_env="OPENROUTER_API_KEY",
+        base_url="https://openrouter.ai/api/v1",
+    )
+    resolve_llm_runtime_config(cfg)
+
+    s = get_onboarding_status(cfg)
+
+    assert cfg.llm.api_key == "sk-from-env"
+    assert "llm.api_key" in cfg._runtime_secret_paths
+    assert s.llm_configured is True
+    assert s.llm_source == "env"
+
+
+def test_provider_with_missing_env_key_needs_onboarding(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    cfg = GatewayConfig()
+    cfg.llm = LlmProviderConfig(
+        provider="openrouter",
+        model="m",
+        api_key="",
+        api_key_env="OPENROUTER_API_KEY",
+        base_url="https://openrouter.ai/api/v1",
+    )
+
+    s = get_onboarding_status(cfg)
+
+    assert s.llm_configured is False
+    assert s.llm_source == "missing_env"
+    assert s.needs_onboarding is True
 
 
 def test_matching_llm_key_does_not_configure_image_generation_until_enabled(monkeypatch):

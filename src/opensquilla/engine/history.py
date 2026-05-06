@@ -242,4 +242,32 @@ def reconstruct_messages_from_entry(
         elif not messages:
             messages.append(Message(role="assistant", content=content))
 
+    if isinstance(content, str) and "[generated artifact omitted:" in content:
+        markers = [
+            line.strip()
+            for line in content.splitlines()
+            if line.strip().startswith("[generated artifact omitted:")
+        ]
+        if markers:
+            marker_text = "\n".join(markers)
+            assistant = next(
+                (
+                    m
+                    for m in reversed(messages)
+                    if m.role == "assistant" and isinstance(m.content, list)
+                ),
+                None,
+            )
+            if assistant is not None:
+                content_blocks = assistant.content
+                if not isinstance(content_blocks, list):
+                    return messages
+                existing = "\n".join(
+                    block.text for block in content_blocks if isinstance(block, ContentBlockText)
+                )
+                if marker_text not in existing:
+                    content_blocks.append(ContentBlockText(text=marker_text))
+            elif not messages:
+                messages.append(Message(role="assistant", content=marker_text))
+
     return messages

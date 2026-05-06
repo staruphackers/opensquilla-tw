@@ -422,14 +422,13 @@ def _get_default_router():
         import os
 
         from opensquilla.skills.hub.clawhub import ClawHubSource
+        from opensquilla.skills.hub.github import GitHubSource
         from opensquilla.skills.hub.router import SourceRouter
 
-        sources = [ClawHubSource(token=os.environ.get("CLAWHUB_TOKEN"))]
-        gh_token = os.environ.get("GITHUB_TOKEN")
-        if gh_token:
-            from opensquilla.skills.hub.github import GitHubSource
-
-            sources.append(GitHubSource(token=gh_token))
+        sources = [
+            ClawHubSource(token=os.environ.get("CLAWHUB_TOKEN")),
+            GitHubSource(token=os.environ.get("GITHUB_TOKEN")),
+        ]
         _default_router = SourceRouter(sources)
     return _default_router
 

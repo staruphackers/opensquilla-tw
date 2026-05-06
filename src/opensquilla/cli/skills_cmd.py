@@ -193,14 +193,13 @@ def skills_search(
         import os
 
         from opensquilla.skills.hub.clawhub import ClawHubSource
+        from opensquilla.skills.hub.github import GitHubSource
         from opensquilla.skills.hub.router import SourceRouter
 
-        sources: list[SkillSource] = [ClawHubSource(token=os.environ.get("CLAWHUB_TOKEN"))]
-        gh_token = os.environ.get("GITHUB_TOKEN")
-        if gh_token:
-            from opensquilla.skills.hub.github import GitHubSource
-
-            sources.append(GitHubSource(token=gh_token))
+        sources: list[SkillSource] = [
+            ClawHubSource(token=os.environ.get("CLAWHUB_TOKEN")),
+            GitHubSource(token=os.environ.get("GITHUB_TOKEN")),
+        ]
 
         router = SourceRouter(sources)
         results = await router.search(query, limit=20)
@@ -308,7 +307,15 @@ def skills_update(
 @skills_app.command("install")
 def skills_install(
     identifier: str = typer.Argument(..., help="Skill name or identifier"),
-    source: str = typer.Option("clawhub", "--source", "-s", help="Source (clawhub, github)"),
+    source: str = typer.Option(
+        "clawhub",
+        "--source",
+        "-s",
+        help=(
+            "Source (clawhub, github). GitHub accepts owner/repo, "
+            "owner/repo:path, or GitHub URLs."
+        ),
+    ),
     force: bool = typer.Option(False, "--force", "-f", help="Force install (skip security block)"),
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
 ) -> None:
@@ -332,15 +339,14 @@ def skills_install(
         import os
 
         from opensquilla.skills.hub.clawhub import ClawHubSource
+        from opensquilla.skills.hub.github import GitHubSource
         from opensquilla.skills.hub.installer import SkillInstaller
         from opensquilla.skills.hub.router import SourceRouter
 
-        sources: list[SkillSource] = [ClawHubSource(token=os.environ.get("CLAWHUB_TOKEN"))]
-        gh_token = os.environ.get("GITHUB_TOKEN")
-        if gh_token:
-            from opensquilla.skills.hub.github import GitHubSource
-
-            sources.append(GitHubSource(token=gh_token))
+        sources: list[SkillSource] = [
+            ClawHubSource(token=os.environ.get("CLAWHUB_TOKEN")),
+            GitHubSource(token=os.environ.get("GITHUB_TOKEN")),
+        ]
 
         router = SourceRouter(sources)
         installer = SkillInstaller(router=router)

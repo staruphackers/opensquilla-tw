@@ -109,6 +109,7 @@ class TurnResult:
     usage: UsageSummary | None = None
     error: str | None = None
     cancelled: bool = False
+    artifacts: list[dict[str, Any]] | None = None
 
 
 class WaitingIndicator:

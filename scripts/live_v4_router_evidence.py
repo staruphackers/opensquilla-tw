@@ -38,14 +38,14 @@ from scripts.smoke_v4_phase3_router import (  # noqa: E402
 CASES = [
     {
         "id": "r0_prompt_hint",
-        "expected_model": "stepfun/step-3.5-flash",
+        "expected_model": "deepseek/deepseek-v4-flash",
         "expected_thinking": False,
         "expected_response_policy": True,
         "message": "谢谢。",
     },
     {
         "id": "r0_prompt_hint_en",
-        "expected_model": "stepfun/step-3.5-flash",
+        "expected_model": "deepseek/deepseek-v4-flash",
         "expected_thinking": False,
         "expected_response_policy": True,
         "message": "Thanks.",
@@ -60,7 +60,7 @@ CASES = [
     },
     {
         "id": "r2_thinking_medium",
-        "expected_model": "deepseek/deepseek-v4-pro",
+        "expected_model": "z-ai/glm-5.1",
         "expected_thinking": True,
         "expected_thinking_level": "medium",
         "expected_response_policy": False,
@@ -71,7 +71,7 @@ CASES = [
     },
     {
         "id": "r3_thinking_high",
-        "expected_model": "z-ai/glm-5.1",
+        "expected_model": "anthropic/claude-opus-4.7",
         "expected_thinking": True,
         "expected_thinking_level": "high",
         "expected_response_policy": False,
@@ -142,7 +142,7 @@ def main() -> int:
     env["OPENSQUILLA_GATEWAY_CONFIG_PATH"] = str(config_path)
     env["OPENSQUILLA_STATE_DIR"] = str(tmp_path / "state")
     env["OPENSQUILLA_MEMORY_DREAM_DISABLED"] = "1"
-    env["OPENSQUILLA_TOOL_PROFILE"] = "minimal"
+    env["OPENSQUILLA_TOOL_PROFILE"] = "channel_default"
     env["OPENSQUILLA_TURN_CALL_LOG"] = "1"
     env["OPENSQUILLA_TURN_CALL_LOG_DIR"] = str(turn_log_dir)
 

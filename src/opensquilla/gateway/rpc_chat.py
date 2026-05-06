@@ -6,6 +6,7 @@ from typing import cast
 
 import structlog
 
+from opensquilla.artifacts import artifact_payload
 from opensquilla.gateway.config import GatewayConfig
 from opensquilla.gateway.context_overflow import apply_context_overflow_policy
 from opensquilla.gateway.rpc import RpcContext, RpcUnavailableError, get_dispatcher
@@ -255,6 +256,7 @@ async def _handle_chat_history(params: dict | None, ctx: RpcContext) -> dict:
     for entry in transcript[-limit:]:
         content = getattr(entry, "content", "") or ""
         attachments = None
+        artifacts = None
         # Parse JSON-encoded content with attachments
         if content and content.startswith("{"):
             try:
@@ -262,6 +264,13 @@ async def _handle_chat_history(params: dict | None, ctx: RpcContext) -> dict:
                 if isinstance(parsed, dict) and "text" in parsed:
                     content = parsed["text"]
                     attachments = parsed.get("attachments")
+                    parsed_artifacts = parsed.get("artifacts")
+                    if isinstance(parsed_artifacts, list):
+                        artifacts = [
+                            artifact_payload(item)
+                            for item in parsed_artifacts
+                            if isinstance(item, dict)
+                        ]
             except (ValueError, KeyError):
                 pass
         # Recover from corrupted Python repr of content blocks (old compaction bug).
@@ -290,6 +299,8 @@ async def _handle_chat_history(params: dict | None, ctx: RpcContext) -> dict:
         }
         if attachments:
             msg["attachments"] = attachments
+        if artifacts:
+            msg["artifacts"] = artifacts
         tc = getattr(entry, "tool_calls", None)
         if tc:
             msg["tool_calls"] = tc

@@ -10,10 +10,12 @@ from pydantic import ValidationError
 
 from opensquilla.channels.registry import discover_all, parse_channel_entry
 from opensquilla.gateway.config import (
+    ROUTER_TIER_PROFILE_IDS,
     ChannelsConfig,
     GatewayConfig,
     LlmProviderConfig,
     MemoryEmbeddingConfig,
+    SquillaRouterConfig,
 )
 from opensquilla.onboarding.image_generation_specs import (
     get_image_generation_provider_setup_spec,
@@ -29,6 +31,7 @@ from opensquilla.onboarding.redaction import (
 from opensquilla.onboarding.search_specs import get_search_provider_setup_spec
 
 SearchFallbackPolicy = Literal["off", "network"]
+RouterMode = Literal["recommended", "openrouter-mix", "disabled"]
 _REMOTE_MEMORY_EMBEDDING_PROVIDERS = {"openai", "openai-compatible"}
 _DEFAULT_REMOTE_EMBEDDING_BASE_URL = "https://api.openai.com/v1"
 _DEFAULT_OLLAMA_EMBEDDING_BASE_URL = "http://localhost:11434"
@@ -55,12 +58,38 @@ def _clean_optional_str(value: str | None) -> str:
     return value.strip()
 
 
+def _reconcile_router_profile_for_provider(
+    cfg: GatewayConfig,
+    provider_id: str,
+) -> None:
+    current_profile = getattr(cfg.squilla_router, "tier_profile", None)
+    if not getattr(cfg.squilla_router, "enabled", True):
+        return
+    if current_profile and str(current_profile).strip().lower() == provider_id:
+        return
+    if (
+        not current_profile
+        and provider_id == "openrouter"
+        and cfg.squilla_router.tiers.get("t0", {}).get("provider") == "openrouter"
+    ):
+        return
+    router_payload = cfg.squilla_router.model_dump(mode="python")
+    router_payload.pop("tiers", None)
+    if provider_id in ROUTER_TIER_PROFILE_IDS:
+        router_payload["tier_profile"] = provider_id
+    else:
+        router_payload["enabled"] = False
+        router_payload["tier_profile"] = None
+    cfg.squilla_router = SquillaRouterConfig(**router_payload)
+
+
 def upsert_llm_provider(
     config: GatewayConfig,
     *,
     provider_id: str,
     model: str,
     api_key: str = "",
+    api_key_env: str = "",
     base_url: str = "",
     proxy: str = "",
     provider_routing: dict[str, str] | None = None,
@@ -77,14 +106,20 @@ def upsert_llm_provider(
     # unchanged" — matches the WebUI's "leave blank to keep current"
     # password-field affordance.
     effective_api_key = api_key
+    if api_key and api_key_env.strip():
+        raise ValueError("configure either api_key or api_key_env, not both")
+    effective_api_key_env = "" if api_key else api_key_env.strip()
+    if not api_key and not effective_api_key_env and config.llm.provider == provider_id:
+        effective_api_key_env = getattr(config.llm, "api_key_env", "").strip()
     if (
         not effective_api_key
         and spec.requires_api_key
+        and not api_key_env
         and config.llm.provider == provider_id
         and config.llm.api_key
     ):
         effective_api_key = config.llm.api_key
-    if spec.requires_api_key and not effective_api_key:
+    if spec.requires_api_key and not effective_api_key and not effective_api_key_env:
         raise ValueError(f"provider {provider_id!r} requires an api_key")
     effective_base_url = base_url or spec.default_base_url
     if spec.requires_base_url and not effective_base_url:
@@ -95,10 +130,12 @@ def upsert_llm_provider(
         provider=provider_id,
         model=model,
         api_key=effective_api_key,
+        api_key_env=effective_api_key_env,
         base_url=effective_base_url,
         proxy=proxy,
         provider_routing=dict(provider_routing or {}),
     )
+    _reconcile_router_profile_for_provider(new_cfg, provider_id)
     if api_key:
         new_cfg.clear_runtime_secret("llm.api_key")
 
@@ -106,6 +143,10 @@ def upsert_llm_provider(
         "provider": provider_id,
         "model": model,
         "api_key": effective_api_key,
+        "api_key_env": effective_api_key_env,
+        "api_key_source": (
+            "explicit" if effective_api_key else ("env" if effective_api_key_env else "none")
+        ),
         "base_url": effective_base_url,
         "proxy": proxy,
         "provider_routing": dict(provider_routing or {}),
@@ -116,6 +157,54 @@ def upsert_llm_provider(
         restart_required=False,
         warnings=[],
         public_payload=redact_provider_payload(payload),
+    )
+
+
+def upsert_router(
+    config: GatewayConfig,
+    *,
+    mode: str = "recommended",
+    default_tier: str | None = None,
+) -> MutationResult:
+    if mode not in {"recommended", "openrouter-mix", "disabled"}:
+        raise ValueError("router mode must be recommended, openrouter-mix, or disabled")
+    router_mode = cast(RouterMode, mode)
+    provider = str(config.llm.provider or "").strip().lower()
+    router_payload = config.squilla_router.model_dump(mode="python")
+    router_payload.pop("tiers", None)
+
+    if default_tier is not None:
+        router_payload["default_tier"] = default_tier
+
+    public_payload: dict[str, Any] = {"mode": router_mode}
+    if router_mode == "disabled":
+        router_payload["enabled"] = False
+        router_payload["tier_profile"] = None
+        public_payload.update({"enabled": False, "tier_profile": None})
+    elif router_mode == "openrouter-mix":
+        if provider != "openrouter":
+            raise ValueError("openrouter-mix router mode is only valid for openrouter LLM provider")
+        router_payload["enabled"] = True
+        router_payload["tier_profile"] = None
+        public_payload.update({"enabled": True, "tier_profile": None})
+    else:
+        if provider not in ROUTER_TIER_PROFILE_IDS:
+            router_payload["enabled"] = False
+            router_payload["tier_profile"] = None
+            public_payload.update({"enabled": False, "tier_profile": None})
+        else:
+            router_payload["enabled"] = True
+            router_payload["tier_profile"] = provider
+            public_payload.update({"enabled": True, "tier_profile": provider})
+
+    new_cfg = _clone(config)
+    new_cfg.squilla_router = SquillaRouterConfig(**router_payload)
+    return MutationResult(
+        config=new_cfg,
+        changed=True,
+        restart_required=False,
+        warnings=[],
+        public_payload=public_payload,
     )
 
 
@@ -389,7 +478,8 @@ def upsert_channel(
     *,
     entry_payload: dict[str, Any],
 ) -> MutationResult:
-    normalized = validate_channel_entry(entry_payload)
+    merged = _merge_with_existing_secrets(config, entry_payload)
+    normalized = validate_channel_entry(merged)
     name = normalized["name"]
     new_cfg = _clone(config)
     raw = _channel_entries_as_dicts(new_cfg)
@@ -410,6 +500,45 @@ def upsert_channel(
         warnings=[],
         public_payload=redact_channel_entry(normalized["type"], normalized),
     )
+
+
+def _merge_with_existing_secrets(
+    config: GatewayConfig, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """Mirror upsert_llm_provider: blank secret in payload = keep current.
+
+    Only secret fields are auto-preserved here so that re-adding an entry
+    by name does not require re-typing credentials. Non-secret partial
+    updates belong to the edit path, which seeds the full existing entry
+    in the CLI before calling upsert.
+    """
+    from opensquilla.onboarding.channel_specs import get_channel_setup_spec
+
+    type_name = payload.get("type")
+    name = payload.get("name")
+    if not isinstance(type_name, str) or not isinstance(name, str):
+        return dict(payload)
+    try:
+        spec = get_channel_setup_spec(type_name)
+    except KeyError:
+        return dict(payload)
+    existing = next(
+        (
+            e.model_dump(mode="python")
+            for e in config.channels.channels
+            if e.name == name and e.type == type_name
+        ),
+        None,
+    )
+    if existing is None:
+        return dict(payload)
+    merged = dict(payload)
+    for f in spec.fields:
+        if not f.secret:
+            continue
+        if merged.get(f.name) in ("", None) and existing.get(f.name):
+            merged[f.name] = existing[f.name]
+    return merged
 
 
 def remove_channel(

@@ -8,25 +8,40 @@ TEMPLATE = ROOT / "templates/index.html"
 APP = ROOT / "static/js/app.js"
 
 
-def test_channels_view_calls_onboarding_rpc():
+def test_channels_view_is_read_only_status_surface():
     txt = (VIEWS / "channels.js").read_text(encoding="utf-8")
-    assert "onboarding.catalog" in txt
-    assert "onboarding.channel.upsert" in txt
-    assert "onboarding.channel.remove" in txt
-    assert "onboarding.channel.enable" in txt
-    assert "onboarding.channel.disable" in txt
+    assert "channels.status" in txt
+    assert "onboarding.catalog" not in txt
+    assert "onboarding.channel.upsert" not in txt
+    assert "onboarding.channel.remove" not in txt
+    assert "onboarding.channel.enable" not in txt
+    assert "onboarding.channel.disable" not in txt
+    assert "Add channel" not in txt
+    assert "Save channel" not in txt
+    assert "data-ch-remove" not in txt
+    assert "data-ch-toggle" not in txt
+    assert "data-ch-logout" not in txt
+    assert "channels.logout" not in txt
+    assert "channels.restart" not in txt
 
 
-def test_channels_view_uses_correct_toml_shape_copy():
+def test_channels_view_points_configuration_to_cli_onboarding():
     txt = (VIEWS / "channels.js").read_text(encoding="utf-8")
-    # Old bad shape gone, new shape present.
-    assert "[[channels]]" not in txt
-    assert "channels.channels" in txt
+    assert "opensquilla channels list" in txt
+    assert "opensquilla configure --section channels" in txt
 
 
-def test_channels_view_shows_restart_required_notice():
+def test_channels_stats_do_not_report_attention_states_as_healthy():
     txt = (VIEWS / "channels.js").read_text(encoding="utf-8")
-    assert "restart" in txt.lower()
+    assert "all healthy" not in txt
+    assert "need attention" in txt
+    assert "restarting" in txt
+    assert "exhausted" in txt
+
+
+def test_channels_view_filters_to_configured_channels():
+    txt = (VIEWS / "channels.js").read_text(encoding="utf-8")
+    assert "configured !== false" in txt
 
 
 def test_setup_view_loads_catalog_and_status():
@@ -41,6 +56,15 @@ def test_setup_view_loads_catalog_and_status():
     assert "Remote fallback API key" in txt
     assert "effectiveProvider" in txt
     assert "current.mode" in txt
+
+
+def test_setup_view_is_temporarily_gated_with_cli_fallbacks():
+    txt = (VIEWS / "setup.js").read_text(encoding="utf-8")
+    assert "const SETUP_UI_AVAILABLE = false;" in txt
+    assert "Web setup is temporarily unavailable" in txt
+    assert "opensquilla onboard" in txt
+    assert "opensquilla providers configure" in txt
+    assert "~/.opensquilla/config.toml" in txt
 
 
 def test_setup_view_is_loaded_and_registered():
@@ -66,7 +90,7 @@ def test_config_view_exposes_memory_tab_and_restart_notice():
     txt = (VIEWS / "config.js").read_text(encoding="utf-8")
     assert "label: 'Memory'" in txt
     assert "memory.embedding.provider" in txt
-    assert "Restart required for memory changes" in txt
+    assert "Gateway restart required for the change to take effect" in txt
 
 
 def test_example_config_does_not_advertise_local_embedding_model_override():

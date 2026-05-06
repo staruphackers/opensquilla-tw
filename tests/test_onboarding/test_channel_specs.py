@@ -1,4 +1,4 @@
-"""Tests for channel catalog (Phase 2)."""
+"""Tests for the channel catalog."""
 
 from __future__ import annotations
 

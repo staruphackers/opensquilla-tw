@@ -1,4 +1,4 @@
-/** OpenSquilla Web UI — Channels view (FE-007 part 1). */
+/** OpenSquilla Web UI — read-only configured channels view. */
 
 const ChannelsView = (() => {
   let _el = null;
@@ -30,14 +30,11 @@ const ChannelsView = (() => {
           <div class="ch-stage__title-block">
             <span class="ch-stage__eyebrow">Control · Channels</span>
             <h2 class="ch-stage__title">Channels</h2>
-            <p class="ch-stage__subtitle">External adapters that bridge OpenSquilla to chat platforms, queues, and other services.</p>
+            <p class="ch-stage__subtitle">Runtime status for channel entries already configured through onboarding or the CLI.</p>
           </div>
           <div class="ch-stage__actions">
             <button class="btn btn--ghost" id="ch-refresh" title="Refresh">
               ${icons.refresh()}<span>Refresh</span>
-            </button>
-            <button class="btn btn--primary" id="ch-add" title="Add channel">
-              <span>+ Add channel</span>
             </button>
           </div>
         </header>
@@ -53,7 +50,6 @@ const ChannelsView = (() => {
       </div>`;
 
     _el.querySelector('#ch-refresh').addEventListener('click', _loadData);
-    _el.querySelector('#ch-add').addEventListener('click', _openAddModal);
 
     // Subscribe to real-time channel status events
     const unsub = _rpc.on('channel.status', () => _loadData());
@@ -81,10 +77,10 @@ const ChannelsView = (() => {
 
     _rpc.call('channels.status').then(data => {
       if (!_el) return;
-      const raw = data.channels || [];
+      const raw = (data.channels || []).filter(c => c && c.configured !== false);
 
-      // Sort: running first, then stopped, then dead
-      const order = { running: 0, connected: 0, stopped: 1, dead: 2 };
+      // Sort by operator urgency while keeping the UI read-only.
+      const order = { running: 0, connected: 0, restarting: 1, exhausted: 1, dead: 1, stopped: 2, disabled: 3 };
       _channels = [...raw].sort((a, b) => {
         const oa = order[a.status] ?? 1;
         const ob = order[b.status] ?? 1;
@@ -101,8 +97,9 @@ const ChannelsView = (() => {
     if (!wrap) return;
     const total = _channels.length;
     const connected = _channels.filter(c => c.status === 'running' || c.status === 'connected').length;
-    const dead = _channels.filter(c => c.status === 'dead').length;
-    const stopped = total - connected - dead;
+    const attention = _channels.filter(c => _needsAttention(c.status)).length;
+    const inactive = total - connected - attention;
+    const disabled = _channels.filter(c => c.status === 'disabled').length;
     const restarts = _channels.reduce((acc, c) => acc + (Number(c.restart_attempts) || 0), 0);
     const types = new Set();
     _channels.forEach(c => { if (c.type) types.add(c.type); });
@@ -118,12 +115,12 @@ const ChannelsView = (() => {
         <div class="stat-value">
           ${connected}${connected ? '<span class="dot ok"></span>' : ''}
         </div>
-        <div class="stat-hint">${connected ? 'live' : 'all idle'}</div>
+        <div class="stat-hint">${connected ? 'live' : (attention ? `${attention} unhealthy` : 'all idle')}</div>
       </div>
       <div class="stat">
-        <div class="stat-label">Stopped</div>
-        <div class="stat-value">${stopped}</div>
-        <div class="stat-hint">${dead ? `<span class="ch-neg">${dead} dead</span>` : 'all healthy'}</div>
+        <div class="stat-label">Inactive</div>
+        <div class="stat-value">${inactive}</div>
+        <div class="stat-hint">${attention ? `<span class="ch-neg">${attention} need attention</span>` : _inactiveHint(inactive, disabled)}</div>
       </div>
       <div class="stat">
         <div class="stat-label">Restart attempts</div>
@@ -169,9 +166,9 @@ const ChannelsView = (() => {
             </g>
           </svg>
         </div>
-        <div class="ch-empty__title">No channels configured.</div>
-        <p class="ch-empty__msg">Channels connect OpenSquilla to outside services like Slack, Discord, or your own gateway.<br/>Add a channel adapter in the gateway configuration to bring one online.</p>
-        <code class="ch-empty__code">opensquilla.toml → [channels] + [[channels.channels]]</code>
+        <div class="ch-empty__title">No configured channels.</div>
+        <p class="ch-empty__msg">Channel provisioning lives in onboarding and the CLI so credentials, dependency extras, webhook URLs, and restart requirements stay explicit.</p>
+        <code class="ch-empty__code">opensquilla configure --section channels · opensquilla channels list</code>
       </div>`;
       return;
     }
@@ -210,155 +207,31 @@ const ChannelsView = (() => {
           <summary>Adapter config</summary>
           <pre class="ch-card__config-pre">${_esc(configJson)}</pre>
         </details>
-        <footer class="ch-card__actions">
-          ${isRunning
-            ? `<button class="ch-iconbtn ch-iconbtn--danger" data-ch-logout="${_esc(name)}" title="Disconnect">${icons.stop()}<span>Disconnect</span></button>`
-            : `<span class="ch-card__hint">${isDead ? 'Adapter died — check gateway logs.' : 'Configured but not started.'}</span>`}
-          <button class="ch-iconbtn" data-ch-toggle="${_esc(name)}" data-ch-enabled="${ch.enabled !== false}" title="Toggle enabled">
-            <span>${ch.enabled === false ? 'Enable' : 'Disable'}</span>
-          </button>
-          <button class="ch-iconbtn ch-iconbtn--danger" data-ch-remove="${_esc(name)}" title="Remove">
-            <span>Remove</span>
-          </button>
+        <footer class="ch-card__footnote">
+          <span>${_esc(_statusHint({ status, isRunning, isDead, enabled: ch.enabled !== false, name }))}</span>
         </footer>
       </article>`;
     }).join('');
-
-    container.querySelectorAll('[data-ch-logout]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const name = btn.dataset.chLogout;
-        _rpc.call('channels.logout', { channel: name })
-          .then(() => { UI.toast('Disconnected ' + name, 'info'); _loadData(); })
-          .catch(err => UI.toast('Disconnect failed: ' + err.message, 'err'));
-      });
-    });
-
-    container.querySelectorAll('[data-ch-toggle]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const name = btn.dataset.chToggle;
-        const isEnabled = btn.dataset.chEnabled === 'true';
-        const method = isEnabled ? 'onboarding.channel.disable' : 'onboarding.channel.enable';
-        _rpc.call(method, { name })
-          .then(() => {
-            UI.toast(`${isEnabled ? 'Disabled' : 'Enabled'} ${name}. Restart gateway to apply.`, 'info');
-            _loadData();
-          })
-          .catch(err => UI.toast('Toggle failed: ' + err.message, 'err'));
-      });
-    });
-
-    container.querySelectorAll('[data-ch-remove]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const name = btn.dataset.chRemove;
-        if (!confirm(`Remove channel "${name}"? Restart gateway to apply.`)) return;
-        _rpc.call('onboarding.channel.remove', { name })
-          .then(() => { UI.toast(`Removed ${name}. Restart gateway to apply.`, 'info'); _loadData(); })
-          .catch(err => UI.toast('Remove failed: ' + err.message, 'err'));
-      });
-    });
   }
 
-  async function _openAddModal() {
-    let catalog;
-    try {
-      catalog = await _rpc.call('onboarding.catalog');
-    } catch (err) {
-      UI.toast('Failed to load catalog: ' + err.message, 'err');
-      return;
-    }
-    const channels = catalog.channels || [];
-    const overlay = document.createElement('div');
-    overlay.className = 'ch-modal__overlay';
-    const modal = document.createElement('div');
-    modal.className = 'ch-modal';
-    modal.setAttribute('role', 'dialog');
-    modal.setAttribute('aria-modal', 'true');
-    modal.setAttribute('aria-labelledby', 'ch-modal-title');
-    modal.innerHTML = `
-      <header class="ch-modal__head">
-        <div class="ch-modal__title-block">
-          <span class="ch-modal__eyebrow">Adapter · New</span>
-          <h3 id="ch-modal-title">Add channel</h3>
-        </div>
-        <button class="ch-iconbtn" id="ch-modal-close" aria-label="Close">×</button>
-      </header>
-      <div class="ch-modal__body">
-        <label class="ch-field">
-          <span>Channel type</span>
-          <select id="ch-type-select">
-            ${channels.map(c => `<option value="${_esc(c.type)}">${_esc(c.label)} (${_esc(c.type)})</option>`).join('')}
-          </select>
-        </label>
-        <div id="ch-form-host"></div>
-        <p class="ch-modal__hint">Saving requires a gateway restart to take effect.</p>
-      </div>
-      <footer class="ch-modal__foot">
-        <button class="btn btn--ghost" id="ch-modal-cancel">Cancel</button>
-        <button class="btn btn--primary" id="ch-modal-save">Save channel</button>
-      </footer>`;
-    overlay.appendChild(modal);
-    document.body.appendChild(overlay);
+  function _statusHint({ status, isRunning, isDead, enabled, name }) {
+    const safeName = name || '<name>';
+    if (!enabled) return `Disabled in config — gateway restart required after re-enabling. Run \`opensquilla configure --section channels\` to change.`;
+    if (isDead) return `Adapter is dead. Inspect gateway logs, then \`opensquilla channels restart ${safeName}\`.`;
+    if (isRunning) return 'Adapter is live in the current gateway process.';
+    if (status === 'restarting') return 'Adapter is restarting after dispatch errors.';
+    if (status === 'exhausted') return `Adapter exhausted its retry budget. Try \`opensquilla channels restart ${safeName}\`.`;
+    return 'Configured on disk but not active in this gateway process — restart the gateway to load it.';
+  }
 
-    const closeModal = () => overlay.remove();
-    modal.querySelector('#ch-modal-close').addEventListener('click', closeModal);
-    modal.querySelector('#ch-modal-cancel').addEventListener('click', closeModal);
+  function _needsAttention(status) {
+    return status === 'dead' || status === 'restarting' || status === 'exhausted';
+  }
 
-    const select = modal.querySelector('#ch-type-select');
-    const formHost = modal.querySelector('#ch-form-host');
-
-    function renderFields(typeName) {
-      const spec = channels.find(c => c.type === typeName);
-      if (!spec) return;
-      formHost.innerHTML = spec.fields.map(f => {
-        const id = `ch-f-${f.name}`;
-        const required = f.required ? ' *' : '';
-        const isPwd = f.secret || f.type === 'password';
-        if (f.type === 'select') {
-          return `<label class="ch-field"><span>${_esc(f.label)}${required}</span>
-            <select id="${id}" data-name="${_esc(f.name)}" data-type="${_esc(f.type)}">
-              ${(f.choices || []).map(c => `<option value="${_esc(c)}"${c === f.default ? ' selected' : ''}>${_esc(c)}</option>`).join('')}
-            </select></label>`;
-        }
-        if (f.type === 'bool') {
-          return `<label class="ch-field ch-field--inline">
-            <input type="checkbox" id="${id}" data-name="${_esc(f.name)}" data-type="${_esc(f.type)}"${f.default ? ' checked' : ''}>
-            <span>${_esc(f.label)}${required}</span></label>`;
-        }
-        const inputType = isPwd ? 'password' : (f.type === 'int' || f.type === 'float' ? 'number' : 'text');
-        const placeholder = isPwd ? '(leave blank to keep current)' : '';
-        const defaultVal = isPwd ? '' : (f.default ?? '');
-        return `<label class="ch-field"><span>${_esc(f.label)}${required}</span>
-          <input type="${inputType}" id="${id}" data-name="${_esc(f.name)}" data-type="${_esc(f.type)}" data-secret="${isPwd}" placeholder="${_esc(placeholder)}" value="${_esc(String(defaultVal))}"></label>`;
-      }).join('');
-    }
-    renderFields(select.value);
-    select.addEventListener('change', () => renderFields(select.value));
-
-    modal.querySelector('#ch-modal-save').addEventListener('click', async () => {
-      const entry = { type: select.value };
-      formHost.querySelectorAll('[data-name]').forEach(el => {
-        const name = el.dataset.name;
-        const type = el.dataset.type;
-        const isSecret = el.dataset.secret === 'true';
-        if (type === 'bool') {
-          entry[name] = el.checked;
-        } else if (type === 'int') {
-          if (el.value !== '') entry[name] = parseInt(el.value, 10);
-        } else if (type === 'float') {
-          if (el.value !== '') entry[name] = parseFloat(el.value);
-        } else {
-          if (el.value !== '' || !isSecret) entry[name] = el.value;
-        }
-      });
-      try {
-        await _rpc.call('onboarding.channel.upsert', { entry });
-        UI.toast('Channel saved. Restart gateway to apply.', 'info');
-        closeModal();
-        _loadData();
-      } catch (err) {
-        UI.toast('Save failed: ' + err.message, 'err');
-      }
-    });
+  function _inactiveHint(inactive, disabled) {
+    if (!inactive) return 'no inactive channels';
+    if (disabled) return `${disabled} disabled`;
+    return 'configured but idle';
   }
 
   function _esc(s) {

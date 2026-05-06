@@ -5,8 +5,8 @@ Three backends ship today:
 * :class:`~opensquilla.sandbox.backend.bubblewrap.BubblewrapBackend` — the Linux
   primary path; uses the ``bwrap`` binary for namespace isolation.
 * :class:`~opensquilla.sandbox.backend.seatbelt.SeatbeltBackend` — macOS
-  profile-only backend (Phase 2). Exposes SBPL profile generation and an
-  honest ``available()`` check but does not yet execute.
+  profile renderer. Exposes SBPL generation and an honest ``available()``
+  check but does not yet execute commands.
 * :class:`~opensquilla.sandbox.backend.noop.NoopBackend` — used when the sandbox
   feature switch is off; runs the command through the existing rlimit
   wrapper and emits a warning on every invocation so the bypass is visible

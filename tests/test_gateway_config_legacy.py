@@ -1,0 +1,158 @@
+"""Tests for legacy memory field fallback in GatewayConfig.
+
+Verifies that deprecated memory.* fields in old config files are silently
+dropped rather than causing ValidationError, and that a single aggregated
+DeprecationWarning is emitted per process.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+import opensquilla.gateway.config as config_module
+from opensquilla.gateway.config import GatewayConfig
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_ALL_16_DEPRECATED = {
+    "memory.profile": "legacy_profile_value",
+    "memory.cost.embedding_cache": "true",
+    "memory.cost.rerank_cache": "false",
+    "memory.cost.llm_judge_cache": "true",
+    "memory.facts_enabled": "true",
+    "memory.facts_top_k": "5",
+    "memory.facts_max_chars": "2000",
+    "memory.multi_hop_enabled": "false",
+    "memory.multi_hop_max_depth": "3",
+    "memory.multi_hop_score_threshold": "0.7",
+    "memory.recall_frequency": "always",
+    "memory.recall_top_k_default": "10",
+    "memory.semantic_chunking_enabled": "true",
+    "memory.eviction_policy": "lru",
+    "memory.summary_model": "gpt-4o-mini",
+    "memory.summary_max_tokens": "256",
+}
+
+
+def _build_toml_with_deprecated(tmp_path: Path) -> Path:
+    """Write a minimal config.toml that contains all 16 deprecated fields."""
+    lines = ["[memory]\n"]
+    cost_lines = ["[memory.cost]\n"]
+
+    for dotted, val in _ALL_16_DEPRECATED.items():
+        parts = dotted.split(".")
+        if parts[1] == "cost":
+            leaf = parts[2]
+            cost_lines.append(f'{leaf} = "{val}"\n')
+        else:
+            leaf = parts[1]
+            lines.append(f'{leaf} = "{val}"\n')
+
+    toml_path = tmp_path / "config.toml"
+    toml_path.write_text("".join(lines) + "\n" + "".join(cost_lines))
+    return toml_path
+
+
+# ---------------------------------------------------------------------------
+# AC#1 / AC#4: loading does not raise
+# ---------------------------------------------------------------------------
+
+
+def test_load_with_all_16_deprecated_fields_does_not_raise(tmp_path: Path) -> None:
+    """GatewayConfig.load() must succeed even when all 16 deprecated memory
+    fields are present in the config file."""
+    toml_path = _build_toml_with_deprecated(tmp_path)
+    cfg = GatewayConfig.load(toml_path)
+    assert isinstance(cfg, GatewayConfig)
+
+
+# ---------------------------------------------------------------------------
+# AC#5: aggregate DeprecationWarning emitted once per process
+# ---------------------------------------------------------------------------
+
+
+def test_aggregate_deprecation_warning_emitted_once_per_process(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A single DeprecationWarning is emitted the first time deprecated memory
+    fields are encountered; subsequent loads with the same fields are silent."""
+    # Reset the process-level sentinels so this test is not affected by order.
+    monkeypatch.setattr(config_module, "_LEGACY_MEMORY_FIELDS_WARNED", False)
+    monkeypatch.setattr(config_module, "_LEGACY_MEMORY_FIELDS_SEEN", set())
+
+    toml_path = _build_toml_with_deprecated(tmp_path)
+
+    with pytest.warns(DeprecationWarning) as record:
+        GatewayConfig.load(toml_path)
+        # Second load — sentinel is now True, should not add another warning.
+        GatewayConfig.load(toml_path)
+
+    deprecation_warnings = [
+        w for w in record.list if issubclass(w.category, DeprecationWarning)
+    ]
+    assert len(deprecation_warnings) == 1, (
+        f"Expected exactly 1 DeprecationWarning, got {len(deprecation_warnings)}: "
+        f"{[str(w.message) for w in deprecation_warnings]}"
+    )
+    msg = str(deprecation_warnings[0].message)
+    assert "memory" in msg.lower()
+    assert "16 legacy memory.* config field(s) ignored" in msg
+    assert "0.2.0" in msg
+
+
+# ---------------------------------------------------------------------------
+# AC#6: log file written with per-field detail
+# ---------------------------------------------------------------------------
+
+
+def test_log_file_written_with_per_field_detail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After loading a config with deprecated fields, a .log file must exist
+    under ~/.opensquilla/logs/ containing one JSON line per deprecated field."""
+    monkeypatch.setattr(config_module, "_LEGACY_MEMORY_FIELDS_WARNED", False)
+    monkeypatch.setattr(config_module, "_LEGACY_MEMORY_FIELDS_SEEN", set())
+
+    # Redirect opensquilla home to tmp_path so the log lands there.
+    monkeypatch.setattr(config_module, "default_opensquilla_home", lambda: tmp_path)
+
+    toml_path = _build_toml_with_deprecated(tmp_path)
+
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        GatewayConfig.load(toml_path)
+
+    logs_dir = tmp_path / "logs"
+    assert logs_dir.exists(), "logs/ directory was not created"
+
+    log_files = sorted(logs_dir.glob("legacy_config_*.log"))
+    assert len(log_files) >= 1, f"No legacy_config_*.log found in {logs_dir}"
+
+    log_file = log_files[-1]
+    lines = [ln for ln in log_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(lines) == 16, f"Expected 16 log lines, got {len(lines)}"
+
+    for line in lines:
+        entry = json.loads(line)
+        assert "field" in entry
+        assert "timestamp" in entry
+        assert "source" in entry
+
+
+# ---------------------------------------------------------------------------
+# AC#8 guard: no OPENSQUILLA_LEGACY_FALLBACK env switch
+# ---------------------------------------------------------------------------
+
+
+def test_no_legacy_fallback_env_var() -> None:
+    """The source must not contain an OPENSQUILLA_LEGACY_FALLBACK env switch
+    (ADR-3 prohibits runtime opt-out of the fallback)."""
+    import inspect
+    source = inspect.getsource(config_module)
+    assert "OPENSQUILLA_LEGACY_FALLBACK" not in source

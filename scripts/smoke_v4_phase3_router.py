@@ -34,25 +34,27 @@ from opensquilla.gateway.config import GatewayConfig  # noqa: E402
 TIERS = {
     "t0": {
         "provider": "openrouter",
-        "model": "stepfun/step-3.5-flash",
+        "model": "deepseek/deepseek-v4-flash",
         "description": "short text and trivial follow-ups",
+        "thinking_level": "high",
     },
     "t1": {
         "provider": "openrouter",
         "model": "deepseek/deepseek-v4-flash",
         "description": "normal coding and agent tasks",
+        "thinking_level": "high",
     },
     "t2": {
         "provider": "openrouter",
-        "model": "deepseek/deepseek-v4-pro",
+        "model": "z-ai/glm-5.1",
         "description": "structured multi-step work",
-        "thinking_level": "low",
+        "thinking_level": "high",
     },
     "t3": {
         "provider": "openrouter",
-        "model": "z-ai/glm-5.1",
+        "model": "anthropic/claude-opus-4.7",
         "description": "deep reasoning and hard recovery turns",
-        "thinking_level": "medium",
+        "thinking_level": "high",
     },
 }
 TIER_ORDER = list(TIERS)
@@ -937,10 +939,13 @@ def _post_json(url: str, payload: dict[str, Any], timeout: float = 5.0) -> dict[
 
 def _live_tier_model_map(live_model: str) -> dict[str, str]:
     live_tier_models = {
-        "t0": os.environ.get("OPENSQUILLA_LIVE_LLM_T0_MODEL", "stepfun/step-3.5-flash").strip(),
+        "t0": os.environ.get("OPENSQUILLA_LIVE_LLM_T0_MODEL", "deepseek/deepseek-v4-flash").strip(),
         "t1": os.environ.get("OPENSQUILLA_LIVE_LLM_T1_MODEL", "deepseek/deepseek-v4-flash").strip(),
-        "t2": os.environ.get("OPENSQUILLA_LIVE_LLM_T2_MODEL", "deepseek/deepseek-v4-pro").strip(),
-        "t3": os.environ.get("OPENSQUILLA_LIVE_LLM_T3_MODEL", "z-ai/glm-5.1").strip(),
+        "t2": os.environ.get("OPENSQUILLA_LIVE_LLM_T2_MODEL", "z-ai/glm-5.1").strip(),
+        "t3": os.environ.get(
+            "OPENSQUILLA_LIVE_LLM_T3_MODEL",
+            "anthropic/claude-opus-4.7",
+        ).strip(),
     }
     if live_model:
         return {tier: live_model for tier in live_tier_models}

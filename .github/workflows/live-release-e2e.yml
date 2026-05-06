@@ -24,8 +24,6 @@ jobs:
 
     env:
       PYTHONPATH: ${{ github.workspace }}
-      OPENSQUILLA_STATE_DIR: ${{ runner.temp }}/opensquilla-state
-      OPENSQUILLA_LOG_DIR: ${{ runner.temp }}/opensquilla-logs
       OPENSQUILLA_TURN_CALL_LOG: "0"
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
       OPENROUTER_BASE_URL: ${{ vars.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1' }}
@@ -36,6 +34,12 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Configure runtime directories
+        shell: bash
+        run: |
+          printf 'OPENSQUILLA_STATE_DIR=%s/opensquilla-state\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'OPENSQUILLA_LOG_DIR=%s/opensquilla-logs\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
 
       - name: Set up Python
         uses: actions/setup-python@v5

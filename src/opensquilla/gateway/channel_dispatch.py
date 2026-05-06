@@ -24,11 +24,12 @@ from typing import TYPE_CHECKING, Any, cast
 import structlog
 
 from opensquilla.agents.scope import resolve_agent_model
+from opensquilla.artifacts import artifact_payload
 from opensquilla.channels._util import ChannelAccessPolicy, evaluate_policy
 from opensquilla.channels.stream_policy import resolve_channel_stream_policy
 from opensquilla.channels.types import IncomingMessage, OutgoingMessage
 from opensquilla.engine.start_turn import start_turn_via_runtime
-from opensquilla.engine.types import ErrorEvent, RunHeartbeatEvent, TextDeltaEvent
+from opensquilla.engine.types import ArtifactEvent, ErrorEvent, RunHeartbeatEvent, TextDeltaEvent
 from opensquilla.gateway.attachment_ingest import AttachmentIngestResult, ingest_attachments
 
 if TYPE_CHECKING:
@@ -1032,6 +1033,7 @@ class _RuntimeChannelStreamRelay:
         self._channel = channel
         self._inbound = inbound
         self._queue: asyncio.Queue[str | object] = asyncio.Queue()
+        self._artifacts: list[dict[str, Any]] = []
         self._task: asyncio.Task[Any] | None = None
         self._closed = False
         self.text_emitted = False
@@ -1084,6 +1086,10 @@ class _RuntimeChannelStreamRelay:
                     yield chunk
 
     async def emit(self, event: Any) -> None:
+        artifact = _artifact_event_payload(event)
+        if artifact is not None:
+            self._artifacts.append(artifact)
+            return
         text = _text_delta_from_event(event)
         if not text:
             return
@@ -1094,6 +1100,12 @@ class _RuntimeChannelStreamRelay:
         if self._closed:
             return
         self._closed = True
+        artifact_lines = _artifact_fallback_lines(self._artifacts)
+        if artifact_lines:
+            prefix = "\n\n" if self.text_emitted else ""
+            artifact_text = "\n".join(artifact_lines)
+            await self._queue.put(f"{prefix}{artifact_text}")
+            self.text_emitted = True
         await self._queue.put(_STREAM_DONE)
         if self._task is None:
             return
@@ -1119,6 +1131,38 @@ def _text_delta_from_event(event: Any) -> str:
         text = event.get("text", "")
         return text if isinstance(text, str) else ""
     return ""
+
+
+def _artifact_event_payload(event: Any) -> dict[str, Any] | None:
+    if isinstance(event, ArtifactEvent):
+        return artifact_payload(event)
+    if isinstance(event, dict) and event.get("kind") == "artifact":
+        return artifact_payload(event)
+    if getattr(event, "kind", None) == "artifact":
+        return artifact_payload(event)
+    return None
+
+
+def _channel_safe_artifact_url(artifact: dict[str, Any]) -> str:
+    for key in ("channel_download_url", "signed_download_url"):
+        value = artifact.get(key)
+        if isinstance(value, str):
+            candidate = value.strip()
+            if candidate.lower().startswith(("https://", "http://")):
+                return candidate
+    return ""
+
+
+def _artifact_fallback_lines(artifacts: list[dict[str, Any]]) -> list[str]:
+    lines: list[str] = []
+    for artifact in artifacts:
+        name = artifact.get("name") if isinstance(artifact.get("name"), str) else "artifact"
+        target = _channel_safe_artifact_url(artifact)
+        if target:
+            lines.append(f"Generated file: {name} -> {target}")
+        else:
+            lines.append(f"Generated file: {name} -> available in WebUI")
+    return lines
 
 
 async def _read_transcript_rows(session_manager: Any, session_key: str) -> list[Any]:
@@ -1386,6 +1430,7 @@ async def _run_turn_batch_path(
 ) -> None:
     """Batch mode: accumulate all text, send once at the end."""
     text_parts: list[str] = []
+    artifacts: list[dict[str, Any]] = []
     error_occurred = False
 
     run_kwargs: dict[str, Any] = {
@@ -1414,6 +1459,14 @@ async def _run_turn_batch_path(
                         "session.event.text_delta",
                         {"text": event.text},
                     )
+            elif artifact := _artifact_event_payload(event):
+                artifacts.append(artifact)
+                if event_bridge is not None:
+                    await event_bridge.emit(
+                        session_key,
+                        "session.event.artifact",
+                        artifact,
+                    )
             elif isinstance(event, RunHeartbeatEvent):
                 await _emit_run_heartbeat(event_bridge, session_key, event)
             elif isinstance(event, ErrorEvent):
@@ -1433,8 +1486,13 @@ async def _run_turn_batch_path(
         text_parts.clear()
         error_occurred = True
 
-    if not error_occurred and text_parts:
-        await channel.send(_build_reply_message(channel, "".join(text_parts), msg))
+    if not error_occurred:
+        content = "".join(text_parts)
+        artifact_lines = _artifact_fallback_lines(artifacts)
+        if artifact_lines:
+            content = "\n\n".join(part for part in (content, "\n".join(artifact_lines)) if part)
+        if content:
+            await channel.send(_build_reply_message(channel, content, msg))
 
 
 async def _run_turn_streaming_path(
@@ -1456,6 +1514,7 @@ async def _run_turn_streaming_path(
     queue: asyncio.Queue[str | None] = asyncio.Queue()
     text_emitted = False
     stream_error: str | None = None
+    artifacts: list[dict[str, Any]] = []
 
     async def _chunk_iter() -> AsyncIterator[str]:
         """Async iterator that yields text chunks from the queue."""
@@ -1506,6 +1565,14 @@ async def _run_turn_streaming_path(
                         "session.event.text_delta",
                         {"text": event.text},
                     )
+            elif artifact := _artifact_event_payload(event):
+                artifacts.append(artifact)
+                if event_bridge is not None:
+                    await event_bridge.emit(
+                        session_key,
+                        "session.event.artifact",
+                        artifact,
+                    )
             elif isinstance(event, RunHeartbeatEvent):
                 await _emit_run_heartbeat(event_bridge, session_key, event)
             elif isinstance(event, ErrorEvent):
@@ -1544,6 +1611,10 @@ async def _run_turn_streaming_path(
             await channel.send(
                 _build_reply_message(channel, f"Error: {stream_error}", msg),
             )
+    elif artifacts:
+        await channel.send(
+            _build_reply_message(channel, "\n".join(_artifact_fallback_lines(artifacts)), msg),
+        )
 
 
 # ── Gap 5: Event emission ────────────────────────────────────────────────

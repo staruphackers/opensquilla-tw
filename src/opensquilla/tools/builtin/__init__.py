@@ -10,6 +10,7 @@ _FATAL_MODULES = frozenset({"shell", "patch", "filesystem"})
 _NAMES = [
     "admin",
     "agents",
+    "artifacts",
     "code_exec",
     "filesystem",
     "git",

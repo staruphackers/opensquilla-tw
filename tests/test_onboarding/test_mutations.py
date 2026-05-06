@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from opensquilla.gateway.config import GatewayConfig
+from opensquilla.gateway.llm_runtime import resolve_llm_runtime_config
 from opensquilla.onboarding.mutations import (
     MutationResult,
     list_channel_entries,
@@ -14,6 +15,7 @@ from opensquilla.onboarding.mutations import (
     upsert_image_generation_provider,
     upsert_llm_provider,
     upsert_memory_embedding,
+    upsert_router,
     upsert_search_provider,
     validate_channel_entry,
 )
@@ -117,9 +119,9 @@ def test_unsupported_provider_rejected():
         upsert_llm_provider(cfg, provider_id="openai_codex", model="x")
 
 
-def test_provider_requiring_base_url_rejects_when_missing():
+def test_unverified_base_url_provider_rejected_before_configuration():
     cfg = GatewayConfig()
-    with pytest.raises(ValueError, match="base_url"):
+    with pytest.raises(ValueError, match="not runtime-supported"):
         upsert_llm_provider(cfg, provider_id="azure", model="x", api_key="k")
 
 
@@ -234,6 +236,68 @@ def test_upsert_llm_provider_preserves_existing_api_key_on_same_provider():
     assert res2.config.llm.model == "m2"
 
 
+def test_upsert_llm_provider_can_use_env_key_without_secret():
+    cfg = GatewayConfig()
+    res = upsert_llm_provider(
+        cfg,
+        provider_id="openrouter",
+        model="deepseek/deepseek-v4-flash",
+        api_key="",
+        api_key_env="OPENROUTER_API_KEY",
+    )
+
+    assert res.config.llm.api_key == ""
+    assert res.config.llm.api_key_env == "OPENROUTER_API_KEY"
+    assert res.public_payload["api_key_source"] == "env"
+
+
+def test_upsert_llm_provider_recomputes_openrouter_mix_on_provider_switch():
+    cfg = GatewayConfig(llm={"provider": "openrouter", "model": "deepseek/x"})
+    assert cfg.squilla_router.enabled is True
+    assert cfg.squilla_router.tier_profile is None
+
+    res = upsert_llm_provider(
+        cfg,
+        provider_id="deepseek",
+        model="deepseek-chat",
+        api_key_env="DEEPSEEK_API_KEY",
+    )
+
+    assert res.config.llm.provider == "deepseek"
+    assert res.config.squilla_router.enabled is True
+    assert res.config.squilla_router.tier_profile == "deepseek"
+    assert res.config.squilla_router.tiers["t0"]["provider"] == "deepseek"
+    assert "tiers" not in res.config.to_toml_dict()["squilla_router"]
+
+
+def test_upsert_router_recommended_writes_profile_without_expanded_tiers():
+    cfg = GatewayConfig(llm={"provider": "deepseek", "model": "deepseek-chat"})
+
+    res = upsert_router(cfg, mode="recommended")
+
+    assert res.config.squilla_router.enabled is True
+    assert res.config.squilla_router.tier_profile == "deepseek"
+    assert "tiers" not in res.config.to_toml_dict()["squilla_router"]
+    assert res.public_payload["mode"] == "recommended"
+
+
+def test_upsert_router_can_disable():
+    cfg = GatewayConfig(llm={"provider": "openrouter", "model": "deepseek/x"})
+
+    res = upsert_router(cfg, mode="disabled")
+
+    assert res.config.squilla_router.enabled is False
+    assert res.config.squilla_router.tier_profile is None
+    assert res.public_payload["mode"] == "disabled"
+
+
+def test_upsert_router_rejects_openrouter_mix_for_direct_provider():
+    cfg = GatewayConfig(llm={"provider": "deepseek", "model": "deepseek-chat"})
+
+    with pytest.raises(ValueError, match="openrouter-mix"):
+        upsert_router(cfg, mode="openrouter-mix")
+
+
 def test_upsert_llm_provider_keeps_runtime_secret_marker_when_reusing_key():
     cfg = GatewayConfig()
     cfg.llm.provider = "openrouter"
@@ -268,6 +332,43 @@ def test_upsert_llm_provider_clears_runtime_secret_marker_for_explicit_key():
 
     assert res.config.llm.api_key == "sk-written"
     assert "llm.api_key" not in res.config._runtime_secret_paths
+
+
+def test_upsert_llm_provider_explicit_key_clears_existing_env_key(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "from-env")
+    cfg = GatewayConfig(
+        llm={
+            "provider": "openrouter",
+            "model": "m1",
+            "api_key": "",
+            "api_key_env": "OPENROUTER_API_KEY",
+        }
+    )
+
+    res = upsert_llm_provider(
+        cfg,
+        provider_id="openrouter",
+        model="m2",
+        api_key="sk-written",
+    )
+    runtime = resolve_llm_runtime_config(res.config)
+
+    assert res.config.llm.api_key_env == ""
+    assert runtime.api_key == "sk-written"
+    assert runtime.api_key_from_env is False
+
+
+def test_upsert_llm_provider_rejects_ambiguous_key_sources():
+    cfg = GatewayConfig()
+
+    with pytest.raises(ValueError, match="either api_key or api_key_env"):
+        upsert_llm_provider(
+            cfg,
+            provider_id="openrouter",
+            model="m",
+            api_key="sk-written",
+            api_key_env="OPENROUTER_API_KEY",
+        )
 
 
 def test_upsert_llm_provider_does_not_carry_key_across_providers():
@@ -372,3 +473,46 @@ def test_unsupported_search_provider_rejected():
     cfg = GatewayConfig()
     with pytest.raises(ValueError, match="not runtime-supported"):
         upsert_search_provider(cfg, provider_id="tavily", api_key="k")
+
+
+def test_upsert_channel_preserves_secret_when_blank():
+    cfg = GatewayConfig()
+    first = upsert_channel(
+        cfg,
+        entry_payload={
+            "type": "slack",
+            "name": "w",
+            "token": "xoxb-original",
+            "signing_secret": "ss-original",
+        },
+    )
+    second = upsert_channel(
+        first.config,
+        entry_payload={
+            "type": "slack",
+            "name": "w",
+            "token": "",  # blank = keep current
+            "signing_secret": "",
+            "slack_channel_id": "C999",
+        },
+    )
+    raw = [e.model_dump(mode="python") for e in second.config.channels.channels]
+    entry = next(e for e in raw if e["name"] == "w")
+    assert entry["token"] == "xoxb-original"
+    assert entry["signing_secret"] == "ss-original"
+    assert entry["slack_channel_id"] == "C999"
+
+
+def test_upsert_channel_replaces_secret_when_provided():
+    cfg = GatewayConfig()
+    first = upsert_channel(
+        cfg,
+        entry_payload={"type": "slack", "name": "w", "token": "xoxb-old"},
+    )
+    second = upsert_channel(
+        first.config,
+        entry_payload={"type": "slack", "name": "w", "token": "xoxb-new"},
+    )
+    raw = [e.model_dump(mode="python") for e in second.config.channels.channels]
+    entry = next(e for e in raw if e["name"] == "w")
+    assert entry["token"] == "xoxb-new"

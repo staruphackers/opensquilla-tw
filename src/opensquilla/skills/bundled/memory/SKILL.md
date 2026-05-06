@@ -8,7 +8,7 @@ triggers:
   - forget
 provenance:
   origin: opensquilla-original
-  license: MIT
+  license: Apache-2.0
   upstream_url: ""
   maintained_by: OpenSquilla
 metadata:

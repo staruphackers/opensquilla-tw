@@ -6,6 +6,7 @@ Core loop is under 500 lines. No recursive calls.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import time
@@ -17,6 +18,7 @@ from typing import Any
 
 import structlog
 
+from opensquilla.artifacts import artifact_payload
 from opensquilla.engine.cache_break_monitor import (
     check_response_for_cache_break,
     notify_compaction,
@@ -72,6 +74,7 @@ from .types import (
     AgentConfig,
     AgentEvent,
     AgentState,
+    ArtifactEvent,
     CompactionEvent,
     CompactionOutcome,
     DoneEvent,
@@ -158,6 +161,24 @@ def _is_threshold_denial(result: ToolResult) -> bool:
     )
 
 
+def _artifact_event_kwargs(payload: dict[str, Any]) -> dict[str, Any]:
+    allowed = {
+        "kind",
+        "id",
+        "sha256",
+        "name",
+        "mime",
+        "size",
+        "session_id",
+        "session_key",
+        "source",
+        "created_at",
+        "download_url",
+        "store",
+    }
+    return {key: value for key, value in artifact_payload(payload).items() if key in allowed}
+
+
 def _flatten_content_blocks(blocks: list[Any]) -> str:
     """Convert a list of content-block Pydantic models to a plain string for compaction.
 
@@ -192,6 +213,10 @@ class _ProviderAttemptKind(StrEnum):
     INCOMPLETE_TOOLS = "incomplete_tools"
     STREAM_INCOMPLETE = "stream_incomplete"
     LENGTH_CAPPED = "length_capped"
+
+
+class _IterationStreamTimeoutError(TimeoutError):
+    """Raised when provider streaming exceeds the active Agent iteration budget."""
 
 
 @dataclass(frozen=True)
@@ -535,6 +560,7 @@ class Agent:
                 tool_name=result.tool_name,
                 content=guarded_content,
                 is_error=result.is_error,
+                artifacts=list(result.artifacts),
             )
             self.config.metadata["tool_json_guard_applied"] = True
             self.config.metadata["tool_json_guard_calls"] = (
@@ -589,6 +615,7 @@ class Agent:
             tool_name=result.tool_name,
             content=compressed_content,
             is_error=result.is_error,
+            artifacts=list(result.artifacts),
         )
 
     # ------------------------------------------------------------------
@@ -872,110 +899,128 @@ class Agent:
 
                     _got_done_event = False
                     attempt_user_visible_emitted = False
-                    async for raw_ev in self.provider.chat(
-                        request_messages,
-                        tools=provider_tool_definitions,
-                        config=chat_cfg,
-                    ):
-                        if isinstance(raw_ev, ProviderTextDelta):
-                            assistant_text_parts.append(raw_ev.text)
-                            if raw_ev.text:
-                                attempt_user_visible_emitted = True
-                            yield TextDeltaEvent(text=raw_ev.text)
+                    try:
+                        raw_stream = self.provider.chat(
+                            request_messages,
+                            tools=provider_tool_definitions,
+                            config=chat_cfg,
+                        )
+                        async for raw_ev in self._stream_provider_events_with_deadline(
+                            raw_stream,
+                            loop=_loop,
+                            iter_deadline=_iter_deadline,
+                            total_deadline=_total_deadline,
+                        ):
+                            if isinstance(raw_ev, ProviderTextDelta):
+                                assistant_text_parts.append(raw_ev.text)
+                                if raw_ev.text:
+                                    attempt_user_visible_emitted = True
+                                yield TextDeltaEvent(text=raw_ev.text)
 
-                        elif isinstance(raw_ev, ProviderToolUseStart):
-                            if not tools_supported:
-                                continue
-                            pending_tools[raw_ev.tool_use_id] = _StreamAccumulator(
-                                tool_use_id=raw_ev.tool_use_id,
-                                tool_name=raw_ev.tool_name,
-                                synthetic_from_text=raw_ev.synthetic_from_text,
-                            )
-                            attempt_user_visible_emitted = True
-                            yield ToolUseStartEvent(
-                                tool_use_id=raw_ev.tool_use_id,
-                                tool_name=raw_ev.tool_name,
-                                synthetic_from_text=raw_ev.synthetic_from_text,
-                            )
-
-                        elif raw_ev.kind == "tool_use_delta":
-                            if not tools_supported:
-                                continue
-                            acc = pending_tools.get(raw_ev.tool_use_id)  # type: ignore[union-attr]
-                            if acc:
-                                acc.json_buf.append(raw_ev.json_fragment)  # type: ignore[union-attr]
-
-                        elif isinstance(raw_ev, ToolUseEndEvent):
-                            if not tools_supported:
-                                continue
-                            acc = pending_tools.pop(raw_ev.tool_use_id, None)
-                            if acc and acc.json_buf:
-                                arguments = acc.finish()
-                            else:
-                                arguments = raw_ev.arguments
-                            synthetic_from_text = (
-                                acc.synthetic_from_text
-                                if acc is not None
-                                else raw_ev.synthetic_from_text
-                            )
-                            tool_calls.append(
-                                ToolCall(
+                            elif isinstance(raw_ev, ProviderToolUseStart):
+                                if not tools_supported:
+                                    continue
+                                pending_tools[raw_ev.tool_use_id] = _StreamAccumulator(
                                     tool_use_id=raw_ev.tool_use_id,
                                     tool_name=raw_ev.tool_name,
-                                    arguments=arguments,
-                                    synthetic_from_text=synthetic_from_text,
+                                    synthetic_from_text=raw_ev.synthetic_from_text,
                                 )
-                            )
-
-                        elif isinstance(raw_ev, ProviderDoneEvent):
-                            provider_done_for_log = raw_ev
-                            _got_done_event = True
-                            iter_input_tokens = raw_ev.input_tokens
-                            iter_output_tokens = raw_ev.output_tokens
-                            iter_reasoning_tokens = raw_ev.reasoning_tokens
-                            iter_reasoning_content = raw_ev.reasoning_content
-                            iter_thinking_signature = raw_ev.thinking_signature
-                            total_billed_cost += raw_ev.billed_cost
-                            total_input_tokens += raw_ev.input_tokens
-                            total_output_tokens += raw_ev.output_tokens
-                            total_reasoning_tokens += raw_ev.reasoning_tokens
-                            total_cached_tokens += raw_ev.cached_tokens
-                            total_cache_write_tokens += raw_ev.cache_write_tokens
-                            if raw_ev.model:
-                                last_actual_model = raw_ev.model
-                            # Usage/cost accounting is billed-attempt based: discarded
-                            # invalid responses still consumed provider tokens, but
-                            # they must not be appended to conversation history or the
-                            # live context-window gauge below.
-                            if self._usage_tracker and self._session_key:
-                                self._usage_tracker.add(
-                                    self._session_key,
-                                    input_tokens=raw_ev.input_tokens,
-                                    output_tokens=raw_ev.output_tokens,
-                                    model_id=raw_ev.model or self.config.model_id or "",
-                                    cache_read_tokens=raw_ev.cached_tokens,
-                                    cache_write_tokens=raw_ev.cache_write_tokens,
+                                attempt_user_visible_emitted = True
+                                yield ToolUseStartEvent(
+                                    tool_use_id=raw_ev.tool_use_id,
+                                    tool_name=raw_ev.tool_name,
+                                    synthetic_from_text=raw_ev.synthetic_from_text,
                                 )
 
-                        elif isinstance(raw_ev, ProviderErrorEvent):
-                            provider_error_for_log = raw_ev
-                            # One-shot thinking/reasoning fallback
-                            _err_lower = raw_ev.message.lower()
-                            if (
-                                thinking_enabled
-                                and not _thinking_fallback_done
-                                and ("thinking" in _err_lower or "reasoning" in _err_lower)
-                            ):
-                                _thinking_fallback_done = True
-                                thinking_enabled = False
-                                thinking_budget = 0
-                                chat_cfg = _chat_config_with_thinking_disabled(chat_cfg)
+                            elif raw_ev.kind == "tool_use_delta":
+                                if not tools_supported:
+                                    continue
+                                acc = pending_tools.get(raw_ev.tool_use_id)  # type: ignore[union-attr]
+                                if acc:
+                                    acc.json_buf.append(raw_ev.json_fragment)  # type: ignore[union-attr]
+
+                            elif isinstance(raw_ev, ToolUseEndEvent):
+                                if not tools_supported:
+                                    continue
+                                acc = pending_tools.pop(raw_ev.tool_use_id, None)
+                                if acc and acc.json_buf:
+                                    arguments = acc.finish()
+                                else:
+                                    arguments = raw_ev.arguments
+                                synthetic_from_text = (
+                                    acc.synthetic_from_text
+                                    if acc is not None
+                                    else raw_ev.synthetic_from_text
+                                )
+                                tool_calls.append(
+                                    ToolCall(
+                                        tool_use_id=raw_ev.tool_use_id,
+                                        tool_name=raw_ev.tool_name,
+                                        arguments=arguments,
+                                        synthetic_from_text=synthetic_from_text,
+                                    )
+                                )
+
+                            elif isinstance(raw_ev, ProviderDoneEvent):
+                                provider_done_for_log = raw_ev
+                                _got_done_event = True
+                                iter_input_tokens = raw_ev.input_tokens
+                                iter_output_tokens = raw_ev.output_tokens
+                                iter_reasoning_tokens = raw_ev.reasoning_tokens
+                                iter_reasoning_content = raw_ev.reasoning_content
+                                iter_thinking_signature = raw_ev.thinking_signature
+                                total_billed_cost += raw_ev.billed_cost
+                                total_input_tokens += raw_ev.input_tokens
+                                total_output_tokens += raw_ev.output_tokens
+                                total_reasoning_tokens += raw_ev.reasoning_tokens
+                                total_cached_tokens += raw_ev.cached_tokens
+                                total_cache_write_tokens += raw_ev.cache_write_tokens
+                                if raw_ev.model:
+                                    last_actual_model = raw_ev.model
+                                # Usage/cost accounting is billed-attempt based: discarded
+                                # invalid responses still consumed provider tokens, but
+                                # they must not be appended to conversation history or the
+                                # live context-window gauge below.
+                                if self._usage_tracker and self._session_key:
+                                    self._usage_tracker.add(
+                                        self._session_key,
+                                        input_tokens=raw_ev.input_tokens,
+                                        output_tokens=raw_ev.output_tokens,
+                                        model_id=raw_ev.model or self.config.model_id or "",
+                                        cache_read_tokens=raw_ev.cached_tokens,
+                                        cache_write_tokens=raw_ev.cache_write_tokens,
+                                    )
+
+                            elif isinstance(raw_ev, ProviderErrorEvent):
+                                provider_error_for_log = raw_ev
+                                # One-shot thinking/reasoning fallback
+                                _err_lower = raw_ev.message.lower()
+                                if (
+                                    thinking_enabled
+                                    and not _thinking_fallback_done
+                                    and ("thinking" in _err_lower or "reasoning" in _err_lower)
+                                ):
+                                    _thinking_fallback_done = True
+                                    thinking_enabled = False
+                                    thinking_budget = 0
+                                    chat_cfg = _chat_config_with_thinking_disabled(chat_cfg)
+                                    _got_error = True
+                                    break  # break stream, retry
+
+                                provider_error = raw_ev
                                 _got_error = True
-                                break  # break stream, retry
-
-                            provider_error = raw_ev
-                            _got_error = True
-                            break  # break stream loop
+                                break  # break stream loop
+                    except _IterationStreamTimeoutError:
+                        yield self._transition(AgentState.ERROR)
+                        terminal_error = ErrorEvent(
+                            message=(
+                                f"Iteration {iterations} exceeded iteration_timeout"
+                                f" ({self.config.iteration_timeout}s) during LLM streaming"
+                            ),
+                            code="iteration_timeout",
+                        )
+                        yield terminal_error
+                        break
 
                     call_duration_ms = int((time.monotonic() - call_started_at) * 1000)
                     response_payload = {
@@ -1263,26 +1308,47 @@ class Agent:
                                 )
                                 yield terminal_error
                                 break
-                            if overflow_outcome.compacted:
-                                turn_messages = overflow_outcome.messages
-                                if overflow_outcome.request_context_insert_index is not None:
-                                    request_context_insert_index = (
-                                        overflow_outcome.request_context_insert_index
-                                    )
-                                if overflow_outcome.runtime_context_insert_index is not None:
-                                    runtime_context_insert_index = (
-                                        overflow_outcome.runtime_context_insert_index
-                                    )
-                                yield CompactionEvent(
-                                    summary=overflow_outcome.summary,
-                                    kept_entries=overflow_outcome.kept_entries,
-                                    kept_count=len(overflow_outcome.messages),
-                                    removed_count=overflow_outcome.removed_count,
+                            next_request_context_insert_index = (
+                                overflow_outcome.request_context_insert_index
+                                if overflow_outcome.request_context_insert_index is not None
+                                else request_context_insert_index
+                            )
+                            next_runtime_context_insert_index = (
+                                overflow_outcome.runtime_context_insert_index
+                                if overflow_outcome.runtime_context_insert_index is not None
+                                else runtime_context_insert_index
+                            )
+                            next_request_messages = self._provider_request_messages(
+                                overflow_outcome.messages,
+                                request_context_message=request_context_message,
+                                request_context_insert_index=next_request_context_insert_index,
+                                runtime_context_message=runtime_context_message,
+                                runtime_context_insert_index=next_runtime_context_insert_index,
+                            )
+                            if not self._provider_request_is_smaller(
+                                request_messages,
+                                next_request_messages,
+                            ):
+                                yield self._transition(AgentState.ERROR)
+                                terminal_error = ErrorEvent(
+                                    message="Context overflow persists after compaction",
+                                    code="compaction_exhausted",
                                 )
-                                if self._session_key:
-                                    notify_compaction(self._session_key)
-                                window_input_tokens = 0
-                                window_output_tokens = 0
+                                yield terminal_error
+                                break
+                            turn_messages = overflow_outcome.messages
+                            request_context_insert_index = next_request_context_insert_index
+                            runtime_context_insert_index = next_runtime_context_insert_index
+                            yield CompactionEvent(
+                                summary=overflow_outcome.summary,
+                                kept_entries=overflow_outcome.kept_entries,
+                                kept_count=len(overflow_outcome.messages),
+                                removed_count=overflow_outcome.removed_count,
+                            )
+                            if self._session_key:
+                                notify_compaction(self._session_key)
+                            window_input_tokens = 0
+                            window_output_tokens = 0
                             _call_attempt += 1
                             continue
                         if not _fallback.should_retry(kind, _retry_attempt):
@@ -1537,12 +1603,22 @@ class Agent:
                 # ------ STREAMING → TOOL_CALLING ------
                 yield self._transition(AgentState.TOOL_CALLING)
 
-                # Execute tools and collect results
+                # Execute tools and collect results.
+                # Safe tools (named in _SAFE_TOOL_NAMES) run concurrently via
+                # asyncio.gather; mutex tools run serially. Results are emitted
+                # in the original tool_calls arrival order regardless of
+                # completion order.
+                from opensquilla.engine.runtime import _SAFE_TOOL_NAMES  # noqa: PLC0415
+
                 tool_result_blocks: list[ContentBlockToolResult] = []
                 executed_results: list[ToolResult] = []
                 turn_yielded = False
-                for tc in tool_calls:
-                    tool_started_at = time.monotonic()
+
+                # Map tool_use_id -> ToolResult built up below.
+                results_by_id: dict[str, ToolResult] = {}
+
+                async def _run_one(tc: ToolCall) -> ToolResult:
+                    started = time.monotonic()
                     self._write_turn_call_log(
                         "tool_request",
                         iteration=iterations,
@@ -1552,11 +1628,11 @@ class Agent:
                     )
                     tool_timeout = self._tool_execution_timeout(tc)
                     try:
-                        result = await asyncio.wait_for(
+                        res = await asyncio.wait_for(
                             self._execute_tool(tc), timeout=tool_timeout
                         )
                     except TimeoutError:
-                        result = ToolResult(
+                        res = ToolResult(
                             tool_use_id=tc.tool_use_id,
                             tool_name=tc.tool_name,
                             content=(f"Tool '{tc.tool_name}' timed out after {tool_timeout}s"),
@@ -1565,15 +1641,56 @@ class Agent:
                     self._write_turn_call_log(
                         "tool_response",
                         iteration=iterations,
-                        tool_use_id=result.tool_use_id,
-                        name=result.tool_name,
-                        result=result.content,
-                        result_chars=len(result.content),
-                        is_error=result.is_error,
-                        duration_ms=int((time.monotonic() - tool_started_at) * 1000),
+                        tool_use_id=res.tool_use_id,
+                        name=res.tool_name,
+                        result=res.content,
+                        result_chars=len(res.content),
+                        is_error=res.is_error,
+                        duration_ms=int((time.monotonic() - started) * 1000),
                     )
-                    result = await self._compress_tool_result(result)
+                    return res
+
+                # Dispatch preserving original order: accumulate consecutive safe
+                # tools into a batch and flush with asyncio.gather before each
+                # mutex tool, then run the mutex tool serially.  This ensures
+                # that a safe tool appearing after a mutex tool cannot start
+                # until that mutex tool has completed.
+                safe_batch: list[ToolCall] = []
+
+                async def _flush_safe_batch(batch: list[ToolCall]) -> None:
+                    if not batch:
+                        return
+                    gather_results = await asyncio.gather(
+                        *[_run_one(tc) for tc in batch], return_exceptions=True
+                    )
+                    for tc, outcome in zip(batch, gather_results):
+                        if isinstance(outcome, BaseException):
+                            outcome = ToolResult(
+                                tool_use_id=tc.tool_use_id,
+                                tool_name=tc.tool_name,
+                                content=f"Tool '{tc.tool_name}' raised: {outcome}",
+                                is_error=True,
+                            )
+                        results_by_id[tc.tool_use_id] = outcome
+
+                for tc in tool_calls:
+                    if tc.tool_name in _SAFE_TOOL_NAMES:
+                        safe_batch.append(tc)
+                    else:
+                        await _flush_safe_batch(safe_batch)
+                        safe_batch = []
+                        results_by_id[tc.tool_use_id] = await _run_one(tc)
+
+                await _flush_safe_batch(safe_batch)
+
+                # Emit results in original tool_calls order.
+                for tc in tool_calls:
+                    result = await self._compress_tool_result(
+                        results_by_id[tc.tool_use_id]
+                    )
                     executed_results.append(result)
+                    for artifact in result.artifacts:
+                        yield ArtifactEvent(**_artifact_event_kwargs(artifact))
                     yield ToolResultEvent(
                         tool_use_id=result.tool_use_id,
                         tool_name=result.tool_name,
@@ -1702,6 +1819,79 @@ class Agent:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    async def _stream_provider_events_with_deadline(
+        self,
+        stream: AsyncIterator[Any],
+        *,
+        loop: asyncio.AbstractEventLoop,
+        iter_deadline: float,
+        total_deadline: float | None,
+    ) -> AsyncIterator[Any]:
+        stream_iter = stream.__aiter__()
+        while True:
+            remaining_iter = iter_deadline - loop.time()
+            if remaining_iter <= 0:
+                await self._close_provider_stream(stream_iter)
+                raise _IterationStreamTimeoutError
+
+            wait_budget = remaining_iter
+            if total_deadline is not None:
+                remaining_total = total_deadline - loop.time()
+                if remaining_total <= 0:
+                    await self._close_provider_stream(stream_iter)
+                    raise TimeoutError(f"Agent total timeout after {self.config.timeout}s")
+                wait_budget = min(wait_budget, remaining_total)
+
+            next_event: asyncio.Future[Any] = asyncio.ensure_future(stream_iter.__anext__())
+            done, _ = await asyncio.wait({next_event}, timeout=wait_budget)
+            if not done:
+                next_event.cancel()
+                with contextlib.suppress(asyncio.CancelledError, StopAsyncIteration):
+                    await next_event
+                await self._close_provider_stream(stream_iter)
+                if total_deadline is not None and loop.time() >= total_deadline:
+                    raise TimeoutError(f"Agent total timeout after {self.config.timeout}s")
+                raise _IterationStreamTimeoutError
+            try:
+                yield next_event.result()
+            except StopAsyncIteration:
+                return
+
+    @staticmethod
+    async def _close_provider_stream(stream_iter: AsyncIterator[Any]) -> None:
+        aclose = getattr(stream_iter, "aclose", None)
+        if not callable(aclose):
+            return
+        try:
+            await aclose()
+        except Exception as exc:  # noqa: BLE001 - cleanup must not mask timeout
+            logger.debug("provider_stream.close_failed", error=str(exc))
+
+    def _provider_request_messages(
+        self,
+        messages: list[Message],
+        *,
+        request_context_message: Message | None,
+        request_context_insert_index: int,
+        runtime_context_message: Message,
+        runtime_context_insert_index: int,
+    ) -> list[Message]:
+        source_messages = self._with_request_context_messages(
+            messages,
+            request_context_message,
+            request_context_insert_index,
+            runtime_context_message,
+            runtime_context_insert_index,
+        )
+        request_messages, _ = sanitize_session_messages(source_messages)
+        return request_messages
+
+    @staticmethod
+    def _provider_request_is_smaller(before: list[Message], after: list[Message]) -> bool:
+        return len(after) < len(before) or session_payload_chars(after) < session_payload_chars(
+            before
+        )
 
     def _runtime_context_block(self) -> str:
         now = datetime.now().astimezone()

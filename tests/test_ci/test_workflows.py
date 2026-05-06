@@ -39,9 +39,11 @@ def test_default_ci_blocks_pull_requests_and_main_pushes() -> None:
     assert {"pull_request", "push", "workflow_dispatch"} <= _trigger_keys(data)
     assert "branches: [main]" in text
     assert "PYTHONPATH: ${{ github.workspace }}" in text
-    assert "OPENSQUILLA_STATE_DIR: ${{ runner.temp }}/opensquilla-state" in text
-    assert "OPENSQUILLA_LOG_DIR: ${{ runner.temp }}/opensquilla-logs" in text
+    assert "Configure runtime directories" in text
+    assert 'OPENSQUILLA_STATE_DIR=%s/opensquilla-state\\n' in text
+    assert 'OPENSQUILLA_LOG_DIR=%s/opensquilla-logs\\n' in text
     assert "OPENSQUILLA_TURN_CALL_LOG: \"0\"" in text
+    assert "actionlint@v1.7.12" in text
 
 
 def test_manual_workflows_reference_existing_test_files() -> None:

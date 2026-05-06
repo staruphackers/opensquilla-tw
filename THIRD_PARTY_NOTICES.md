@@ -9,7 +9,7 @@ It covers:
   OpenSquilla does not vendor those libraries, but the skill instructs the
   agent runtime to invoke them and is documented here for transparency.
 - The local SquillaRouter V4 Phase 3 model bundle under
-  `src/opensquilla/contrib/squilla_router/models/v4.2_phase3_inference/`.
+  `src/opensquilla/squilla_router/models/v4.2_phase3_inference/`.
 
 ## OpenClaw-derived bundled skill descriptors
 
@@ -59,34 +59,29 @@ SOFTWARE.
 ## OpenSquilla-original bundled skills
 
 These bundled skill descriptors are authored and maintained by OpenSquilla and
-are released under OpenSquilla's repository license (MIT; see `LICENSE`):
+are released under OpenSquilla's repository license (Apache-2.0; see `LICENSE`):
 
 - `memory`
-- `pptx`
 
 ## ClawHub-derived bundled skill descriptors
 
 - Component: SKILL.md frontmatter and instruction text for these bundled skills:
-  - `automation-workflows`
   - `deep-research`
   - `docx`
   - `html-to-pdf`
-  - `humanizer`
   - `multi-search-engine`
   - `pdf-toolkit`
-  - `self-improving-agent`
-  - `website-builder`
+  - `pptx`
   - `xlsx`
 - Upstream registry: https://clawhub.ai
 - License: MIT-0 (Public-domain-equivalent; no attribution required, but
   each skill records its specific upstream slug in its own
   `THIRD_PARTY_NOTICES.md` for transparency)
 
-The descriptor text and helper scripts in these skills were independently
-authored by OpenSquilla after surveying the corresponding ClawHub registry
-entries; ClawHub's MIT-0 default license permits unlimited use, modification,
-and redistribution without attribution. The OpenSquilla copies are not
-verbatim reproductions of any specific upstream package.
+These bundled skills record their ClawHub source slug in SKILL.md frontmatter
+and, when present, the skill-local `THIRD_PARTY_NOTICES.md`. ClawHub's MIT-0
+default license permits unlimited use, modification, and redistribution without
+attribution.
 
 ```
 MIT No Attribution
@@ -108,26 +103,6 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
-
-The bundled `pptx` skill describes how to call the public APIs of the libraries
-listed in the next section.
-
-## Libraries referenced by the bundled pptx skill
-
-The pptx skill instructs the agent runtime to invoke these libraries inside the
-sandbox; OpenSquilla does not vendor their source. Their license metadata
-travels with the installed wheel/package.
-
-- python-pptx: MIT License, https://github.com/scanny/python-pptx
-- PptxGenJS: MIT License, https://github.com/gitbrent/PptxGenJS
-- markitdown (optional, for text extraction):
-  MIT License, https://github.com/microsoft/markitdown
-- LibreOffice (optional, for `.pptx → .pdf` rendering, invoked as `soffice`):
-  MPL-2.0, https://www.libreoffice.org/about-us/licenses/
-- Poppler `pdftoppm` (optional, for `.pdf → .jpg` rendering): GPL-2.0+,
-  https://poppler.freedesktop.org/
-
-
 
 ## BAAI bge-small-zh-v1.5 / FlagEmbedding
 
@@ -163,20 +138,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
-## Router Runtime Dependencies
-
-The SquillaRouter bundle is consumed by optional runtime dependencies declared
-in `pyproject.toml` and `runtime-requirements.txt`. The repository does not
-vendor these packages' source trees in the router bundle; installed wheels
-carry their own license metadata. Relevant projects include:
-
-- LightGBM: MIT License, https://github.com/microsoft/LightGBM
-- scikit-learn: BSD 3-Clause License, https://github.com/scikit-learn/scikit-learn
-- joblib: BSD 3-Clause License, https://github.com/joblib/joblib
-- ONNX Runtime: MIT License, https://github.com/microsoft/onnxruntime
-- Hugging Face tokenizers: Apache License 2.0, https://github.com/huggingface/tokenizers
-- PyYAML: MIT License, https://github.com/yaml/pyyaml
 
 ## Router Artifact Safety Note
 

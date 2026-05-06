@@ -10,11 +10,9 @@ The envelope MUST NOT use the field name ``file_uuid``; that is an
 upload-store concept which would leak into the engine on replay. Staged
 attachments use ``sha256_ref`` instead.
 
-Deferred coverage: dedupe-within-session against an existing on-disk sha +
-transcript-disk-budget fallback to inline-in-envelope. The current
-implementation deduplicates implicitly (sha-keyed paths overwrite to the same
-content); the explicit "fall back to inline when budget exceeded" test belongs
-with the budget tracker.
+Deferred coverage: dedupe-within-session against an existing on-disk sha. The
+current implementation deduplicates implicitly because sha-keyed paths overwrite
+to the same content.
 """
 
 from __future__ import annotations
@@ -23,6 +21,8 @@ import base64
 import hashlib
 import json
 from pathlib import Path
+
+import pytest
 
 from opensquilla.gateway.transcripts import (
     build_transcript_attachment_envelope,
@@ -117,7 +117,7 @@ def test_transcript_envelope_uses_sha256_ref_not_file_uuid(tmp_path: Path) -> No
 
 
 # ---------------------------------------------------------------------------
-# Test 3 — persist disabled keeps everything inline.
+# Test 3 — persist disabled keeps staged material out of the envelope.
 # ---------------------------------------------------------------------------
 
 def test_persist_transcripts_disabled_skips_disk_copy(tmp_path: Path) -> None:
@@ -137,7 +137,13 @@ def test_persist_transcripts_disabled_skips_disk_copy(tmp_path: Path) -> None:
     )
     parsed = json.loads(envelope)
     persisted = parsed["attachments"][0]
-    assert persisted.get("data") == _b64(pdf)
+    assert persisted == {
+        "name": "r.pdf",
+        "mime": "application/pdf",
+        "size": len(pdf),
+        "missing_reason": "attachment persistence disabled",
+    }
+    assert "data" not in persisted
     assert "sha256_ref" not in persisted
     assert writes == []
 
@@ -171,8 +177,8 @@ def test_transcript_dedup_within_session(tmp_path: Path) -> None:
 # Test 5 — replay rebuilds from sha256_ref by reading the on-disk copy.
 # ---------------------------------------------------------------------------
 
-def test_replay_resolves_sha256_ref_without_file_uuid_in_engine(tmp_path: Path) -> None:
-    """Engine never observes file_uuid — replay reads sha-keyed file."""
+def test_replay_preserves_sha256_ref_without_reinlining_bytes(tmp_path: Path) -> None:
+    """Historical replay keeps ref metadata and never recreates base64 data."""
 
     pdf = b"%PDF-1.4\nbody\n"
     sha = hashlib.sha256(pdf).hexdigest()
@@ -196,30 +202,20 @@ def test_replay_resolves_sha256_ref_without_file_uuid_in_engine(tmp_path: Path) 
     text, attachments = rebuild_attachments_for_replay(
         envelope, session_id="s1", media_root=tmp_path
     )
-    assert text == "replay me"
-    assert len(attachments) == 1
-    att = attachments[0]
-    # No file_uuid leak.
-    assert "file_uuid" not in att
-    # Bytes are inlined for the engine.
-    assert base64.b64decode(att["data"]) == pdf
-    assert att["type"] == "application/pdf"
+    assert "replay me" in text
+    assert "[historical attachment omitted: r.pdf (application/pdf)]" in text
+    assert attachments == []
+    assert sha not in text
 
 
 # ---------------------------------------------------------------------------
 # Test 6 — replay degrades gracefully when the persisted file is missing.
 # ---------------------------------------------------------------------------
 
-def test_transcript_persistence_falls_back_to_inline_when_budget_exceeded(
+def test_transcript_persistence_rejects_budget_exceeded_staged_attachment(
     tmp_path: Path,
 ) -> None:
-    """When disk_budget_bytes would be exceeded, the writer falls back to
-    inline-in-envelope rather than crashing the persist.
-
-    Counter ``transcript.disk.budget_exceeded`` increments and the envelope
-    reverts to the existing ``{type, data, name}`` shape so the transcript still
-    preserves the attachment.
-    """
+    """Current staged uploads must not fall back to persistent inline base64."""
     pdf = b"%PDF-1.4\n" + b"a" * 50_000  # 50 KB
     staged = {
         "type": "application/pdf",
@@ -227,20 +223,15 @@ def test_transcript_persistence_falls_back_to_inline_when_budget_exceeded(
         "name": "r.pdf",
         "_was_staged": True,
     }
-    envelope, writes = build_transcript_attachment_envelope(
-        text="x",
-        attachments=[staged],
-        session_id="s1",
-        media_root=tmp_path,
-        persist_enabled=True,
-        disk_budget_bytes=10_000,  # cap below the payload size
-    )
-    parsed = json.loads(envelope)
-    persisted = parsed["attachments"][0]
-    # Fallback path: inline data, no sha256_ref, no on-disk write.
-    assert persisted.get("data") == _b64(pdf)
-    assert "sha256_ref" not in persisted
-    assert writes == []
+    with pytest.raises(ValueError, match="disk budget"):
+        build_transcript_attachment_envelope(
+            text="x",
+            attachments=[staged],
+            session_id="s1",
+            media_root=tmp_path,
+            persist_enabled=True,
+            disk_budget_bytes=10_000,  # cap below the payload size
+        )
     transcripts_dir = tmp_path / "transcripts" / "s1"
     assert not transcripts_dir.exists() or not list(transcripts_dir.iterdir())
 

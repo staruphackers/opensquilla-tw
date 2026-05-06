@@ -40,6 +40,22 @@ def _make_entry(content: str, role: str = "user") -> TranscriptEntry:
     )
 
 
+def _flush_receipt(**overrides):
+    payload = {
+        "mode": "llm",
+        "error": None,
+        "indexed_chunk_count": 1,
+        "integrity_status": "ok",
+        "output_coverage_status": "ok",
+        "invalid_candidate_count": 0,
+        "candidate_missing_ids": [],
+        "obligation_status": "ok",
+        "obligation_missing_ids": [],
+    }
+    payload.update(overrides)
+    return SimpleNamespace(**payload)
+
+
 class _FakeCompactionProvider:
     provider_name = "openai"
 
@@ -255,7 +271,7 @@ async def test_preflight_flushes_full_transcript_before_compact() -> None:
 
     async def flush_execute(*args, **kwargs):
         calls.append("flush")
-        return MagicMock(mode="llm", error=None)
+        return _flush_receipt()
 
     flush_service.execute = AsyncMock(side_effect=flush_execute)
 
@@ -275,8 +291,172 @@ async def test_preflight_flushes_full_transcript_before_compact() -> None:
         agent_id="ops",
         message_window=0,
         segment_mode="auto",
+        timeout=5.0,
     )
     mock_sm.compact.assert_awaited_once_with("agent:ops:long-session", context_window)
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        _flush_receipt(mode="raw", raw_reason="no_provider"),
+        _flush_receipt(integrity_status="missing_chunks"),
+        _flush_receipt(output_coverage_status="coverage_warning"),
+        _flush_receipt(invalid_candidate_count=1),
+        _flush_receipt(candidate_missing_ids=["candidate-1"]),
+        _flush_receipt(obligation_missing_ids=["obligation-1"]),
+    ],
+)
+@pytest.mark.asyncio
+async def test_preflight_degraded_flush_receipts_skip_compact(receipt: SimpleNamespace) -> None:
+    context_window = 1000
+    entries = [_make_entry("early durable fact " + ("a" * 4000))]
+    mock_sm = MagicMock()
+    mock_sm.get_transcript = AsyncMock(return_value=entries)
+    mock_sm.compact = AsyncMock(return_value="summary text")
+
+    flush_service = MagicMock()
+    flush_service.execute = AsyncMock(return_value=receipt)
+    runner = TurnRunner(
+        provider_selector=MagicMock(),
+        session_manager=mock_sm,
+        session_flush_service=flush_service,
+    )
+
+    with patch("opensquilla.session.tokenizer.estimate_tokens", return_value=1000):
+        await runner._maybe_preflight_compact("agent:ops:long-session", context_window)
+
+    flush_service.execute.assert_awaited_once()
+    mock_sm.compact.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_preflight_backfilled_flush_receipt_allows_compact() -> None:
+    context_window = 1000
+    entries = [_make_entry("early durable fact " + ("a" * 4000))]
+    mock_sm = MagicMock()
+    mock_sm.get_transcript = AsyncMock(return_value=entries)
+    mock_sm.compact = AsyncMock(return_value="summary text")
+
+    flush_service = MagicMock()
+    flush_service.execute = AsyncMock(return_value=_flush_receipt(obligation_status="backfilled"))
+    runner = TurnRunner(
+        provider_selector=MagicMock(),
+        session_manager=mock_sm,
+        session_flush_service=flush_service,
+    )
+
+    with patch("opensquilla.session.tokenizer.estimate_tokens", return_value=1000):
+        await runner._maybe_preflight_compact("agent:ops:long-session", context_window)
+
+    flush_service.execute.assert_awaited_once()
+    mock_sm.compact.assert_awaited_once_with("agent:ops:long-session", context_window)
+
+
+@pytest.mark.asyncio
+async def test_preflight_uses_configured_memory_flush_timeout() -> None:
+    context_window = 1000
+    entries = [_make_entry("early durable fact " + ("a" * 4000))]
+    mock_sm = MagicMock()
+    mock_sm.get_transcript = AsyncMock(return_value=entries)
+    mock_sm.compact = AsyncMock(return_value="summary text")
+
+    flush_service = MagicMock()
+    flush_service.execute = AsyncMock(return_value=_flush_receipt())
+    runner = TurnRunner(
+        provider_selector=MagicMock(),
+        session_manager=mock_sm,
+        session_flush_service=flush_service,
+        config=SimpleNamespace(
+            memory=SimpleNamespace(flush_enabled=True, flush_timeout_seconds=0.25)
+        ),
+    )
+
+    with patch("opensquilla.session.tokenizer.estimate_tokens", return_value=1000):
+        await runner._maybe_preflight_compact("agent:ops:long-session", context_window)
+
+    assert flush_service.execute.await_args.kwargs["timeout"] == 0.25
+    mock_sm.compact.assert_awaited_once_with("agent:ops:long-session", context_window)
+
+
+@pytest.mark.asyncio
+async def test_preflight_memory_flush_disabled_compacts_without_flush() -> None:
+    context_window = 1000
+    entries = [_make_entry("early durable fact " + ("a" * 4000))]
+    mock_sm = MagicMock()
+    mock_sm.get_transcript = AsyncMock(return_value=entries)
+    mock_sm.compact = AsyncMock(return_value="summary text")
+
+    flush_service = MagicMock()
+    flush_service.execute = AsyncMock(return_value=_flush_receipt())
+    runner = TurnRunner(
+        provider_selector=MagicMock(),
+        session_manager=mock_sm,
+        session_flush_service=flush_service,
+        config=SimpleNamespace(
+            memory=SimpleNamespace(flush_enabled=False, flush_timeout_seconds=0.25)
+        ),
+    )
+
+    with patch("opensquilla.session.tokenizer.estimate_tokens", return_value=1000):
+        await runner._maybe_preflight_compact("agent:ops:long-session", context_window)
+
+    flush_service.execute.assert_not_called()
+    mock_sm.compact.assert_awaited_once_with("agent:ops:long-session", context_window)
+
+
+@pytest.mark.parametrize("value", ["0", "false", "no", "off"])
+@pytest.mark.asyncio
+async def test_preflight_env_flush_disabled_compacts_without_flush(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    monkeypatch.setenv("OPENSQUILLA_SESSION_FLUSH", value)
+    context_window = 1000
+    entries = [_make_entry("early durable fact " + ("a" * 4000))]
+    mock_sm = MagicMock()
+    mock_sm.get_transcript = AsyncMock(return_value=entries)
+    mock_sm.compact = AsyncMock(return_value="summary text")
+
+    flush_service = MagicMock()
+    flush_service.execute = AsyncMock(return_value=_flush_receipt())
+    runner = TurnRunner(
+        provider_selector=MagicMock(),
+        session_manager=mock_sm,
+        session_flush_service=flush_service,
+        config=SimpleNamespace(
+            memory=SimpleNamespace(flush_enabled=True, flush_timeout_seconds=0.25)
+        ),
+    )
+
+    with patch("opensquilla.session.tokenizer.estimate_tokens", return_value=1000):
+        await runner._maybe_preflight_compact("agent:ops:long-session", context_window)
+
+    flush_service.execute.assert_not_called()
+    mock_sm.compact.assert_awaited_once_with("agent:ops:long-session", context_window)
+
+
+@pytest.mark.asyncio
+async def test_preflight_flush_service_unavailable_skips_compact_when_enabled() -> None:
+    context_window = 1000
+    entries = [_make_entry("early durable fact " + ("a" * 4000))]
+    mock_sm = MagicMock()
+    mock_sm.get_transcript = AsyncMock(return_value=entries)
+    mock_sm.compact = AsyncMock(return_value="summary text")
+
+    runner = TurnRunner(
+        provider_selector=MagicMock(),
+        session_manager=mock_sm,
+        session_flush_service=None,
+        config=SimpleNamespace(
+            memory=SimpleNamespace(flush_enabled=True, flush_timeout_seconds=0.25)
+        ),
+    )
+
+    with patch("opensquilla.session.tokenizer.estimate_tokens", return_value=1000):
+        await runner._maybe_preflight_compact("agent:ops:long-session", context_window)
+
+    mock_sm.compact.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -295,7 +475,7 @@ async def test_preflight_passes_provider_backed_compaction_config_after_flush() 
     mock_sm.compact = AsyncMock(side_effect=compact)
 
     flush_service = MagicMock()
-    flush_service.execute = AsyncMock(return_value=MagicMock(mode="llm", error=None))
+    flush_service.execute = AsyncMock(return_value=_flush_receipt())
 
     runner = TurnRunner(
         provider_selector=MagicMock(),
@@ -356,6 +536,37 @@ async def test_preflight_keeps_legacy_compact_manager_compatible() -> None:
         )
 
     assert calls == [("agent:ops:long-session", context_window)]
+
+
+@pytest.mark.asyncio
+async def test_run_falls_back_to_generic_preflight_after_t3_flush_failed() -> None:
+    selector = _FakeProviderSelector()
+    runner = TurnRunner(provider_selector=selector, config=GatewayConfig())
+    seen: dict[str, object] = {}
+
+    async def fake_t3(session_key, turn, context_window_tokens, **kwargs):
+        seen["t3_session_key"] = session_key
+        return "flush_failed"
+
+    async def spy_preflight(session_key, context_window_tokens, **kwargs):
+        seen["preflight_session_key"] = session_key
+        seen.update(kwargs)
+
+    runner._maybe_compact_on_t3_upgrade = fake_t3  # type: ignore[method-assign]
+    runner._maybe_preflight_compact = spy_preflight  # type: ignore[method-assign]
+    tool_ctx = ToolContext(is_owner=True, caller_kind=CallerKind.CLI)
+
+    async for _ in runner.run(
+        "hello",
+        "agent:main:abc123",
+        tool_context=tool_ctx,
+        model="routed/model",
+    ):
+        pass
+
+    assert seen["t3_session_key"] == "agent:main:abc123"
+    assert seen["preflight_session_key"] == "agent:main:abc123"
+    assert seen["compaction_model"] == "routed/model"
 
 
 @pytest.mark.asyncio

@@ -129,7 +129,11 @@ async def main() -> int:
     spec = get_provider_spec("deepseek")
     api_key = os.environ.get(spec.env_key, "").strip()
     model = args.model or os.environ.get("DEEPSEEK_MODEL", "").strip() or "deepseek-v4-pro"
-    base_url = args.base_url or os.environ.get("DEEPSEEK_BASE_URL", "").strip() or spec.default_base_url
+    base_url = (
+        args.base_url
+        or os.environ.get("DEEPSEEK_BASE_URL", "").strip()
+        or spec.default_base_url
+    )
     marker = f"DEEPSEEK_TOOL_REPLAY_{int(time.time() * 1000)}"
     payload: dict[str, Any] = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),

@@ -143,8 +143,18 @@ def _buffer_session_event(
 async def _resolve_attachments(
     validated: list[dict[str, Any]],
     store: Any | None = None,
+    *,
+    material_root: Any | None = None,
+    session_id: str | None = None,
+    disk_budget_bytes: int | None = None,
 ) -> list[dict[str, Any]]:
-    resolved, _consumed = await _attachment_ingest.resolve_attachments(validated, store=store)
+    resolved, _consumed = await _attachment_ingest.resolve_attachments(
+        validated,
+        store=store,
+        material_root=material_root,
+        session_id=session_id,
+        disk_budget_bytes=disk_budget_bytes,
+    )
     return resolved
 
 
@@ -608,10 +618,25 @@ async def _handle_sessions_send(params: dict | None, ctx: RpcContext) -> dict:
 
     message_text: str = params["message"]
     semantic_message_text = message_text
+    from pathlib import Path as _Path
+
+    attachments_cfg = getattr(ctx.config, "attachments", None)
+    persist_enabled = bool(getattr(attachments_cfg, "persist_transcripts", True))
+    media_root_raw = getattr(attachments_cfg, "media_root", None)
+    media_root = (
+        _Path(media_root_raw)
+        if media_root_raw
+        else _Path(".opensquilla") / "media"
+    )
+    session_id = key.split(":")[-1] or key
+    disk_budget = getattr(attachments_cfg, "transcript_disk_budget_bytes", None)
     ingested_attachments = await _attachment_ingest.ingest_attachments(
         message_text,
         params.get("attachments", []),
         failure_mode="raise",
+        material_root=media_root,
+        session_id=session_id,
+        disk_budget_bytes=disk_budget if isinstance(disk_budget, int) else None,
     )
     message_text = ingested_attachments.text
     raw_attachments = ingested_attachments.attachments
@@ -703,8 +728,6 @@ async def _handle_sessions_send(params: dict | None, ctx: RpcContext) -> dict:
     async def _persist_user_message() -> None:
         nonlocal message_text, persisted_entry
         if raw_attachments:
-            from pathlib import Path as _Path
-
             from opensquilla.gateway.transcripts import (
                 build_transcript_attachment_envelope,
             )
@@ -715,17 +738,6 @@ async def _handle_sessions_send(params: dict | None, ctx: RpcContext) -> dict:
                 if isinstance(_stamped, str):
                     message_text = _stamped
 
-            attachments_cfg = getattr(ctx.config, "attachments", None)
-            persist_enabled = bool(getattr(attachments_cfg, "persist_transcripts", True))
-            media_root_raw = getattr(attachments_cfg, "media_root", None)
-            media_root = (
-                _Path(media_root_raw)
-                if media_root_raw
-                else _Path(".opensquilla") / "media"
-            )
-
-            session_id = key.split(":")[-1] or key
-            disk_budget = getattr(attachments_cfg, "transcript_disk_budget_bytes", None)
             persist_content, _writes = build_transcript_attachment_envelope(
                 text=message_text,
                 attachments=raw_attachments,

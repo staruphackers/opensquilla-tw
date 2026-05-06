@@ -50,6 +50,11 @@ class ToolContext:
     source_kind: str | None = None
     source_name: str | None = None
     task_id: str | None = None
+    artifact_media_root: str | None = None
+    artifact_session_id: str | None = None
+    artifact_max_bytes: int | None = None
+    artifact_disk_budget_bytes: int | None = None
+    published_artifacts: list[dict[str, Any]] = field(default_factory=list)
     allowed_tools: set[str] | None = None
     denied_tools: set[str] = field(default_factory=set)
     on_memory_source_write: Callable[[str, str], None] | None = None
@@ -78,6 +83,7 @@ SUBAGENT_TOOL_DENY: frozenset[str] = frozenset(
         "agents_list",
         "subagents",
         "message",
+        "publish_artifact",
     }
 )
 

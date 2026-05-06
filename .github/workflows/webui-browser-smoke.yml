@@ -3,6 +3,9 @@ name: Web UI Browser Smoke
 "on":
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   webui-browser-smoke:
     name: Real browser Web UI smoke
@@ -10,13 +13,16 @@ jobs:
     timeout-minutes: 20
     env:
       OPENSQUILLA_WEBUI_BROWSER_E2E: "1"
-      OPENSQUILLA_LOG_DIR: ${{ runner.temp }}/opensquilla-logs
       OPENSQUILLA_TURN_CALL_LOG: "0"
       TMPDIR: /tmp
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+
+      - name: Configure runtime directories
+        shell: bash
+        run: printf 'OPENSQUILLA_LOG_DIR=%s/opensquilla-logs\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
 
       - name: Set up Python
         uses: actions/setup-python@v5

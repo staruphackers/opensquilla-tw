@@ -85,8 +85,8 @@ def test_reasoning_hint_model_family_detection() -> None:
     assert reasoning_tag_hint("plain-model") is None
 
 
-def test_docs_prompt_hint_is_repo_relative_for_cache_stability() -> None:
-    assert TurnRunner._resolve_docs_path() == "docs/"
+def test_docs_prompt_hint_is_disabled_when_public_docs_are_not_shipped() -> None:
+    assert TurnRunner._resolve_docs_path() is None
 
 
 @pytest.mark.asyncio

@@ -5,9 +5,12 @@ from __future__ import annotations
 import base64
 import binascii
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 import structlog
+
+from opensquilla.attachment_refs import make_attachment_ref, write_transcript_material
 
 log = structlog.get_logger(__name__)
 
@@ -406,6 +409,11 @@ def validate_attachments(
 
 
 def _attachment_raw_size(attachment: dict[str, Any], index: int) -> int:
+    if attachment.get("kind") == "attachment_ref":
+        size = attachment.get("size")
+        if isinstance(size, int) and size >= 0:
+            return size
+        raise ValueError(f"attachments[{index}].size is required for attachment_ref")
     data = attachment.get("data")
     raw_bytes, _was_bytes = _raw_bytes_from_data(data, index=index)
     return len(raw_bytes)
@@ -425,6 +433,10 @@ def enforce_total_attachment_bytes(attachments: list[dict[str, Any]]) -> None:
 async def resolve_attachments(
     validated: list[dict[str, Any]],
     store: Any | None = None,
+    *,
+    material_root: Path | None = None,
+    session_id: str | None = None,
+    disk_budget_bytes: int | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     if not any(isinstance(a, dict) and a.get("file_uuid") for a in validated):
         enforce_total_attachment_bytes(validated)
@@ -465,7 +477,28 @@ async def resolve_attachments(
             failure_mode="raise",
             mark_bytes_as_staged=True,
         )
-        resolved.append(materialized[0])
+        item = materialized[0]
+        if material_root is None or not session_id:
+            raise ValueError(
+                f"attachments[{index}] file_uuid resolution requires a material target"
+            )
+        raw_bytes, _was_bytes = _raw_bytes_from_data(item.get("data"), index=index)
+        sha, _path, _wrote = write_transcript_material(
+            media_root=material_root,
+            session_id=session_id,
+            payload=raw_bytes,
+            disk_budget_bytes=disk_budget_bytes,
+        )
+        resolved.append(
+            make_attachment_ref(
+                sha256=sha,
+                name=item["name"],
+                mime=item["type"],
+                size=len(raw_bytes),
+                session_id=session_id,
+                source="upload",
+            )
+        )
         consumed.append(ref)
     enforce_total_attachment_bytes(resolved)
     return resolved, consumed
@@ -478,13 +511,22 @@ async def ingest_attachments(
     store: Any | None = None,
     failure_mode: Literal["raise", "mark"] = "raise",
     mark_bytes_as_staged: bool = False,
+    material_root: Path | None = None,
+    session_id: str | None = None,
+    disk_budget_bytes: int | None = None,
 ) -> AttachmentIngestResult:
     validated, failures = validate_attachments(
         raw_attachments,
         failure_mode=failure_mode,
         mark_bytes_as_staged=mark_bytes_as_staged,
     )
-    resolved, consumed = await resolve_attachments(validated, store=store)
+    resolved, consumed = await resolve_attachments(
+        validated,
+        store=store,
+        material_root=material_root,
+        session_id=session_id,
+        disk_budget_bytes=disk_budget_bytes,
+    )
     if failures:
         markers = [failure.marker for failure in failures]
         text = "\n".join([text, *markers]).strip()

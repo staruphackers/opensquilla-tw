@@ -1,0 +1,28 @@
+from __future__ import annotations
+
+import tomllib
+from pathlib import Path
+
+
+def test_pyproject_version_not_bumped() -> None:
+    config = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    version = config["project"]["version"]
+    assert version == "0.1.0", (
+        f"pyproject.toml version must stay '0.1.0' "
+        f"(alpha communicated via git tag); got '{version}'"
+    )
+
+
+def test_releases_md_exists_and_references_alpha_tag() -> None:
+    releases = Path("RELEASES.md")
+    assert releases.is_file(), "RELEASES.md must exist at the repository root"
+    text = releases.read_text(encoding="utf-8")
+    assert "v0.1.0-alpha.1" in text, "RELEASES.md must reference the tag 'v0.1.0-alpha.1'"
+
+
+def test_changelog_has_alpha_section_and_unreleased() -> None:
+    changelog = Path("CHANGELOG.md")
+    assert changelog.is_file(), "CHANGELOG.md must exist at the repository root"
+    text = changelog.read_text(encoding="utf-8")
+    assert "[0.1.0-alpha.1]" in text, "CHANGELOG.md must contain a [0.1.0-alpha.1] section"
+    assert "[Unreleased]" in text, "CHANGELOG.md must retain an [Unreleased] section"

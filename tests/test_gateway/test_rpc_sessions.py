@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -661,6 +663,71 @@ class TestSessionsSend:
         assert ctx_with_sessions.session_manager.created_messages == []
         assert store.evicted == []
         assert set(store.entries) == set(entries)
+
+    @pytest.mark.asyncio
+    async def test_send_staged_upload_persists_and_runs_with_material_ref(
+        self,
+        dispatcher,
+        tmp_path,
+        session,
+    ):
+        payload = b"%PDF-1.4\nbody\n"
+        sha = hashlib.sha256(payload).hexdigest()
+        store = _FakeUploadStore(
+            {
+                "u-pdf": (
+                    payload,
+                    {
+                        "mime": "application/pdf",
+                        "name": "r.pdf",
+                        "sha256": sha,
+                        "size": len(payload),
+                    },
+                )
+            }
+        )
+        manager = FakeSessionManager([session])
+        runner = _RecordingTurnRunner()
+        cfg = GatewayConfig()
+        cfg.attachments.media_root = str(tmp_path)
+        ctx = make_ctx(session_manager=manager, config=cfg, turn_runner=runner)
+        set_upload_store(store)  # type: ignore[arg-type]
+        try:
+            res = await dispatcher.dispatch(
+                "r1",
+                "sessions.send",
+                {
+                    "key": session.session_key,
+                    "message": "summarise",
+                    "attachments": [
+                        {"file_uuid": "u-pdf", "mime": "application/pdf", "name": "r.pdf"}
+                    ],
+                },
+                ctx,
+            )
+            task = get_agent_task_registry().get(session.session_key)
+            if task is not None:
+                await task
+        finally:
+            set_upload_store(None)
+
+        assert res.ok is True
+        assert store.evicted == ["u-pdf"]
+        persisted = json.loads(manager.created_messages[0][2])
+        persisted_att = persisted["attachments"][0]
+        assert persisted_att == {
+            "sha256_ref": sha,
+            "name": "r.pdf",
+            "mime": "application/pdf",
+            "size": len(payload),
+        }
+        runtime_att = runner.run_calls[0]["attachments"][0]
+        assert runtime_att["kind"] == "attachment_ref"
+        assert runtime_att["sha256"] == sha
+        assert runtime_att["scope"] == session.session_id
+        assert "data" not in runtime_att
+        assert "file_uuid" not in runtime_att
+        assert (tmp_path / "transcripts" / session.session_id / sha).read_bytes() == payload
 
     @pytest.mark.asyncio
     async def test_send_rejects_invalid_attachment_media_type(

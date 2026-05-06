@@ -29,6 +29,7 @@ const ChatView = (() => {
   let _segments = [];             // [{type:'text', raw:'', el:DOM}, {type:'tool', el:DOM}, ...]
   let _activeTextSeg = null;      // pointer to current text segment's DOM element
   let _activeTextRaw = '';        // raw text for current active segment only
+  let _streamArtifacts = [];
   let _autoScroll = true;
   let _streamIdleTimer = null;
   let _streamIdlePausedForApproval = false;
@@ -534,6 +535,17 @@ const ChatView = (() => {
     if (!_thread || _thread.dataset.hoverBound === '1') return;
     _thread.dataset.hoverBound = '1';
     _thread.addEventListener('click', (ev) => {
+      const artifactBtn = ev.target.closest('[data-artifact-download]');
+      if (artifactBtn) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        _downloadArtifact({
+          id: artifactBtn.dataset.artifactId || '',
+          name: artifactBtn.dataset.artifactName || 'artifact',
+          download_url: artifactBtn.dataset.artifactDownload || '',
+        });
+        return;
+      }
       const btn = ev.target.closest('.msg-action');
       if (!btn) return;
       ev.preventDefault();
@@ -2007,6 +2019,14 @@ const ChatView = (() => {
       _appendToolResult(payload);
     }));
 
+    _unsubs.push(_rpc.on('session.event.artifact', (payload) => {
+      if (_isStaleEpoch(payload)) return;
+      if (_aborted) return;
+      _noteStreamSeq(payload);
+      _resetStreamIdleTimer();
+      _appendArtifact(payload);
+    }));
+
     _unsubs.push(_rpc.on('session.event.subagent_completion', (payload) => {
       if (_isStaleEpoch(payload)) return;
       if (_aborted) return;
@@ -2408,6 +2428,7 @@ const ChatView = (() => {
           role: msg.role,
           text: displayText,
           ts: msg.timestamp || msg.ts || null,
+          artifacts: msg.artifacts || [],
           ...msgOptions,
         });
         _appendHistoryDaySeparator(msg.timestamp || msg.ts || null);
@@ -2448,6 +2469,10 @@ const ChatView = (() => {
           });
           thumbsHtml += '</div>';
           body.innerHTML += thumbsHtml;
+        }
+        if (msg.artifacts && msg.artifacts.length > 0) {
+          const body = div.querySelector('.msg-body');
+          body.innerHTML += _renderArtifacts(msg.artifacts || []);
         }
         // Tool-call reconstruction and attachment rendering above rewrite
         // body.innerHTML, which wipes the toolbar attached during _addMessage.
@@ -2907,6 +2932,7 @@ const ChatView = (() => {
     _applySessionRunState({ run_status: 'running', active_task: { status: 'running' } });
     _streamRaw = '';
     _segments = []; _activeTextSeg = null; _activeTextRaw = '';
+    _streamArtifacts = [];
     _streamBubble = null;
     _autoScroll = true;
     if (_thread) _thread.setAttribute('aria-busy', 'true');
@@ -3030,6 +3056,7 @@ const ChatView = (() => {
         _isStreaming = false;
         _streamRaw = '';
         _segments = []; _activeTextSeg = null; _activeTextRaw = '';
+        _streamArtifacts = [];
         _updateSendButton();
         return;
       }
@@ -3042,6 +3069,7 @@ const ChatView = (() => {
         _isStreaming = false;
         _streamRaw = '';
         _segments = []; _activeTextSeg = null; _activeTextRaw = '';
+        _streamArtifacts = [];
         if (_thread) _thread.setAttribute('aria-busy', 'false');
         _updateSendButton();
         return;
@@ -3080,6 +3108,7 @@ const ChatView = (() => {
         role: 'assistant',
         text: cleanedText,
         ts: new Date().toISOString(),
+        artifacts: _streamArtifacts.slice(),
         ...(wasAborted ? { interrupted: true } : {}),
       });
 
@@ -3093,6 +3122,7 @@ const ChatView = (() => {
     _streamBubble = null;
     _streamRaw = '';
     _segments = []; _activeTextSeg = null; _activeTextRaw = '';
+    _streamArtifacts = [];
     if (_thread) _thread.setAttribute('aria-busy', 'false');
     _updateSendButton();
   }
@@ -3244,6 +3274,74 @@ const ChatView = (() => {
 
     resultTarget.appendChild(resultDiv);
     if (_autoScroll) _scrollToBottom();
+  }
+
+  function _appendArtifact(payload) {
+    if (!payload) return;
+    _streamArtifacts.push(payload);
+    const bubble = _ensureStreamBubble();
+    const body = bubble.querySelector('.msg-body');
+    body.insertAdjacentHTML('beforeend', _renderArtifacts([payload]));
+    if (_autoScroll) _scrollToBottom();
+  }
+
+  function _artifactDownloadUrl(artifact) {
+    let raw = artifact && artifact.download_url ? String(artifact.download_url) : '';
+    if (!raw && artifact && artifact.id) raw = `/api/v1/artifacts/${encodeURIComponent(artifact.id)}`;
+    if (!raw) return '';
+    try {
+      const url = new URL(raw, window.location.origin);
+      url.searchParams.delete('sessionKey');
+      url.searchParams.delete('session_key');
+      return url.pathname + url.search + url.hash;
+    } catch {
+      return raw;
+    }
+  }
+
+  function _renderArtifacts(artifacts) {
+    if (!Array.isArray(artifacts) || artifacts.length === 0) return '';
+    let html = '<div class="msg-artifacts">';
+    artifacts.forEach((artifact) => {
+      const name = artifact && artifact.name ? String(artifact.name) : 'artifact';
+      const mime = artifact && artifact.mime ? String(artifact.mime) : 'artifact';
+      const size = artifact && artifact.size ? `${Math.max(1, Math.round(Number(artifact.size) / 1024))} KB` : '';
+      const downloadUrl = _artifactDownloadUrl(artifact || {});
+      html += `<button type="button" class="msg-artifact-chip" data-artifact-download="${_esc(downloadUrl)}" data-artifact-id="${_esc(artifact?.id || '')}" data-artifact-name="${_esc(name)}" title="${_esc(name)}">
+        <span class="msg-file-chip__icon" aria-hidden="true">file</span>
+        <span class="msg-file-chip__name">${_esc(name)}</span>
+        <span class="msg-file-chip__meta">${_esc([mime, size].filter(Boolean).join(' · '))}</span>
+      </button>`;
+    });
+    html += '</div>';
+    return html;
+  }
+
+  async function _downloadArtifact(artifact) {
+    const downloadUrl = _artifactDownloadUrl(artifact);
+    if (!downloadUrl) return;
+    const headers = {};
+    const token = (App.getAuthToken && App.getAuthToken()) || '';
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    if (_sessionKey) headers['x-opensquilla-session-key'] = _sessionKey;
+    const response = await fetch(downloadUrl, {
+      method: 'GET',
+      headers: headers,
+      credentials: 'same-origin',
+    });
+    if (!response.ok) {
+      UI.toast(`Download failed: HTTP ${response.status}`, 'warn', 3500);
+      return;
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = artifact.name || 'artifact';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
   }
 
   function _reconstructToolCalls(bubbleDiv, segments) {
@@ -3675,7 +3773,7 @@ const ChatView = (() => {
     _messages.forEach((msg) => {
       const role = msg.role === 'user' ? 'You' : msg.role === 'assistant' ? 'Assistant' : msg.role;
       const time = msg.ts ? ` _(${new Date(msg.ts).toLocaleString()})_` : '';
-      md += `### ${role}${time}\n\n${msg.text}\n\n---\n\n`;
+      md += `### ${role}${time}\n\n${msg.text}${_artifactMarkdownLines(msg.artifacts || [])}\n\n---\n\n`;
     });
 
     const blob = new Blob([md], { type: 'text/markdown' });
@@ -3685,6 +3783,32 @@ const ChatView = (() => {
     a.click();
     URL.revokeObjectURL(a.href);
     UI.toast('Exported as Markdown', 'info');
+  }
+
+  function _artifactMarkdownLines(artifacts) {
+    if (!Array.isArray(artifacts) || artifacts.length === 0) return '';
+    const lines = artifacts.map((artifact) => {
+      const name = artifact && artifact.name ? String(artifact.name) : 'artifact';
+      const mime = artifact && artifact.mime ? String(artifact.mime) : '';
+      const size = artifact && artifact.size ? `${Math.max(1, Math.round(Number(artifact.size) / 1024))} KB` : '';
+      const url = _artifactExportDownloadUrl(artifact || {});
+      const meta = [mime, size].filter(Boolean).join(' · ');
+      const suffix = meta ? ` - ${meta}` : '';
+      return `- [Download ${name}](${url})${suffix}`;
+    });
+    return `\n\nArtifacts:\n${lines.join('\n')}`;
+  }
+
+  function _artifactExportDownloadUrl(artifact) {
+    const raw = _artifactDownloadUrl(artifact);
+    if (!raw) return '';
+    try {
+      const url = new URL(raw, window.location.origin);
+      if (_sessionKey) url.searchParams.set('sessionKey', _sessionKey);
+      return url.href;
+    } catch {
+      return raw;
+    }
   }
 
   /* ── Pending Queue (Proposal C) ─────────────────────────────────────── */
@@ -3959,6 +4083,7 @@ const ChatView = (() => {
     _streamBubble = null;
     _streamRaw = '';
     _segments = []; _activeTextSeg = null; _activeTextRaw = '';
+    _streamArtifacts = [];
     _el = null;
     _rpc = null;
   }

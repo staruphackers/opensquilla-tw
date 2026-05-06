@@ -1380,6 +1380,23 @@ def _render_gateway_task_group_status(
         console.print(f"[{style}]{message}[/]")
 
 
+def _artifact_event_payload(event: Any) -> dict[str, Any]:
+    from opensquilla.artifacts import artifact_payload
+
+    if isinstance(event, dict):
+        return artifact_payload(
+            {key: value for key, value in event.items() if key not in {"event", "payload"}}
+        )
+
+    return artifact_payload(event)
+
+
+def _artifact_status_line(artifact: dict[str, Any]) -> str:
+    name = artifact.get("name") if isinstance(artifact.get("name"), str) else "artifact"
+    target = artifact.get("download_url") if isinstance(artifact.get("download_url"), str) else ""
+    return f"Generated file: {name} -> {target or artifact.get('id', '')}"
+
+
 async def _stream_response_gateway(
     client: _GatewayClientLike,
     session_key: str,
@@ -1391,6 +1408,7 @@ async def _stream_response_gateway(
     elevated = elevated_state["mode"] if elevated_state else None
     usage: UsageSummary | None = None
     cancelled = False
+    artifacts: list[dict[str, Any]] = []
 
     with StreamingRenderer() as renderer:
         try:
@@ -1409,12 +1427,25 @@ async def _stream_response_gateway(
                         client.resolve_approval,
                         elevated_state=elevated_state,
                     )
+                elif event_name == "session.event.artifact":
+                    artifact = _artifact_event_payload(event)
+                    artifacts.append(artifact)
+                    status = getattr(renderer, "status", None)
+                    if callable(status):
+                        status(_artifact_status_line(artifact))
+                    else:
+                        console.print(_artifact_status_line(artifact))
                 elif event_name.startswith("session.event.task_group."):
                     _render_gateway_task_group_status(event_name, event, renderer)
                 elif event_name == "session.event.error":
                     message_text = event.get("message", "unknown")
                     renderer.error(message_text)
-                    return TurnResult(text=renderer.buffer, usage=usage, error=message_text)
+                    return TurnResult(
+                        text=renderer.buffer,
+                        usage=usage,
+                        error=message_text,
+                        artifacts=artifacts,
+                    )
                 elif event_name == "session.event.done":
                     usage = UsageSummary.from_gateway_payload(event)
                     cancelled = event.get("reason") == "aborted"
@@ -1423,7 +1454,12 @@ async def _stream_response_gateway(
             await client.abort_session(session_key)
             cancelled = True
         renderer.finalize(usage, cancelled=cancelled)
-    return TurnResult(text=renderer.buffer, usage=usage, cancelled=cancelled)
+    return TurnResult(
+        text=renderer.buffer,
+        usage=usage,
+        cancelled=cancelled,
+        artifacts=artifacts,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1457,6 +1493,7 @@ async def _stream_response_turnrunner(
     """Stream TurnRunner response with Rich live display (standalone mode)."""
     from opensquilla.engine.runtime import TurnRunner
     from opensquilla.engine.types import (
+        ArtifactEvent,
         DoneEvent,
         ErrorEvent,
         RunHeartbeatEvent,
@@ -1482,6 +1519,7 @@ async def _stream_response_turnrunner(
     resolver = _local_approval_resolver()
     usage: UsageSummary | None = None
     cancelled = False
+    artifacts: list[dict[str, Any]] = []
 
     with StreamingRenderer() as renderer:
         try:
@@ -1497,11 +1535,24 @@ async def _stream_response_turnrunner(
                     renderer.tool_call(event.tool_name)
                 elif isinstance(event, ToolResultEvent):
                     await _maybe_handle_approval(event.result, renderer, resolver)
+                elif isinstance(event, ArtifactEvent):
+                    artifact = _artifact_event_payload(event)
+                    artifacts.append(artifact)
+                    status = getattr(renderer, "status", None)
+                    if callable(status):
+                        status(_artifact_status_line(artifact))
+                    else:
+                        console.print(_artifact_status_line(artifact))
                 elif isinstance(event, WarningEvent):
                     console.print(f"[yellow]{event.message}[/yellow]")
                 elif isinstance(event, ErrorEvent):
                     renderer.error(event.message)
-                    return TurnResult(text=renderer.buffer, usage=usage, error=event.message)
+                    return TurnResult(
+                        text=renderer.buffer,
+                        usage=usage,
+                        error=event.message,
+                        artifacts=artifacts,
+                    )
                 elif isinstance(event, DoneEvent):
                     usage = UsageSummary.from_done_event(event)
         except (KeyboardInterrupt, asyncio.CancelledError):
@@ -1512,7 +1563,12 @@ async def _stream_response_turnrunner(
             renderer.error(message_text)
             return TurnResult(text=renderer.buffer, error=message_text)
         renderer.finalize(usage, cancelled=cancelled)
-    return TurnResult(text=renderer.buffer, usage=usage, cancelled=cancelled)
+    return TurnResult(
+        text=renderer.buffer,
+        usage=usage,
+        cancelled=cancelled,
+        artifacts=artifacts,
+    )
 
 
 async def _handle_image_command_turnrunner(

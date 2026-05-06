@@ -682,6 +682,80 @@ class SessionStorage:
         await self.conn.commit()
         return summary
 
+    async def rewrite_compacted_session(
+        self,
+        *,
+        node: SessionNode,
+        summary: SessionSummary | None,
+        entries: list[TranscriptEntry],
+    ) -> None:
+        """Atomically persist a compaction rewrite for one session."""
+        node.session_key = canonicalize_session_key(node.session_key)
+        node.agent_id = normalize_agent_id(node.agent_id)
+
+        await self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            await self.conn.execute(
+                "DELETE FROM transcript_entries WHERE session_id = ?",
+                (node.session_id,),
+            )
+
+            if summary is not None:
+                summary.session_id = node.session_id
+                summary.session_key = node.session_key
+                async with self.conn.execute(
+                    "SELECT COALESCE(MAX(compaction_index), -1) + 1 "
+                    "FROM session_summaries WHERE session_id = ?",
+                    (summary.session_id,),
+                ) as cur:
+                    row = await cur.fetchone()
+                summary.compaction_index = row[0] if row else 0
+                summary_data = summary.model_dump(exclude={"id"})
+                summary_cols = list(summary_data.keys())
+                summary_placeholders = ", ".join("?" for _ in summary_cols)
+                summary_values = [_serialize(summary_data[c]) for c in summary_cols]
+                async with self.conn.execute(
+                    "INSERT INTO session_summaries "
+                    f"({', '.join(summary_cols)}) VALUES ({summary_placeholders})",
+                    summary_values,
+                ) as cur:
+                    summary.id = cur.lastrowid
+
+            for entry in entries:
+                entry.session_id = node.session_id
+                entry.session_key = node.session_key
+                entry_data = entry.model_dump(exclude={"id"})
+                entry_cols = list(entry_data.keys())
+                entry_placeholders = ", ".join("?" for _ in entry_cols)
+                entry_values = [_serialize(entry_data[c]) for c in entry_cols]
+                await self.conn.execute(
+                    "INSERT INTO transcript_entries "
+                    f"({', '.join(entry_cols)}) VALUES ({entry_placeholders})",
+                    entry_values,
+                )
+
+            node_data = node.model_dump()
+            node_cols = list(node_data.keys())
+            node_placeholders = ", ".join("?" for _ in node_cols)
+            node_updates: list[str] = []
+            for col in node_cols:
+                if col == "session_key":
+                    continue
+                if col == "epoch":
+                    node_updates.append("epoch = MAX(sessions.epoch, excluded.epoch)")
+                else:
+                    node_updates.append(f"{col}=excluded.{col}")
+            node_values = [_serialize(node_data[c]) for c in node_cols]
+            await self.conn.execute(
+                f"INSERT INTO sessions ({', '.join(node_cols)}) VALUES ({node_placeholders}) "
+                f"ON CONFLICT(session_key) DO UPDATE SET {', '.join(node_updates)}",
+                node_values,
+            )
+            await self.conn.commit()
+        except Exception:
+            await self.conn.rollback()
+            raise
+
     async def get_latest_summary(self, session_id: str) -> SessionSummary | None:
         async with self.conn.execute(
             "SELECT * FROM session_summaries WHERE session_id = ? "

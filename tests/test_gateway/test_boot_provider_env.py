@@ -36,7 +36,7 @@ def test_boot_resolves_direct_provider_env_key_and_base_url(
     assert cfg.llm.base_url == "https://ark.example/api/v3"
 
 
-def test_boot_keeps_openrouter_env_precedence_for_openrouter(monkeypatch) -> None:
+def test_boot_uses_explicit_key_before_standard_env(monkeypatch) -> None:
     monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
     monkeypatch.setenv("OPENROUTER_BASE_URL", "https://openrouter.example/api/v1")
     monkeypatch.setenv("VOLCENGINE_API_KEY", "volc-key")
@@ -50,8 +50,50 @@ def test_boot_keeps_openrouter_env_precedence_for_openrouter(monkeypatch) -> Non
 
     runtime = resolve_llm_runtime_config(cfg)
 
-    assert runtime.api_key == "or-key"
+    assert runtime.api_key == "config-key"
+    assert runtime.api_key_from_env is False
     assert runtime.base_url == "https://openrouter.example/api/v1"
+
+
+def test_openrouter_runtime_uses_default_provider_routing() -> None:
+    cfg = GatewayConfig(llm={"provider": "openrouter"})
+
+    runtime = resolve_llm_runtime_config(cfg)
+
+    assert runtime.provider_routing == {
+        "deepseek/deepseek-v4-flash": "deepseek",
+        "z-ai/glm-5.1": "z-ai",
+        "anthropic/claude-opus-4.7": "anthropic",
+        "moonshotai/kimi-k2.6": "moonshotai",
+    }
+
+
+def test_openrouter_runtime_provider_routing_overrides_default() -> None:
+    cfg = GatewayConfig(
+        llm={
+            "provider": "openrouter",
+            "provider_routing": {
+                "z-ai/glm-5.1": "z-ai/fp8",
+                "custom/model": "custom-provider",
+            },
+        }
+    )
+
+    runtime = resolve_llm_runtime_config(cfg)
+
+    assert runtime.provider_routing["deepseek/deepseek-v4-flash"] == "deepseek"
+    assert runtime.provider_routing["z-ai/glm-5.1"] == "z-ai/fp8"
+    assert runtime.provider_routing["anthropic/claude-opus-4.7"] == "anthropic"
+    assert runtime.provider_routing["moonshotai/kimi-k2.6"] == "moonshotai"
+    assert runtime.provider_routing["custom/model"] == "custom-provider"
+
+
+def test_direct_provider_runtime_does_not_inherit_openrouter_provider_routing() -> None:
+    cfg = GatewayConfig(llm={"provider": "deepseek", "api_key": "", "base_url": ""})
+
+    runtime = resolve_llm_runtime_config(cfg)
+
+    assert runtime.provider_routing == {}
 
 
 def test_runtime_config_sync_resolves_selected_provider_env(monkeypatch) -> None:

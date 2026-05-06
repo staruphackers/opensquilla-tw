@@ -2,7 +2,7 @@
 name = "opensquilla"
 version = "0.1.0"
 description = "OpenSquilla — microkernel Python agent runtime with MCP-native tools and multi-channel messaging"
-license = "MIT"
+license = "Apache-2.0"
 readme = "README.release.md"
 authors = [
     { name = "OpenSquilla contributors" },
@@ -10,6 +10,7 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "starlette>=0.40",
+    "python-multipart>=0.0.20",
     "uvicorn[standard]>=0.30",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
@@ -83,10 +84,6 @@ qq = ["qq-botpy>=1.2.1,<1.3"]
 msteams = ["botbuilder-core>=4.17,<5.0", "botbuilder-schema>=4.17,<5.0"]
 matrix = ["matrix-nio>=0.25,<0.26", "markdown>=3.0"]
 matrix-e2e = ["matrix-nio[e2e]>=0.25,<0.26", "markdown>=3.0"]
-docs = [
-    "mkdocs>=1.5",
-    "mkdocs-material>=9.4",
-]
 document-extras = [
     "weasyprint>=60.0",
 ]
@@ -106,7 +103,6 @@ exclude = [
 ]
 
 [tool.hatch.build.targets.wheel.force-include]
-"src/opensquilla/dist" = "opensquilla/dist"
 "src/opensquilla/skills/bundled/pptx/references/pptxgenjs.md" = "opensquilla/skills/bundled/pptx/references/pptxgenjs.md"
 "src/opensquilla/skills/bundled/pptx/references/python_pptx.md" = "opensquilla/skills/bundled/pptx/references/python_pptx.md"
 "src/opensquilla/skills/bundled/docx/references/python_docx.md" = "opensquilla/skills/bundled/docx/references/python_docx.md"
@@ -115,14 +111,8 @@ exclude = [
 "src/opensquilla/skills/bundled/pdf-toolkit/references/reportlab.md" = "opensquilla/skills/bundled/pdf-toolkit/references/reportlab.md"
 "src/opensquilla/skills/bundled/deep-research/references/methodology.md" = "opensquilla/skills/bundled/deep-research/references/methodology.md"
 "src/opensquilla/skills/bundled/deep-research/references/sources.md" = "opensquilla/skills/bundled/deep-research/references/sources.md"
-"src/opensquilla/skills/bundled/self-improving-agent/references/categories.md" = "opensquilla/skills/bundled/self-improving-agent/references/categories.md"
-"src/opensquilla/skills/bundled/humanizer/references/ai_patterns.md" = "opensquilla/skills/bundled/humanizer/references/ai_patterns.md"
 "src/opensquilla/skills/bundled/html-to-pdf/references/weasyprint.md" = "opensquilla/skills/bundled/html-to-pdf/references/weasyprint.md"
 "src/opensquilla/skills/bundled/multi-search-engine/references/engines.md" = "opensquilla/skills/bundled/multi-search-engine/references/engines.md"
-"src/opensquilla/skills/bundled/automation-workflows/references/zapier.md" = "opensquilla/skills/bundled/automation-workflows/references/zapier.md"
-"src/opensquilla/skills/bundled/automation-workflows/references/make.md" = "opensquilla/skills/bundled/automation-workflows/references/make.md"
-"src/opensquilla/skills/bundled/automation-workflows/references/n8n.md" = "opensquilla/skills/bundled/automation-workflows/references/n8n.md"
-"src/opensquilla/skills/bundled/website-builder/references/seo_checklist.md" = "opensquilla/skills/bundled/website-builder/references/seo_checklist.md"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -159,7 +149,7 @@ python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
 exclude = [
-    "^src/opensquilla/contrib/squilla_router/models/",
+    "^src/opensquilla/squilla_router/models/",
     "^src/opensquilla/skills/bundled/.*/scripts/",
 ]
 

@@ -1,0 +1,210 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from opensquilla.artifacts import (
+    DEFAULT_ARTIFACT_DISK_BUDGET_BYTES,
+    DEFAULT_ARTIFACT_MAX_BYTES,
+    ArtifactBudgetError,
+    ArtifactIntegrityError,
+    ArtifactStore,
+    artifact_payload,
+)
+from opensquilla.tools.builtin.artifacts import publish_artifact
+from opensquilla.tools.types import ToolContext, ToolError, current_tool_context
+
+
+def test_artifact_store_round_trips_metadata_and_bytes(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path)
+
+    ref = store.publish_bytes(
+        b"hello\n",
+        session_id="session-1",
+        session_key="agent:main:webchat:session-1",
+        name="report.txt",
+        mime="text/plain",
+        source="publish_artifact",
+    )
+    path = store.path_for(ref)
+
+    assert ref.kind == "artifact_ref"
+    assert ref.name == "report.txt"
+    assert ref.size == 6
+    assert ref.download_url == "/api/v1/artifacts/" + ref.id
+    assert path.read_bytes() == b"hello\n"
+
+    resolved_ref, resolved_path = store.resolve_for_download(ref.id, session_id="session-1")
+    assert resolved_ref == ref
+    assert resolved_path == path
+
+
+def test_artifact_payload_omits_session_key_and_query_token(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path)
+    ref = store.publish_bytes(
+        b"hello\n",
+        session_id="session-1",
+        session_key="agent:main:webchat:session-1",
+        name="report.txt",
+        mime="text/plain",
+        source="publish_artifact",
+    )
+
+    payload = artifact_payload(ref)
+
+    assert "session_key" not in payload
+    assert "sessionKey" not in json.dumps(payload)
+    assert payload["download_url"] == f"/api/v1/artifacts/{ref.id}"
+
+
+def test_artifact_store_preserves_unicode_filename_and_normalizes_mime_params(
+    tmp_path: Path,
+) -> None:
+    store = ArtifactStore(tmp_path)
+
+    ref = store.publish_bytes(
+        b"hello\n",
+        session_id="session-1",
+        session_key="agent:main:webchat:session-1",
+        name="记忆修补师.txt",
+        mime="text/plain; charset=utf-8",
+        source="publish_artifact",
+    )
+
+    assert ref.name == "记忆修补师.txt"
+    assert ref.mime == "text/plain"
+
+
+def test_artifact_store_rejects_hash_mismatch(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path)
+    ref = store.publish_bytes(
+        b"hello",
+        session_id="session-1",
+        session_key="agent:main:webchat:session-1",
+        name="report.txt",
+        mime="text/plain",
+        source="publish_artifact",
+    )
+
+    store.path_for(ref).write_bytes(b"tampered")
+
+    with pytest.raises(ArtifactIntegrityError):
+        store.resolve_for_download(ref.id, session_id="session-1")
+
+
+def test_artifact_store_enforces_per_file_and_disk_budgets(tmp_path: Path) -> None:
+    store = ArtifactStore(tmp_path)
+
+    with pytest.raises(ArtifactBudgetError):
+        store.publish_bytes(
+            b"abcdef",
+            session_id="session-1",
+            session_key="agent:main:webchat:session-1",
+            name="too-big.txt",
+            mime="text/plain",
+            source="publish_artifact",
+            max_bytes=5,
+        )
+
+    assert not list((tmp_path / "artifacts").rglob("too-big.txt"))
+
+    store.publish_bytes(
+        b"abc",
+        session_id="session-1",
+        session_key="agent:main:webchat:session-1",
+        name="ok.txt",
+        mime="text/plain",
+        source="publish_artifact",
+        disk_budget_bytes=6,
+    )
+    with pytest.raises(ArtifactBudgetError):
+        store.publish_bytes(
+            b"defg",
+            session_id="session-1",
+            session_key="agent:main:webchat:session-1",
+            name="over-budget.txt",
+            mime="text/plain",
+            source="publish_artifact",
+            disk_budget_bytes=6,
+        )
+
+
+def test_artifact_budget_defaults_are_open_source_sized() -> None:
+    assert DEFAULT_ARTIFACT_MAX_BYTES == 30 * 1024 * 1024
+    assert DEFAULT_ARTIFACT_DISK_BUDGET_BYTES == 512 * 1024 * 1024
+
+
+@pytest.mark.asyncio
+async def test_publish_artifact_tool_allows_workspace_file_only(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    output = workspace / "report.txt"
+    output.write_text("ready", encoding="utf-8")
+    ctx = ToolContext(
+        workspace_dir=str(workspace),
+        artifact_media_root=str(tmp_path / "media"),
+        artifact_session_id="session-1",
+        session_key="agent:main:webchat:session-1",
+    )
+
+    token = current_tool_context.set(ctx)
+    try:
+        result = await publish_artifact(path="report.txt", name="final.txt", mime="text/plain")
+    finally:
+        current_tool_context.reset(token)
+
+    payload = json.loads(result)
+    assert payload["status"] == "published"
+    assert payload["artifact"]["name"] == "final.txt"
+    assert payload["artifact"]["mime"] == "text/plain"
+    assert payload["artifact"]["session_id"] == "session-1"
+    assert "session_key" not in payload["artifact"]
+    assert "sessionKey" not in json.dumps(payload["artifact"])
+    # The LLM-facing artifact has no URL — models tend to fabricate a host
+    # when shown a relative URL ending in /api/v1/artifacts/...
+    assert "download_url" not in payload["artifact"]
+    assert "note" in payload
+    # The frontend event path still gets the full payload (with download_url).
+    assert len(ctx.published_artifacts) == 1
+    full_artifact = ctx.published_artifacts[0]
+    assert full_artifact["download_url"] == f"/api/v1/artifacts/{full_artifact['id']}"
+    assert {k: v for k, v in full_artifact.items() if k != "download_url"} == payload[
+        "artifact"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_publish_artifact_tool_rejects_missing_workspace_and_escape(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("no", encoding="utf-8")
+
+    token = current_tool_context.set(
+        ToolContext(
+            artifact_media_root=str(tmp_path / "media"),
+            artifact_session_id="session-1",
+            session_key="agent:main:webchat:session-1",
+        )
+    )
+    try:
+        with pytest.raises(ToolError):
+            await publish_artifact(path=str(outside))
+    finally:
+        current_tool_context.reset(token)
+
+    token = current_tool_context.set(
+        ToolContext(
+            workspace_dir=str(workspace),
+            artifact_media_root=str(tmp_path / "media"),
+            artifact_session_id="session-1",
+            session_key="agent:main:webchat:session-1",
+        )
+    )
+    try:
+        with pytest.raises(ToolError):
+            await publish_artifact(path="../outside.txt")
+    finally:
+        current_tool_context.reset(token)

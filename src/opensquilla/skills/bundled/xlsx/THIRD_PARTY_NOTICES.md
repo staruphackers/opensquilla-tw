@@ -1,11 +1,7 @@
 # Third-party notices for `xlsx` skill
 
-Inspired by `excel-xlsx` on the ClawHub registry
-(<https://clawhub.ai/excel-xlsx>, MIT-0). The OpenSquilla version is
-independently authored: SKILL.md instructional text, helper scripts, and the
-openpyxl reference notes here were written from the openpyxl documentation
-(<https://openpyxl.readthedocs.io/>) and the OOXML SpreadsheetML
-specification, not copied from the upstream package.
+Source: ClawHub `excel-xlsx`
+(<https://clawhub.ai/excel-xlsx>, MIT-0).
 
 ## Runtime dependency
 
@@ -14,5 +10,5 @@ This skill requires `openpyxl` (MIT license,
 
 ## License
 
-This skill, as part of OpenSquilla, is licensed under the project's MIT
-license. The openpyxl runtime dependency carries its own MIT license.
+The ClawHub source is MIT-0. The OpenSquilla project license is Apache-2.0.
+The openpyxl runtime dependency carries its own MIT license.

@@ -3,9 +3,7 @@
 Public API quick reference for the python-pptx library. See the upstream
 docs at https://python-pptx.readthedocs.io for the full surface.
 
-This file is original OpenSquilla content. python-pptx itself is MIT-licensed
-upstream; this cheatsheet documents its public function and class names,
-which are facts about the library, not derivative content.
+python-pptx is MIT-licensed upstream.
 
 ## Setup
 

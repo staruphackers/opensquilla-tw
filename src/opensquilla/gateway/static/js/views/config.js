@@ -546,7 +546,7 @@ const ConfigView = (() => {
     if (_mode === 'yaml') {
       const text = _el.querySelector('#cfg-yaml-area').value;
       _rpc.call('config.apply', { config_yaml: text })
-        .then(res => { UI.toast(res && res.restartRequired ? 'Config applied. Restart required for memory changes.' : 'Config applied', res && res.restartRequired ? 'info' : 'ok'); _dirty = {}; _invalidJson = {}; _jsonDrafts = {}; _loadData(); })
+        .then(res => { UI.toast(res && res.restartRequired ? 'Config applied. Gateway restart required for the change to take effect.' : 'Config applied', res && res.restartRequired ? 'info' : 'ok'); _dirty = {}; _invalidJson = {}; _jsonDrafts = {}; _loadData(); })
         .catch(err => UI.toast('Apply failed: ' + err.message, 'err'));
     } else {
       if (Object.keys(_invalidJson).length > 0) {
@@ -556,7 +556,7 @@ const ConfigView = (() => {
       const patches = Object.fromEntries(Object.entries(_dirty).map(([k, v]) => [k, v.new]));
       if (Object.keys(patches).length === 0) { UI.toast('No changes to save', 'info'); return; }
       _rpc.call('config.patch', { patches })
-        .then(res => { UI.toast(res && res.restartRequired ? 'Config saved. Restart required for memory changes.' : 'Config saved', res && res.restartRequired ? 'info' : 'ok'); _dirty = {}; _invalidJson = {}; _jsonDrafts = {}; _loadData(); })
+        .then(res => { UI.toast(res && res.restartRequired ? 'Config saved. Gateway restart required for the change to take effect.' : 'Config saved', res && res.restartRequired ? 'info' : 'ok'); _dirty = {}; _invalidJson = {}; _jsonDrafts = {}; _loadData(); })
         .catch(err => UI.toast('Save failed: ' + err.message, 'err'));
     }
   }

@@ -10,7 +10,6 @@ BUNDLE_DIR = (
     REPO_ROOT
     / "src"
     / "opensquilla"
-    / "contrib"
     / "squilla_router"
     / "models"
     / "v4.2_phase3_inference"

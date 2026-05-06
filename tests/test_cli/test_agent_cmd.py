@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import base64
+import json
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from typer.testing import CliRunner
 
-from opensquilla.cli.agent_cmd import run_agent_once
-from opensquilla.engine.types import DoneEvent
+from opensquilla.cli.agent_cmd import AgentRunResult, run_agent_command, run_agent_once
+from opensquilla.engine.types import ArtifactEvent, DoneEvent
 from opensquilla.gateway.config import AgentEntryConfig, GatewayConfig
 from opensquilla.tools.types import CallerKind, InteractionMode
 
@@ -85,6 +86,90 @@ async def test_run_agent_once_uses_agent_registry_model_when_model_not_explicit(
     assert captured["runner_config_model"] == "agent/default"
     assert captured["run_model"] == "agent/default"
     assert captured["tool_context"].workspace_dir == str(agent_workspace)
+
+
+@pytest.mark.asyncio
+async def test_run_agent_once_collects_artifact_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = {
+        "id": "art-cli",
+        "kind": "artifact_ref",
+        "name": "report.txt",
+        "mime": "text/plain",
+        "size": 4,
+        "sha256": "d" * 64,
+        "session_id": "session-1",
+        "session_key": "agent:main:main",
+        "source": "publish_artifact",
+        "created_at": "2026-05-06T12:00:00Z",
+        "download_url": "/api/v1/artifacts/art-cli?sessionKey=agent%3Amain%3Amain",
+        "store": "artifacts",
+    }
+
+    class FakeTurnRunner:
+        def __init__(self, **kwargs: Any) -> None:
+            return None
+
+        async def run(self, message: str, session_key: str, **kwargs: Any):
+            yield ArtifactEvent(**artifact)
+            yield DoneEvent(text="ok")
+
+    async def fake_build_services(*, config: GatewayConfig, **kwargs: Any) -> _FakeServices:
+        return _FakeServices(config)
+
+    monkeypatch.setattr("opensquilla.engine.runtime.TurnRunner", FakeTurnRunner)
+    monkeypatch.setattr("opensquilla.gateway.build_services", fake_build_services)
+
+    result = await run_agent_once(message="hello", config=GatewayConfig())
+
+    assert result.artifacts == [
+        {
+            **{key: value for key, value in artifact.items() if key != "session_key"},
+            "download_url": "/api/v1/artifacts/art-cli",
+        }
+    ]
+    assert result.artifacts[0]["download_url"] == "/api/v1/artifacts/art-cli"
+
+
+def test_run_agent_command_json_includes_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    artifact = {
+        "id": "art-cli",
+        "kind": "artifact_ref",
+        "name": "report.txt",
+        "mime": "text/plain",
+        "size": 4,
+        "sha256": "d" * 64,
+        "session_id": "session-1",
+        "session_key": "agent:main:main",
+        "source": "publish_artifact",
+        "created_at": "2026-05-06T12:00:00Z",
+        "download_url": "/api/v1/artifacts/art-cli?sessionKey=agent%3Amain%3Amain",
+        "store": "artifacts",
+    }
+
+    async def fake_run_agent_once(**kwargs: Any) -> AgentRunResult:
+        return AgentRunResult(
+            status="ok",
+            agent_id="main",
+            session_key="agent:main:main",
+            text="ok",
+            usage={},
+            errors=[],
+            artifacts=[artifact],
+        )
+
+    monkeypatch.setattr("opensquilla.cli.agent_cmd.run_agent_once", fake_run_agent_once)
+
+    run_agent_command(message="hello", json_output=True)
+
+    output_artifact = json.loads(capsys.readouterr().out)["artifacts"][0]
+    assert "session_key" not in output_artifact
+    assert "sessionKey" not in json.dumps(output_artifact)
+    assert output_artifact["download_url"] == "/api/v1/artifacts/art-cli"
 
 
 @pytest.mark.asyncio

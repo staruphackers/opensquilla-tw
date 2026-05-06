@@ -187,9 +187,10 @@ def _try_lock(fh: IO[bytes]) -> bool:
     if os.name == "nt":
         import msvcrt
 
+        msvcrt_mod = cast(Any, msvcrt)
         try:
             fh.seek(0)
-            msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+            msvcrt_mod.locking(fh.fileno(), msvcrt_mod.LK_NBLCK, 1)
             return True
         except OSError:
             return False
@@ -208,9 +209,10 @@ def _unlock(fh: IO[bytes]) -> None:
     if os.name == "nt":
         import msvcrt
 
+        msvcrt_mod = cast(Any, msvcrt)
         try:
             fh.seek(0)
-            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+            msvcrt_mod.locking(fh.fileno(), msvcrt_mod.LK_UNLCK, 1)
         except OSError:
             pass
     else:
@@ -236,11 +238,12 @@ def _is_alive(pid: int) -> bool:
         try:
             import ctypes
 
+            ctypes_mod = cast(Any, ctypes)
             synchronize = 0x00100000
-            handle = ctypes.windll.kernel32.OpenProcess(synchronize, False, pid)
+            handle = ctypes_mod.windll.kernel32.OpenProcess(synchronize, False, pid)
             if handle == 0:
                 return False
-            ctypes.windll.kernel32.CloseHandle(handle)
+            ctypes_mod.windll.kernel32.CloseHandle(handle)
             return True
         except Exception:  # noqa: BLE001
             return False

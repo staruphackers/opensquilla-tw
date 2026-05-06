@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import dataclass
 from typing import Any
@@ -40,7 +41,10 @@ class OnboardOptions:
     provider_id: str | None = None
     model: str | None = None
     api_key: str | None = None
+    api_key_env: str | None = None
     base_url: str | None = None
+    router_mode: str = "recommended"
+    minimal: bool = False
 
 
 def _is_tty() -> bool:
@@ -50,16 +54,24 @@ def _is_tty() -> bool:
 def run_noninteractive_provider_configure(
     provider_id: str, values: dict[str, Any]
 ) -> PersistResult:
-    cfg = load_config()
-    result = upsert_llm_provider(
-        cfg,
-        provider_id=provider_id,
-        model=values.get("model", ""),
-        api_key=values.get("api_key", ""),
-        base_url=values.get("base_url", ""),
-        proxy=values.get("proxy", ""),
+    from opensquilla.onboarding.setup_engine import SetupEngine
+
+    engine = SetupEngine()
+    engine.apply(
+        "provider",
+        {
+            "providerId": provider_id,
+            "model": values.get("model", ""),
+            "apiKey": values.get("api_key", ""),
+            "apiKeyEnv": values.get("api_key_env", ""),
+            "baseUrl": values.get("base_url", ""),
+            "proxy": values.get("proxy", ""),
+        },
     )
-    return persist_config(result.config, restart_required=False)
+    router_mode = values.get("router", "")
+    if router_mode:
+        engine.apply("router", {"mode": router_mode})
+    return engine.persist()
 
 
 def run_noninteractive_channel_add(
@@ -91,8 +103,9 @@ def run_noninteractive_search_configure(
 def _print_noninteractive_hint() -> PersistResult:
     print(
         "Onboarding requires a TTY. Run a non-interactive equivalent, e.g.:\n"
-        "  opensquilla providers configure openrouter "
-        "--model deepseek/deepseek-v4-flash --api-key $OPENROUTER_API_KEY\n"
+        "  opensquilla onboard --provider openrouter "
+        "--model deepseek/deepseek-v4-flash --api-key-env OPENROUTER_API_KEY "
+        "--router recommended --minimal\n"
         "  opensquilla search configure brave --api-key $BRAVE_SEARCH_API_KEY\n"
         "  opensquilla channels add slack --name work --token $SLACK_TOKEN"
     )
@@ -125,11 +138,24 @@ def _ask_provider_fields(
         questionary.text("Model id").ask() or ""
     )
     if spec.requires_api_key:
-        answers["api_key"] = options.api_key or (
-            questionary.password("API key").ask() or ""
-        )
+        env_key = options.api_key_env or spec.env_key
+        if options.api_key_env:
+            answers["api_key"] = ""
+            answers["api_key_env"] = options.api_key_env
+        elif env_key and os.environ.get(env_key) and not options.api_key:
+            use_env = questionary.confirm(
+                f"Detected ${env_key}. Use it for this provider?", default=True
+            ).ask()
+            answers["api_key"] = ""
+            answers["api_key_env"] = env_key if use_env else ""
+        else:
+            answers["api_key"] = options.api_key or (
+                questionary.password("API key").ask() or ""
+            )
+            answers["api_key_env"] = ""
     else:
         answers["api_key"] = options.api_key or ""
+        answers["api_key_env"] = ""
     if spec.requires_base_url:
         answers["base_url"] = options.base_url or (
             questionary.text("Base URL", default=spec.default_base_url).ask() or ""
@@ -209,9 +235,19 @@ def run_interactive_onboard(options: OnboardOptions) -> PersistResult:
         provider_id=provider_id,
         model=answers["model"],
         api_key=answers.get("api_key", ""),
+        api_key_env=answers.get("api_key_env", ""),
         base_url=answers.get("base_url", ""),
     )
-    persist = persist_config(res.config, restart_required=False)
+    cfg_after_provider = res.config
+    if options.router_mode:
+        from opensquilla.onboarding.mutations import upsert_router
+
+        router_res = upsert_router(cfg_after_provider, mode=options.router_mode)
+        cfg_after_provider = router_res.config
+    persist = persist_config(cfg_after_provider, restart_required=False)
+
+    if options.minimal:
+        return persist
 
     if not options.skip_channels and questionary.confirm(
         "Configure a messaging channel now?", default=False
@@ -271,6 +307,69 @@ def run_interactive_channel_add(type_name: str | None) -> PersistResult:
     return persist_config(res.config, restart_required=True)
 
 
+def run_interactive_channel_edit(name: str | None = None) -> PersistResult:
+    if not _is_tty():
+        return _print_noninteractive_hint()
+
+    import questionary
+
+    cfg = load_config()
+    existing_entries = [e.model_dump(mode="python") for e in cfg.channels.channels]
+    if not existing_entries:
+        print("No channels to edit. Use 'configure --section channels' to add one.")
+        return persist_config(cfg, restart_required=False, backup=False)
+
+    if name is None:
+        name = questionary.select(
+            "Channel to edit",
+            choices=[e["name"] for e in existing_entries],
+        ).ask()
+    target_entry = next(e for e in existing_entries if e["name"] == name)
+    type_name = target_entry["type"]
+    spec = get_channel_setup_spec(type_name)
+
+    answers: dict[str, Any] = {"type": type_name, "name": name}
+    for f in spec.fields:
+        if f.name == "name":
+            continue
+        current = target_entry.get(f.name)
+        if f.field_type == "select":
+            answers[f.name] = questionary.select(
+                f.label,
+                choices=list(f.choices),
+                default=current if isinstance(current, str) else None,
+            ).ask()
+        elif f.field_type == "bool":
+            answers[f.name] = questionary.confirm(
+                f.label,
+                default=bool(current) if current is not None else bool(f.default),
+            ).ask()
+        elif f.field_type == "password":
+            answers[f.name] = questionary.password(
+                f"{f.label} (blank = keep current)"
+            ).ask() or ""
+        elif f.field_type == "int":
+            raw = questionary.text(
+                f.label,
+                default=str(current if current is not None else f.default or 0),
+            ).ask() or "0"
+            answers[f.name] = int(raw)
+        elif f.field_type == "float":
+            raw = questionary.text(
+                f.label,
+                default=str(current if current is not None else f.default or 0.0),
+            ).ask() or "0"
+            answers[f.name] = float(raw)
+        else:
+            answers[f.name] = questionary.text(
+                f.label,
+                default=str(current if current is not None else f.default or ""),
+            ).ask() or ""
+
+    res = upsert_channel(cfg, entry_payload=answers)
+    return persist_config(res.config, restart_required=True)
+
+
 def run_interactive_configure(section: str | None = None) -> PersistResult | None:
     if not _is_tty():
         _print_noninteractive_hint()
@@ -287,6 +386,15 @@ def run_interactive_configure(section: str | None = None) -> PersistResult | Non
             OnboardOptions(skip_channels=True, skip_search=True)
         )
     if section == "channels":
+        existing = load_config().channels.channels
+        if existing:
+            mode = questionary.select(
+                "Channel action",
+                choices=["add", "edit"],
+                default="add",
+            ).ask()
+            if mode == "edit":
+                return run_interactive_channel_edit(None)
         return run_interactive_channel_add(None)
     if section == "search":
         return run_interactive_search_configure()

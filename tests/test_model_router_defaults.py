@@ -3,6 +3,7 @@ from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
 import pytest
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -42,11 +43,13 @@ def test_squilla_router_defaults_match_runtime_router_config() -> None:
     assert cfg.require_router_runtime is True
 
     assert cfg.tiers["t0"]["model"] == "deepseek/deepseek-v4-flash"
+    assert cfg.tiers["t0"]["thinking_level"] == "high"
     assert cfg.tiers["t1"]["model"] == "deepseek/deepseek-v4-flash"
+    assert cfg.tiers["t1"]["thinking_level"] == "high"
     assert cfg.tiers["t2"]["model"] == "z-ai/glm-5.1"
-    assert cfg.tiers["t2"]["thinking_level"] == "low"
+    assert cfg.tiers["t2"]["thinking_level"] == "high"
     assert cfg.tiers["t3"]["model"] == "anthropic/claude-opus-4.7"
-    assert cfg.tiers["t3"]["thinking_level"] == "medium"
+    assert cfg.tiers["t3"]["thinking_level"] == "high"
     assert cfg.tiers["image_model"]["model"] == "moonshotai/kimi-k2.6"
     assert cfg.tiers["image_model"]["supports_image"] is True
     assert cfg.tiers["image_model"]["image_only"] is True
@@ -261,11 +264,13 @@ def test_example_toml_enables_runtime_router_defaults() -> None:
 
     tiers = squilla_router["tiers"]
     assert tiers["t0"]["model"] == "deepseek/deepseek-v4-flash"
+    assert tiers["t0"]["thinking_level"] == "high"
     assert tiers["t1"]["model"] == "deepseek/deepseek-v4-flash"
+    assert tiers["t1"]["thinking_level"] == "high"
     assert tiers["t2"]["model"] == "z-ai/glm-5.1"
-    assert tiers["t2"]["thinking_level"] == "low"
+    assert tiers["t2"]["thinking_level"] == "high"
     assert tiers["t3"]["model"] == "anthropic/claude-opus-4.7"
-    assert tiers["t3"]["thinking_level"] == "medium"
+    assert tiers["t3"]["thinking_level"] == "high"
     assert tiers["image_model"]["model"] == "moonshotai/kimi-k2.6"
     assert tiers["image_model"]["supports_image"] is True
     assert tiers["image_model"]["image_only"] is True
@@ -276,7 +281,6 @@ def test_runtime_router_config_does_not_ship_unused_cost_fields() -> None:
         REPO_ROOT
         / "src"
         / "opensquilla"
-        / "contrib"
         / "squilla_router"
         / "models"
         / "v4.2_phase3_inference"
@@ -284,7 +288,14 @@ def test_runtime_router_config_does_not_ship_unused_cost_fields() -> None:
     )
 
     text = runtime_config.read_text(encoding="utf-8")
+    data = yaml.safe_load(text)
 
+    assert data["tier_registry"]["S"] == ["deepseek/deepseek-v4-flash"]
+    assert data["tier_registry"]["M"] == ["deepseek/deepseek-v4-flash"]
+    assert data["tier_registry"]["L"] == ["z-ai/glm-5.1"]
+    assert data["tier_registry"]["XL"] == ["anthropic/claude-opus-4.7"]
+    assert data["tier_explanations"]["L"]["model"] == "z-ai/glm-5.1"
+    assert data["tier_explanations"]["XL"]["model"] == "anthropic/claude-opus-4.7"
     assert "cost_ratios:" not in text
     assert "cost_matrix:" not in text
     assert "under_routing_multiplier" not in text

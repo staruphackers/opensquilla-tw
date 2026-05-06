@@ -15,25 +15,21 @@ from opensquilla.skills.loader import SkillLoader
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLED = ROOT / "src" / "opensquilla" / "skills" / "bundled"
 DEFAULTS = {
-    "automation-workflows",
     "coding-agent",
     "cron",
     "deep-research",
     "docx",
     "github",
     "html-to-pdf",
-    "humanizer",
     "memory",
     "multi-search-engine",
     "nano-pdf",
     "pdf-toolkit",
     "pptx",
-    "self-improving-agent",
     "skill-creator",
     "summarize",
     "tmux",
     "weather",
-    "website-builder",
     "xlsx",
 }
 

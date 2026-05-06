@@ -84,6 +84,22 @@ class ToolResultEvent:
 
 
 @dataclass
+class ArtifactEvent:
+    kind: Literal["artifact"] = "artifact"
+    id: str = ""
+    sha256: str = ""
+    name: str = ""
+    mime: str = ""
+    size: int = 0
+    session_id: str = ""
+    session_key: str = ""
+    source: str = ""
+    created_at: str = ""
+    download_url: str = ""
+    store: str = "artifacts"
+
+
+@dataclass
 class StateChangeEvent:
     kind: Literal["state_change"] = field(default="state_change", init=False)
     from_state: AgentState = AgentState.IDLE
@@ -179,6 +195,7 @@ AgentEvent = (
     | RunHeartbeatEvent
     | ToolUseStartEvent
     | ToolResultEvent
+    | ArtifactEvent
     | StateChangeEvent
     | ErrorEvent
     | DoneEvent

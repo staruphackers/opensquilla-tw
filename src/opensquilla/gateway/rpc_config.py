@@ -130,6 +130,28 @@ def _memory_restart_fingerprint(config: Any) -> dict[str, Any]:
     }
 
 
+def _channels_restart_fingerprint(config: Any) -> Any:
+    """Fingerprint config.channels so any change forces restartRequired=True.
+
+    ChannelManager and webhook routes are constructed once at boot, so any
+    field change in config.channels — even a single token — requires a
+    gateway restart to take live effect.
+    """
+    if config is None or not hasattr(config, "model_dump"):
+        return None
+    data = config.model_dump(mode="python")
+    channels = data.get("channels") if isinstance(data, dict) else None
+    if not isinstance(channels, dict):
+        return None
+    entries = channels.get("channels") or []
+    if not isinstance(entries, list):
+        return None
+    return sorted(
+        [entry for entry in entries if isinstance(entry, dict)],
+        key=lambda e: (e.get("name") or "", e.get("type") or ""),
+    )
+
+
 def _validate_memory_embedding_semantics(config: Any) -> None:
     memory_cfg = getattr(config, "memory", None)
     if memory_cfg is None:
@@ -244,6 +266,7 @@ async def _handle_config_set(params: dict | None, ctx: RpcContext) -> dict[str, 
         raise ValueError("No config available")
 
     old_memory_fingerprint = _memory_restart_fingerprint(ctx.config)
+    old_channels_fingerprint = _channels_restart_fingerprint(ctx.config)
     cfg_dict = ctx.config.model_dump() if hasattr(ctx.config, "model_dump") else {}
     # Validate path exists
     source_value = _resolve_path(cfg_dict, path)
@@ -270,8 +293,10 @@ async def _handle_config_set(params: dict | None, ctx: RpcContext) -> dict[str, 
     _sync_image_generation(new_config)
     _persist_config(ctx.config)
     return {
-        "restartRequired": old_memory_fingerprint
-        != _memory_restart_fingerprint(new_config)
+        "restartRequired": (
+            old_memory_fingerprint != _memory_restart_fingerprint(new_config)
+            or old_channels_fingerprint != _channels_restart_fingerprint(new_config)
+        )
     }
 
 
@@ -291,6 +316,7 @@ async def _handle_config_patch(params: dict | None, ctx: RpcContext) -> dict[str
         raise ValueError("No config available")
 
     old_memory_fingerprint = _memory_restart_fingerprint(ctx.config)
+    old_channels_fingerprint = _channels_restart_fingerprint(ctx.config)
     cfg_dict = ctx.config.model_dump() if hasattr(ctx.config, "model_dump") else {}
     source_cfg_dict = copy.deepcopy(cfg_dict) if isinstance(cfg_dict, dict) else {}
     redacted_paths: set[str] = set()
@@ -337,8 +363,10 @@ async def _handle_config_patch(params: dict | None, ctx: RpcContext) -> dict[str
     _persist_config(ctx.config)
     return {
         "patched": list(dot_patches.keys()) + (["(merge)"] if patch_data else []),
-        "restartRequired": old_memory_fingerprint
-        != _memory_restart_fingerprint(new_config),
+        "restartRequired": (
+            old_memory_fingerprint != _memory_restart_fingerprint(new_config)
+            or old_channels_fingerprint != _channels_restart_fingerprint(new_config)
+        ),
     }
 
 
@@ -382,6 +410,7 @@ async def _handle_config_apply(params: dict | None, ctx: RpcContext) -> dict[str
         config_payload["config_path"] = getattr(ctx.config, "config_path", None)
 
     old_memory_fingerprint = _memory_restart_fingerprint(ctx.config)
+    old_channels_fingerprint = _channels_restart_fingerprint(ctx.config)
     old_payload = (
         ctx.config.model_dump(mode="python")
         if ctx.config is not None and hasattr(ctx.config, "model_dump")
@@ -400,8 +429,10 @@ async def _handle_config_apply(params: dict | None, ctx: RpcContext) -> dict[str
     _sync_image_generation(new_config)
     _persist_config(ctx.config if ctx.config is not None else new_config)
     return {
-        "restartRequired": old_memory_fingerprint
-        != _memory_restart_fingerprint(new_config)
+        "restartRequired": (
+            old_memory_fingerprint != _memory_restart_fingerprint(new_config)
+            or old_channels_fingerprint != _channels_restart_fingerprint(new_config)
+        )
     }
 
 
