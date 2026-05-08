@@ -93,6 +93,7 @@ METHOD_SCOPES: dict[str, str] = {
     "doctor.memory.status": READ_SCOPE,
     "logs.status": READ_SCOPE,
     "logs.tail": READ_SCOPE,
+    "logs.trace": READ_SCOPE,
     "models.list": READ_SCOPE,
     "providers.status": READ_SCOPE,
     "search.status": READ_SCOPE,
