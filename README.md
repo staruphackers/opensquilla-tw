@@ -545,6 +545,16 @@ to websocket mode and does not need a public URL in that mode; Feishu
 webhook mode, Slack, WeCom, and Microsoft Teams require a public
 provider-reachable URL.
 
+The same JSON status payload also includes two support surfaces. Use
+`capability_profile` for transport-level facts such as group chat,
+mentions, native file upload, replies, threads, cards, and reactions.
+Use `platform_manifest` for provider-level boundaries such as files,
+attachments, docs, drive, wiki, permissions, and scope diagnostics.
+Unsupported or config-required rows are intentional: they prevent the
+product from claiming Feishu-style doc/wiki/drive behavior on providers
+whose adapter or platform does not expose that surface yet. Real tenant
+smoke tests remain opt-in and credential-gated.
+
 **Config load order:** `OPENSQUILLA_GATEWAY_CONFIG_PATH` →
 `./opensquilla.toml` → `~/.opensquilla/config.toml` → built-in
 defaults. Onboarding writes the file at the path the runtime would

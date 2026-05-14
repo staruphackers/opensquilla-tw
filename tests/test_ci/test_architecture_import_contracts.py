@@ -15,6 +15,7 @@ APPROVED_PACKAGE_IMPORTS: frozenset[tuple[str, str]] = frozenset({
     ("channels", "engine"),
     ("channels", "gateway"),
     ("channels", "session"),
+    ("channels", "tools"),
     ("cli", "agents"),
     ("cli", "dist"),
     ("cli", "engine"),

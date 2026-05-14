@@ -855,6 +855,7 @@ fi
 
 def render_start_ps1(profile: str = "recommended") -> str:
     target = _install_target("opensquilla", profile, _portable_profile_extras(profile))
+    requires_router_runtime = "$true" if profile == "recommended" else "$false"
     script = """param(
     [switch]$Cli,
     [Parameter(ValueFromRemainingArguments = $true)]
@@ -868,6 +869,7 @@ $PackageDir = Join-Path $ScriptDir 'packages'
 $PythonBin = Join-Path $ScriptDir 'runtime\\python\\python.exe'
 $VenvBase = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { $env:TEMP }
 $VenvRoot = Join-Path $VenvBase 'OpenSquilla\\venvs'
+$RequiresRouterRuntime = __REQUIRES_ROUTER_RUNTIME__
 if ((-not $env:OPENSQUILLA_LLM_API_KEY) -and $env:OPENROUTER_API_KEY) {
     $env:OPENSQUILLA_LLM_API_KEY = $env:OPENROUTER_API_KEY
 }
@@ -878,6 +880,67 @@ if (-not (Test-Path $PythonBin)) {
 if (-not (Test-Path $PackageDir)) {
     throw "OpenSquilla package directory not found: $PackageDir"
 }
+
+function Test-WindowsVCRedistInstalled {
+    if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+        [System.Runtime.InteropServices.OSPlatform]::Windows
+    )) {
+        return $true
+    }
+    $runtimeKeys = @(
+        'HKLM:\\SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\x64',
+        'HKLM:\\SOFTWARE\\WOW6432Node\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\x64'
+    )
+    foreach ($key in $runtimeKeys) {
+        if (-not (Test-Path $key)) {
+            continue
+        }
+        $runtime = Get-ItemProperty -Path $key -ErrorAction SilentlyContinue
+        if ($runtime -and $runtime.Installed -eq 1 -and $runtime.Major -ge 14) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Install-WindowsVCRedistIfNeeded {
+    if (-not $RequiresRouterRuntime) {
+        return
+    }
+    if ($env:OPENSQUILLA_SKIP_VC_REDIST -eq '1') {
+        Write-Host 'OpenSquilla: skipping Microsoft Visual C++ Redistributable check because OPENSQUILLA_SKIP_VC_REDIST=1.'
+        return
+    }
+    if (Test-WindowsVCRedistInstalled) {
+        return
+    }
+
+    $redistUrl = 'https://aka.ms/vs/17/release/vc_redist.x64.exe'
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if ($winget) {
+        Write-Host 'OpenSquilla: Microsoft Visual C++ Redistributable not detected; installing with winget.'
+        $wingetArgs = @(
+            'install',
+            '--id',
+            'Microsoft.VCRedist.2015+.x64',
+            '--exact',
+            '--silent',
+            '--accept-package-agreements',
+            '--accept-source-agreements'
+        )
+        & winget @wingetArgs
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host 'OpenSquilla: Microsoft Visual C++ Redistributable installation completed.'
+            return
+        }
+        Write-Warning "OpenSquilla: winget could not install Microsoft Visual C++ Redistributable (exit $LASTEXITCODE)."
+    }
+
+    Write-Warning 'OpenSquilla: Microsoft Visual C++ Redistributable is needed for the bundled router on many Windows machines.'
+    Write-Warning "OpenSquilla: install it from $redistUrl, then restart PowerShell if onnxruntime reports DLL load failures."
+    Write-Warning 'OpenSquilla: the gateway can still start with a safe router fallback while this runtime is missing.'
+}
+
 if (-not (Test-Path $VenvRoot)) {
     New-Item -ItemType Directory -Path $VenvRoot -Force | Out-Null
 }
@@ -925,6 +988,7 @@ if (-not $env:OPENSQUILLA_GATEWAY_WORKSPACE_DIR) {
     $env:OPENSQUILLA_GATEWAY_WORKSPACE_DIR = Join-Path $env:OPENSQUILLA_STATE_DIR 'workspace'
 }
 New-Item -ItemType Directory -Path $env:OPENSQUILLA_STATE_DIR -Force | Out-Null
+Install-WindowsVCRedistIfNeeded
 
 if (-not (Test-Path $VenvPython)) {
     Write-Host "Creating local OpenSquilla environment..."
@@ -1026,7 +1090,9 @@ if (-not $OutputRedirected) {
 }
 exit $GatewayExitCode
 """
-    return script.replace("__TARGET__", target)
+    return script.replace("__TARGET__", target).replace(
+        "__REQUIRES_ROUTER_RUNTIME__", requires_router_runtime
+    )
 
 
 def render_cli_sh() -> str:

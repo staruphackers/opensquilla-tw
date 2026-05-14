@@ -21,11 +21,11 @@ def test_recommended_extra_uses_onnx_tokenizers_without_transformers() -> None:
     assert not any(dep.startswith("transformers") for dep in recommended)
 
 
-def test_recommended_extra_supports_default_pptx_skill() -> None:
+def test_core_dependencies_support_default_pptx_skill() -> None:
     config = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-    recommended = config["project"]["optional-dependencies"]["recommended"]
+    dependencies = config["project"]["dependencies"]
 
-    assert any(dep.startswith("python-pptx") for dep in recommended)
+    assert any(dep.startswith("python-pptx") for dep in dependencies)
 
 
 def test_releases_md_exists_and_references_preview_tag() -> None:

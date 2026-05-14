@@ -47,13 +47,17 @@ SCHEMA_VERSION = 1
 # under ``opensquilla.channels``. Helpers (``_util``, ``manager``, ``types``)
 # are intentionally excluded — they are infra, not channels.
 BUNDLED_CHANNELS: tuple[str, ...] = (
+    "dingtalk",
     "discord",
     "feishu",
+    "matrix",
+    "msteams",
+    "qq",
     "slack",
     "telegram",
     "terminal",
+    "wecom",
     "websocket",
-    "whatsapp",
 )
 
 # Bundled built-in tools. Tools are listed by module name under

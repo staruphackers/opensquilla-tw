@@ -610,6 +610,6 @@ async def test_task_runtime_turn_applies_cron_job_tool_policy() -> None:
     )
 
     tool_context = runner.calls[0]["tool_context"]
-    assert tool_context.allowed_tools == {"session_status", "memory_search"}
+    assert tool_context.allowed_tools == {"session_status"}
     assert "exec_command" in tool_context.denied_tools
     assert "web_fetch" in tool_context.denied_tools

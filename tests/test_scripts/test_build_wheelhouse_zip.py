@@ -651,6 +651,14 @@ def test_prepare_windows_portable_release_tree_includes_double_click_launcher(
     assert ".\\opensquilla.cmd onboard" in readme
     assert "Closing the terminal stops the gateway." in readme
     assert "Advanced portable usage" in readme
+    start_ps1 = (release_root / "start.ps1").read_text(encoding="utf-8")
+    assert "Test-WindowsVCRedistInstalled" in start_ps1
+    assert "RuntimeInformation]::IsOSPlatform" in start_ps1
+    assert "$RequiresRouterRuntime = $true" in start_ps1
+    assert '"opensquilla[recommended,feishu]" -notmatch' not in start_ps1
+    assert "OPENSQUILLA_SKIP_VC_REDIST" in start_ps1
+    assert "Microsoft.VCRedist.2015+.x64" in start_ps1
+    assert "https://aka.ms/vs/17/release/vc_redist.x64.exe" in start_ps1
 
 
 def test_install_portable_wheelhouse_preinstalls_into_bundled_python(
