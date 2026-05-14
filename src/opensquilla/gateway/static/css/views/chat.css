@@ -762,6 +762,7 @@
   font-family: var(--font-mono);
   font-size: var(--fs-xs);
   color: var(--text-muted);
+  min-width: 11ch;
 }
 
 /* ─── Tool Cards (collapsed tool calls) ────────────────────────────────── */

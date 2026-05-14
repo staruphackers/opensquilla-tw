@@ -148,15 +148,10 @@ class TurnResult:
 class WaitingIndicator:
     """Small custom waiting indicator for the REPL pre-token state."""
 
+    # kept in sync with chat.js _showThinkingIndicatorNow
     _verbs = (
-        "Pondering",
-        "Synthesizing",
-        "Cooking",
-        "Thinking",
-        "Weighing",
-        "Considering",
-        "Brewing",
-        "Sketching",
+        "Burrowing", "Lurking", "Scanning", "Stalking",
+        "Coiling", "Striking", "Snapping", "Surfacing",
     )
     _verb_dwell_seconds = 2.5
 

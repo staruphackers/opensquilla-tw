@@ -140,6 +140,9 @@ const ChatView = (() => {
   let _thinkingDelayTimer = null;
   const _THINKING_DELAY_MS = 400;  // don't show for fast responses
   const _THINKING_TTL_MS = 60000;  // 60s auto-hide
+  // kept in sync with stream.py WaitingIndicator._verbs
+  const SQUILLA_VERBS = ['Burrowing','Lurking','Scanning','Stalking','Coiling','Striking','Snapping','Surfacing'];
+  const SQUILLA_DWELL_MS = 2500;
 
   // Inline directive tags — control signals the LLM emits per system prompt
   // instructions (e.g. reply threading).  Must be stripped before display.
@@ -3059,8 +3062,11 @@ const ChatView = (() => {
 
     const elapsed = document.createElement('span');
     elapsed.className = 'thinking-elapsed';
-    const secs = Math.floor((Date.now() - _thinkingStartTime) / 1000);
-    elapsed.textContent = 'Working (' + secs + 's)';
+    elapsed.setAttribute('aria-live', 'off');
+    const elapsedMs = Date.now() - _thinkingStartTime;
+    const seconds = Math.floor(elapsedMs / 1000);
+    const verb = SQUILLA_VERBS[Math.floor(elapsedMs / SQUILLA_DWELL_MS) % SQUILLA_VERBS.length];
+    elapsed.textContent = `${verb} (${seconds}s)`;
 
     status.appendChild(dots);
     status.appendChild(elapsed);
@@ -3071,9 +3077,11 @@ const ChatView = (() => {
 
     _thinkingTimerInterval = setInterval(() => {
       if (!_thinkingEl) { clearInterval(_thinkingTimerInterval); return; }
-      const s = Math.floor((Date.now() - _thinkingStartTime) / 1000);
+      const eMs = Date.now() - _thinkingStartTime;
+      const s = Math.floor(eMs / 1000);
+      const v = SQUILLA_VERBS[Math.floor(eMs / SQUILLA_DWELL_MS) % SQUILLA_VERBS.length];
       const label = _thinkingEl.querySelector('.thinking-elapsed');
-      if (label) label.textContent = 'Working (' + s + 's)';
+      if (label) label.textContent = `${v} (${s}s)`;
 
       if (s >= _THINKING_TTL_MS / 1000) {
         _hideThinkingIndicator();

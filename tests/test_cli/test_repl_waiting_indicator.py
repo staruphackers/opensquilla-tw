@@ -13,9 +13,9 @@ from opensquilla.cli.repl.stream import StreamingRenderer, WaitingIndicator
 
 def test_verb_cycles_by_dwell_seconds() -> None:
     ind = WaitingIndicator(started_at=100.0)
-    assert ind._verb(0.0) == "Pondering"
-    assert ind._verb(2.6) == "Synthesizing"
-    assert ind._verb(5.1) == "Cooking"
+    assert ind._verb(0.0) == "Burrowing"
+    assert ind._verb(2.6) == "Lurking"
+    assert ind._verb(5.1) == "Scanning"
     n = len(WaitingIndicator._verbs)
     assert ind._verb(n * 2.5 + 0.1) == ind._verb(0.1)
 
@@ -25,8 +25,8 @@ def test_render_contains_verb_and_elapsed_seconds() -> None:
     ind = WaitingIndicator(started_at=started)
     with patch("opensquilla.cli.repl.stream.time.monotonic", return_value=started + 3.0):
         plain = ind.__rich__().plain
-    # 3.0 / 2.5 = 1 → _verbs[1] == "Synthesizing"
-    assert "Synthesizing" in plain
+    # 3.0 / 2.5 = 1 → _verbs[1] == "Lurking"
+    assert "Lurking" in plain
     assert "3.0s" in plain
     assert "Ctrl+C cancels" in plain
 
