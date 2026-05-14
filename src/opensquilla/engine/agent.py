@@ -73,7 +73,7 @@ from opensquilla.session.compaction import (
     compact_context,
 )
 from opensquilla.tool_boundary import AgentToolHandler as ToolHandler
-from opensquilla.tools.result_budget import (
+from opensquilla.result_budget import (
     ToolResultBudgetClass,
     compact_tool_result_content,
     resolve_budget_class,

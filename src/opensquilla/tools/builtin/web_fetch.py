@@ -15,7 +15,7 @@ from cachetools import TTLCache
 from opensquilla.env import trust_env as _trust_env
 from opensquilla.sandbox.integration import sandboxed
 from opensquilla.tools.registry import tool
-from opensquilla.tools.result_budget import (
+from opensquilla.result_budget import (
     DEFAULT_TOOL_RESULT_BUDGET_POLICY,
     ToolResultBudgetPolicy,
 )

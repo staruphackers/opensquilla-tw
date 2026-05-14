@@ -2,6 +2,11 @@
 
 The budget applies at tool boundaries, not at skill boundaries, so installed
 skills cannot bypass it by asking for more fetches or larger outputs.
+
+Lives at the top level (rather than inside ``opensquilla.tools``) so that the
+engine layer can import these helpers without triggering the tool-registry
+side effect in ``opensquilla.tools.__init__``. See
+``tests/test_public_tool_surface.py::test_engine_types_import_does_not_register_builtin_tools``.
 """
 
 from __future__ import annotations

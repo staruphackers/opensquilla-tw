@@ -8,7 +8,7 @@ import pytest
 from opensquilla.engine.types import ToolCall
 from opensquilla.tools.dispatch import build_tool_handler
 from opensquilla.tools.registry import ToolRegistry
-from opensquilla.tools.result_budget import ToolResultBudgetClass, ToolResultBudgetPolicy
+from opensquilla.result_budget import ToolResultBudgetClass, ToolResultBudgetPolicy
 from opensquilla.tools.types import (
     CallerKind,
     InteractionMode,

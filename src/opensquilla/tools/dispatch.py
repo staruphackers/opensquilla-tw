@@ -17,7 +17,7 @@ from opensquilla.tool_boundary import AgentToolHandler, ToolCall, ToolResult
 from opensquilla.tools.envelope import build_tool_failure_envelope, is_denial_payload
 from opensquilla.tools.policy import private_memory_read_tool_denied
 from opensquilla.tools.registry import ToolRegistry, profile_allows_tool, resolve_profile
-from opensquilla.tools.result_budget import (
+from opensquilla.result_budget import (
     DEFAULT_TOOL_RESULT_BUDGET_POLICY,
     ToolResultBudgetPolicy,
     ToolResultBudgetTracker,
