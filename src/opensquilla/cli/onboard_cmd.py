@@ -38,7 +38,8 @@ def onboard_command(
     router: str = typer.Option(
         "recommended",
         "--router",
-        help="recommended | openrouter-mix | disabled",
+        metavar="MODE",
+        help="Router profile: recommended, openrouter-mix, or disabled.",
     ),
     minimal: bool = typer.Option(False, "--minimal"),
     skip_channels: bool = typer.Option(False, "--skip-channels"),

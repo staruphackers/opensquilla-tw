@@ -27,7 +27,7 @@ from opensquilla.cli.repl.commands import is_exit_command, render_help_table
 from opensquilla.cli.repl.prompt import prompt_approval, prompt_user
 from opensquilla.cli.repl.session_state import ChatSessionState, messages_to_markdown
 from opensquilla.cli.repl.stream import StreamingRenderer, TurnResult, UsageSummary
-from opensquilla.cli.ui import ACCENT, console, error_panel
+from opensquilla.cli.ui import ACCENT, ACCENT_HEADER, console, error_panel
 from opensquilla.engine.commands import Surface
 from opensquilla.session.compaction import (
     build_compaction_config_from_provider,
@@ -1101,11 +1101,11 @@ async def _handle_tool_compress_command(
             model = getattr(cfg, "tool_result_compression_summary_model", None)
 
     model_suffix = f" [dim]model={model}[/dim]" if resolved_mode == "summarize" and model else ""
-    console.print(f"[cyan]tool result compression:[/cyan] {resolved_mode.upper()}{model_suffix}")
+    console.print(f"[{ACCENT}]tool result compression:[/] {resolved_mode.upper()}{model_suffix}")
 
 
 def _print_sessions_table(rows: list[dict[str, Any]]) -> None:
-    table = Table(title="Sessions", show_header=True, header_style="bold cyan")
+    table = Table(title="Sessions", show_header=True, header_style=ACCENT_HEADER)
     table.add_column("Key")
     table.add_column("Status")
     table.add_column("Model")
@@ -1121,7 +1121,7 @@ def _print_sessions_table(rows: list[dict[str, Any]]) -> None:
 
 
 def _print_models_table(rows: list[dict[str, Any]]) -> None:
-    table = Table(title="Models", show_header=True, header_style="bold cyan")
+    table = Table(title="Models", show_header=True, header_style=ACCENT_HEADER)
     table.add_column("ID")
     table.add_column("Provider")
     table.add_column("Context", justify="right")
@@ -1286,14 +1286,14 @@ async def _handle_approvals_command(cmd: str, client: object | None = None) -> N
         if arg == "reset":
             queue.set_settings(mode="prompt")
             cache.clear()
-            console.print("[cyan]Approval mode reset to prompt; cache cleared.[/cyan]")
+            console.print(f"[{ACCENT}]Approval mode reset to prompt; cache cleared.[/]")
             return
         entries = [
             f"  [dim]{scope}[/dim] {k}:{t}"
             for (k, t), (_exp, scope) in cache._entries.items()  # noqa: SLF001
         ]
-        console.print(f"[cyan]mode:[/cyan] {queue.get_settings().mode}")
-        console.print(f"[cyan]cached intents ({len(entries)}):[/cyan]")
+        console.print(f"[{ACCENT}]mode:[/] {queue.get_settings().mode}")
+        console.print(f"[{ACCENT}]cached intents ({len(entries)}):[/]")
         for line in entries or ["  [dim](none)[/dim]"]:
             console.print(line)
         return
@@ -1306,7 +1306,7 @@ async def _handle_approvals_command(cmd: str, client: object | None = None) -> N
         try:
             await client.set_approval_mode("prompt")
             await client.forget_approvals()
-            console.print("[cyan]Approval mode reset to prompt; server cache cleared.[/cyan]")
+            console.print(f"[{ACCENT}]Approval mode reset to prompt; server cache cleared.[/]")
         except Exception as exc:
             console.print(f"[red]Failed to reset approvals:[/red] {type(exc).__name__}: {exc}")
             console.print("[red]Restart the gateway if this is an older build.[/red]")
@@ -1318,12 +1318,12 @@ async def _handle_approvals_command(cmd: str, client: object | None = None) -> N
         console.print(f"[red]Failed to query approvals:[/red] {type(exc).__name__}: {exc}")
         console.print("[red]Older gateway? Restart it.[/red]")
         return
-    console.print(f"[cyan]mode:[/cyan] {snap.get('mode')}")
+    console.print(f"[{ACCENT}]mode:[/] {snap.get('mode')}")
     raw_entries = snap.get("intent_cache_entries")
     approval_entries = (
         cast(list[dict[str, Any]], raw_entries) if isinstance(raw_entries, list) else []
     )
-    console.print(f"[cyan]cached intents ({len(approval_entries)}):[/cyan]")
+    console.print(f"[{ACCENT}]cached intents ({len(approval_entries)}):[/]")
     if not approval_entries:
         console.print("  [dim](none)[/dim]")
     for e in approval_entries:
@@ -1340,14 +1340,14 @@ async def _handle_forget_command(cmd: str, client: object | None = None) -> None
     if len(parts) < 2:
         if await _forget_server_approvals(client):
             console.print(
-                "[cyan]All cached approvals cleared.[/cyan] Future destructive "
+                f"[{ACCENT}]All cached approvals cleared.[/] Future destructive "
                 "ops will prompt again."
             )
         return
     target = parts[1].strip()
     if await _forget_server_approvals(client, target):
         console.print(
-            f"[cyan]Cached approval for[/cyan] {target} [cyan]cleared[/cyan] (if one existed)."
+            f"[{ACCENT}]Cached approval for[/] {target} [{ACCENT}]cleared[/] (if one existed)."
         )
 
 
@@ -1373,7 +1373,7 @@ async def _handle_elevated_command(
     arg = parts[1].lower() if len(parts) > 1 else "status"
     if arg == "status":
         current = state["mode"] or "off (sandboxed)"
-        console.print(f"[cyan]permissions:[/cyan] {current}")
+        console.print(f"[{ACCENT}]permissions:[/] {current}")
         return
 
     known = {"off": None, "on": "on", "bypass": "bypass", "full": "full"}
@@ -1412,7 +1412,7 @@ async def _handle_elevated_command(
 
     if arg == "off":
         console.print(
-            f"[cyan]permissions: off[/cyan] — exec runs inside the sandbox. "
+            f"[{ACCENT}]permissions: off[/] — exec runs inside the sandbox. "
             f"Queue mode reset to prompt. {revoked_suffix}{queue_mode_reset_warning}"
         )
     elif arg == "on":

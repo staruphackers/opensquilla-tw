@@ -9,7 +9,7 @@ import os
 import typer
 
 from opensquilla.cli.gateway_lifecycle import GatewayLifecycleManager, GatewayLifecycleResult
-from opensquilla.cli.ui import console
+from opensquilla.cli.ui import ACCENT_MARKUP, console
 from opensquilla.gateway.boot import start_gateway_server
 from opensquilla.gateway.config import GatewayConfig, is_public_bind, resolve_listen_address
 from opensquilla.paths import default_opensquilla_home
@@ -45,7 +45,7 @@ def run_gateway(
     config = GatewayConfig.load(os.environ.get("OPENSQUILLA_GATEWAY_CONFIG_PATH"))
     config = config.model_copy(update={"host": host, "port": port, "debug": debug})
 
-    banner_host = f"[red]{host}[/red]" if is_public_bind(host) else f"[cyan]{host}[/cyan]"
+    banner_host = f"[red]{host}[/red]" if is_public_bind(host) else f"[{ACCENT_MARKUP}]{host}[/]"
     console.print(f"[bold green]Starting OpenSquilla gateway[/bold green] on {banner_host}:{port}")
     for line in gateway_startup_guidance(host, port):
         console.print(line)

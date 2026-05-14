@@ -9,7 +9,7 @@ from rich.table import Table
 
 from opensquilla.cli.gateway_rpc import confirm_or_exit, run_gateway_sync
 from opensquilla.cli.output import print_json
-from opensquilla.cli.ui import console
+from opensquilla.cli.ui import ACCENT_HEADER, console
 
 cron_app = typer.Typer(help="Inspect and manage scheduled OpenSquilla runs.")
 
@@ -39,7 +39,7 @@ def _render_jobs(rows: list[dict[str, Any]], *, title: str = "Cron jobs") -> Non
     if not rows:
         typer.echo("No cron jobs.")
         return
-    table = Table(title=title, show_header=True, header_style="bold cyan")
+    table = Table(title=title, show_header=True, header_style=ACCENT_HEADER)
     table.add_column("ID")
     table.add_column("Name")
     table.add_column("Enabled")
@@ -63,7 +63,7 @@ def _render_jobs(rows: list[dict[str, Any]], *, title: str = "Cron jobs") -> Non
 
 
 def _render_mapping(payload: dict[str, Any], *, title: str) -> None:
-    table = Table(title=title, show_header=True, header_style="bold cyan")
+    table = Table(title=title, show_header=True, header_style=ACCENT_HEADER)
     table.add_column("Field")
     table.add_column("Value")
     for key, value in payload.items():
@@ -75,7 +75,7 @@ def _render_runs(rows: list[dict[str, Any]]) -> None:
     if not rows:
         typer.echo("No cron runs.")
         return
-    table = Table(title="Cron runs", show_header=True, header_style="bold cyan")
+    table = Table(title="Cron runs", show_header=True, header_style=ACCENT_HEADER)
     table.add_column("ID")
     table.add_column("Started")
     table.add_column("Finished")
