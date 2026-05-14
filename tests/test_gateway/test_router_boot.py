@@ -288,6 +288,107 @@ async def test_start_gateway_server_schedules_router_preload_after_channels(
         await server.close()
 
 
+@pytest.mark.asyncio
+async def test_start_gateway_server_wires_cron_failure_dispatcher(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Driver-level guard for the production cron failure-destination wire.
+
+    When ``svc.cron_scheduler`` exists, boot must register
+    ``DeliveryChain.dispatch_failure_alert`` as the global failure dispatcher
+    in ``scheduler.jobs`` so failed cron runs reach the configured FD at
+    runtime. Without this wire the dispatch plumbing is dead in production
+    even though unit tests cover the hook directly.
+    """
+    captured: dict[str, Any] = {}
+
+    class FakeTurnRunner:
+        def __init__(self, **_kw: Any) -> None: ...
+
+        def set_session_lock_provider(self, _provider: Any) -> None: ...
+
+    class FakeCronScheduler:
+        def __init__(self) -> None:
+            self.registered: dict[str, Any] = {}
+
+        def register_handler(self, key: str, fn: Any) -> None:
+            self.registered[key] = fn
+
+        async def list_jobs(self) -> list:
+            return []
+
+    cron_sched = FakeCronScheduler()
+
+    async def fake_build_services(**kwargs: Any) -> Any:
+        async def close() -> None:
+            return None
+
+        return SimpleNamespace(
+            provider_selector=object(),
+            tool_registry=object(),
+            session_manager=None,
+            skill_loader=object(),
+            usage_tracker=object(),
+            config=kwargs["config"],
+            memory_sync_managers={},
+            model_catalog=None,
+            memory_retrievers={},
+            turn_capture_services={},
+            flush_service=None,
+            cron_scheduler=cron_sched,
+            task_runtime=None,
+            agent_registry=None,
+            memory_managers={},
+            memory_stores={},
+            _turn_runner_ref=[],
+            close=close,
+        )
+
+    from opensquilla.gateway import boot
+    from opensquilla.scheduler import jobs as scheduler_jobs
+
+    def _record_dispatcher(fn: Any) -> None:
+        captured["dispatcher"] = fn
+
+    monkeypatch.setattr("opensquilla.engine.runtime.TurnRunner", FakeTurnRunner)
+    monkeypatch.setattr(boot, "build_services", fake_build_services)
+    monkeypatch.setattr(boot, "_setup_file_logging", lambda config: None)
+    monkeypatch.setattr(boot, "emit_skill_filter_banner", lambda config: None)
+    monkeypatch.setattr(scheduler_jobs, "set_failure_dispatcher", _record_dispatcher)
+    monkeypatch.setattr(
+        "opensquilla.gateway.pidlock.GatewayPidLock.acquire", lambda self: None
+    )
+    monkeypatch.setattr(
+        "opensquilla.gateway.pidlock.GatewayPidLock.release", lambda self: None
+    )
+
+    config = GatewayConfig(
+        state_dir=str(tmp_path / "state"),
+        workspace_dir=str(tmp_path / "workspace"),
+        control_ui={"enabled": False},
+        channels={"channels": []},
+    )
+
+    server = await boot.start_gateway_server(config=config, run=False)
+    try:
+        assert callable(captured.get("dispatcher")), (
+            "set_failure_dispatcher was not called during boot — the cron "
+            "failure-destination wire is missing from gateway/boot.py"
+        )
+        # The wire must register DeliveryChain.dispatch_failure_alert
+        # (a bound method), not some unrelated callable.
+        assert (
+            getattr(captured["dispatcher"], "__name__", "")
+            == "dispatch_failure_alert"
+        )
+        # Handler factories ran, confirming the wire ran inside the cron-init
+        # branch (not just by coincidence).
+        assert set(cron_sched.registered) >= {"agent_run", "system_event"}
+    finally:
+        await server.close()
+
+
 def test_build_flush_service_respects_memory_flush_enabled_config() -> None:
     service = build_flush_service(
         tool_registry=ToolRegistry(),

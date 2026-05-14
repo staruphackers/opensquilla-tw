@@ -549,3 +549,42 @@ async def test_dispatch_failure_alert_no_fd_is_skip() -> None:
     chain = DeliveryChain()
     job = _job_with_delivery(handler_key="agent_run", delivery=DeliveryConfig())
     assert await chain.dispatch_failure_alert(job, "x") == "skipped"
+
+
+# --- Gateway boot wiring contract ---------------------------------------
+
+
+async def test_set_failure_dispatcher_with_delivery_chain_drives_end_to_end() -> None:
+    """Locks the contract gateway boot relies on: registering
+    ``DeliveryChain.dispatch_failure_alert`` via ``set_failure_dispatcher``
+    causes any failed cron run to land on the configured FailureDestination.
+    Regression guard for the boot-time wire in gateway/boot.py."""
+    cm = _RecordingChannelManager()
+    cm.register("slack")
+    chain = DeliveryChain(channel_manager_ref=lambda: cm)
+
+    set_failure_dispatcher(chain.dispatch_failure_alert)
+    try:
+        job = _job_with_delivery(
+            handler_key="system_event",
+            delivery=DeliveryConfig(
+                failure_destination=FailureDestination(
+                    mode=DeliveryMode.CHANNEL,
+                    channel_name="slack",
+                    channel_id="C-ops",
+                ),
+            ),
+        )
+
+        async def _failing_handler(job: CronJob):
+            raise RuntimeError("heartbeat dead")
+
+        execution = await execute_with_timeout(job, _failing_handler)
+
+        assert execution.success is False
+        # End-to-end: hook → DeliveryChain.dispatch_failure_alert →
+        # _post_to_channel → adapter.send. The slack FD adapter sees the alert.
+        assert len(cm.adapters["slack"].sent) == 1
+        assert cm.adapters["slack"].sent[-1].content == "heartbeat dead"
+    finally:
+        set_failure_dispatcher(None)

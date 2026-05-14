@@ -1784,6 +1784,16 @@ async def start_gateway_server(
             session_forwarder=_session_forwarder,
         )
 
+        # Plug DeliveryChain.dispatch_failure_alert into execute_with_timeout
+        # so every failed cron run (agent_run raise, system_event raise,
+        # TimeoutError, generic exception) reaches the job's configured
+        # FailureDestination at runtime. Without this wire the dispatch
+        # plumbing is dead in production even though unit tests cover the
+        # hook directly.
+        from opensquilla.scheduler.jobs import set_failure_dispatcher
+
+        set_failure_dispatcher(delivery_chain.dispatch_failure_alert)
+
         def _cron_workspace_resolver(agent_id: str) -> tuple[str | None, bool]:
             workspace_dir = resolve_agent_workspace_dir(agent_id, config)
             workspace_strict = getattr(config, "workspace_strict", None)
