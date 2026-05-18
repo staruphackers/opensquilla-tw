@@ -22,7 +22,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from opensquilla.memory.dream_prompts import (
     phase1_prompt,
@@ -110,7 +110,7 @@ class _DreamFileLock:
 
             getattr(msvcrt, "locking")(self._fh.fileno(), getattr(msvcrt, "LK_LOCK"), 1)
         else:
-            import fcntl
+            fcntl = cast(Any, __import__("fcntl"))
 
             flock = getattr(fcntl, "flock")
             lock_ex = getattr(fcntl, "LOCK_EX")
@@ -129,7 +129,7 @@ class _DreamFileLock:
                     self._fh.fileno(), getattr(msvcrt, "LK_UNLCK"), 1
                 )
             else:
-                import fcntl
+                fcntl = cast(Any, __import__("fcntl"))
 
                 flock = getattr(fcntl, "flock")
                 lock_un = getattr(fcntl, "LOCK_UN")

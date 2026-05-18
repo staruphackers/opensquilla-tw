@@ -361,9 +361,9 @@ async def prompt_approval_inline(*, surface: Surface, approval_panel: str) -> st
     chat_app.set_approval_in_flight(True)
     try:
         async with in_terminal():
-            fresh = PromptSession(message=approval_panel)
+            terminal_fresh: PromptSession[str] = PromptSession(message=approval_panel)
             try:
-                answer = await fresh.prompt_async()
+                answer = await terminal_fresh.prompt_async()
             except (EOFError, KeyboardInterrupt):
                 return "d"
             return (answer or "").strip().lower()
