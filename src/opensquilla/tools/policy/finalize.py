@@ -26,6 +26,7 @@ from opensquilla.execution_status import (
 )
 from opensquilla.result_budget import (
     ToolResultBudgetTracker,
+    ToolRunBudgetExceededError,
     resolve_budget_class,
 )
 from opensquilla.tool_boundary import ToolCall, ToolResult
@@ -89,6 +90,11 @@ async def finalize(
     # ---------------- Exception branch ----------------
     if exception is not None:
         envelope = build_tool_failure_envelope(exception, call.tool_name)
+        reason = (
+            "tool_run_budget_exhausted"
+            if isinstance(exception, ToolRunBudgetExceededError)
+            else "runtime_error"
+        )
         log.warning(
             "dispatch.tool_failed",
             tool=call.tool_name,
@@ -104,7 +110,7 @@ async def finalize(
             "exit_code": None,
             "timed_out": False,
             "truncated": False,
-            "reason": "runtime_error",
+            "reason": reason,
             "source": "tool_runtime",
             "preservation_class": "diagnostic",
         }

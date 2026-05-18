@@ -71,6 +71,9 @@ class ToolContext:
     tool_policy: dict[str, Any] | None = None
     tool_result_budget_policy: Any | None = None
     tool_result_budget_tracker_factory: Callable[[], Any] | None = None
+    tool_run_budget_policy: Any | None = None
+    tool_run_budget_tracker_factory: Callable[[], Any] | None = None
+    tool_run_budget_key: str | None = None
 
 
 # Request-scoped context — set by build_tool_handler before each dispatch.

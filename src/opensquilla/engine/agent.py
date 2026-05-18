@@ -10,6 +10,7 @@ import contextlib
 import hashlib
 import json
 import time
+import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -151,10 +152,6 @@ _INVALID_PROVIDER_CONTEXT_PROJECTION_PREFIX = "[invalid_provider_context_project
 _INVALID_PROVIDER_CONTEXT_ARGUMENTS_KEY = "_invalid_provider_context_arguments"
 _TOOL_ARGUMENT_HEARTBEAT_CHARS = 4096
 _PROVIDER_CONTEXT_PROJECTION_REUSED_REASON = "provider_context_projection_reused"
-_PROVIDER_CONTEXT_PROJECTION_REUSED_USER_MESSAGE = (
-    "I could not execute the tool call because it reused provider-only compacted "
-    "tool arguments. Regenerate the real tool arguments and retry."
-)
 _COMPACTED_TOOL_ARGUMENT_MARKERS = frozenset(
     {
         "_opensquilla_compacted_tool_arguments",
@@ -576,9 +573,6 @@ class Agent:
         self._session_flush_service = session_flush_service
         self._last_compaction_refusal_reason: str | None = None
         self._tool_failure_loop_counts: dict[tuple[str, str], int] = {}
-        self._tool_argument_snapshot_cache: dict[
-            tuple[str, str, str], ToolResultRecord
-        ] = {}
 
     def _context_overflow_error(self) -> ErrorEvent:
         reason = self._last_compaction_refusal_reason
@@ -812,39 +806,6 @@ class Agent:
             messages=messages,
             **payload,
         )
-
-    def _store_tool_argument_snapshot(
-        self,
-        content: str,
-        *,
-        tool_use_id: str,
-        tool_name: str,
-    ) -> ToolResultRecord | None:
-        if (
-            _TOOL_ARGUMENT_PROJECTION_PREFIX in content
-            or _INVALID_PROVIDER_CONTEXT_ARGUMENTS_KEY in content
-            or any(marker in content for marker in _COMPACTED_TOOL_ARGUMENT_MARKERS)
-        ):
-            self._write_turn_call_log(
-                "tool_argument_projection_snapshot_rejected",
-                tool_use_id=tool_use_id,
-                tool_name=tool_name,
-            )
-            return None
-        snapshot_tool_name = f"{tool_name}:arguments"
-        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        cache_key = (tool_use_id, snapshot_tool_name, digest)
-        cached = self._tool_argument_snapshot_cache.get(cache_key)
-        if cached is not None:
-            return cached
-        stored = self._store_tool_result_snapshot(
-            content,
-            tool_use_id=tool_use_id,
-            tool_name=snapshot_tool_name,
-        )
-        if stored is not None:
-            self._tool_argument_snapshot_cache[cache_key] = stored
-        return stored
 
     def _switch_to_invalid_response_fallback(self, reason: str) -> bool:
         fallback = getattr(self.provider, "fallback_after_invalid_response", None)
@@ -1180,132 +1141,19 @@ class Agent:
         )
         return compacted_messages
 
-    def _project_large_tool_use_arguments_for_provider(
+    def _sanitize_projected_tool_use_arguments_for_provider(
         self,
         messages: list[Message],
     ) -> list[Message]:
         cap = self._tool_use_argument_provider_request_max_chars("")
-        if cap <= 0:
-            return messages
+        replacements: dict[tuple[int, int], ContentBlockToolUse] = {}
 
-        successful_tool_result_ids: set[str] = set()
-        for message in messages:
-            if not isinstance(message.content, list):
-                continue
-            for block in message.content:
-                if (
-                    isinstance(block, ContentBlockToolResult)
-                    and not block.is_error
-                    and isinstance(block.tool_use_id, str)
-                ):
-                    successful_tool_result_ids.add(block.tool_use_id)
-
-        tool_input_sizes: dict[tuple[int, int], int] = {}
-        aggregate_input_chars = 0
         for message_index, message in enumerate(messages):
             if not isinstance(message.content, list):
                 continue
             for block_index, block in enumerate(message.content):
                 if not isinstance(block, ContentBlockToolUse):
                     continue
-                input_chars = len(json.dumps(block.input, ensure_ascii=False))
-                tool_input_sizes[(message_index, block_index)] = input_chars
-                aggregate_input_chars += input_chars
-        aggregate_projection = (
-            len(tool_input_sizes) > 1 and aggregate_input_chars > cap
-        )
-
-        def _projection(
-            *,
-            block: ContentBlockToolUse,
-            key: str,
-            value: str,
-            input_chars: int,
-            digest: str,
-            handle: str | None,
-            metadata_only: bool,
-            reason: str,
-        ) -> str:
-            handle_line = f"tool_argument_handle: {handle}\n" if handle is not None else ""
-            omitted = len(value)
-            path_line = ""
-            path = block.input.get("path")
-            if isinstance(path, str):
-                path_line = f"path: {path}\n"
-            projection = (
-                "[tool_use_argument_projection]\n"
-                f"tool: {block.name}\n"
-                f"tool_use_id: {block.id}\n"
-                f"field: {key}\n"
-                f"{path_line}"
-                f"original_chars: {len(value)}\n"
-                f"original_input_chars: {input_chars}\n"
-                f"sha256: {digest}\n"
-                f"{handle_line}"
-                f"omitted_chars: {omitted}\n"
-                f"reason: {reason}\n"
-            )
-            if metadata_only:
-                return projection.rstrip()
-            head = value[:360]
-            tail = value[-180:] if len(value) > 360 else ""
-            projection += f"head:\n{head}"
-            if tail and tail != head:
-                projection += f"\n...\ntail:\n{tail}"
-            return projection
-
-        def _completed_file_write_summary(
-            *,
-            block: ContentBlockToolUse,
-            input_chars: int,
-            digest: str,
-            handle: str | None,
-        ) -> ContentBlockText:
-            path = block.input.get("path")
-            path_line = f"path: {path}\n" if isinstance(path, str) else ""
-            selected_field = ""
-            selected_chars = 0
-            for key in ("content", "code", "patch", "diff"):
-                value = block.input.get(key)
-                if isinstance(value, str):
-                    selected_field = key
-                    selected_chars = len(value)
-                    break
-            handle_line = (
-                f"tool_argument_handle: {handle}\n" if handle is not None else ""
-            )
-            field_line = f"field: {selected_field}\n" if selected_field else ""
-            return ContentBlockText(
-                text=(
-                    "[completed_file_write]\n"
-                    f"tool: {block.name}\n"
-                    f"tool_use_id: {block.id}\n"
-                    f"{field_line}"
-                    f"{path_line}"
-                    f"original_chars: {selected_chars}\n"
-                    f"original_input_chars: {input_chars}\n"
-                    f"sha256: {digest}\n"
-                    f"{handle_line}"
-                    "result: completed; raw file content is omitted from provider "
-                    "context; do not retry this write solely because the content "
-                    "is omitted."
-                )
-            )
-
-        replacements: dict[tuple[int, int], ContentBlockText | ContentBlockToolUse] = {}
-        completed_file_write_ids: set[str] = set()
-        for message_index, message in enumerate(messages):
-            if not isinstance(message.content, list):
-                continue
-            for block_index, block in enumerate(message.content):
-                if not isinstance(block, ContentBlockToolUse):
-                    continue
-                input_chars = tool_input_sizes[(message_index, block_index)]
-                input_cap = self._tool_use_argument_provider_request_max_chars(block.name)
-                file_write_success = (
-                    block.name in {"write_file", "edit_file", "apply_patch"}
-                    and block.id in successful_tool_result_ids
-                )
                 if self._has_provider_context_argument_marker(block.input):
                     replacements[(message_index, block_index)] = ContentBlockToolUse(
                         id=block.id,
@@ -1316,6 +1164,7 @@ class Agent:
                         ),
                     )
                     continue
+
                 legacy_projected_input = dict(block.input)
                 legacy_projection_scrubbed = False
                 for key, value in block.input.items():
@@ -1334,111 +1183,18 @@ class Agent:
                         name=block.name,
                         input=legacy_projected_input,
                     )
-                    continue
-                if (
-                    input_chars <= input_cap
-                    and not aggregate_projection
-                    and not file_write_success
-                ):
-                    continue
-                raw_input = json.dumps(
-                    block.input,
-                    ensure_ascii=False,
-                    indent=2,
-                    sort_keys=True,
-                )
-                digest = hashlib.sha256(raw_input.encode("utf-8")).hexdigest()
-                stored = self._store_tool_argument_snapshot(
-                    raw_input,
-                    tool_use_id=block.id,
-                    tool_name=block.name,
-                )
-                if file_write_success:
-                    replacements[(message_index, block_index)] = (
-                        _completed_file_write_summary(
-                            block=block,
-                            input_chars=input_chars,
-                            digest=digest,
-                            handle=stored.handle if stored is not None else None,
-                        )
-                    )
-                    completed_file_write_ids.add(block.id)
-                    continue
-                projected_input = dict(block.input)
-                for key, value in block.input.items():
-                    if not isinstance(value, str):
-                        continue
-                    if value.startswith(_TOOL_ARGUMENT_PROJECTION_PREFIX):
-                        projected_input[key] = self._provider_projection_placeholder(
-                            block.name,
-                            key,
-                        )
-                        continue
-                    if value.startswith(_INVALID_PROVIDER_CONTEXT_PROJECTION_PREFIX):
-                        continue
-                    key_chars = len(json.dumps({key: value}, ensure_ascii=False))
-                    project_for_success = (
-                        file_write_success
-                        and key in {"content", "code", "patch", "diff"}
-                    )
-                    project_for_aggregate = aggregate_projection and key not in {
-                        "path",
-                        "cwd",
-                        "cmd",
-                        "command",
-                    }
-                    if (
-                        key_chars <= input_cap
-                        and not project_for_aggregate
-                        and not project_for_success
-                    ):
-                        continue
-                    if project_for_success:
-                        reason = (
-                            "successful_file_write_projection: file write succeeded; "
-                            "raw argument omitted from provider context."
-                        )
-                    elif project_for_aggregate:
-                        reason = (
-                            "aggregate tool arguments compacted for provider context budget."
-                        )
-                    else:
-                        reason = "large tool argument compacted for provider context budget."
-                    projected_input[key] = _projection(
-                        block=block,
-                        key=key,
-                        value=value,
-                        input_chars=input_chars,
-                        digest=digest,
-                        handle=stored.handle if stored is not None else None,
-                        metadata_only=project_for_success or project_for_aggregate,
-                        reason=reason,
-                    )
-                if projected_input == block.input:
-                    continue
-                replacements[(message_index, block_index)] = ContentBlockToolUse(
-                    id=block.id,
-                    name=block.name,
-                    input=projected_input,
-                )
 
         if not replacements:
             return messages
 
-        projected_messages: list[Message] = []
+        sanitized_messages: list[Message] = []
         for message_index, message in enumerate(messages):
             if not isinstance(message.content, list):
-                projected_messages.append(message)
+                sanitized_messages.append(message)
                 continue
             next_content: list[Any] = []
             changed = False
             for block_index, block in enumerate(message.content):
-                if (
-                    isinstance(block, ContentBlockToolResult)
-                    and block.tool_use_id in completed_file_write_ids
-                ):
-                    changed = True
-                    continue
                 replacement = replacements.get((message_index, block_index))
                 if replacement is None:
                     next_content.append(block)
@@ -1446,11 +1202,11 @@ class Agent:
                 next_content.append(replacement)
                 changed = True
             if not changed:
-                projected_messages.append(message)
+                sanitized_messages.append(message)
                 continue
             if not next_content:
                 continue
-            projected_messages.append(
+            sanitized_messages.append(
                 Message(
                     role=message.role,
                     content=next_content,
@@ -1458,17 +1214,17 @@ class Agent:
                 )
             )
 
-        self.config.metadata["tool_argument_projection_applied"] = True
-        self.config.metadata["tool_argument_projection_calls"] = (
-            self.config.metadata.get("tool_argument_projection_calls", 0)
-            + len(replacements)
+        self.config.metadata["tool_argument_provider_view_summaries_applied"] = True
+        metadata_key = "tool_argument_provider_view_summaries"
+        self.config.metadata[metadata_key] = (
+            self.config.metadata.get(metadata_key, 0) + len(replacements)
         )
         self._write_turn_call_log(
-            "tool_argument_projection",
-            projected_tool_uses=len(replacements),
+            "tool_argument_provider_view_summary",
+            sanitized_tool_uses=len(replacements),
             max_chars=cap,
         )
-        return projected_messages
+        return sanitized_messages
 
     def _store_tool_result_snapshot(
         self,
@@ -1990,7 +1746,7 @@ class Agent:
                         request_source_messages
                     )
                     request_source_messages = (
-                        self._project_large_tool_use_arguments_for_provider(
+                        self._sanitize_projected_tool_use_arguments_for_provider(
                             request_source_messages
                         )
                     )
@@ -3207,16 +2963,11 @@ class Agent:
                     Message(role="user", content=tool_result_blocks)  # type: ignore[arg-type]
                 )
                 if terminal_projection_preflight_error:
-                    if not any(part.strip() for part in final_text_parts):
-                        final_text_parts.append(
-                            _PROVIDER_CONTEXT_PROJECTION_REUSED_USER_MESSAGE
-                        )
                     self._write_turn_call_log(
-                        "tool_argument_projection_rehydrate_terminal",
+                        "tool_argument_projection_rehydrate_recovery",
                         iteration=iterations,
                         tool_use_ids=sorted(preflight_tool_results),
                     )
-                    break
                 if turn_yielded:
                     break
 
@@ -4092,9 +3843,9 @@ class Agent:
             tool_use_id=tc.tool_use_id,
             tool_name=tc.tool_name,
             content=(
-                f"The {tc.tool_name}.{field} input reused a provider-only compacted "
-                "tool argument. OpenSquilla did not execute it; regenerate the real "
-                "argument instead of copying provider context."
+                f"The {tc.tool_name}.{field} input was not available in executable "
+                "form. The tool was not run; regenerate the complete argument and "
+                "retry the tool call."
             ),
             is_error=True,
             execution_status=runtime_execution_status(
@@ -4126,9 +3877,9 @@ class Agent:
             tool_use_id=tc.tool_use_id,
             tool_name=tc.tool_name,
             content=(
-                f"The {tc.tool_name} arguments reused provider-only compacted tool "
-                "arguments. OpenSquilla did not execute them; regenerate the real "
-                "arguments instead of copying provider context."
+                f"The {tc.tool_name} arguments were not available in executable "
+                "form. The tool was not run; regenerate the complete arguments and "
+                "retry the tool call."
             ),
             is_error=True,
             execution_status=runtime_execution_status(
@@ -4242,6 +3993,7 @@ class Agent:
         )
 
         parent_session_key = self._session_key or "unknown"
+        subagent_label = spec.label or "subagent"
 
         # Schema-time filtering: subagents cannot see dangerous tools
         filtered_defs = [td for td in self.tool_definitions if td.name not in SUBAGENT_TOOL_DENY]
@@ -4257,6 +4009,9 @@ class Agent:
             channel_id=f"subagent:{parent_session_key}",
             sender_id=parent_session_key,
             denied_tools=set(SUBAGENT_TOOL_DENY),
+            tool_run_budget_key=(
+                f"subagent:{parent_session_key}:{subagent_label}:{depth}:{uuid.uuid4().hex}"
+            ),
         )
 
         async def _subagent_tool_handler(tc: ToolCall) -> ToolResult:
@@ -4313,6 +4068,9 @@ class Agent:
             provider_request_proof_max_chars=self.config.provider_request_proof_max_chars,
             tool_use_argument_provider_request_max_chars=(
                 self.config.tool_use_argument_provider_request_max_chars
+            ),
+            tool_use_argument_projection_enabled=(
+                self.config.tool_use_argument_projection_enabled
             ),
             tool_failure_loop_block_threshold=(
                 self.config.tool_failure_loop_block_threshold

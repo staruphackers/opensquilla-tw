@@ -6,7 +6,11 @@ import json
 import pytest
 
 from opensquilla.engine.types import ToolCall
-from opensquilla.result_budget import ToolResultBudgetClass, ToolResultBudgetPolicy
+from opensquilla.result_budget import (
+    ToolResultBudgetClass,
+    ToolResultBudgetPolicy,
+    ToolRunBudgetPolicy,
+)
 from opensquilla.tools.dispatch import build_tool_handler
 from opensquilla.tools.registry import ToolRegistry
 from opensquilla.tools.types import (
@@ -137,7 +141,13 @@ async def test_dispatch_rejects_unparsed_raw_tool_arguments_before_handler() -> 
 
 
 @pytest.mark.asyncio
-async def test_dispatch_rejects_provider_compacted_tool_arguments_before_handler() -> None:
+@pytest.mark.parametrize(
+    "marker_key",
+    ["_opensquilla_compacted_tool_arguments", "_opensquilla_compacted_tool_input"],
+)
+async def test_dispatch_rejects_provider_compacted_tool_arguments_before_handler(
+    marker_key: str,
+) -> None:
     handler = build_tool_handler(_build_registry())
 
     result = await handler(
@@ -145,7 +155,7 @@ async def test_dispatch_rejects_provider_compacted_tool_arguments_before_handler
             tool_use_id="tc-compacted",
             tool_name="echo",
             arguments={
-                "_opensquilla_compacted_tool_arguments": True,
+                marker_key: True,
                 "head": '{"value": "large',
                 "tail": 'payload"}',
             },
@@ -574,6 +584,443 @@ async def test_dispatch_clamps_web_search_results_before_handler() -> None:
 
     assert json.loads(result.content) == {"results": []}
     assert seen == {"query": "test", "max_results": 10}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_run_budget_blocks_exhausted_external_call_before_handler() -> None:
+    registry = ToolRegistry()
+    calls = 0
+
+    async def web_fetch(url: str, max_chars: int | None = None) -> str:
+        nonlocal calls
+        calls += 1
+        return f"{url}:{max_chars}"
+
+    registry.register(
+        ToolSpec(
+            name="web_fetch",
+            description="fetch",
+            parameters={"url": {"type": "string"}, "max_chars": {"type": "integer"}},
+            result_budget_class="external",
+        ),
+        web_fetch,
+    )
+    handler = build_tool_handler(
+        registry,
+        ToolContext(
+            tool_run_budget_key="dispatch-test-fetch-limit",
+            tool_run_budget_policy=ToolRunBudgetPolicy(
+                max_web_fetch_calls_per_turn=1,
+                max_single_fetch_chars=500,
+                max_external_text_chars_per_turn=1_000,
+            )
+        ),
+    )
+
+    first = await handler(
+        ToolCall(
+            tool_use_id="tc-fetch-1",
+            tool_name="web_fetch",
+            arguments={"url": "https://example.com", "max_chars": 10_000},
+        )
+    )
+    second = await handler(
+        ToolCall(
+            tool_use_id="tc-fetch-2",
+            tool_name="web_fetch",
+            arguments={"url": "https://example.com/again", "max_chars": 10_000},
+        )
+    )
+
+    assert first.content == "https://example.com:500"
+    assert calls == 1
+    assert second.is_error is True
+    assert second.execution_status is not None
+    assert second.execution_status["reason"] == "tool_run_budget_exhausted"
+    payload = json.loads(second.content)
+    assert payload["error_class"] == "ToolRunBudgetExceededError"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_run_budget_abort_releases_failed_external_reservation() -> None:
+    registry = ToolRegistry()
+    fail_next = True
+    seen_max_chars: list[int | None] = []
+
+    async def web_fetch(url: str, max_chars: int | None = None) -> str:
+        nonlocal fail_next
+        seen_max_chars.append(max_chars)
+        if fail_next:
+            fail_next = False
+            raise RuntimeError("temporary failure")
+        return "ok"
+
+    registry.register(
+        ToolSpec(
+            name="web_fetch",
+            description="fetch",
+            parameters={"url": {"type": "string"}, "max_chars": {"type": "integer"}},
+            result_budget_class="external",
+        ),
+        web_fetch,
+    )
+    handler = build_tool_handler(
+        registry,
+        ToolContext(
+            tool_run_budget_key="dispatch-test-fetch-abort",
+            tool_run_budget_policy=ToolRunBudgetPolicy(
+                max_web_fetch_calls_per_turn=1,
+                max_single_fetch_chars=400,
+                max_external_text_chars_per_turn=400,
+            )
+        ),
+    )
+
+    failed = await handler(
+        ToolCall(
+            tool_use_id="tc-fetch-fail",
+            tool_name="web_fetch",
+            arguments={"url": "https://example.com", "max_chars": 10_000},
+        )
+    )
+    retried = await handler(
+        ToolCall(
+            tool_use_id="tc-fetch-retry",
+            tool_name="web_fetch",
+            arguments={"url": "https://example.com", "max_chars": 10_000},
+        )
+    )
+
+    assert failed.is_error is True
+    assert retried.content == "ok"
+    assert seen_max_chars == [400, 400]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_run_budget_limits_concurrent_external_calls_atomically() -> None:
+    registry = ToolRegistry()
+    started = 0
+
+    async def web_fetch(url: str, max_chars: int | None = None) -> str:
+        nonlocal started
+        started += 1
+        await asyncio.sleep(0)
+        return url
+
+    registry.register(
+        ToolSpec(
+            name="web_fetch",
+            description="fetch",
+            parameters={"url": {"type": "string"}, "max_chars": {"type": "integer"}},
+            result_budget_class="external",
+        ),
+        web_fetch,
+    )
+    handler = build_tool_handler(
+        registry,
+        ToolContext(
+            tool_run_budget_key="dispatch-test-fetch-concurrent",
+            tool_run_budget_policy=ToolRunBudgetPolicy(
+                max_web_fetch_calls_per_turn=1,
+                max_single_fetch_chars=400,
+                max_external_text_chars_per_turn=1_000,
+            )
+        ),
+    )
+
+    results = await asyncio.gather(
+        handler(
+            ToolCall(
+                tool_use_id="tc-fetch-a",
+                tool_name="web_fetch",
+                arguments={"url": "https://example.com/a"},
+            )
+        ),
+        handler(
+            ToolCall(
+                tool_use_id="tc-fetch-b",
+                tool_name="web_fetch",
+                arguments={"url": "https://example.com/b"},
+            )
+        ),
+    )
+
+    assert started == 1
+    assert sum(result.is_error for result in results) == 1
+    assert any(
+        result.execution_status
+        and result.execution_status["reason"] == "tool_run_budget_exhausted"
+        for result in results
+    )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_run_budget_commits_oversized_external_result_as_error() -> None:
+    registry = ToolRegistry()
+
+    async def web_fetch(url: str, max_chars: int | None = None) -> str:
+        return "x" * 250
+
+    registry.register(
+        ToolSpec(
+            name="web_fetch",
+            description="fetch",
+            parameters={"url": {"type": "string"}, "max_chars": {"type": "integer"}},
+            result_budget_class="external",
+        ),
+        web_fetch,
+    )
+    handler = build_tool_handler(
+        registry,
+        ToolContext(
+            tool_run_budget_key="dispatch-test-fetch-result-budget",
+            tool_run_budget_policy=ToolRunBudgetPolicy(
+                max_web_fetch_calls_per_turn=2,
+                max_single_fetch_chars=200,
+                max_external_text_chars_per_turn=200,
+            )
+        ),
+    )
+
+    result = await handler(
+        ToolCall(
+            tool_use_id="tc-fetch-large",
+            tool_name="web_fetch",
+            arguments={"url": "https://example.com", "max_chars": 200},
+        )
+    )
+    retry = await handler(
+        ToolCall(
+            tool_use_id="tc-fetch-after-large",
+            tool_name="web_fetch",
+            arguments={"url": "https://example.com", "max_chars": 200},
+        )
+    )
+
+    assert result.is_error is True
+    assert result.execution_status is not None
+    assert result.execution_status["reason"] == "tool_run_budget_exhausted"
+    payload = json.loads(result.content)
+    assert payload["error_class"] == "ToolRunBudgetExceededError"
+    assert retry.is_error is True
+    assert retry.execution_status is not None
+    assert retry.execution_status["reason"] == "tool_run_budget_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_run_budget_charges_web_search_external_text() -> None:
+    registry = ToolRegistry()
+
+    async def web_search(query: str, max_results: int | None = None) -> str:
+        return json.dumps({"query": query, "results": ["x" * 250]})
+
+    registry.register(
+        ToolSpec(
+            name="web_search",
+            description="search",
+            parameters={"query": {"type": "string"}, "max_results": {"type": "integer"}},
+            result_budget_class="external",
+        ),
+        web_search,
+    )
+    handler = build_tool_handler(
+        registry,
+        ToolContext(
+            tool_run_budget_key="dispatch-test-search-result-budget",
+            tool_run_budget_policy=ToolRunBudgetPolicy(
+                max_web_search_calls_per_turn=2,
+                max_external_text_chars_per_turn=200,
+            )
+        ),
+    )
+
+    result = await handler(
+        ToolCall(
+            tool_use_id="tc-search-large",
+            tool_name="web_search",
+            arguments={"query": "test", "max_results": 10},
+        )
+    )
+    retry = await handler(
+        ToolCall(
+            tool_use_id="tc-search-after-large",
+            tool_name="web_search",
+            arguments={"query": "test", "max_results": 10},
+        )
+    )
+
+    assert result.is_error is True
+    assert result.execution_status is not None
+    assert result.execution_status["reason"] == "tool_run_budget_exhausted"
+    payload = json.loads(result.content)
+    assert payload["error_class"] == "ToolRunBudgetExceededError"
+    assert retry.is_error is True
+    assert retry.execution_status is not None
+    assert retry.execution_status["reason"] == "tool_run_budget_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_run_budget_is_fresh_for_separate_current_contexts() -> None:
+    registry = ToolRegistry()
+
+    async def web_fetch(url: str, max_chars: int | None = None) -> str:
+        return f"{url}:{max_chars}"
+
+    registry.register(
+        ToolSpec(
+            name="web_fetch",
+            description="fetch",
+            parameters={"url": {"type": "string"}, "max_chars": {"type": "integer"}},
+            result_budget_class="external",
+        ),
+        web_fetch,
+    )
+    handler = build_tool_handler(registry)
+
+    async def call_with_new_turn(turn_id: str) -> str:
+        token = current_tool_context.set(
+            ToolContext(
+                session_key=f"agent:main:{turn_id}",
+                tool_run_budget_key=f"agent:main:{turn_id}:turn-budget",
+                tool_run_budget_policy=ToolRunBudgetPolicy(
+                    max_web_fetch_calls_per_turn=1,
+                    max_single_fetch_chars=300,
+                    max_external_text_chars_per_turn=500,
+                ),
+            )
+        )
+        try:
+            first = await handler(
+                ToolCall(
+                    tool_use_id=f"tc-{turn_id}-1",
+                    tool_name="web_fetch",
+                    arguments={"url": f"https://example.com/{turn_id}/first"},
+                )
+            )
+            second = await handler(
+                ToolCall(
+                    tool_use_id=f"tc-{turn_id}-2",
+                    tool_name="web_fetch",
+                    arguments={"url": f"https://example.com/{turn_id}/second"},
+                )
+            )
+        finally:
+            current_tool_context.reset(token)
+
+        assert first.is_error is False
+        assert second.is_error is True
+        assert second.execution_status is not None
+        assert second.execution_status["reason"] == "tool_run_budget_exhausted"
+        return first.content
+
+    first_turn = await call_with_new_turn("turn-a")
+    second_turn = await call_with_new_turn("turn-b")
+
+    assert first_turn == "https://example.com/turn-a/first:300"
+    assert second_turn == "https://example.com/turn-b/first:300"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_run_budget_without_key_does_not_leak_across_handler_reuse() -> None:
+    registry = ToolRegistry()
+
+    async def web_fetch(url: str, max_chars: int | None = None) -> str:
+        return f"{url}:{max_chars}"
+
+    registry.register(
+        ToolSpec(
+            name="web_fetch",
+            description="fetch",
+            parameters={"url": {"type": "string"}, "max_chars": {"type": "integer"}},
+            result_budget_class="external",
+        ),
+        web_fetch,
+    )
+    handler = build_tool_handler(
+        registry,
+        ToolContext(
+            tool_run_budget_policy=ToolRunBudgetPolicy(
+                max_web_fetch_calls_per_turn=1,
+                max_single_fetch_chars=300,
+                max_external_text_chars_per_turn=500,
+            )
+        ),
+    )
+
+    first = await handler(
+        ToolCall(
+            tool_use_id="tc-reuse-a",
+            tool_name="web_fetch",
+            arguments={"url": "https://example.com/a"},
+        )
+    )
+    second = await handler(
+        ToolCall(
+            tool_use_id="tc-reuse-b",
+            tool_name="web_fetch",
+            arguments={"url": "https://example.com/b"},
+        )
+    )
+
+    assert first.content == "https://example.com/a:300"
+    assert second.content == "https://example.com/b:300"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_run_budget_applies_to_subagent_current_context() -> None:
+    registry = ToolRegistry()
+    calls = 0
+
+    async def web_fetch(url: str, max_chars: int | None = None) -> str:
+        nonlocal calls
+        calls += 1
+        return f"{url}:{max_chars}"
+
+    registry.register(
+        ToolSpec(
+            name="web_fetch",
+            description="fetch",
+            parameters={"url": {"type": "string"}, "max_chars": {"type": "integer"}},
+            result_budget_class="external",
+        ),
+        web_fetch,
+    )
+    handler = build_tool_handler(registry)
+    token = current_tool_context.set(
+        ToolContext(
+            session_key="subagent:agent:main:webchat:demo",
+            caller_kind=CallerKind.SUBAGENT,
+            tool_run_budget_key="subagent:agent:main:webchat:demo:worker:1",
+            tool_run_budget_policy=ToolRunBudgetPolicy(
+                max_web_fetch_calls_per_turn=1,
+                max_single_fetch_chars=300,
+                max_external_text_chars_per_turn=500,
+            ),
+        )
+    )
+    try:
+        first = await handler(
+            ToolCall(
+                tool_use_id="tc-subagent-a",
+                tool_name="web_fetch",
+                arguments={"url": "https://example.com/a"},
+            )
+        )
+        second = await handler(
+            ToolCall(
+                tool_use_id="tc-subagent-b",
+                tool_name="web_fetch",
+                arguments={"url": "https://example.com/b"},
+            )
+        )
+    finally:
+        current_tool_context.reset(token)
+
+    assert first.content == "https://example.com/a:300"
+    assert calls == 1
+    assert second.is_error is True
+    assert second.execution_status is not None
+    assert second.execution_status["reason"] == "tool_run_budget_exhausted"
 
 
 @pytest.mark.asyncio

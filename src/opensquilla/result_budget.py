@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+WEB_FETCH_MIN_MAX_CHARS = 100
+
 
 class ToolResultBudgetClass(StrEnum):
     EXTERNAL = "external"
@@ -55,6 +57,188 @@ class ToolResultBudgetPolicy:
 
 
 DEFAULT_TOOL_RESULT_BUDGET_POLICY = ToolResultBudgetPolicy()
+
+
+@dataclass(frozen=True)
+class ToolRunBudgetPolicy:
+    max_web_search_calls_per_turn: int | None = 8
+    max_web_fetch_calls_per_turn: int | None = 20
+    max_external_text_chars_per_turn: int | None = 300_000
+    max_single_fetch_chars: int | None = 20_000
+
+
+DEFAULT_TOOL_RUN_BUDGET_POLICY = ToolRunBudgetPolicy()
+
+
+class ToolRunBudgetExceededError(RuntimeError):
+    """Raised when a tool call would exceed the per-turn run budget."""
+
+    def __init__(self, tool_name: str, message: str) -> None:
+        super().__init__(message)
+        self.tool_name = tool_name
+
+
+@dataclass(frozen=True)
+class ToolRunBudgetReservation:
+    tool_name: str
+    arguments: dict[str, Any]
+    reserved_external_text_chars: int = 0
+    counted_as_fetch: bool = False
+    counted_as_search: bool = False
+    counted_as_external_text: bool = False
+
+
+class ToolRunBudgetTracker:
+    """Concurrency-safe per-turn accounting for tool calls and raw text."""
+
+    def __init__(self, policy: ToolRunBudgetPolicy | None = None) -> None:
+        self.policy = policy or DEFAULT_TOOL_RUN_BUDGET_POLICY
+        self._lock = asyncio.Lock()
+        self._web_search_calls_used = 0
+        self._web_fetch_calls_used = 0
+        self._external_text_chars_used = 0
+        self._external_text_chars_reserved = 0
+
+    async def reserve_tool_call(
+        self,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> ToolRunBudgetReservation:
+        args = dict(arguments)
+        if tool_name == "web_search":
+            async with self._lock:
+                self._check_call_budget(
+                    tool_name=tool_name,
+                    used=self._web_search_calls_used,
+                    limit=self.policy.max_web_search_calls_per_turn,
+                )
+                self._web_search_calls_used += 1
+            return ToolRunBudgetReservation(
+                tool_name=tool_name,
+                arguments=args,
+                counted_as_search=True,
+                counted_as_external_text=True,
+            )
+
+        if tool_name not in EXTERNAL_TOOL_NAMES:
+            return ToolRunBudgetReservation(tool_name=tool_name, arguments=args)
+
+        async with self._lock:
+            self._check_call_budget(
+                tool_name=tool_name,
+                used=self._web_fetch_calls_used,
+                limit=self.policy.max_web_fetch_calls_per_turn,
+            )
+            reserved = self._reserve_external_text_budget(tool_name, args)
+            self._web_fetch_calls_used += 1
+            return ToolRunBudgetReservation(
+                tool_name=tool_name,
+                arguments=args,
+                reserved_external_text_chars=reserved,
+                counted_as_fetch=True,
+                counted_as_external_text=True,
+            )
+
+    async def commit_tool_result(
+        self,
+        reservation: ToolRunBudgetReservation,
+        content: Any,
+    ) -> None:
+        if not reservation.counted_as_external_text:
+            return
+        text = content if isinstance(content, str) else str(content)
+        async with self._lock:
+            self._release_external_reservation(reservation)
+            self._external_text_chars_used += len(text)
+            limit = self.policy.max_external_text_chars_per_turn
+            if limit is not None and self._external_text_chars_used > limit:
+                raise ToolRunBudgetExceededError(
+                    reservation.tool_name,
+                    (
+                        "External tool text returned by this turn exceeded the "
+                        f"run budget ({self._external_text_chars_used}>{limit})."
+                    ),
+                )
+
+    async def abort_tool_result(self, reservation: ToolRunBudgetReservation) -> None:
+        if (
+            not reservation.counted_as_fetch
+            and not reservation.counted_as_search
+            and not reservation.counted_as_external_text
+        ):
+            return
+        async with self._lock:
+            self._release_external_reservation(reservation)
+            if reservation.counted_as_fetch:
+                self._web_fetch_calls_used = max(0, self._web_fetch_calls_used - 1)
+            if reservation.counted_as_search:
+                self._web_search_calls_used = max(0, self._web_search_calls_used - 1)
+
+    def _reserve_external_text_budget(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> int:
+        cap = self.policy.max_single_fetch_chars
+        total = self.policy.max_external_text_chars_per_turn
+        if total is not None:
+            remaining = (
+                total
+                - self._external_text_chars_used
+                - self._external_text_chars_reserved
+            )
+            if remaining <= 0:
+                raise ToolRunBudgetExceededError(
+                    tool_name,
+                    f"Tool '{tool_name}' exceeded the external text run budget ({total}).",
+                )
+            cap = remaining if cap is None else min(cap, remaining)
+        if cap is None:
+            return 0
+        cap = max(0, int(cap))
+        if tool_name == "web_fetch":
+            if cap < WEB_FETCH_MIN_MAX_CHARS:
+                raise ToolRunBudgetExceededError(
+                    tool_name,
+                    (
+                        "web_fetch cannot enforce the remaining run budget below "
+                        f"{WEB_FETCH_MIN_MAX_CHARS} characters."
+                    ),
+                )
+            requested = arguments.get("max_chars")
+            try:
+                requested_int = int(requested) if requested is not None else None
+            except (TypeError, ValueError):
+                requested_int = None
+            if requested_int is None or requested_int > cap:
+                arguments["max_chars"] = cap
+        self._external_text_chars_reserved += cap
+        return cap
+
+    def _release_external_reservation(
+        self,
+        reservation: ToolRunBudgetReservation,
+    ) -> None:
+        if reservation.reserved_external_text_chars:
+            self._external_text_chars_reserved = max(
+                0,
+                self._external_text_chars_reserved
+                - reservation.reserved_external_text_chars,
+            )
+
+    @staticmethod
+    def _check_call_budget(
+        *,
+        tool_name: str,
+        used: int,
+        limit: int | None,
+    ) -> None:
+        if limit is not None and used >= limit:
+            raise ToolRunBudgetExceededError(
+                tool_name,
+                f"Tool '{tool_name}' exceeded the per-turn call budget ({limit}).",
+            )
 
 
 @dataclass(frozen=True)

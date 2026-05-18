@@ -1564,7 +1564,11 @@ class TurnRunner:
         session_key = canonicalize_session_key(session_key)
         agent_id = normalize_agent_id(agent_id)
         lock = self.get_session_lock(session_key)
-        effective_tool_context = replace(tool_context, session_key=session_key)
+        effective_tool_context = replace(
+            tool_context,
+            session_key=session_key,
+            tool_run_budget_key=f"{session_key}:{uuid.uuid4().hex}",
+        )
         # Re-entry detection: check whether this call chain already owns the
         # session lock (gateway path: TaskRuntime._execute holds the shared
         # lock before calling run()). We use a ContextVar keyed by lock id so

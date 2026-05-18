@@ -93,6 +93,7 @@ document-extras = [
 
 [project.scripts]
 opensquilla = "opensquilla.cli.main:app"
+gateway = "opensquilla.cli.main:gateway_app"
 
 [build-system]
 requires = ["hatchling"]

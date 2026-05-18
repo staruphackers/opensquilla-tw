@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
@@ -140,7 +141,7 @@ class CopiedProjectionToolLoopCapturingProvider(LargeArgumentToolLoopCapturingPr
                 yield event
             return
         if call_number == 2:
-            projection = self._latest_projected_code_argument()
+            projection = self._legacy_projected_code_argument()
             yield ProviderToolUseStart(tool_use_id="tool-2", tool_name="execute_code")
             yield ProviderToolUseEnd(
                 tool_use_id="tool-2",
@@ -152,19 +153,21 @@ class CopiedProjectionToolLoopCapturingProvider(LargeArgumentToolLoopCapturingPr
         yield ProviderText(text="done")
         yield ProviderDone(stop_reason="end_turn", input_tokens=4, output_tokens=1)
 
-    def _latest_projected_code_argument(self) -> str:
-        for message in self.calls[-1]["messages"]:
-            if not isinstance(message.content, list):
-                continue
-            for block in message.content:
-                if not isinstance(block, ContentBlockToolUse):
-                    continue
-                code = block.input.get("code")
-                if isinstance(code, str) and code.startswith(
-                    "[tool_use_argument_projection]\n"
-                ):
-                    return code
-        raise AssertionError("provider request did not contain a projected code argument")
+    def _legacy_projected_code_argument(self) -> str:
+        return (
+            "[tool_use_argument_projection]\n"
+            "tool: execute_code\n"
+            "tool_use_id: tool-1\n"
+            "field: code\n"
+            f"original_chars: {len(self.code)}\n"
+            f"original_input_chars: {len(self.code)}\n"
+            "sha256: "
+            + hashlib.sha256(self.code.encode("utf-8")).hexdigest()
+            + "\n"
+            "tool_argument_handle: tr-1234567890abcdef1234567890abcdef\n"
+            "omitted_chars: 123\n"
+            "reason: legacy test marker\n"
+        )
 
 
 class CompactedToolArgumentsProvider(ToolLoopCapturingProvider):
@@ -553,7 +556,7 @@ def test_agent_provider_backstop_preserves_sessions_yield_control_json() -> None
     assert payload["waited"] is False
 
 
-def test_agent_provider_view_projects_large_tool_use_arguments(tmp_path) -> None:
+def test_agent_provider_view_keeps_large_tool_use_arguments_by_default(tmp_path) -> None:
     agent = Agent(
         provider=CapturingProvider(),
         config=AgentConfig(
@@ -578,20 +581,16 @@ def test_agent_provider_view_projects_large_tool_use_arguments(tmp_path) -> None
         )
     ]
 
-    projected = agent._project_large_tool_use_arguments_for_provider(messages)
+    projected = agent._sanitize_projected_tool_use_arguments_for_provider(messages)
 
     original_block = messages[0].content[0]
     projected_block = projected[0].content[0]
     assert isinstance(original_block, ContentBlockToolUse)
     assert isinstance(projected_block, ContentBlockToolUse)
     assert original_block.input["code"] == large_code
-    assert projected_block.input["code"] != large_code
-    assert "tool_use_argument_projection" in projected_block.input["code"]
-    assert "original_chars:" in projected_block.input["code"]
-    assert "sha256:" in projected_block.input["code"]
-    assert len(json.dumps(projected_block.input, ensure_ascii=False)) < 1200
-    assert agent.config.metadata["tool_argument_projection_applied"] is True
-    assert agent.config.metadata["tool_argument_projection_calls"] == 1
+    assert projected_block.input["code"] == large_code
+    assert "tool_use_argument_projection" not in projected_block.input["code"]
+    assert "tool_argument_projection_applied" not in agent.config.metadata
 
 
 def test_agent_provider_view_derives_tool_argument_budget_above_legacy_default(
@@ -622,7 +621,7 @@ def test_agent_provider_view_derives_tool_argument_budget_above_legacy_default(
         )
     ]
 
-    projected = agent._project_large_tool_use_arguments_for_provider(messages)
+    projected = agent._sanitize_projected_tool_use_arguments_for_provider(messages)
 
     projected_block = projected[0].content[0]
     assert isinstance(projected_block, ContentBlockToolUse)
@@ -661,7 +660,7 @@ def test_agent_provider_view_scrubs_legacy_projected_tool_argument(tmp_path) -> 
         )
     ]
 
-    projected = agent._project_large_tool_use_arguments_for_provider(messages)
+    projected = agent._sanitize_projected_tool_use_arguments_for_provider(messages)
 
     block = projected[0].content[0]
     assert isinstance(block, ContentBlockToolUse)
@@ -673,8 +672,7 @@ def test_agent_provider_view_scrubs_legacy_projected_tool_argument(tmp_path) -> 
     ]
     assert all("tool_use_argument_projection" not in content for content in stored_contents)
 
-
-def test_agent_provider_view_projects_aggregate_tool_use_arguments(tmp_path) -> None:
+def test_agent_provider_view_does_not_project_aggregate_tool_use_arguments(tmp_path) -> None:
     agent = Agent(
         provider=CapturingProvider(),
         config=AgentConfig(
@@ -683,6 +681,7 @@ def test_agent_provider_view_projects_aggregate_tool_use_arguments(tmp_path) -> 
             tool_result_store_session_key="agent:main:webchat:test",
             tool_result_store_agent_id="main",
             tool_use_argument_provider_request_max_chars=1200,
+            tool_use_argument_projection_enabled=True,
         ),
     )
     messages = [
@@ -702,24 +701,21 @@ def test_agent_provider_view_projects_aggregate_tool_use_arguments(tmp_path) -> 
         )
     ]
 
-    projected = agent._project_large_tool_use_arguments_for_provider(messages)
+    projected = agent._sanitize_projected_tool_use_arguments_for_provider(messages)
 
     projected_blocks = [
         block
         for block in projected[0].content
         if isinstance(block, ContentBlockToolUse)
     ]
-    assert any(
-        "tool_use_argument_projection" in block.input["content"]
-        for block in projected_blocks
-    )
+    assert all(block.input["content"] == "x" * 700 for block in projected_blocks)
     assert all(
         original.input["content"] == "x" * 700
         for original in messages[0].content
         if isinstance(original, ContentBlockToolUse)
     )
-    assert agent.config.metadata["tool_argument_projection_applied"] is True
-    assert agent.config.metadata["tool_argument_projection_calls"] >= 1
+    assert "tool_argument_projection_applied" not in agent.config.metadata
+    assert "tool_argument_projection_calls" not in agent.config.metadata
 
 
 def test_agent_provider_view_derives_tool_result_budget_above_legacy_default(
@@ -772,8 +768,7 @@ def test_agent_provider_view_derives_tool_result_budget_above_legacy_default(
     assert first_result.content.startswith("FETCH_DERIVED_0")
     assert "external_tool_result_compacted" not in first_result.content
 
-
-def test_agent_provider_view_projects_small_aggregate_tool_use_arguments(tmp_path) -> None:
+def test_agent_provider_view_does_not_project_small_aggregate_tool_use_arguments(tmp_path) -> None:
     agent = Agent(
         provider=CapturingProvider(),
         config=AgentConfig(
@@ -782,6 +777,7 @@ def test_agent_provider_view_projects_small_aggregate_tool_use_arguments(tmp_pat
             tool_result_store_session_key="agent:main:webchat:test",
             tool_result_store_agent_id="main",
             tool_use_argument_provider_request_max_chars=1200,
+            tool_use_argument_projection_enabled=True,
         ),
     )
     messages = [
@@ -801,21 +797,20 @@ def test_agent_provider_view_projects_small_aggregate_tool_use_arguments(tmp_pat
         )
     ]
 
-    projected = agent._project_large_tool_use_arguments_for_provider(messages)
+    projected = agent._sanitize_projected_tool_use_arguments_for_provider(messages)
 
     projected_blocks = [
         block
         for block in projected[0].content
         if isinstance(block, ContentBlockToolUse)
     ]
-    assert any(
-        "tool_use_argument_projection" in block.input["content"]
-        for block in projected_blocks
-    )
+    assert all(block.input["content"] == "x" * 200 for block in projected_blocks)
     assert all(block.input["path"].startswith("generated/") for block in projected_blocks)
+    assert "tool_argument_projection_applied" not in agent.config.metadata
+    assert "tool_argument_projection_calls" not in agent.config.metadata
 
 
-def test_agent_provider_view_keeps_successful_file_write_as_metadata(tmp_path) -> None:
+def test_agent_provider_view_keeps_successful_file_write_argument_executable(tmp_path) -> None:
     agent = Agent(
         provider=CapturingProvider(),
         config=AgentConfig(
@@ -850,40 +845,41 @@ def test_agent_provider_view_keeps_successful_file_write_as_metadata(tmp_path) -
         ),
     ]
 
-    projected = agent._project_large_tool_use_arguments_for_provider(messages)
+    projected = agent._sanitize_projected_tool_use_arguments_for_provider(messages)
 
-    projected_text = next(
+    projected_tool_use = next(
         block
         for block in projected[0].content
-        if isinstance(block, ContentBlockText)
+        if isinstance(block, ContentBlockToolUse)
     )
-    assert "completed_file_write" in projected_text.text
-    assert "tool: write_file" in projected_text.text
-    assert "tool_use_id: write-1" in projected_text.text
-    assert "path: index.html" in projected_text.text
-    assert "sha256:" in projected_text.text
-    assert "original_chars:" in projected_text.text
-    assert "do not retry" in projected_text.text
-    assert "[tool_use_argument_projection]" not in projected_text.text
-    assert "<p>word</p>" not in projected_text.text
-    assert all(
-        not (
-            isinstance(block, ContentBlockToolResult)
-            and block.tool_use_id == "write-1"
-        )
-        for message in projected
-        if isinstance(message.content, list)
-        for block in message.content
+    projected_content = projected_tool_use.input["content"]
+    assert projected_tool_use.id == "write-1"
+    assert projected_tool_use.name == "write_file"
+    assert projected_tool_use.input["path"] == "index.html"
+    assert projected_content == large_html
+    assert "[tool_use_argument_projection]" not in projected_content
+    assert "successful_file_write_projection" not in projected_content
+    assert "<p>word</p>" in projected_content
+    projected_result = next(
+        block
+        for block in projected[1].content
+        if isinstance(block, ContentBlockToolResult)
     )
+    assert projected_result.tool_use_id == "write-1"
+    assert projected[-1].role == "user"
     history_block = next(
         block
         for block in messages[0].content
         if isinstance(block, ContentBlockToolUse)
     )
     assert history_block.input["content"] == large_html
+    assert "tool_argument_projection_applied" not in agent.config.metadata
+    assert "tool_argument_projection_calls" not in agent.config.metadata
 
 
-def test_agent_provider_view_reuses_successful_file_write_argument_snapshot(tmp_path) -> None:
+def test_agent_provider_view_does_not_store_successful_file_write_snapshot(
+    tmp_path,
+) -> None:
     agent = Agent(
         provider=CapturingProvider(),
         config=AgentConfig(
@@ -918,29 +914,22 @@ def test_agent_provider_view_reuses_successful_file_write_argument_snapshot(tmp_
         ),
     ]
 
-    first = agent._project_large_tool_use_arguments_for_provider(messages)
-    second = agent._project_large_tool_use_arguments_for_provider(messages)
+    first = agent._sanitize_projected_tool_use_arguments_for_provider(messages)
+    second = agent._sanitize_projected_tool_use_arguments_for_provider(messages)
 
     first_block = next(
-        block for block in first[0].content if isinstance(block, ContentBlockText)
+        block for block in first[0].content if isinstance(block, ContentBlockToolUse)
     )
     second_block = next(
-        block for block in second[0].content if isinstance(block, ContentBlockText)
-    )
-    first_handle = next(
-        line.split(":", 1)[1].strip()
-        for line in first_block.text.splitlines()
-        if line.startswith("tool_argument_handle:")
-    )
-    second_handle = next(
-        line.split(":", 1)[1].strip()
-        for line in second_block.text.splitlines()
-        if line.startswith("tool_argument_handle:")
+        block for block in second[0].content if isinstance(block, ContentBlockToolUse)
     )
 
-    assert second_handle == first_handle
-    assert agent.config.metadata["tool_result_store_writes"] == 1
-    assert len(list((tmp_path / "tool-results" / "s" / "session-1").glob("**/meta.json"))) == 1
+    assert first_block.input["content"] == large_html
+    assert second_block.input["content"] == large_html
+    assert agent.config.metadata.get("tool_result_store_writes", 0) == 0
+    assert not list((tmp_path / "tool-results" / "s" / "session-1").glob("**/meta.json"))
+    assert "tool_argument_projection_applied" not in agent.config.metadata
+    assert "tool_argument_projection_calls" not in agent.config.metadata
 
 
 @pytest.mark.asyncio
@@ -1282,7 +1271,7 @@ async def test_agent_request_context_repeats_across_tool_loop_without_persisting
 
 
 @pytest.mark.asyncio
-async def test_agent_projects_large_tool_arguments_during_tool_replay(tmp_path) -> None:
+async def test_agent_keeps_large_tool_arguments_during_tool_replay(tmp_path) -> None:
     large_code = "print('start')\n" + ("x = 1\n" * 500) + "print('end')\n"
     provider = LargeArgumentToolLoopCapturingProvider(large_code)
 
@@ -1302,6 +1291,7 @@ async def test_agent_projects_large_tool_arguments_during_tool_replay(tmp_path) 
             tool_result_store_session_key="agent:main:webchat:test",
             tool_result_store_agent_id="main",
             tool_use_argument_provider_request_max_chars=1200,
+            tool_use_argument_projection_enabled=True,
         ),
         tool_handler=tool_handler,
     )
@@ -1322,8 +1312,8 @@ async def test_agent_projects_large_tool_arguments_during_tool_replay(tmp_path) 
         for block in assistant_replay.content
         if isinstance(block, ContentBlockToolUse)
     )
-    assert replay_block.input["code"] != large_code
-    assert "tool_use_argument_projection" in replay_block.input["code"]
+    assert replay_block.input["code"] == large_code
+    assert "tool_use_argument_projection" not in replay_block.input["code"]
     history_block = next(
         block
         for message in agent._history
@@ -1361,14 +1351,16 @@ async def test_agent_refuses_copied_tool_argument_projection_without_dispatch(
             tool_result_store_session_key="agent:main:webchat:test",
             tool_result_store_agent_id="main",
             tool_use_argument_provider_request_max_chars=1200,
+            tool_use_argument_projection_enabled=True,
         ),
         tool_handler=tool_handler,
     )
 
     events = [event async for event in agent.run_turn("hello")]
 
-    assert any(event.kind == "done" for event in events)
-    assert len(provider.calls) == 2
+    done_event = next(event for event in events if event.kind == "done")
+    assert done_event.text == "done"
+    assert len(provider.calls) == 3
     assert dispatched_code_arguments == [large_code]
     assert dispatched_arguments == [{"code": large_code, "timeout": 10}]
     assert all(
@@ -1381,7 +1373,7 @@ async def test_agent_refuses_copied_tool_argument_projection_without_dispatch(
         if isinstance(event, ToolResultEvent) and event.tool_use_id == "tool-2"
     )
     assert result_event.is_error is True
-    assert "provider-only compacted tool argument" in result_event.result
+    assert "provider-only compacted tool argument" not in result_event.result
     assert "Projected tool argument" not in result_event.result
     assert result_event.arguments["code"] != large_code
     assert not result_event.arguments["code"].startswith("[tool_use_argument_projection]\n")
@@ -1415,10 +1407,10 @@ async def test_agent_refuses_unrestorable_tool_argument_projection(tmp_path) -> 
     provider = CopiedProjectionToolLoopCapturingProvider(large_code)
     dispatched_tool_ids: list[str] = []
 
-    original_latest_projection = provider._latest_projected_code_argument
+    original_legacy_projection = provider._legacy_projected_code_argument
 
     def corrupted_projection() -> str:
-        projection = original_latest_projection()
+        projection = original_legacy_projection()
         bad_hash = "0" * 64
         return projection.replace(
             "sha256: ",
@@ -1426,7 +1418,7 @@ async def test_agent_refuses_unrestorable_tool_argument_projection(tmp_path) -> 
             1,
         )
 
-    provider._latest_projected_code_argument = corrupted_projection  # type: ignore[method-assign]
+    provider._legacy_projected_code_argument = corrupted_projection  # type: ignore[method-assign]
 
     async def tool_handler(call: Any) -> ToolResult:
         dispatched_tool_ids.append(call.tool_use_id)
@@ -1445,6 +1437,7 @@ async def test_agent_refuses_unrestorable_tool_argument_projection(tmp_path) -> 
             tool_result_store_session_key="agent:main:webchat:test",
             tool_result_store_agent_id="main",
             tool_use_argument_provider_request_max_chars=1200,
+            tool_use_argument_projection_enabled=True,
         ),
         tool_handler=tool_handler,
     )
@@ -1458,7 +1451,7 @@ async def test_agent_refuses_unrestorable_tool_argument_projection(tmp_path) -> 
     )
     assert dispatched_tool_ids == ["tool-1"]
     assert result_event.is_error is True
-    assert "provider-only compacted tool argument" in result_event.result
+    assert "provider-only compacted tool argument" not in result_event.result
     assert "Projected tool argument" not in result_event.result
     assert not result_event.arguments["code"].startswith("[tool_use_argument_projection]\n")
     assert "tool_use_argument_projection" not in result_event.arguments["code"]
@@ -1486,7 +1479,6 @@ async def test_agent_refuses_unrestorable_tool_argument_projection(tmp_path) -> 
         path.read_text(encoding="utf-8")
         for path in (tmp_path / "tool-results").rglob("content.txt")
     ]
-    assert stored_contents
     assert all("tool_use_argument_projection" not in content for content in stored_contents)
 
 
@@ -1519,8 +1511,9 @@ async def test_agent_refuses_copied_provider_compacted_tool_arguments(tmp_path) 
 
     assert any(event.kind == "done" for event in events)
     done_event = next(event for event in events if event.kind == "done")
-    assert "provider-only compacted tool arguments" in done_event.text
-    assert len(provider.calls) == 1
+    assert done_event.text == "done"
+    assert "provider-only compacted tool arguments" not in done_event.text
+    assert len(provider.calls) == 2
     assert dispatched == []
     result_event = next(
         event
@@ -1528,7 +1521,7 @@ async def test_agent_refuses_copied_provider_compacted_tool_arguments(tmp_path) 
         if isinstance(event, ToolResultEvent) and event.tool_use_id == "tool-compact"
     )
     assert result_event.is_error is True
-    assert "provider-only compacted tool arguments" in result_event.result
+    assert "provider-only compacted tool arguments" not in result_event.result
     assert "ProjectedToolArgumentsError" not in result_event.result
     assert "_opensquilla_compacted_tool_arguments" not in result_event.arguments
 

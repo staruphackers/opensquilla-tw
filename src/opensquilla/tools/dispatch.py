@@ -28,8 +28,12 @@ from opensquilla.engine.hooks import ToolHook, ToolHookCall, ToolHookResult
 from opensquilla.execution_status import normalize_execution_status
 from opensquilla.result_budget import (
     DEFAULT_TOOL_RESULT_BUDGET_POLICY,
+    DEFAULT_TOOL_RUN_BUDGET_POLICY,
     ToolResultBudgetPolicy,
     ToolResultBudgetTracker,
+    ToolRunBudgetExceededError,
+    ToolRunBudgetPolicy,
+    ToolRunBudgetTracker,
     clamp_tool_arguments,
 )
 from opensquilla.safety.injection_guard import (
@@ -80,6 +84,22 @@ def _build_budget_tracker(ctx: ToolContext | None) -> ToolResultBudgetTracker:
         if isinstance(tracker, ToolResultBudgetTracker):
             return tracker
     return ToolResultBudgetTracker(_resolve_budget_policy(ctx))
+
+
+def _resolve_run_budget_policy(ctx: ToolContext | None) -> ToolRunBudgetPolicy:
+    policy = getattr(ctx, "tool_run_budget_policy", None) if ctx is not None else None
+    if isinstance(policy, ToolRunBudgetPolicy):
+        return policy
+    return DEFAULT_TOOL_RUN_BUDGET_POLICY
+
+
+def _build_run_budget_tracker(ctx: ToolContext | None) -> ToolRunBudgetTracker:
+    factory = getattr(ctx, "tool_run_budget_tracker_factory", None) if ctx else None
+    if callable(factory):
+        tracker = factory()
+        if isinstance(tracker, ToolRunBudgetTracker):
+            return tracker
+    return ToolRunBudgetTracker(_resolve_run_budget_policy(ctx))
 
 
 def _build_envelope_result(
@@ -287,11 +307,13 @@ def build_tool_handler(
     2. Registry lookup; returns structured error on miss.
     3. ``ToolHook.before_tool`` fan-out (no-op if ``tool_hooks`` is empty).
     4. Policy chain; first denial returns immediately.
-    5. Dispatches to the registered handler inside the request-scoped contextvar.
-    6. ``ToolHook.after_tool`` fan-out with the raw outcome.
-    7. Finalises the result (execution status, budget, artefacts) via
+    5. Reserves run budget, including external call counts and text caps.
+    6. Dispatches to the registered handler inside the request-scoped contextvar.
+    7. Commits or aborts the run-budget reservation.
+    8. ``ToolHook.after_tool`` fan-out with the raw outcome.
+    9. Finalises the result (execution status, budget, artefacts) via
        :func:`opensquilla.tools.policy.finalize`.
-    8. Resets ``current_tool_context`` unconditionally in ``finally``.
+    10. Resets ``current_tool_context`` unconditionally in ``finally``.
 
     ``tool_hooks`` defaults to empty so callers that do not pass hooks are
     bit-for-bit equivalent to the legacy path.
@@ -303,6 +325,7 @@ def build_tool_handler(
         int,
         tuple[weakref.ReferenceType[ToolContext], ToolResultBudgetTracker],
     ] = {}
+    keyed_run_budget_trackers: dict[str, ToolRunBudgetTracker] = {}
 
     def _budget_tracker_for(effective_ctx: ToolContext | None) -> ToolResultBudgetTracker:
         if effective_ctx is None or effective_ctx is ctx:
@@ -315,6 +338,24 @@ def build_tool_handler(
                 return tracker
         tracker = _build_budget_tracker(effective_ctx)
         scoped_budget_trackers[key] = (weakref.ref(effective_ctx), tracker)
+        return tracker
+
+    def _run_budget_tracker_for(
+        effective_ctx: ToolContext | None,
+    ) -> ToolRunBudgetTracker:
+        run_budget_key = (
+            getattr(effective_ctx, "tool_run_budget_key", None)
+            if effective_ctx is not None
+            else None
+        )
+        if isinstance(run_budget_key, str) and run_budget_key:
+            tracker = keyed_run_budget_trackers.get(run_budget_key)
+            if tracker is not None:
+                return tracker
+            tracker = _build_run_budget_tracker(effective_ctx)
+            keyed_run_budget_trackers[run_budget_key] = tracker
+            return tracker
+        tracker = _build_run_budget_tracker(effective_ctx)
         return tracker
 
     async def _handler(tool_call: ToolCall) -> ToolResult:
@@ -386,6 +427,35 @@ def build_tool_handler(
             return decision.envelope
 
         # 5. Handler dispatch inside the request-scoped contextvar.
+        run_budget_tracker = _run_budget_tracker_for(effective_ctx)
+        try:
+            reservation = await run_budget_tracker.reserve_tool_call(
+                tool_name=tool_call.tool_name,
+                arguments=clamp_tool_arguments(
+                    tool_call.tool_name,
+                    dict(tool_call.arguments),
+                    budget_policy,
+                ),
+            )
+        except ToolRunBudgetExceededError as exc:
+            envelope = _build_envelope_result(
+                tool_call,
+                exc=exc,
+                reason_override="tool_run_budget_exhausted",
+            )
+            if hook_call is not None:
+                for hook in hooks:
+                    try:
+                        hook.after_tool(hook_call, ToolHookResult(result=envelope))
+                    except Exception as hook_exc:  # noqa: BLE001
+                        log.warning(
+                            "dispatch.tool_hook_failed",
+                            hook=getattr(hook, "name", type(hook).__name__),
+                            phase="after_tool",
+                            error=str(hook_exc),
+                        )
+            return envelope
+
         token = current_tool_context.set(effective_ctx)
         raw_result: Any = None
         exception: BaseException | None = None
@@ -393,17 +463,17 @@ def build_tool_handler(
             len(effective_ctx.published_artifacts) if effective_ctx is not None else 0
         )
         try:
-            arguments = clamp_tool_arguments(
-                tool_call.tool_name,
-                dict(tool_call.arguments),
-                budget_policy,
-            )
-            raw_result = await registered.handler(**arguments)
+            raw_result = await registered.handler(**reservation.arguments)
+            await run_budget_tracker.commit_tool_result(reservation, raw_result)
         except asyncio.CancelledError as exc:
             exception = exc
+            await run_budget_tracker.abort_tool_result(reservation)
             raise
+        except ToolRunBudgetExceededError as exc:
+            exception = exc
         except Exception as exc:  # noqa: BLE001
             exception = exc
+            await run_budget_tracker.abort_tool_result(reservation)
         finally:
             try:
                 # 6. ToolHook.after_tool — observability seam.
