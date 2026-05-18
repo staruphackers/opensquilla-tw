@@ -1478,6 +1478,13 @@ def build_turn_runner_from_services(
         session_flush_service=getattr(svc, "flush_service", None),
         session_lock_provider=_standalone_lock_provider,
         diagnostics_state=diagnostics_state,
+        # Phase B + Phase C hook registries — forwarded from services when
+        # present so any future user-registered TurnHook / CompactionHook
+        # instance flows through to TurnRunner without another boot edit.
+        # None today (no production services expose either registry); the
+        # plumbing stays here so the path is wired end-to-end.
+        turn_hooks=getattr(svc, "turn_hooks", None),
+        compaction_hooks=getattr(svc, "compaction_hooks", None),
     )
 
 
@@ -1651,6 +1658,12 @@ async def start_gateway_server(
         max_pending_per_session=_task_runtime_max_pending_per_session(config),
         subagent_reserved_slots=int(
             getattr(getattr(config, "subagents", None), "subagent_reserved_slots", 0)
+        ),
+        turn_hard_deadline_s=getattr(
+            config.task_runtime, "turn_hard_deadline_s", None
+        ),
+        pending_overflow_policy=getattr(
+            config.task_runtime, "pending_overflow_policy", "reject_newest"
         ),
     )
     # Wire task_runtime's lock provider into turn_runner so both share a

@@ -22,9 +22,11 @@ Lock ordering invariant:
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
+from enum import StrEnum
 from typing import Any, cast
 
 import structlog
@@ -167,11 +169,29 @@ class _RuntimeTask:
     terminal_emitted: bool = False
     cancel_requested: bool = False
     acquired_slot: bool = False
+    overflow_dropped: bool = False
 
 
 TaskHandler = Callable[[TaskRun], Awaitable[Any]]
 EventEmitter = Callable[[str, str, dict[str, Any]], Awaitable[None]]
 TerminalListener = Callable[[SubagentCompletionEvent], Awaitable[None]]
+
+
+class PendingOverflowPolicy(StrEnum):
+    """Per-session pending queue overflow policy.
+
+    ``REJECT_NEWEST``
+        Default — refuse the new enqueue with ``TaskQueueFullError``.
+        Backwards compatible behaviour.
+
+    ``DROP_OLDEST``
+        Evict the oldest QUEUED pending task on the same session, mark it
+        ``CANCELLED`` with ``terminal_reason="dropped_by_overflow"``, and
+        accept the new enqueue. Running tasks are never evicted.
+    """
+
+    REJECT_NEWEST = "reject_newest"
+    DROP_OLDEST = "drop_oldest"
 
 
 class TaskQueueFullError(RuntimeError):
@@ -184,6 +204,21 @@ class TaskQueueFullError(RuntimeError):
         )
         self.session_key = session_key
         self.max_pending = max_pending
+
+
+class _TurnHardDeadlineExceeded(TimeoutError):
+    """Internal breaker error raised when a turn exceeds its hard deadline.
+
+    Subclasses TimeoutError so legacy ``except TimeoutError`` paths still
+    classify the run as timed out, but the dedicated type lets the runtime
+    annotate the terminal record with the breaker-specific reason.
+    """
+
+    def __init__(self, *, deadline_s: float) -> None:
+        super().__init__(
+            f"turn exceeded hard deadline of {deadline_s:g}s"
+        )
+        self.deadline_s = deadline_s
 
 
 class TaskRuntime:
@@ -213,6 +248,10 @@ class TaskRuntime:
         max_concurrency: int = 4,
         max_pending_per_session: int | None = 64,
         subagent_reserved_slots: int = 0,
+        turn_hard_deadline_s: float | None = None,
+        pending_overflow_policy: PendingOverflowPolicy | str = (
+            PendingOverflowPolicy.REJECT_NEWEST
+        ),
     ) -> None:
         if max_concurrency < 1:
             raise ValueError("max_concurrency must be >= 1")
@@ -220,6 +259,15 @@ class TaskRuntime:
             raise ValueError("max_pending_per_session must be >= 1")
         if subagent_reserved_slots < 0:
             raise ValueError("subagent_reserved_slots must be >= 0")
+        if turn_hard_deadline_s is not None and turn_hard_deadline_s <= 0:
+            raise ValueError("turn_hard_deadline_s must be > 0 or None")
+        try:
+            pending_overflow_policy = PendingOverflowPolicy(pending_overflow_policy)
+        except ValueError as exc:
+            valid = ", ".join(member.value for member in PendingOverflowPolicy)
+            raise ValueError(
+                f"pending_overflow_policy must be one of {{{valid}}}"
+            ) from exc
         # Clamp so subagents can always acquire eventually. A reservation that
         # consumes the entire pool would deadlock the subagent lane.
         if subagent_reserved_slots >= max_concurrency:
@@ -239,6 +287,8 @@ class TaskRuntime:
         self._max_pending_per_session = max_pending_per_session
         self._max_concurrency = max_concurrency
         self._subagent_reserved_slots = subagent_reserved_slots
+        self._turn_hard_deadline_s = turn_hard_deadline_s
+        self._pending_overflow_policy = pending_overflow_policy
         # OUTER per-session lock dict (see Lock ordering invariant in class docstring).
         # Protects: task dispatch serialization within a session — ensures at most
         # one task runs at a time per session_key.  Acquire order: always BEFORE
@@ -294,6 +344,7 @@ class TaskRuntime:
         stream_event_sink: TaskStreamEventSink | None = None,
         *,
         update_envelope_cache: bool = True,
+        overflow_policy: PendingOverflowPolicy | str | None = None,
     ) -> TaskHandle:
         envelope = replace(
             envelope,
@@ -313,18 +364,19 @@ class TaskRuntime:
         if queue_mode == "interrupt":
             await self.cancel(session_key=envelope.session_key)
         elif self._max_pending_per_session is not None:
-            async with self._state_lock:
-                pending_count = len(self._pending_by_session.get(envelope.session_key, []))
-            if pending_count >= self._max_pending_per_session:
-                _emit_metric(
-                    "queue_full_errors_total",
-                    value=1,
-                    session_key=envelope.session_key,
-                )
-                raise TaskQueueFullError(
-                    session_key=envelope.session_key,
-                    max_pending=self._max_pending_per_session,
-                )
+            effective_policy = self._pending_overflow_policy
+            if overflow_policy is not None:
+                try:
+                    effective_policy = PendingOverflowPolicy(overflow_policy)
+                except ValueError as exc:
+                    valid = ", ".join(member.value for member in PendingOverflowPolicy)
+                    raise ValueError(
+                        f"overflow_policy must be one of {{{valid}}}"
+                    ) from exc
+            await self._apply_overflow_policy(
+                envelope.session_key,
+                policy=effective_policy,
+            )
 
         record = AgentTaskRecord(
             session_key=envelope.session_key,
@@ -544,6 +596,107 @@ class TaskRuntime:
                 except (asyncio.CancelledError, Exception):
                     pass
 
+    async def apply_overflow_policy(
+        self,
+        session_key: str,
+        *,
+        policy: PendingOverflowPolicy | str | None = None,
+    ) -> None:
+        """Public entry point for per-channel overflow enforcement.
+
+        Channel adapters call this before issuing the per-session
+        ``start_turn_via_runtime`` so they can override the runtime default
+        (e.g. ``DROP_OLDEST`` for noisy realtime channels). When ``policy``
+        is ``None`` the runtime's own default is used.
+        """
+        if self._max_pending_per_session is None:
+            return
+        resolved: PendingOverflowPolicy | None = None
+        if policy is not None:
+            try:
+                resolved = PendingOverflowPolicy(policy)
+            except ValueError as exc:
+                valid = ", ".join(member.value for member in PendingOverflowPolicy)
+                raise ValueError(
+                    f"overflow_policy must be one of {{{valid}}}"
+                ) from exc
+        await self._apply_overflow_policy(
+            canonicalize_session_key(session_key),
+            policy=resolved,
+        )
+
+    async def _apply_overflow_policy(
+        self,
+        session_key: str,
+        *,
+        policy: PendingOverflowPolicy | None = None,
+    ) -> None:
+        """Enforce ``max_pending_per_session`` per the resolved policy.
+
+        ``policy`` overrides the runtime default for this single call so a
+        channel adapter may pick its own behaviour (e.g. ``DROP_OLDEST`` for
+        noisy realtime channels).
+
+        Holds ``_state_lock`` only while inspecting/snapshotting pending state
+        and (for ``drop_oldest``) selecting the eviction candidate. The
+        cancellation work itself runs outside the lock so ``_mark_terminal``
+        can re-acquire ``_state_lock`` safely.
+        """
+        assert self._max_pending_per_session is not None
+        if policy is None:
+            policy = self._pending_overflow_policy
+        async with self._state_lock:
+            pending = list(self._pending_by_session.get(session_key, []))
+            pending_count = len(pending)
+            victim: _RuntimeTask | None = None
+            if pending_count >= self._max_pending_per_session:
+                if policy == PendingOverflowPolicy.DROP_OLDEST:
+                    victim = next(
+                        (
+                            task
+                            for task in pending
+                            if task.status == AgentTaskStatus.QUEUED
+                        ),
+                        None,
+                    )
+                if policy != PendingOverflowPolicy.DROP_OLDEST or victim is None:
+                    _emit_metric(
+                        "queue_full_errors_total",
+                        value=1,
+                        session_key=session_key,
+                        policy=str(policy),
+                    )
+                    raise TaskQueueFullError(
+                        session_key=session_key,
+                        max_pending=self._max_pending_per_session,
+                    )
+                # Mark before releasing the lock so a concurrent enqueue
+                # cannot pick the same victim and double-cancel.
+                victim.cancel_requested = True
+                victim.overflow_dropped = True
+        if victim is not None:
+            _emit_metric(
+                "queue_full_errors_total",
+                value=1,
+                session_key=session_key,
+                policy=str(PendingOverflowPolicy.DROP_OLDEST),
+                action="dropped_oldest",
+            )
+            # Cancel the asyncio task driving _execute(). The asyncio.Lock
+            # acquire path may swallow the cancel via a race when the lock
+            # holder releases at the same instant, so we always finalise
+            # the record ourselves: _mark_terminal is idempotent (guarded
+            # by terminal_emitted) so a redundant call from the _execute
+            # cancel branch is a no-op.
+            asyncio_task = victim.asyncio_task
+            if asyncio_task is not None and not asyncio_task.done():
+                asyncio_task.cancel()
+            await self._mark_terminal(
+                victim,
+                AgentTaskStatus.CANCELLED,
+                terminal_reason="dropped_by_overflow",
+            )
+
     async def _try_collect(
         self,
         *,
@@ -604,16 +757,24 @@ class TaskRuntime:
                 _owner_token = _SESSION_LOCK_OWNER.set(_new_map)
                 try:
                     if task.cancel_requested:
+                        reason = (
+                            "overflow_drop" if task.overflow_dropped else "user_cancel"
+                        )
+                        terminal_reason = (
+                            "dropped_by_overflow"
+                            if task.overflow_dropped
+                            else "cancelled_before_start"
+                        )
                         _emit_metric(
                             "turn_cancellations_total",
                             value=1,
-                            reason="user_cancel",
+                            reason=reason,
                             session_key=task.envelope.session_key,
                         )
                         await self._mark_terminal(
                             task,
                             AgentTaskStatus.CANCELLED,
-                            terminal_reason="cancelled_before_start",
+                            terminal_reason=terminal_reason,
                         )
                         return
                     await self._wait_for_subagent_slot(task)
@@ -633,7 +794,29 @@ class TaskRuntime:
                             semantic_message=task.semantic_message,
                             stream_event_sink=task.stream_event_sink,
                         )
-                        await self._turn_handler(run)
+                        if self._turn_hard_deadline_s is not None:
+                            _deadline_start = time.monotonic()
+                            try:
+                                await asyncio.wait_for(
+                                    self._turn_handler(run),
+                                    timeout=self._turn_hard_deadline_s,
+                                )
+                            except TimeoutError as exc:
+                                # Only reclassify when the hard-deadline budget
+                                # was actually exhausted.  A TimeoutError that
+                                # originates inside the handler (e.g. from a
+                                # phase class or tool call) will have elapsed
+                                # well below the deadline; in that case re-raise
+                                # the original exception unchanged so the outer
+                                # handler records the correct cause.
+                                _elapsed = time.monotonic() - _deadline_start
+                                if _elapsed >= self._turn_hard_deadline_s:
+                                    raise _TurnHardDeadlineExceeded(
+                                        deadline_s=self._turn_hard_deadline_s,
+                                    ) from exc
+                                raise
+                        else:
+                            await self._turn_handler(run)
                         await self._mark_terminal(
                             task,
                             AgentTaskStatus.SUCCEEDED,
@@ -645,16 +828,34 @@ class TaskRuntime:
                 finally:
                     _SESSION_LOCK_OWNER.reset(_owner_token)
         except asyncio.CancelledError:
+            reason = "overflow_drop" if task.overflow_dropped else "interrupt"
+            terminal_reason = (
+                "dropped_by_overflow" if task.overflow_dropped else "cancelled"
+            )
             _emit_metric(
                 "turn_cancellations_total",
                 value=1,
-                reason="interrupt",
+                reason=reason,
                 session_key=task.envelope.session_key,
             )
             await self._mark_terminal(
                 task,
                 AgentTaskStatus.CANCELLED,
-                terminal_reason="cancelled",
+                terminal_reason=terminal_reason,
+            )
+        except _TurnHardDeadlineExceeded as exc:
+            _emit_metric(
+                "turn_cancellations_total",
+                value=1,
+                reason="hard_deadline",
+                session_key=task.envelope.session_key,
+            )
+            await self._mark_terminal(
+                task,
+                AgentTaskStatus.TIMEOUT,
+                terminal_reason="hard_deadline_exceeded",
+                error_class=type(exc).__name__,
+                error_message=str(exc),
             )
         except TimeoutError as exc:
             _emit_metric(

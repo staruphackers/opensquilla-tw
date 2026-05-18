@@ -452,6 +452,8 @@ class Agent:
         session_key: str | None = None,
         turn_call_logger: TurnCallLogger | None = None,
         tool_result_summarizer_provider: LLMProvider | None = None,
+        memory_sync_manager: Any | None = None,
+        session_flush_service: Any | None = None,
     ) -> None:
         self.provider = provider
         self.config = config or AgentConfig()
@@ -468,14 +470,17 @@ class Agent:
         self._state: AgentState = AgentState.IDLE
         self._history: list[Message] = []
         self._context: ContextAssembly | None = None
-        self._memory_sync_manager: Any | None = None
+        # Phase B: typed dependency surface. Either constructor injection or
+        # legacy attribute assignment from the runtime is accepted; both reach
+        # the same internal slot.
+        self._memory_sync_manager: Any | None = memory_sync_manager
 
         # Memory flush state (sub-agent based, re-entrant per compaction cycle)
         self._flush_done_this_cycle: bool = False
         self._active_flush_task: asyncio.Task | None = None
         self._flush_backoff_until: float = 0.0
         self._flush_backoff_seconds: float = 0.0
-        self._session_flush_service = None  # set externally by runtime/gateway
+        self._session_flush_service = session_flush_service
 
     def _tool_execution_timeout(self, tool_call: ToolCall) -> float:
         timeout = float(self.config.tool_timeout)

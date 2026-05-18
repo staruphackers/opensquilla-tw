@@ -144,6 +144,61 @@ class TaskRuntimeConfig(BaseModel):
     # task_runtime._global_sem). Configured here so OPENSQUILLA_CHANNEL_INFLIGHT_CAP
     # has a stable env name regardless of channel adapter wiring.
     channel_inflight_cap: int = Field(default=8, ge=1)
+    # Hard ceiling on how long a single turn may hold the OUTER per-session
+    # lock before the dead-turn breaker fires. ``None`` keeps the historical
+    # behaviour (no breaker, jam tolerated).
+    turn_hard_deadline_s: float | None = Field(default=None, gt=0)
+    # Global default policy when ``max_pending_per_session`` is exceeded.
+    # ``reject_newest`` preserves legacy reject-on-overflow. ``drop_oldest``
+    # evicts the oldest QUEUED pending task on the session and accepts the
+    # new turn — useful for noisy realtime channels where the freshest
+    # message matters more than the queued backlog.
+    pending_overflow_policy: str = Field(default="reject_newest")
+    # Per-channel override map. Keys are channel ids (e.g. ``"feishu"``),
+    # values are policy strings.  Channels not listed fall back to
+    # ``pending_overflow_policy``. Empty dict by default — no channel is
+    # tuned independently.
+    pending_overflow_policy_per_channel: dict[str, str] = Field(default_factory=dict)
+    # Stream relay coalescing window. Consecutive text deltas inside a single
+    # window are concatenated into one chunk before being yielded to the
+    # channel adapter's ``send_streaming``. ``0`` (default) preserves the
+    # historical one-chunk-per-delta behaviour. Operators tune this for
+    # adapters that incur a per-call cost on ``send_streaming`` updates.
+    stream_relay_coalesce_ms: float = Field(default=0.0, ge=0)
+    # Hard cap on the size of a coalesced chunk. ``0`` (default) keeps the
+    # historical behaviour — used together with
+    # ``stream_relay_coalesce_ms`` to enable batching.
+    stream_relay_coalesce_chars: int = Field(default=0, ge=0)
+
+    @field_validator("pending_overflow_policy")
+    @classmethod
+    def _validate_overflow_policy(cls, value: str) -> str:
+        from opensquilla.gateway.task_runtime import PendingOverflowPolicy
+
+        try:
+            PendingOverflowPolicy(value)
+        except ValueError as exc:
+            valid = ", ".join(member.value for member in PendingOverflowPolicy)
+            raise ValueError(
+                f"pending_overflow_policy must be one of {{{valid}}}"
+            ) from exc
+        return value
+
+    @field_validator("pending_overflow_policy_per_channel")
+    @classmethod
+    def _validate_per_channel_policy(cls, value: dict[str, str]) -> dict[str, str]:
+        from opensquilla.gateway.task_runtime import PendingOverflowPolicy
+
+        valid = ", ".join(member.value for member in PendingOverflowPolicy)
+        for channel, policy in value.items():
+            try:
+                PendingOverflowPolicy(policy)
+            except ValueError as exc:
+                raise ValueError(
+                    f"pending_overflow_policy_per_channel[{channel!r}] "
+                    f"must be one of {{{valid}}}"
+                ) from exc
+        return value
 
 
 class LlmProviderConfig(BaseSettings):

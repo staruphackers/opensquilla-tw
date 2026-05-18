@@ -5,20 +5,25 @@ by every caller (gateway, CLI, cron, channel adapters). The pipeline is:
 
 1. Ingress injection guard — before registry lookup.
 2. Registry lookup — before any policy check.
-3. Policy chain (:data:`opensquilla.tools.policy.POLICY_CHAIN`) — first denial wins.
-4. Handler dispatch inside ``current_tool_context.set(effective_ctx)``.
-5. Single finalisation point (:func:`opensquilla.tools.policy.finalize.finalize`).
-6. ``current_tool_context.reset(token)`` in ``finally``.
+3. Optional ``ToolHook.before_tool`` fan-out (Phase B seam).
+4. Policy chain (:func:`opensquilla.tools.policy.run_chain_with_emit`) —
+   first denial wins; chain log emission flows through one site.
+5. Handler dispatch inside ``current_tool_context.set(effective_ctx)``.
+6. Optional ``ToolHook.after_tool`` fan-out with the raw outcome.
+7. Single finalisation point (:func:`opensquilla.tools.policy.finalize.finalize`).
+8. ``current_tool_context.reset(token)`` in ``finally``.
 """
 
 from __future__ import annotations
 
 import json
 import weakref
+from collections.abc import Sequence
 from typing import Any
 
 import structlog
 
+from opensquilla.engine.hooks import ToolHook, ToolHookCall, ToolHookResult
 from opensquilla.execution_status import normalize_execution_status
 from opensquilla.result_budget import (
     DEFAULT_TOOL_RESULT_BUDGET_POLICY,
@@ -32,7 +37,7 @@ from opensquilla.safety.injection_guard import (
 )
 from opensquilla.tool_boundary import AgentToolHandler, ToolCall, ToolResult
 from opensquilla.tools.envelope import build_tool_failure_envelope
-from opensquilla.tools.policy import POLICY_CHAIN, DispatchInput, finalize
+from opensquilla.tools.policy import DispatchInput, finalize, run_chain_with_emit
 from opensquilla.tools.registry import ToolRegistry
 from opensquilla.tools.types import CallerKind, ToolContext, current_tool_context
 
@@ -202,6 +207,7 @@ def build_tool_handler(
     ctx: ToolContext | None = None,
     *,
     known_skill_names: set[str] | None = None,
+    tool_hooks: Sequence[ToolHook] | None = None,
 ) -> AgentToolHandler:
     """Build an async tool handler from a :class:`ToolRegistry`.
 
@@ -209,13 +215,19 @@ def build_tool_handler(
 
     1. Injection-guard check before registry lookup.
     2. Registry lookup; returns structured error on miss.
-    3. Policy chain; first denial returns immediately.
-    4. Dispatches to the registered handler inside the request-scoped contextvar.
-    5. Finalises the result (execution status, budget, artefacts) via
+    3. ``ToolHook.before_tool`` fan-out (no-op if ``tool_hooks`` is empty).
+    4. Policy chain; first denial returns immediately.
+    5. Dispatches to the registered handler inside the request-scoped contextvar.
+    6. ``ToolHook.after_tool`` fan-out with the raw outcome.
+    7. Finalises the result (execution status, budget, artefacts) via
        :func:`opensquilla.tools.policy.finalize`.
-    6. Resets ``current_tool_context`` unconditionally in ``finally``.
+    8. Resets ``current_tool_context`` unconditionally in ``finally``.
+
+    ``tool_hooks`` defaults to empty so callers that do not pass hooks are
+    bit-for-bit equivalent to the legacy path.
     """
     known = frozenset(known_skill_names or ())
+    hooks: tuple[ToolHook, ...] = tuple(tool_hooks or ())
     fallback_budget_tracker = _build_budget_tracker(ctx)
     scoped_budget_trackers: dict[
         int,
@@ -249,7 +261,21 @@ def build_tool_handler(
         if registered is None:
             return _resolve_registry_miss(tool_call, known, effective_ctx)
 
-        # 3. Policy chain — first denial wins.
+        # 3. ToolHook.before_tool — observability seam (Phase B).
+        hook_call = ToolHookCall(tool_call=tool_call, ctx=effective_ctx) if hooks else None
+        if hook_call is not None:
+            for hook in hooks:
+                try:
+                    hook.before_tool(hook_call)
+                except Exception as exc:  # noqa: BLE001 - hooks must not break dispatch
+                    log.warning(
+                        "dispatch.tool_hook_failed",
+                        hook=getattr(hook, "name", type(hook).__name__),
+                        phase="before_tool",
+                        error=str(exc),
+                    )
+
+        # 4. Policy chain — first denial wins. Single emission site via run_chain_with_emit.
         dispatch_input = DispatchInput(
             tool_call=tool_call,
             ctx=effective_ctx,
@@ -257,20 +283,35 @@ def build_tool_handler(
             known_skill_names=known,
             registry=registry,
         )
-        for check in POLICY_CHAIN:
-            decision = check.evaluate(dispatch_input)
-            if decision.allowed:
-                continue
-            if decision.log_event is not None:
-                event = decision.log_event.get("event", "dispatch.policy_block")
-                fields = {k: v for k, v in decision.log_event.items() if k != "event"}
-                log.warning(event, **fields)
-            assert decision.envelope is not None, (
-                f"PolicyCheck {check.name!r} returned a denial without an envelope"
-            )
+
+        def _emit_policy_log(log_event: dict) -> None:
+            event = log_event.get("event", "dispatch.policy_block")
+            fields = {k: v for k, v in log_event.items() if k != "event"}
+            log.warning(event, **fields)
+
+        decision = run_chain_with_emit(dispatch_input, emit=_emit_policy_log)
+        if not decision.allowed:
+            if decision.envelope is None:
+                raise RuntimeError(
+                    "PolicyCheck returned a denial without an envelope"
+                )
+            if hook_call is not None:
+                for hook in hooks:
+                    try:
+                        hook.after_tool(
+                            hook_call,
+                            ToolHookResult(result=decision.envelope),
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning(
+                            "dispatch.tool_hook_failed",
+                            hook=getattr(hook, "name", type(hook).__name__),
+                            phase="after_tool",
+                            error=str(exc),
+                        )
             return decision.envelope
 
-        # 4. Handler dispatch inside the request-scoped contextvar.
+        # 5. Handler dispatch inside the request-scoped contextvar.
         token = current_tool_context.set(effective_ctx)
         raw_result: Any = None
         exception: BaseException | None = None
@@ -288,7 +329,20 @@ def build_tool_handler(
             exception = exc
         finally:
             try:
-                # 5. Single finalisation point.
+                # 6. ToolHook.after_tool — observability seam.
+                if hook_call is not None:
+                    outcome = ToolHookResult(result=raw_result, exception=exception)
+                    for hook in hooks:
+                        try:
+                            hook.after_tool(hook_call, outcome)
+                        except Exception as hook_exc:  # noqa: BLE001
+                            log.warning(
+                                "dispatch.tool_hook_failed",
+                                hook=getattr(hook, "name", type(hook).__name__),
+                                phase="after_tool",
+                                error=str(hook_exc),
+                            )
+                # 7. Single finalisation point.
                 return await finalize(
                     tool_call,
                     effective_ctx,

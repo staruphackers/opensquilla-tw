@@ -13,7 +13,7 @@ from ``opensquilla.tools.policy`` continue to work.
 
 from __future__ import annotations
 
-from opensquilla.tools.policy.chain import POLICY_CHAIN, run_chain
+from opensquilla.tools.policy.chain import POLICY_CHAIN, run_chain, run_chain_with_emit
 from opensquilla.tools.policy.checks import (
     AllowListPolicy,
     DenyListPolicy,
@@ -39,6 +39,7 @@ __all__ = [
     "ProfilePolicy",
     "finalize",
     "run_chain",
+    "run_chain_with_emit",
 ]
 
 # Legacy re-exports — kept for backwards compatibility so existing call sites

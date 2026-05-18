@@ -17,33 +17,84 @@ import os
 import platform
 import time
 import uuid
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final, SupportsInt, TypeGuard, cast
+from typing import Any, Final, SupportsInt, TypeGuard
 
 import structlog
 
-from opensquilla.artifacts import artifact_marker, artifact_payload
+from opensquilla.artifacts import artifact_marker
 from opensquilla.attachment_refs import is_attachment_ref, read_attachment_ref_bytes
 from opensquilla.bootstrap_types import BootstrapFileReport
 from opensquilla.engine.agent import Agent, ToolHandler
 from opensquilla.engine.cache_break_monitor import notify_compaction
+from opensquilla.engine.hooks import (
+    CompactionHook,
+    DefaultTraceEmitterHook,
+    TurnEvent,
+    TurnHook,
+    TurnHookContext,
+)
 from opensquilla.engine.pipeline import TurnContext
 from opensquilla.engine.pricing import PriceEntry, lookup_price
-from opensquilla.engine.tool_text_compat import strip_synthetic_tool_call_text
+from opensquilla.engine.turn_runner import (
+    AgentBootstrapStage,
+    AgentBootstrapStageInput,
+    AttachmentStage,
+    AttachmentStageInput,
+    CompactionAndHistoryStage,
+    CompactionAndHistoryStageInput,
+    InputStage,
+    InputStageInput,
+    PromptAssemblerStage,
+    PromptAssemblerStageInput,
+    ProviderAndToolsStage,
+    ProviderAndToolsStageInput,
+    StreamConsumerStage,
+    StreamConsumerStageInput,
+    TurnFinalizerStage,
+    TurnFinalizerStageInput,
+    _PromptReportBuilderAdapter,
+    _RequestContextPrependAdapter,
+    _StreamState,
+    _TurnRunnerAgentConfigBuilderAdapter,
+    _TurnRunnerAgentFactoryAdapter,
+    _TurnRunnerAgentRunAdapter,
+    _TurnRunnerAttachmentMessageBuilderAdapter,
+    _TurnRunnerCompactionPersistAdapter,
+    _TurnRunnerExtraContextAdapter,
+    _TurnRunnerHistoryLoaderAdapter,
+    _TurnRunnerMemoryFingerprintAdapter,
+    _TurnRunnerMemorySnapshotAdapter,
+    _TurnRunnerMemorySnapshotRefreshAdapter,
+    _TurnRunnerMemorySyncNotifyAdapter,
+    _TurnRunnerModelCatalogAdapter,
+    _TurnRunnerPipelineExecutionAdapter,
+    _TurnRunnerPreflightCompactionAdapter,
+    _TurnRunnerPromptAssemblerAdapter,
+    _TurnRunnerPromptConfigResolverAdapter,
+    _TurnRunnerProviderResolverAdapter,
+    _TurnRunnerRouterContextAdapter,
+    _TurnRunnerSessionIdResolverAdapter,
+    _TurnRunnerSessionTotalsAdapter,
+    _TurnRunnerSummarizerProviderAdapter,
+    _TurnRunnerSystemPromptRefreshAdapter,
+    _TurnRunnerT3UpgradeCompactionAdapter,
+    _TurnRunnerTimeoutBudgetAdapter,
+    _TurnRunnerToolBuilderAdapter,
+    _TurnRunnerTranscriptAppendAdapter,
+    _TurnRunnerTurnErrorPersistAdapter,
+    _TurnRunnerTurnMemoryCaptureAdapter,
+)
 from opensquilla.engine.types import (
     AgentConfig,
     AgentEvent,
-    ArtifactEvent,
-    CompactionEvent,
     DoneEvent,
     ErrorEvent,
-    TextDeltaEvent,
     ThinkingLevel,
     ToolResultEvent,
-    ToolUseStartEvent,
     WarningEvent,
 )
 from opensquilla.execution_status import (
@@ -66,7 +117,6 @@ from opensquilla.provider import (
     ErrorEvent as ProviderErrorEvent,
 )
 from opensquilla.provider import (
-    LLMProvider,
     ProviderRecoveryAction,
     classify_provider_error,
     decide_recovery_action,
@@ -77,7 +127,6 @@ from opensquilla.session.compaction_lifecycle import (
 )
 from opensquilla.session.cost_rollup import (
     normalize_event_cost_source,
-    rollup_cost_source,
 )
 from opensquilla.session.keys import (
     allows_private_memory_prompt_injection,
@@ -122,6 +171,24 @@ _IMAGE_GENERATION_TOOL_NAMES: Final[frozenset[str]] = frozenset(
 _ARTIFACT_DELIVERY_FAILURE_MARKER: Final[str] = "File delivery failed:"
 _ARTIFACT_DELIVERY_TOOL_NAME: Final[str] = "publish_artifact"
 _ARTIFACT_DELIVERY_FAILURE_MAX_CHARS: Final[int] = 360
+
+_HOOKS_FEATURE_ENV: Final[str] = "OPENSQUILLA_HOOKS"
+
+
+def _hooks_mode_from_env() -> str:
+    """Resolve the active hook mode from the ``OPENSQUILLA_HOOKS`` env var.
+
+    Returns ``"legacy"`` only when explicitly set to ``legacy``
+    (case-insensitive); any other value (including unset) returns ``"new"``.
+    The default flipped to ``new`` after the equivalence harness showed zero
+    divergence between legacy and hook paths across the engine and tools test
+    suites. ``OPENSQUILLA_HOOKS=legacy`` remains as an escape hatch for one
+    release cycle so any unforeseen drift can be diagnosed without rolling
+    back code.
+    """
+
+    raw = os.environ.get(_HOOKS_FEATURE_ENV, "").strip().lower()
+    return "legacy" if raw == "legacy" else "new"
 
 
 def _is_deepseek_model_id(model: str) -> bool:
@@ -1025,6 +1092,8 @@ class TurnRunner:
         session_flush_service: SessionFlushService | None = None,
         session_lock_provider: Callable[[str], asyncio.Lock] | None = None,
         diagnostics_state: Any | None = None,
+        turn_hooks: Sequence[TurnHook] | None = None,
+        compaction_hooks: Sequence[CompactionHook] | None = None,
     ) -> None:
         self._provider_selector = provider_selector
         self._tool_registry = tool_registry
@@ -1038,6 +1107,20 @@ class TurnRunner:
         self._turn_capture_services = turn_capture_services
         self._session_flush_service = session_flush_service
         self._diagnostics_state = diagnostics_state
+        # Phase B hook surface. When OPENSQUILLA_HOOKS=new, the runtime fans
+        # turn events out through these hooks instead of calling the static
+        # ``_write_trace_event`` helper directly. The default registration
+        # reproduces inline behavior 1:1.
+        if turn_hooks is None:
+            self._turn_hooks: tuple[TurnHook, ...] = (DefaultTraceEmitterHook(),)
+        else:
+            self._turn_hooks = tuple(turn_hooks)
+        # Phase B CompactionHook surface. CompactionAndHistoryStage fans
+        # before/after-compact events out through these hooks. Empty tuple
+        # by default = no fan-out.
+        self._compaction_hooks: tuple[CompactionHook, ...] = (
+            tuple(compaction_hooks) if compaction_hooks else ()
+        )
         # Per-session lock provider.
         # Gateway path: task_runtime._get_session_lock_for_turn (wired in boot.py).
         # CLI/standalone path: _standalone_lock_provider from build_turn_runner_from_services.
@@ -1061,6 +1144,80 @@ class TurnRunner:
         self._bootstrap_snapshots: dict[tuple[str, str, str], BootstrapSnapshot] = {}
         self._compaction_failures: dict[str, _CompactionFailureState] = {}
         self._turn_compacted_sessions: set[str] = set()
+        # Phase C InputStage instance (PR-C-1). Holds no per-turn state;
+        # constructed once. Active unconditionally as of PR-C-9.
+        self._input_stage = InputStage(extra_ctx=_TurnRunnerExtraContextAdapter())
+        # Phase C ProviderAndToolsStage instance (PR-C-2). Holds no
+        # per-turn state. Active unconditionally as of PR-C-9.
+        self._provider_and_tools_stage = ProviderAndToolsStage(
+            provider_resolver=_TurnRunnerProviderResolverAdapter(self),
+            tool_builder=_TurnRunnerToolBuilderAdapter(self),
+        )
+        # Phase C PromptAssemblerStage instance (PR-C-3). Holds no
+        # per-turn state. Active unconditionally as of PR-C-9.
+        self._prompt_assembler_stage = PromptAssemblerStage(
+            prompt_assembler=_TurnRunnerPromptAssemblerAdapter(self),
+            pipeline_executor=_TurnRunnerPipelineExecutionAdapter(self),
+            router_context=_TurnRunnerRouterContextAdapter(self),
+            prompt_config_resolver=_TurnRunnerPromptConfigResolverAdapter(self),
+            prompt_report_builder=_PromptReportBuilderAdapter(),
+            session_id_resolver=_TurnRunnerSessionIdResolverAdapter(self),
+            memory_fingerprint=_TurnRunnerMemoryFingerprintAdapter(self),
+        )
+        # Phase C AgentBootstrapStage instance (PR-C-4). Holds no
+        # per-turn state. Active unconditionally as of PR-C-9.
+        self._agent_bootstrap_stage = AgentBootstrapStage(
+            timeout_budget=_TurnRunnerTimeoutBudgetAdapter(self),
+            model_catalog=_TurnRunnerModelCatalogAdapter(self),
+            agent_config_builder=_TurnRunnerAgentConfigBuilderAdapter(self),
+            summarizer_provider=_TurnRunnerSummarizerProviderAdapter(),
+            memory_snapshot=_TurnRunnerMemorySnapshotAdapter(self),
+            agent_factory=_TurnRunnerAgentFactoryAdapter(self),
+        )
+        # Phase C CompactionAndHistoryStage instance (PR-C-5). Holds no
+        # per-turn state. Active unconditionally as of PR-C-9.
+        self._compaction_and_history_stage = CompactionAndHistoryStage(
+            t3_upgrade=_TurnRunnerT3UpgradeCompactionAdapter(self),
+            preflight=_TurnRunnerPreflightCompactionAdapter(self),
+            history_loader=_TurnRunnerHistoryLoaderAdapter(self),
+            request_context_prepender=_RequestContextPrependAdapter(),
+            compaction_hooks=self._compaction_hooks,
+        )
+        # Phase C AttachmentStage instance (PR-C-6). Holds no per-turn
+        # state. Active unconditionally as of PR-C-9.
+        self._attachment_stage = AttachmentStage(
+            builder=_TurnRunnerAttachmentMessageBuilderAdapter(self),
+        )
+        # Phase C StreamConsumerStage instance (PR-C-7). Holds no
+        # per-turn state. Active unconditionally as of PR-C-9. The
+        # warning transformer binds ``self._handle_runtime_warning`` as
+        # a one-method callable; the recording-fake discipline applies
+        # identically to a Protocol-shaped port.
+        self._stream_consumer_stage = StreamConsumerStage(
+            agent_run=_TurnRunnerAgentRunAdapter(),
+            compaction_persist=_TurnRunnerCompactionPersistAdapter(self),
+            memory_snapshot_refresh=_TurnRunnerMemorySnapshotRefreshAdapter(self),
+            system_prompt_refresh=_TurnRunnerSystemPromptRefreshAdapter(self),
+            memory_sync_notify=_TurnRunnerMemorySyncNotifyAdapter(),
+            warning_transformer=self._handle_runtime_warning,
+        )
+        # Phase C TurnFinalizerStage instance (PR-C-8). Holds no
+        # per-turn state. Active unconditionally as of PR-C-9. Adapter
+        # contracts:
+        #   * TranscriptAppendPort folds the ``token_count`` introspect
+        #     and the ``session_manager is None`` guard.
+        #   * TurnMemoryCapturePort forwards verbatim; the stage owns
+        #     the log-and-continue try/except.
+        #   * SessionTotalsPort inlines the post-DoneEvent cost rollup
+        #     bit-identically to the legacy slice.
+        #   * TurnErrorPersistPort forwards verbatim; the helper owns
+        #     its own try/except + None guards.
+        self._turn_finalizer_stage = TurnFinalizerStage(
+            transcript_append=_TurnRunnerTranscriptAppendAdapter(self),
+            turn_memory_capture=_TurnRunnerTurnMemoryCaptureAdapter(self),
+            session_totals=_TurnRunnerSessionTotalsAdapter(self),
+            turn_error_persist=_TurnRunnerTurnErrorPersistAdapter(self),
+        )
 
     def has_compacted_this_turn(self, session_key: str) -> bool:
         return session_key in self._turn_compacted_sessions
@@ -1462,9 +1619,14 @@ class TurnRunner:
         turn_segments: list[dict] = []
         turn_artifacts: list[dict[str, Any]] = []
         artifact_delivery_failures: list[str] = []
-        self._write_trace_event(
+        self._emit_turn_event(
             "turn_start",
             trace_context,
+            session_key=session_key,
+            agent_id=agent_id,
+            turn_id=turn_id,
+            run_kind=run_kind,
+            input_mode=input_mode,
             seq=1,
             attrs={"input_mode": input_mode, "run_kind": run_kind},
             payload={
@@ -1473,51 +1635,45 @@ class TurnRunner:
             },
         )
         try:
-            runtime_message = message
-            semantic_input = semantic_message if semantic_message is not None else message
-            extra_prompt_context: dict[str, str] | None = None
-            if input_mode == "system_event":
-                runtime_message = f"[INTERNAL SYSTEM EVENT]\n{message}"
-                semantic_input = message
-                extra_prompt_context = {
-                    "Internal Event Mode": (
-                        "The next input is an internal scheduler event, not a human user"
-                        " message. Treat it as system-originated context."
-                    )
-                }
-            extra_prompt_context = self._merge_extra_prompt_context(
-                extra_prompt_context,
-                self._extra_context_for_tool_context(tool_context),
+            input_out = await self._input_stage.run(
+                InputStageInput(
+                    message=message,
+                    semantic_message=semantic_message,
+                    input_mode=input_mode,
+                    persist_input=persist_input,
+                    input_provenance=input_provenance,
+                    session_key=session_key,
+                    tool_context=tool_context,
+                    session_append=self._session_manager,
+                )
             )
+            runtime_message = input_out.runtime_message
+            semantic_input = input_out.semantic_input
+            extra_prompt_context = input_out.extra_prompt_context
 
-            if persist_input and self._session_manager is not None and message:
-                input_role = "system" if input_mode == "system_event" else "user"
-                persisted_entry = await self._session_manager.append_message(
-                    session_key,
-                    role=input_role,
-                    content=message,
-                    provenance=input_provenance,
+            pt_outcome = await self._provider_and_tools_stage.run(
+                ProviderAndToolsStageInput(
+                    session_key=session_key,
+                    agent_id=agent_id,
+                    tool_context=tool_context,
+                    run_kind=run_kind,
+                    input_mode=input_mode,
                 )
-                # Pick up any stamp SessionManager applied (user role only).
-                if (
-                    input_mode != "system_event"
-                    and persisted_entry is not None
-                    and isinstance(persisted_entry.content, str)
-                    and persisted_entry.content != message
-                ):
-                    runtime_message = persisted_entry.content
-
-            # 1. Resolve provider (clone to avoid shared state race)
-            provider, cloned_selector = self._resolve_provider()
-            if provider is None:
+            )
+            if pt_outcome.terminate:
+                # Harness performs the legacy observability + persist +
+                # yield sequence in the legacy ORDER (trace-emit, persist,
+                # yield, return).
+                provider_error_event = pt_outcome.early_yield
                 log.error("turn_runner.no_provider", session_key=session_key)
-                provider_error_event = ErrorEvent(
-                    message="No provider available",
-                    code="no_provider",
-                )
-                self._write_trace_event(
+                self._emit_turn_event(
                     "turn_error",
                     trace_context,
+                    session_key=session_key,
+                    agent_id=agent_id,
+                    turn_id=turn_id,
+                    run_kind=run_kind,
+                    input_mode=input_mode,
                     seq=2,
                     payload={
                         "error_type": "ProviderResolutionError",
@@ -1528,114 +1684,54 @@ class TurnRunner:
                 await self._persist_turn_error(session_key, provider_error_event)
                 yield provider_error_event
                 return
+            pt_out = pt_outcome.output
+            provider = pt_out.provider
+            cloned_selector = pt_out.cloned_selector
+            tool_defs = pt_out.tool_defs
+            tool_handler = pt_out.tool_handler
+            tool_context = pt_out.effective_tool_context
+            tool_metadata = pt_out.tool_metadata
 
-            # 2. Build tools (filtered by tool_context)
-            if tool_context is not None:
-                tool_context = await self._with_artifact_context(tool_context, session_key)
-                tool_context = self._with_runtime_write_callbacks(tool_context, agent_id)
-
-            tool_metadata: dict[str, Any] = {}
-            if "metadata" in inspect.signature(self._build_tools).parameters:
-                tool_defs, tool_handler = self._build_tools(tool_context, metadata=tool_metadata)
-            else:
-                tool_defs, tool_handler = self._build_tools(tool_context)
-
-            # 4. Assemble identity prompt
-            prompt_metadata: dict[str, Any] = {}
-            base_prompt = self._assemble_prompt(
-                agent_id,
-                tool_defs,
-                session_key=session_key,
-                semantic_message=semantic_input,
-                extra_context=extra_prompt_context,
-                prompt_metadata=prompt_metadata,
-                bootstrap_context_mode=bootstrap_context_mode,
-            )
-
-            # 4. Run pipeline
-            pipeline_kwargs: dict[str, Any] = {}
-            if _accepts_keyword_arg(self._run_pipeline, "ingress_pipeline_steps"):
-                pipeline_kwargs["ingress_pipeline_steps"] = ingress_pipeline_steps
-            if _accepts_keyword_arg(self._run_pipeline, "semantic_message"):
-                pipeline_kwargs["semantic_message"] = semantic_input
-            router_context = await self._router_previous_assistant_context(
-                session_key,
-                exclude_last_user=history_has_persisted_user or persist_input,
-            )
-            if _accepts_keyword_arg(self._run_pipeline, "prev_assistant_text"):
-                pipeline_kwargs["prev_assistant_text"] = router_context.get("prev_assistant_text")
-            if _accepts_keyword_arg(self._run_pipeline, "prev_assistant_usage"):
-                pipeline_kwargs["prev_assistant_usage"] = router_context.get(
-                    "prev_assistant_usage"
+            pa_outcome = await self._prompt_assembler_stage.run(
+                PromptAssemblerStageInput(
+                    runtime_message=runtime_message,
+                    semantic_input=semantic_input,
+                    extra_prompt_context=extra_prompt_context,
+                    provider=provider,
+                    cloned_selector=cloned_selector,
+                    tool_defs=tool_defs,
+                    effective_tool_context=tool_context,
+                    tool_metadata=tool_metadata,
+                    session_key=session_key,
+                    agent_id=agent_id,
+                    turn_id=turn_id,
+                    attachments=attachments,
+                    bootstrap_context_mode=bootstrap_context_mode,
+                    model=model,
+                    history_has_persisted_user=history_has_persisted_user,
+                    persist_input=persist_input,
+                    ingress_pipeline_steps=ingress_pipeline_steps,
                 )
-            if _accepts_keyword_arg(self._run_pipeline, "history_user_texts"):
-                pipeline_kwargs["history_user_texts"] = router_context.get("history_user_texts")
-            if _accepts_keyword_arg(self._run_pipeline, "flags_text_override"):
-                pipeline_kwargs["flags_text_override"] = semantic_input
-            if _accepts_keyword_arg(self._run_pipeline, "tool_context"):
-                pipeline_kwargs["tool_context"] = tool_context
-            turn, provider = await self._run_pipeline(
-                runtime_message,
-                session_key,
-                provider,
-                cloned_selector,
-                tool_defs,
-                base_prompt,
-                attachments,
-                **pipeline_kwargs,
             )
-            turn.metadata.update(prompt_metadata)
-            turn.metadata.update(tool_metadata)
-            if self._config is not None and hasattr(self._config, "memory_mode_fingerprint"):
-                try:
-                    fingerprint = self._config.memory_mode_fingerprint()
-                    prompt_fingerprint = turn.metadata.get("memory_mode_fingerprint")
-                    if isinstance(prompt_fingerprint, dict):
-                        fingerprint.update(
-                            {str(k): str(v) for k, v in prompt_fingerprint.items()}
-                        )
-                    turn.metadata["memory_mode_fingerprint"] = fingerprint
-                except Exception:
-                    pass
-            effective_runtime_message = getattr(turn, "message", runtime_message)
-            if model and cloned_selector is not None:
-                cloned_selector.override_model(model)
-                provider = cloned_selector.resolve()
-            if cloned_selector is not None:
-                provider = _SelectorFallbackProvider(provider, cloned_selector)
+            pa_out = pa_outcome.output
+            provider = pa_out.provider
+            turn = pa_out.turn
             turn_obj = turn
-            tool_defs_for_log = tool_defs
+            tool_defs_for_log = turn.tool_defs
             provider_for_log = provider
-
-            # 5. Resolve final prompt and config
-            final_prompt, cache_breakpoints, request_context_prompt = self._resolve_prompt_config(
-                turn
-            )
+            effective_runtime_message = pa_out.effective_runtime_message
+            final_prompt = pa_out.final_prompt
             final_prompt_str = final_prompt
-            session_id_for_log = await self._resolve_session_id_for_log(session_key)
-            prompt_report_for_log = build_prompt_report(
-                turn_id=turn_id,
-                session_key=session_key,
-                session_id=session_id_for_log,
-                agent_id=agent_id,
-                system_prompt=final_prompt_str,
-                tool_defs=turn.tool_defs,
-                metadata=turn.metadata,
-                tool_profile=turn.metadata.get("tool_profile"),
-            )
-
-            # Resolve model_id: explicit param > pipeline-routed > selector current config
-            selector_model = ""
-            if cloned_selector is not None:
-                try:
-                    selector_model = getattr(cloned_selector.current_config, "model", "") or ""
-                except Exception:
-                    selector_model = ""
-            resolved_model = model or turn.model or selector_model
-            provider_name = getattr(provider, "provider_name", "") or type(provider).__name__
+            cache_breakpoints = pa_out.cache_breakpoints
+            request_context_prompt = pa_out.request_context_prompt
+            resolved_model = pa_out.resolved_model
+            provider_name = pa_out.provider_name
+            session_id_for_log = pa_out.session_id_for_log
+            prompt_report_for_log = pa_out.prompt_report
+            selector_model = pa_out.selector_model
             trace_context = replace(
                 trace_context,
-                session_id=session_id_for_log,
+                session_id=pa_out.trace_context_session_id,
             )
             if is_turn_call_log_enabled(self._diagnostics_state):
                 turn_call_logger = TurnCallLogger(
@@ -1659,12 +1755,14 @@ class TurnRunner:
                 )
                 turn_call_logger.write(
                     "turn_start",
-                        {
-                            "input_mode": input_mode,
-                            "message": effective_runtime_message,
-                            "attachment_count": len(attachments),
-                            "tool_names": [getattr(td, "name", "") for td in turn.tool_defs],
-                        },
+                    {
+                        "input_mode": input_mode,
+                        "message": effective_runtime_message,
+                        "attachment_count": len(attachments),
+                        "tool_names": [
+                            getattr(td, "name", "") for td in turn.tool_defs
+                        ],
+                    },
                 )
             log.debug(
                 "turn_runner.model_resolved",
@@ -1672,576 +1770,162 @@ class TurnRunner:
                 pipeline_model=turn.model,
                 selector_model=selector_model,
                 resolved=resolved_model,
-                squilla_router_tier=turn.metadata.get("routed_tier"),
+                squilla_router_tier=pa_out.squilla_router_tier,
             )
-            # Runtime timeout is the whole agent turn lifecycle. Provider
-            # request timeout remains separate and is passed as request_timeout.
-            effective_runtime_timeout = (
-                float(timeout)
-                if timeout is not None
-                else self._resolve_agent_runtime_timeout(session_key)
-            )
-            effective_max_iterations = self._resolve_agent_max_iterations(
-                session_key,
-                max_iterations,
-            )
-            effective_iteration_timeout = self._resolve_agent_iteration_timeout(
-                session_key,
-                iteration_timeout,
-            )
-            effective_tool_timeout = self._resolve_agent_tool_timeout(
-                session_key,
-                tool_timeout,
-            )
-            effective_agent_request_timeout = self._resolve_agent_request_timeout(
-                session_key,
-                request_timeout,
-            )
-            effective_max_provider_retries = self._resolve_agent_max_provider_retries(
-                session_key,
-                max_provider_retries,
-            )
-
-            # Resolve max_tokens & context_window from model catalog
-            user_max_tokens = getattr(getattr(self._config, "llm", None), "max_tokens", 0)
-            if self._model_catalog is not None:
-                max_tokens = self._model_catalog.resolve_max_tokens(
-                    resolved_model, user_override=user_max_tokens
+            ab_outcome = await self._agent_bootstrap_stage.run(
+                AgentBootstrapStageInput(
+                    provider=provider,
+                    cloned_selector=cloned_selector,
+                    turn=turn,
+                    final_prompt=final_prompt,
+                    cache_breakpoints=cache_breakpoints,
+                    request_context_prompt=request_context_prompt,
+                    resolved_model=resolved_model,
+                    session_id_for_log=session_id_for_log,
+                    tool_handler=tool_handler,
+                    turn_call_logger=turn_call_logger,
+                    session_key=session_key,
+                    agent_id=agent_id,
+                    timeout=timeout,
+                    max_iterations=max_iterations,
+                    iteration_timeout=iteration_timeout,
+                    tool_timeout=tool_timeout,
+                    request_timeout=request_timeout,
+                    max_provider_retries=max_provider_retries,
                 )
-                context_window = self._model_catalog.resolve_context_window(resolved_model)
-            else:
-                max_tokens = user_max_tokens if user_max_tokens > 0 else 8192
-                context_window = 200_000
+            )
+            ab_out = ab_outcome.output
+            agent = ab_out.agent
+            agent_config = ab_out.agent_config
+            # These locals are read by the test_agent_bootstrap_stage_snapshot
+            # frame-walking probe. Do not remove.
+            effective_runtime_timeout = ab_out.effective_runtime_timeout  # noqa: F841
+            effective_max_iterations = ab_out.effective_max_iterations  # noqa: F841
+            effective_iteration_timeout = ab_out.effective_iteration_timeout  # noqa: F841
+            effective_tool_timeout = ab_out.effective_tool_timeout  # noqa: F841
+            effective_agent_request_timeout = ab_out.effective_request_timeout  # noqa: F841
+            effective_max_provider_retries = ab_out.effective_max_provider_retries  # noqa: F841
+            model_caps = ab_out.model_capabilities  # noqa: F841
+            private_memory_allowed = ab_out.private_memory_allowed
+            sync_manager = ab_out.sync_manager
 
-            # Resolve model capabilities for reasoning support
-            model_caps = None
-            if self._model_catalog is not None:
-                provider_name = getattr(
-                    getattr(self._config, "llm", None), "provider", "openrouter"
+            # 6. Compaction (t3 + preflight) + history load + request-context
+            # prepend. CompactionAndHistoryStage owns the four-call sequence
+            # (t3_upgrade → preflight → load_history → prepend_request_context_prompt).
+            ch_outcome = await self._compaction_and_history_stage.run(
+                CompactionAndHistoryStageInput(
+                    agent=agent,
+                    context_window_tokens=agent_config.context_window_tokens,
+                    provider=provider,
+                    resolved_model=resolved_model,
+                    turn=turn,
+                    session_key=session_key,
+                    agent_id=agent_id,
+                    history_has_persisted_user=history_has_persisted_user,
                 )
-                base_url = getattr(getattr(self._config, "llm", None), "base_url", "")
-                model_caps = self._model_catalog.get_capabilities(
-                    resolved_model, provider_name=provider_name, base_url=base_url
+            )
+            ch_out = ch_outcome.output
+            agent.config.request_context_prompt = (
+                ch_out.final_request_context_prompt
+            )
+
+            # 8. Build extra messages for attachments + turn_input rebind.
+            # AttachmentStage owns the slice.
+            att_outcome = await self._attachment_stage.run(
+                AttachmentStageInput(
+                    effective_runtime_message=effective_runtime_message,
+                    attachments=attachments,
                 )
-
-            _mem_cfg = getattr(self._config, "memory", None) if self._config else None
-            _agent_token_cfg = (
-                getattr(self._config, "agent_token_saving", None) if self._config else None
             )
-            thinking = self._resolve_turn_thinking(turn)
-            tool_result_compression_mode = self._resolve_tool_result_compression_mode(
-                _agent_token_cfg
-            )
-            tool_result_summary_model = getattr(
-                _agent_token_cfg,
-                "tool_result_compression_summary_model",
-                None,
-            )
-            agent_config = AgentConfig(
-                max_iterations=effective_max_iterations,
-                system_prompt=final_prompt,
-                cache_breakpoints=cache_breakpoints,
-                request_context_prompt=request_context_prompt,
-                cache_mode=turn.metadata.get("cache_mode", "off"),
-                skills_context_prompt=turn.metadata.get("skills_context_prompt"),
-                model_id=resolved_model,
-                timeout=effective_runtime_timeout,
-                iteration_timeout=effective_iteration_timeout,
-                tool_timeout=effective_tool_timeout,
-                request_timeout=effective_agent_request_timeout,
-                max_provider_retries=effective_max_provider_retries,
-                max_tokens=max_tokens,
-                context_window_tokens=context_window,
-                flush_enabled=getattr(_mem_cfg, "flush_enabled", True),
-                flush_timeout_seconds=getattr(_mem_cfg, "flush_timeout_seconds", 5.0),
-                flush_backoff_initial_seconds=getattr(
-                    _mem_cfg,
-                    "flush_backoff_initial_seconds",
-                    30.0,
-                ),
-                flush_backoff_max_seconds=getattr(_mem_cfg, "flush_backoff_max_seconds", 300.0),
-                flush_archive_max_bytes=getattr(_mem_cfg, "flush_archive_max_bytes", 800_000),
-                flush_workspace_dir=str(self._resolve_memory_source_dir(agent_id)),
-                model_capabilities=model_caps,
-                thinking=thinking,
-                tool_result_compression_enabled=getattr(
-                    _agent_token_cfg,
-                    "tool_result_compression_enabled",
-                    True,
-                ),
-                tool_result_compression_mode=tool_result_compression_mode,  # type: ignore[arg-type]
-                tool_result_compression_max_share=getattr(
-                    _agent_token_cfg,
-                    "tool_result_compression_max_share",
-                    0.25,
-                ),
-                tool_result_compression_summary_model=tool_result_summary_model,
-                tool_result_compression_summary_max_tokens=getattr(
-                    _agent_token_cfg,
-                    "tool_result_compression_summary_max_tokens",
-                    1024,
-                ),
-                tool_result_compression_summary_timeout_seconds=getattr(
-                    _agent_token_cfg,
-                    "tool_result_compression_summary_timeout_seconds",
-                    20.0,
-                ),
-                tool_result_compression_summary_input_max_chars=getattr(
-                    _agent_token_cfg,
-                    "tool_result_compression_summary_input_max_chars",
-                    60_000,
-                ),
-                tool_result_store_dir=str(media_root_from_config(self._config) / "tool-results"),
-                tool_result_store_session_id=session_id_for_log or session_key,
-                tool_result_store_session_key=session_key,
-                tool_result_store_agent_id=agent_id,
-                tool_result_store_max_bytes=getattr(
-                    _agent_token_cfg,
-                    "tool_result_store_max_bytes",
-                    8 * 1024 * 1024,
-                ),
-                tool_result_store_disk_budget_bytes=getattr(
-                    _agent_token_cfg,
-                    "tool_result_store_disk_budget_bytes",
-                    256 * 1024 * 1024,
-                ),
-                tool_result_store_retention_seconds=getattr(
-                    _agent_token_cfg,
-                    "tool_result_store_retention_seconds",
-                    7 * 24 * 60 * 60,
-                ),
-                metadata=turn.metadata,
-            )
-            tool_result_summarizer_provider = self._resolve_tool_result_summarizer_provider(
-                mode=tool_result_compression_mode,
-                cloned_selector=cloned_selector,
-                current_provider=provider,
-                summary_model=tool_result_summary_model,
-            )
-
-            # Resolve per-agent memory sync manager (Trigger 1: warm session)
-            sync_manager = (
-                self._memory_sync_managers.get(agent_id) if self._memory_sync_managers else None
-            )
-            if sync_manager is not None:
-                await sync_manager.warm_session(session_key)
-
-            # Capture frozen memory snapshot on first turn of this session
-            private_memory_allowed = allows_private_memory_prompt_injection(session_key)
-            snap_key = (agent_id, session_key)
-            if private_memory_allowed and snap_key not in self._memory_snapshots:
-                _ws = self._resolve_memory_source_dir(agent_id)
-                self._memory_snapshots[snap_key] = MemorySnapshot(
-                    memory_md=self._load_memory_md(_ws),
-                    daily_notes=self._load_daily_notes(_ws),
-                )
-
-            agent = Agent(
-                provider=cast(LLMProvider, provider),
-                config=agent_config,
-                tool_definitions=turn.tool_defs,
-                tool_handler=tool_handler,
-                usage_tracker=self._usage_tracker,
-                session_key=session_key,
-                turn_call_logger=turn_call_logger,
-                tool_result_summarizer_provider=cast(
-                    LLMProvider | None,
-                    tool_result_summarizer_provider,
-                ),
-            )
-            agent._memory_sync_manager = sync_manager
-            cast(Any, agent)._session_flush_service = self._session_flush_service
-
-            # 6. Pre-flight compaction (before loading history into Agent)
-            t3_upgrade_result = await self._maybe_compact_on_t3_upgrade(
-                session_key,
-                turn,
-                agent_config.context_window_tokens,
-                compaction_provider=provider,
-                compaction_model=resolved_model,
-            )
-            if t3_upgrade_result in {_T3_NOT_APPLICABLE, _T3_FLUSH_FAILED}:
-                await self._maybe_preflight_compact(
-                    session_key,
-                    agent_config.context_window_tokens,
-                    compaction_provider=provider,
-                    compaction_model=resolved_model,
-                )
-
-            # 7. Load history. Compaction summaries are composed after
-            # preflight compaction and before Agent.run_turn so summaries
-            # created during preflight are visible on the same turn without
-            # mutating the cacheable system prompt.
-            compaction_summary_context = await self._load_history(
-                agent,
-                session_key,
-                trim_last_user=history_has_persisted_user,
-            )
-            agent.config.request_context_prompt = _prepend_request_context_prompt(
-                agent.config.request_context_prompt,
-                compaction_summary_context,
-            )
-
-            # 8. Build extra messages for attachments
-            extra_msgs = self._build_attachment_messages(
-                effective_runtime_message,
-                attachments,
-                media_root=self._attachment_media_root(),
-            )
+            att_out = att_outcome.output
+            extra_msgs = att_out.extra_messages
 
             # 9. Stream events (final_text_parts/turn_segments are declared
-            # up-front above so the CancelledError handler can read them)
+            # up-front above so the CancelledError handler can read them).
+            # StreamConsumerStage owns the slice. The four pre-stream
+            # accumulators (final_text_parts, turn_segments, turn_artifacts,
+            # artifact_delivery_failures) stay declared in this scope and
+            # are PASSED BY REFERENCE into _StreamState so the
+            # CancelledError handler below still sees them.
             current_text_parts: list[str] = []
             error_message: str | None = None
             pending_error_event: ErrorEvent | None = None
             done_event: DoneEvent | None = None
-            turn_input = effective_runtime_message if extra_msgs is None else ""
-            agent_run_kwargs: dict[str, Any] = {}
-            if _accepts_keyword_arg(agent.run_turn, "semantic_message"):
-                agent_run_kwargs["semantic_message"] = semantic_input
-            async for event in agent.run_turn(
-                turn_input,
+            turn_input = att_out.turn_input
+
+            stream_state = _StreamState(
+                current_text_parts=current_text_parts,
+                final_text_parts=final_text_parts,
+                turn_segments=turn_segments,
+                turn_artifacts=turn_artifacts,
+                artifact_delivery_failures=artifact_delivery_failures,
+            )
+            stream_inp = StreamConsumerStageInput(
+                agent=agent,
+                agent_id=agent_id,
+                sync_manager=sync_manager,
+                private_memory_allowed=private_memory_allowed,
+                turn=turn,
+                tool_defs=tool_defs,
+                turn_input=turn_input,
                 extra_messages=extra_msgs,
-                **agent_run_kwargs,
-            ):
-                if isinstance(event, TextDeltaEvent):
-                    final_text_parts.append(event.text)
-                    current_text_parts.append(event.text)
-                elif isinstance(event, ToolUseStartEvent):
-                    if event.synthetic_from_text and current_text_parts:
-                        raw_current_text = "".join(current_text_parts)
-                        cleaned_current_text = strip_synthetic_tool_call_text(
-                            raw_current_text,
-                            event.tool_name,
-                        )
-                        if cleaned_current_text != raw_current_text:
-                            full_text = "".join(final_text_parts)
-                            if full_text.endswith(raw_current_text):
-                                prefix = full_text[: -len(raw_current_text)]
-                                final_text_parts = [prefix + cleaned_current_text]
-                            else:
-                                final_text_parts = [
-                                    strip_synthetic_tool_call_text(
-                                        full_text,
-                                        event.tool_name,
-                                    )
-                                ]
-                            current_text_parts = (
-                                [cleaned_current_text] if cleaned_current_text else []
-                            )
-                    if current_text_parts:
-                        turn_segments.append({"type": "text", "text": "".join(current_text_parts)})
-                        current_text_parts = []
-                    turn_segments.append(
-                        {
-                            "type": "tool_use",
-                            "tool_use_id": event.tool_use_id,
-                            "name": event.tool_name,
-                            "input": "",
-                        }
-                    )
-                elif isinstance(event, ToolResultEvent):
-                    failure_summary = _artifact_delivery_failure_summary(event)
-                    if failure_summary is not None:
-                        artifact_delivery_failures.append(failure_summary)
-                    if event.arguments is not None:
-                        for segment in reversed(turn_segments):
-                            if (
-                                segment.get("type") == "tool_use"
-                                and segment.get("tool_use_id") == event.tool_use_id
-                            ):
-                                segment["input"] = event.arguments
-                                break
-                    turn_segments.append(_persisted_tool_result_segment(event))
-                elif isinstance(event, ArtifactEvent):
-                    turn_artifacts.append(artifact_payload(event))
-                elif isinstance(event, ErrorEvent):
-                    # Agent emits ErrorEvent(code="timeout") when
-                    # asyncio.timeout() fires. Rewrite to the stable user
-                    # envelope so every downstream renderer (UI, CLI, channel)
-                    # sees the same shape as the tool-failure envelope.
-                    if event.code == "timeout":
-                        event = ErrorEvent(
-                            message=_LLM_TIMEOUT_ENVELOPE["user_message"],
-                            code=_LLM_TIMEOUT_ENVELOPE["error_class"],
-                        )
-                    if event.code == "incomplete_tool_stream":
-                        turn_segments = _drop_unpaired_tool_use_segments(turn_segments)
-                    error_message = event.message or "Unknown error"
-                    pending_error_event = event
-                    continue
-                elif isinstance(event, WarningEvent):
-                    event = self._handle_runtime_warning(event)
-                elif isinstance(event, DoneEvent):
-                    normalized_text = _normalize_heartbeat_text(
-                        event.text,
-                        run_kind=run_kind,
-                        heartbeat_ack_max_chars=heartbeat_ack_max_chars,
-                    )
-                    metadata = turn.metadata
-                    routed_tier = metadata.get("routed_tier")
-                    routing_source = metadata.get("routing_source", "none")
-                    routing_confidence = float(metadata.get("routing_confidence") or 0.0)
-                    baseline_model = metadata.get("baseline_model", "")
-                    routed_model = metadata.get("routed_model", "") or event.model
-                    savings_pct = float(metadata.get("savings_pct") or 0.0)
-                    _max_p = float(metadata.get("savings_max_price_per_m") or 0.0)
-                    _rte_p = float(metadata.get("savings_routed_price_per_m") or 0.0)
-                    savings_usd = _compute_route_input_savings_usd(
-                        _max_p,
-                        _rte_p,
-                        event.input_tokens,
-                    )
-                    router_cfg = getattr(self._config, "squilla_router", None)
-                    squilla_router_tiers = getattr(router_cfg, "tiers", {})
-                    estimated_output_savings_pct = getattr(
-                        router_cfg,
-                        "estimated_output_savings_pct",
-                        0.03,
-                    )
-                    comprehensive = _compute_comprehensive_turn_savings(
-                        event,
-                        metadata,
-                        squilla_router_tiers,
-                        routed_model,
-                        estimated_output_savings_pct=estimated_output_savings_pct,
-                    )
-                    provider_cache_hit = (event.cached_tokens or 0) > 0
-                    opensquilla_cache_hit = metadata.get("cache_mode") == "hit"
-                    event = replace(
-                        event,
-                        text=normalized_text,
-                        routed_tier=routed_tier,
-                        routing_source=routing_source or "none",
-                        routing_confidence=routing_confidence,
-                        baseline_model=baseline_model,
-                        routed_model=routed_model,
-                        savings_pct=savings_pct,
-                        savings_usd=savings_usd,
-                        cache_hit_active=provider_cache_hit or opensquilla_cache_hit,
-                        total_savings_pct=comprehensive.pct,
-                        total_savings_usd=comprehensive.usd,
-                    )
-                    done_event = event
-                    if normalized_text and not final_text_parts:
-                        final_text_parts.append(normalized_text)
-                        if turn_segments:
-                            current_text_parts.append(normalized_text)
-                    accumulated_text = "".join(final_text_parts)
-                    if _should_add_artifact_delivery_failure_notice(
-                        failure_summaries=artifact_delivery_failures,
-                        turn_artifacts=turn_artifacts,
-                        final_text=accumulated_text,
-                    ):
-                        separator = "\n\n" if accumulated_text.strip() else ""
-                        notice_delta = separator + _artifact_delivery_failure_notice()
-                        final_text_parts.append(notice_delta)
-                        current_text_parts.append(notice_delta)
-                        normalized_text = "".join(final_text_parts)
-                        event = replace(event, text=normalized_text)
-                        done_event = event
-                        yield TextDeltaEvent(text=notice_delta)
-                    # Hallucination check: emit Warning BEFORE yielding Done
-                    # so CLI/SDK consumers that stop reading on terminal events
-                    # still see it.
-                    accumulated_text = "".join(final_text_parts)
-                    if _claims_image_without_tool_use(
-                        accumulated_text, turn.tool_defs, turn_segments
-                    ):
-                        yield WarningEvent(
-                            code="image_generate_claimed_without_call",
-                            message=(
-                                "The assistant described a generated image but did not "
-                                "call an image-generation tool. No image was produced."
-                            ),
-                        )
-                elif isinstance(event, CompactionEvent):
-                    if self._session_manager is not None:
-                        try:
-                            await self._session_manager.persist_compaction_result(
-                                session_key,
-                                event.summary,
-                                event.kept_entries,
-                            )
-                            notify_compaction(session_key)
-                        except Exception as exc:
-                            log.warning("compaction_persist_failed", error=str(exc))
-                    # Refresh frozen snapshot and system prompt after compaction
-                    _ws2 = self._resolve_memory_source_dir(agent_id)
-                    if private_memory_allowed:
-                        self._memory_snapshots[(agent_id, session_key)] = MemorySnapshot(
-                            memory_md=self._load_memory_md(_ws2),
-                            daily_notes=self._load_daily_notes(_ws2),
-                        )
-                    # Compaction-refresh resets the agent to a clean cacheable
-                    # base; the next turn's normal pre-turn pipeline will
-                    # rebuild the volatile suffix (memory / workspace)
-                    # from fresh state. ``_assemble_prompt`` may still return a
-                    # ``(base, dynamic_suffix)`` tuple here — daily_notes,
-                    # workspace_files, and extra_context now live in that
-                    # suffix — so extract just the base. Feeding the
-                    # tuple straight to ``agent.refresh_system_prompt`` would
-                    # smuggle volatile bytes into ``ChatConfig.system`` and
-                    # raise ValidationError on the next turn.
-                    assembled = self._assemble_prompt(
-                        agent_id,
-                        tool_defs,
-                        session_key=session_key,
-                        bootstrap_context_mode=bootstrap_context_mode,
-                    )
-                    refreshed_prompt = assembled[0] if isinstance(assembled, tuple) else assembled
-                    agent.refresh_system_prompt(refreshed_prompt)
-                    continue  # internal event, don't yield to caller
-                yield event
-
-            # Flush any remaining text segment
-            if current_text_parts:
-                turn_segments.append({"type": "text", "text": "".join(current_text_parts)})
-
-            # Trigger 5: notify memory sync of message bytes
-            if sync_manager is not None:
-                byte_count = len(effective_runtime_message.encode("utf-8"))
-                sync_manager.notify_message(byte_count)
-
-            # 10. Persist assistant response (filter sentinel tokens)
-            final_text = "".join(final_text_parts)
-            original_final_text = final_text
-            final_text = _normalize_heartbeat_text(
-                final_text,
+                semantic_input=semantic_input,
+                effective_runtime_message=effective_runtime_message,
+                session_key=session_key,
                 run_kind=run_kind,
                 heartbeat_ack_max_chars=heartbeat_ack_max_chars,
+                bootstrap_context_mode=bootstrap_context_mode,
+                router_cfg=getattr(self._config, "squilla_router", None),
+                session_manager_present=self._session_manager is not None,
+                state=stream_state,
             )
-            if (
-                original_final_text
-                and not final_text
-                and turn_segments
-                and all(
-                    isinstance(segment, dict) and segment.get("type") == "text"
-                    for segment in turn_segments
+            async for event in self._stream_consumer_stage.run(stream_inp):
+                yield event
+            # Read terminal state off the shared _StreamState. The
+            # four pass-by-reference lists were mutated in place, so
+            # this preserves the harness's read-after-stream
+            # contract; only the four owned fields need explicit
+            # writeback.
+            current_text_parts = stream_state.current_text_parts
+            error_message = stream_state.error_message
+            pending_error_event = stream_state.pending_error_event
+            done_event = stream_state.done_event
+            # Post-stage edge owned by the harness: flush remaining
+            # text segment. The stage's post-stream notify already
+            # fired (it is the last action of the stage body).
+            if current_text_parts:
+                turn_segments.append(
+                    {"type": "text", "text": "".join(current_text_parts)}
                 )
-            ):
-                turn_segments = []
-            # (Hallucination warning is emitted inside the DoneEvent branch
-            # above so it precedes the terminal done event for all consumers.)
 
-            if (
-                final_text or turn_segments or turn_artifacts
-            ) and self._session_manager is not None:
-                persisted_content = (
-                    json.dumps(
-                        {"text": final_text, "artifacts": turn_artifacts},
-                        ensure_ascii=False,
-                    )
-                    if turn_artifacts
-                    else final_text
+            # 10. Persist assistant response (filter sentinel tokens).
+            # TurnFinalizerStage owns the slice. The four side effects
+            # fire in legacy order: heartbeat normalize -> transcript
+            # append -> memory capture (try/except) -> error persist ->
+            # session totals rollup (try/except).
+            fin_outcome = await self._turn_finalizer_stage.run(
+                TurnFinalizerStageInput(
+                    final_text_parts=final_text_parts,
+                    turn_segments=turn_segments,
+                    turn_artifacts=turn_artifacts,
+                    error_message=error_message,
+                    pending_error_event=pending_error_event,
+                    done_event=done_event,
+                    runtime_message=runtime_message,
+                    input_mode=input_mode,
+                    input_provenance=input_provenance,
+                    resolved_model=resolved_model,
+                    agent_id=agent_id,
+                    session_key=session_key,
+                    tool_context=tool_context,
+                    run_kind=run_kind,
+                    heartbeat_ack_max_chars=heartbeat_ack_max_chars,
+                    no_memory_capture=no_memory_capture,
                 )
-                append_kwargs: dict[str, Any] = {
-                    "role": "assistant",
-                    "content": persisted_content,
-                    "tool_calls": turn_segments if turn_segments else None,
-                }
-                if (
-                    done_event is not None
-                    and done_event.reasoning_content
-                    and _is_deepseek_model_id(done_event.model or resolved_model or "")
-                ):
-                    append_kwargs["reasoning_content"] = done_event.reasoning_content
-                if _accepts_keyword_arg(self._session_manager.append_message, "token_count"):
-                    append_kwargs["token_count"] = (
-                        done_event.output_tokens if done_event is not None else None
-                    )
-                await self._session_manager.append_message(session_key, **append_kwargs)
-                try:
-                    await self._capture_turn_memory(
-                        agent_id=agent_id,
-                        session_key=session_key,
-                        runtime_message=runtime_message,
-                        final_text=final_text,
-                        input_mode=input_mode,
-                        tool_context=tool_context,
-                        input_provenance=input_provenance,
-                        run_kind=run_kind,
-                        no_memory_capture=no_memory_capture,
-                    )
-                except Exception as exc:
-                    log.warning(
-                        "turn_runner.capture_failed",
-                        session_key=session_key,
-                        agent_id=agent_id,
-                        error=str(exc),
-                    )
-            if error_message and self._session_manager is not None:
-                await self._persist_turn_error(session_key, pending_error_event)
-            if done_event is not None and self._session_manager is not None:
-                try:
-                    current_session = await self._session_manager.get_session(session_key)
-                    if current_session is not None:
-                        done_total_tokens = done_event.input_tokens + done_event.output_tokens
-                        event_cost_source = normalize_event_cost_source(
-                            done_event.cost_source,
-                            input_tokens=done_event.input_tokens,
-                            output_tokens=done_event.output_tokens,
-                            cache_read_tokens=done_event.cached_tokens,
-                            cache_write_tokens=done_event.cache_write_tokens,
-                            cost_usd=done_event.cost_usd,
-                            billed_cost_usd=done_event.billed_cost,
-                        )
-                        next_total_cost = (
-                            getattr(current_session, "total_cost_usd", 0.0) or 0.0
-                        ) + done_event.cost_usd
-                        next_billed_cost = (
-                            getattr(current_session, "billed_cost_usd", 0.0) or 0.0
-                        ) + done_event.billed_cost
-                        next_estimated_component = (
-                            getattr(current_session, "estimated_cost_component_usd", 0.0)
-                            or 0.0
-                        )
-                        if event_cost_source == "opensquilla_estimate":
-                            next_estimated_component += done_event.cost_usd
-                        next_missing_entries = (
-                            getattr(current_session, "missing_cost_entries", 0) or 0
-                        )
-                        if event_cost_source == "unavailable":
-                            next_missing_entries += 1
-                        next_cost_source = rollup_cost_source(
-                            billed_cost_usd=next_billed_cost,
-                            estimated_cost_component_usd=next_estimated_component,
-                            missing_cost_entries=next_missing_entries,
-                        )
-                        # Persist the last actual model into usage metadata only.
-                        # Writing it to session.model would pin future turns and
-                        # silently bypass squilla-router routing.
-                        await self._session_manager.update(
-                            session_key,
-                            input_tokens=(getattr(current_session, "input_tokens", 0) or 0)
-                            + done_event.input_tokens,
-                            output_tokens=(getattr(current_session, "output_tokens", 0) or 0)
-                            + done_event.output_tokens,
-                            total_tokens=(getattr(current_session, "total_tokens", 0) or 0)
-                            + done_total_tokens,
-                            total_tokens_fresh=True,
-                            estimated_cost_usd=(
-                                getattr(current_session, "estimated_cost_usd", 0.0) or 0.0
-                            )
-                            + done_event.cost_usd,
-                            total_cost_usd=next_total_cost,
-                            billed_cost_usd=next_billed_cost,
-                            estimated_cost_component_usd=next_estimated_component,
-                            cost_source=next_cost_source,
-                            missing_cost_entries=next_missing_entries,
-                            cache_read=(getattr(current_session, "cache_read", 0) or 0)
-                            + done_event.cached_tokens,
-                            cache_write=(getattr(current_session, "cache_write", 0) or 0)
-                            + done_event.cache_write_tokens,
-                            model_override=done_event.model
-                            or getattr(current_session, "model_override", None),
-                        )
-                except Exception as exc:
-                    log.warning(
-                        "turn_runner.session_usage_persist_failed",
-                        session_key=session_key,
-                        error=str(exc),
-                    )
+            )
+            fin_out = fin_outcome.output
+            final_text = fin_out.final_text
+            turn_segments = fin_out.turn_segments
 
             if turn_call_logger is not None:
                 turn_call_logger.write(
@@ -2253,9 +1937,14 @@ class TurnRunner:
                     },
                 )
             if trace_context is not None:
-                self._write_trace_event(
+                self._emit_turn_event(
                     "turn_end",
                     trace_context,
+                    session_key=session_key,
+                    agent_id=agent_id,
+                    turn_id=turn_id,
+                    run_kind=run_kind,
+                    input_mode=input_mode,
                     seq=2,
                     attrs={"provider": provider_name, "model": resolved_model},
                     payload={
@@ -2362,9 +2051,14 @@ class TurnRunner:
                 except Exception:
                     pass
             if trace_context is not None:
-                self._write_trace_event(
+                self._emit_turn_event(
                     "turn_cancelled",
                     trace_context,
+                    session_key=session_key,
+                    agent_id=agent_id,
+                    turn_id=turn_id,
+                    run_kind=run_kind,
+                    input_mode=input_mode,
                     seq=2,
                     payload={"partial_text_chars": len(partial_text)},
                 )
@@ -2390,9 +2084,14 @@ class TurnRunner:
                     },
                 )
             if trace_context is not None:
-                self._write_trace_event(
+                self._emit_turn_event(
                     "turn_error",
                     trace_context,
+                    session_key=session_key,
+                    agent_id=agent_id,
+                    turn_id=turn_id,
+                    run_kind=run_kind,
+                    input_mode=input_mode,
                     seq=2,
                     payload={
                         "error_type": type(exc).__name__,
@@ -2423,6 +2122,64 @@ class TurnRunner:
             )
         except Exception as exc:  # pragma: no cover - observability must not break turns
             log.debug("trace_event.write_failed", kind=kind, error=str(exc))
+
+    def _emit_turn_event(
+        self,
+        kind: str,
+        context: TraceContext | None,
+        *,
+        session_key: str,
+        agent_id: str,
+        turn_id: str | None = None,
+        run_kind: str | None = None,
+        input_mode: str | None = None,
+        seq: int | None = None,
+        attrs: dict[str, Any] | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """Fan a turn event out through the registered ``TurnHook`` chain.
+
+        ``OPENSQUILLA_HOOKS=legacy`` is honored as an escape hatch and routes
+        through the static :meth:`_write_trace_event` directly so any
+        unforeseen production drift can be confined to the hook fan-out
+        without rolling back the call sites.
+        """
+
+        if context is None:
+            return
+        if _hooks_mode_from_env() == "legacy":
+            self._write_trace_event(
+                kind,
+                context,
+                seq=seq,
+                attrs=attrs,
+                payload=payload,
+            )
+            return
+        hook_ctx = TurnHookContext(
+            session_key=session_key,
+            agent_id=agent_id,
+            turn_id=turn_id,
+            run_kind=run_kind,
+            input_mode=input_mode,
+            trace_context=context,
+        )
+        event = TurnEvent(
+            kind=kind,
+            seq=seq,
+            attrs=dict(attrs or {}),
+            payload=dict(payload or {}),
+        )
+        for hook in self._turn_hooks:
+            try:
+                hook.on_event(hook_ctx, event)
+            except Exception as exc:  # noqa: BLE001 - hooks must not break turns
+                log.warning(
+                    "turn_hook.on_event_failed",
+                    hook=getattr(hook, "name", type(hook).__name__),
+                    kind=kind,
+                    error=str(exc),
+                )
 
     @staticmethod
     def _build_turn_call_source(

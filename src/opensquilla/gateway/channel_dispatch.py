@@ -94,6 +94,29 @@ def _emit_metric(name: str, value: int = 1, **labels: Any) -> None:
     log.info(name, metric=name, value=value, **labels)
 
 
+def _resolve_channel_overflow_policy(channel: Any, config: Any) -> str | None:
+    """Resolve the per-channel overflow policy override (if any).
+
+    Reads ``config.task_runtime.pending_overflow_policy_per_channel`` keyed
+    by ``channel.channel_id``. Returns ``None`` when the channel has no
+    explicit override so ``runtime.enqueue`` falls back to its constructor
+    default (typically the global ``pending_overflow_policy``).
+    """
+    if config is None:
+        return None
+    runtime_cfg = getattr(config, "task_runtime", None)
+    overrides = getattr(runtime_cfg, "pending_overflow_policy_per_channel", None)
+    if not overrides:
+        return None
+    channel_id = getattr(channel, "channel_id", None)
+    if not isinstance(channel_id, str) or not channel_id:
+        return None
+    value = overrides.get(channel_id)
+    if not isinstance(value, str) or not value:
+        return None
+    return value
+
+
 class _ChannelInFlightSet:
     """Per-channel in-flight reply task tracker with a configurable cap.
 
@@ -393,6 +416,17 @@ async def run_channel_dispatch(
             # concurrent senders cannot interleave between the two steps.
             try:
                 async with _maybe_lock(session_lock):
+                    channel_overflow_policy = _resolve_channel_overflow_policy(
+                        channel, config
+                    )
+                    if channel_overflow_policy is not None:
+                        apply_policy = getattr(
+                            task_runtime, "apply_overflow_policy", None
+                        )
+                        if callable(apply_policy):
+                            await apply_policy(
+                                session_key, policy=channel_overflow_policy
+                            )
                     handle = await start_turn_via_runtime(
                         task_runtime,
                         route_envelope,
@@ -687,6 +721,11 @@ async def _dispatch_combined_message_after_debounce(channel: Any, combined: Any,
     # Reservation is released in the finally block below regardless of outcome.
     try:
         async with _maybe_lock(session_lock):
+            channel_overflow_policy = _resolve_channel_overflow_policy(channel, config)
+            if channel_overflow_policy is not None:
+                apply_policy = getattr(task_runtime, "apply_overflow_policy", None)
+                if callable(apply_policy):
+                    await apply_policy(session_key, policy=channel_overflow_policy)
             handle = await start_turn_via_runtime(task_runtime, route_envelope, msg.content, attachments=ingested.attachments, mode="followup", run_kind="channel_turn", semantic_message=raw_content, stream_event_sink=stream_relay.emit if stream_relay is not None else None)  # noqa: E501
             _persisted, persisted_content = await _append_channel_user_message(
                 session_manager=session_manager,
@@ -1103,9 +1142,44 @@ def _streaming_reply_kwargs(channel: Any, msg: IncomingMessage) -> dict[str, Any
 
 _STREAM_DONE = object()
 
+# Coalescing window for consecutive text deltas in the relay queue. The
+# relay yields a batched chunk once either threshold is reached. Both
+# defaults are 0 so the relay preserves its historical one-chunk-per-delta
+# behaviour out of the box; tuning either via ``config.task_runtime``
+# enables coalescing for adapters that incur a per-call cost on
+# ``send_streaming`` updates.
+_STREAM_RELAY_DEFAULT_COALESCE_MS = 0.0
+_STREAM_RELAY_DEFAULT_COALESCE_CHARS = 0
+
+
+def _resolve_stream_relay_coalesce(config: Any) -> tuple[float, int]:
+    """Return ``(window_seconds, char_threshold)`` for stream relay batching.
+
+    ``None`` config or absent fields fall back to the module defaults so
+    legacy call sites (tests, embedded use) keep their historical behaviour.
+    """
+    window_ms = _STREAM_RELAY_DEFAULT_COALESCE_MS
+    char_threshold = _STREAM_RELAY_DEFAULT_COALESCE_CHARS
+    runtime_cfg = getattr(config, "task_runtime", None) if config is not None else None
+    cfg_window = getattr(runtime_cfg, "stream_relay_coalesce_ms", None)
+    if isinstance(cfg_window, int | float) and cfg_window >= 0:
+        window_ms = float(cfg_window)
+    cfg_chars = getattr(runtime_cfg, "stream_relay_coalesce_chars", None)
+    if isinstance(cfg_chars, int) and cfg_chars >= 0:
+        char_threshold = cfg_chars
+    return window_ms / 1000.0, char_threshold
+
 
 class _RuntimeChannelStreamRelay:
-    """Bridge one runtime task's stream events into a channel streaming adapter."""
+    """Bridge one runtime task's stream events into a channel streaming adapter.
+
+    The relay coalesces consecutive text deltas into larger chunks before
+    handing them to ``send_streaming`` — adapters that incur a per-call cost
+    (rate-limited message edits, network round trips) benefit from batching
+    micro-deltas.  When ``send_streaming`` fails mid-stream the relay falls
+    back to a single ``channel.send`` carrying the not-yet-delivered text so
+    the user still sees the rest of the reply.
+    """
 
     def __init__(self, channel: Any, inbound: IncomingMessage, config: Any = None) -> None:
         self._channel = channel
@@ -1118,6 +1192,14 @@ class _RuntimeChannelStreamRelay:
         self._closed = False
         self.text_emitted = False
         self.stream_error: BaseException | None = None
+        # Buffer of chunks already yielded to ``send_streaming``. If the
+        # adapter raises mid-stream the relay falls back to ``channel.send``
+        # with the chunks that never made it through.
+        self._yielded_chunks: list[str] = []
+        self._undelivered_index = 0
+        coalesce_window_s, coalesce_chars = _resolve_stream_relay_coalesce(config)
+        self._coalesce_window_s = coalesce_window_s
+        self._coalesce_chars = coalesce_chars
 
     @classmethod
     def maybe_start(
@@ -1152,6 +1234,47 @@ class _RuntimeChannelStreamRelay:
             )
             return None
 
+    async def _coalesce_next_batch(
+        self,
+        first_text: str,
+    ) -> tuple[str, object | None]:
+        """Aggregate consecutive text items until window or char threshold.
+
+        Returns ``(batched_text, sentinel_or_none)`` — when the trailing
+        sentinel is ``_STREAM_DONE`` the caller flushes and exits.
+        """
+        if self._coalesce_window_s <= 0 and self._coalesce_chars <= 0:
+            return first_text, None
+        buffer = [first_text]
+        size = len(first_text)
+        deadline = (
+            asyncio.get_event_loop().time() + self._coalesce_window_s
+            if self._coalesce_window_s > 0
+            else None
+        )
+        while True:
+            if self._coalesce_chars and size >= self._coalesce_chars:
+                return "".join(buffer), None
+            remaining = (
+                deadline - asyncio.get_event_loop().time()
+                if deadline is not None
+                else None
+            )
+            if remaining is not None and remaining <= 0:
+                return "".join(buffer), None
+            try:
+                if remaining is None:
+                    item = self._queue.get_nowait()
+                else:
+                    item = await asyncio.wait_for(self._queue.get(), timeout=remaining)
+            except (asyncio.QueueEmpty, TimeoutError):
+                return "".join(buffer), None
+            if item is _STREAM_DONE:
+                return "".join(buffer), _STREAM_DONE
+            if isinstance(item, str):
+                buffer.append(item)
+                size += len(item)
+
     async def _chunks(self) -> AsyncIterator[str]:
         sanitizer = _DirectiveTagStreamSanitizer()
         while True:
@@ -1159,12 +1282,29 @@ class _RuntimeChannelStreamRelay:
             if item is _STREAM_DONE:
                 tail = sanitizer.flush()
                 if tail:
+                    self._yielded_chunks.append(tail)
                     yield tail
+                    # Only advance the delivered watermark when the consumer
+                    # accepted the chunk (yield returned). If yield raises,
+                    # the consumer failed to process it and the chunk must
+                    # be replayed via the close() fallback path.
+                    self._undelivered_index = len(self._yielded_chunks)
                 return
-            if isinstance(item, str):
-                chunk = sanitizer.clean(item)
-                if chunk:
-                    yield chunk
+            if not isinstance(item, str):
+                continue
+            batched, sentinel = await self._coalesce_next_batch(item)
+            chunk = sanitizer.clean(batched)
+            if chunk:
+                self._yielded_chunks.append(chunk)
+                yield chunk
+                self._undelivered_index = len(self._yielded_chunks)
+            if sentinel is _STREAM_DONE:
+                tail = sanitizer.flush()
+                if tail:
+                    self._yielded_chunks.append(tail)
+                    yield tail
+                    self._undelivered_index = len(self._yielded_chunks)
+                return
 
     async def emit(self, event: Any) -> None:
         artifact = _artifact_event_payload(event)
@@ -1206,6 +1346,45 @@ class _RuntimeChannelStreamRelay:
                 await self._task
         except Exception as exc:  # noqa: BLE001 - error already becomes batch fallback.
             self.stream_error = exc
+
+        # Per-event delivery fallback: when send_streaming raised mid-stream,
+        # any chunk that was queued but never reached the consumer must
+        # still land via channel.send. Drain the relay queue for queued
+        # text items, concatenate with chunks already yielded but not
+        # delivered, and send as a single batch reply. Successful streams
+        # (stream_error is None) skip this branch.
+        if self.stream_error is not None:
+            queued_remainder: list[str] = []
+            while True:
+                try:
+                    item = self._queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if item is _STREAM_DONE:
+                    continue
+                if isinstance(item, str):
+                    queued_remainder.append(item)
+            undelivered_yielded = "".join(
+                self._yielded_chunks[self._undelivered_index :]
+            )
+            fallback_text = undelivered_yielded + "".join(queued_remainder)
+            if fallback_text:
+                try:
+                    await self._channel.send(
+                        _build_reply_message(
+                            self._channel,
+                            fallback_text,
+                            self._inbound,
+                        )
+                    )
+                except Exception as send_exc:  # noqa: BLE001 - log only.
+                    log.warning(
+                        "channel_dispatch.stream_relay_batch_fallback_failed",
+                        channel_type=type(self._channel).__name__,
+                        error_type=type(send_exc).__name__,
+                        error=str(send_exc),
+                    )
+                self._undelivered_index = len(self._yielded_chunks)
 
         if _can_deliver_channel_files(self._channel):
             undelivered = await _deliver_artifacts_as_channel_files(
