@@ -268,11 +268,12 @@ class AgentConfig:
     skills_context_prompt: str | None = None
     # Pre-compaction memory flush
     flush_enabled: bool = True
-    flush_timeout_seconds: float = 5.0
-    flush_background_timeout_seconds: float = 60.0
+    flush_timeout_seconds: float = 15.0
+    flush_background_timeout_seconds: float = 120.0
     flush_backoff_initial_seconds: float = 30.0
     flush_backoff_max_seconds: float = 300.0
     flush_archive_max_bytes: int = 800_000
+    flush_compaction_requires_safe_receipt: bool = False
     flush_workspace_dir: str | None = None
     model_capabilities: Any | None = None  # ModelCapabilities from provider.types
     # Agent token saving: compress tool results before feeding them back to the LLM.
@@ -283,8 +284,9 @@ class AgentConfig:
     tool_result_compression_summary_max_tokens: int = 1024
     tool_result_compression_summary_timeout_seconds: float = 20.0
     tool_result_compression_summary_input_max_chars: int = 60_000
-    tool_result_provider_request_max_chars: int = 96_000
-    tool_use_argument_provider_request_max_chars: int = 8_000
+    tool_result_provider_request_max_chars: int = 0
+    provider_request_proof_max_chars: int = 0
+    tool_use_argument_provider_request_max_chars: int = 0
     tool_result_external_keep_recent: int = 2
     tool_failure_loop_block_threshold: int = 3
     tool_result_store_dir: str | None = None

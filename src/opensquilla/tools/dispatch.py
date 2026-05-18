@@ -16,6 +16,7 @@ by every caller (gateway, CLI, cron, channel adapters). The pipeline is:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import weakref
 from collections.abc import Sequence
@@ -88,6 +89,7 @@ def _build_envelope_result(
     policy_denial: bool = False,
     error_class_override: str | None = None,
     user_message_override: str | None = None,
+    reason_override: str | None = None,
 ) -> ToolResult:
     status = {
         "version": 1,
@@ -95,7 +97,7 @@ def _build_envelope_result(
         "exit_code": None,
         "timed_out": False,
         "truncated": False,
-        "reason": "denied" if policy_denial else "runtime_error",
+        "reason": reason_override or ("denied" if policy_denial else "runtime_error"),
         "source": "tool_runtime",
         "preservation_class": "diagnostic",
     }
@@ -173,6 +175,7 @@ def _check_non_executable_arguments(
         return _build_envelope_result(
             tool_call,
             exc=ProjectedToolArgumentsError(),
+            reason_override="provider_context_projection_reused",
         )
 
     for argument_name, value in arguments.items():
@@ -189,6 +192,7 @@ def _check_non_executable_arguments(
             return _build_envelope_result(
                 tool_call,
                 exc=ProjectedToolArgumentsError(),
+                reason_override="provider_context_projection_reused",
             )
 
     return None
@@ -395,6 +399,9 @@ def build_tool_handler(
                 budget_policy,
             )
             raw_result = await registered.handler(**arguments)
+        except asyncio.CancelledError as exc:
+            exception = exc
+            raise
         except Exception as exc:  # noqa: BLE001
             exception = exc
         finally:
@@ -412,16 +419,17 @@ def build_tool_handler(
                                 phase="after_tool",
                                 error=str(hook_exc),
                             )
-                # 7. Single finalisation point.
-                return await finalize(
-                    tool_call,
-                    effective_ctx,
-                    raw_result,
-                    exception,
-                    artifact_start,
-                    _budget_tracker_for(effective_ctx),
-                    registered,
-                )
+                if not isinstance(exception, asyncio.CancelledError):
+                    # 7. Single finalisation point.
+                    return await finalize(
+                        tool_call,
+                        effective_ctx,
+                        raw_result,
+                        exception,
+                        artifact_start,
+                        _budget_tracker_for(effective_ctx),
+                        registered,
+                    )
             finally:
                 current_tool_context.reset(token)
 

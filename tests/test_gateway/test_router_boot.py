@@ -7,10 +7,11 @@ from typing import Any
 
 import pytest
 
-from opensquilla.engine.types import DoneEvent
+from opensquilla.engine.types import AgentConfig, DoneEvent
 from opensquilla.gateway.boot import (
     _configured_agent_ids,
     _register_dream_crons,
+    _task_runtime_turn_hard_deadline_s,
     _warn_workspace_state_mismatch,
     build_flush_service,
     build_services,
@@ -23,8 +24,53 @@ from opensquilla.gateway.diagnostics import DiagnosticsState
 from opensquilla.gateway.routing import build_cli_route_envelope, build_cron_route_envelope
 from opensquilla.onboarding.mutations import upsert_channel
 from opensquilla.scheduler.types import CronJob, JobStatus
+from opensquilla.session.compaction import CompactionConfig
 from opensquilla.tools.registry import ToolRegistry
 from opensquilla.tools.types import CallerKind, ToolContext
+
+
+def test_gateway_boot_bridges_compaction_notifications_to_session_stream() -> None:
+    source = Path("src/opensquilla/gateway/boot.py").read_text(encoding="utf-8")
+
+    assert "add_compaction_listener" in source
+    assert '"session.event.compaction"' in source
+    assert "_compaction_listener_remove" in source
+
+
+def test_task_runtime_default_hard_deadline_exceeds_agent_runtime_timeout() -> None:
+    config = GatewayConfig()
+
+    deadline = _task_runtime_turn_hard_deadline_s(config)
+
+    assert deadline == 930.0
+
+
+def test_task_runtime_hard_deadline_honors_explicit_config() -> None:
+    config = GatewayConfig()
+    config.task_runtime.turn_hard_deadline_s = 12.5
+
+    assert _task_runtime_turn_hard_deadline_s(config) == 12.5
+
+
+def test_gateway_stream_timeouts_allow_long_silent_agent_work() -> None:
+    config = GatewayConfig()
+
+    assert config.agent_stream_idle_timeout_seconds == 600.0
+    assert config.webui_stream_idle_grace_seconds == 630.0
+    assert config.webui_stream_idle_grace_seconds > config.agent_stream_idle_timeout_seconds
+
+
+def test_compaction_time_budget_defaults_allow_long_chain_work() -> None:
+    gateway_config = GatewayConfig()
+    agent_config = AgentConfig()
+    compaction_config = CompactionConfig()
+
+    assert gateway_config.memory.flush_timeout_seconds == 15.0
+    assert gateway_config.memory.flush_background_timeout_seconds == 120.0
+    assert gateway_config.compaction.timeout_seconds == 90.0
+    assert agent_config.flush_timeout_seconds == 15.0
+    assert agent_config.flush_background_timeout_seconds == 120.0
+    assert compaction_config.timeout_seconds == 90.0
 
 
 class _FakeDreamScheduler:
@@ -385,7 +431,11 @@ async def test_start_gateway_server_wires_cron_failure_dispatcher(
         )
         # Handler factories ran, confirming the wire ran inside the cron-init
         # branch (not just by coincidence).
-        assert set(cron_sched.registered) >= {"agent_run", "system_event"}
+        assert set(cron_sched.registered) >= {
+            "agent_run",
+            "static_message",
+            "system_event",
+        }
     finally:
         await server.close()
 

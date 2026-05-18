@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -19,6 +20,33 @@ def _registry(name: str, result: str) -> ToolRegistry:
 
     registry.register(ToolSpec(name=name, description=name, parameters={}), handler)
     return registry
+
+
+@pytest.mark.asyncio
+async def test_dispatch_propagates_cancellation_to_outer_timeout() -> None:
+    registry = ToolRegistry()
+    cancelled = asyncio.Event()
+
+    async def handler() -> str:
+        try:
+            await asyncio.sleep(1.0)
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        return "late"
+
+    registry.register(
+        ToolSpec(name="slow_tool", description="slow_tool", parameters={}), handler
+    )
+    handler = build_tool_handler(registry)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(
+            handler(ToolCall("call_slow_timeout", "slow_tool", {})),
+            timeout=0.01,
+        )
+
+    assert cancelled.is_set()
 
 
 @pytest.mark.asyncio

@@ -1010,6 +1010,31 @@ class FeishuChannel:
         if not isinstance(parsed, dict):
             return []
 
+        if msg_type == "post":
+            attachments: list[Attachment] = []
+            for paragraph in parsed.get("content", []):
+                if not isinstance(paragraph, list):
+                    continue
+                for element in paragraph:
+                    if not isinstance(element, dict) or element.get("tag") != "img":
+                        continue
+                    resource_key = element.get("image_key")
+                    if not isinstance(resource_key, str) or not resource_key:
+                        continue
+                    attachments.append(
+                        Attachment(
+                            name="image.png",
+                            mime_type="image/png",
+                            metadata={
+                                "feishu_message_id": message_id,
+                                "feishu_message_type": msg_type,
+                                "feishu_resource_key": resource_key,
+                                "feishu_resource_type": "image",
+                            },
+                        )
+                    )
+            return attachments
+
         defaults = _FEISHU_INBOUND_RESOURCE_DEFAULTS.get(msg_type)
         if defaults is None:
             return []

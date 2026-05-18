@@ -649,6 +649,7 @@ async def test_image_input_routes_directly_to_vision_model_without_prompt_inject
     assert routed.metadata["routing_applied"] is True
     assert routed.metadata["routing_confidence"] == 1.0
     assert routed.metadata["routing_source"] == "image_route"
+    assert routed.metadata["route_max_history_turns"] == 1
     assert routed.metadata["thinking_requested"] is True
     assert routed.metadata["thinking_level"] == "medium"
     assert "[RESPONSE_POLICY:" not in routed.message

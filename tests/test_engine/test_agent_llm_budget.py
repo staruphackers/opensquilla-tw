@@ -40,6 +40,11 @@ from opensquilla.provider.request_proof import (
 )
 from opensquilla.session.compaction import CompactionResult
 
+RAW_CURRENT_TURN_OVERFLOW_MESSAGE = (
+    "Context overflow is in the current turn's recent tool calls or "
+    "reasoning tail; history compaction cannot reduce it."
+)
+
 
 class _StallingProvider:
     provider_name = "fake"
@@ -133,6 +138,29 @@ class _ProviderRequestBudgetExceededProvider:
         return []
 
 
+class _ConfigCapturingProvider:
+    provider_name = "fake"
+
+    def __init__(self) -> None:
+        self.configs: list[ChatConfig | None] = []
+
+    def chat(
+        self,
+        messages: list[Message],
+        tools: list[Any] | None = None,
+        config: ChatConfig | None = None,
+    ) -> AsyncIterator[Any]:
+        self.configs.append(config)
+        return self._stream()
+
+    async def _stream(self) -> AsyncIterator[Any]:
+        yield ProviderText(text="ok")
+        yield ProviderDone(stop_reason="stop", input_tokens=1, output_tokens=1)
+
+    async def list_models(self) -> list[Any]:
+        return []
+
+
 class _CompactingErrorSessionManager:
     def __init__(self, *, compact_raises: bool = False) -> None:
         self.calls: list[tuple[str, str]] = []
@@ -152,7 +180,7 @@ class _CompactingErrorSessionManager:
 
 
 @pytest.mark.asyncio
-async def test_turn_error_persist_compacts_current_turn_exhaustion_before_error() -> None:
+async def test_turn_error_persist_records_current_turn_exhaustion_without_compacting() -> None:
     session_manager = _CompactingErrorSessionManager()
     runner = TurnRunner(
         provider_selector=None,
@@ -168,14 +196,11 @@ async def test_turn_error_persist_compacts_current_turn_exhaustion_before_error(
         ),
     )
 
-    assert session_manager.calls == [
-        ("compact", "agent:main:webchat:test"),
-        ("append", "agent:main:webchat:test"),
-    ]
+    assert session_manager.calls == [("append", "agent:main:webchat:test")]
 
 
 @pytest.mark.asyncio
-async def test_turn_error_persist_still_records_error_when_exhaustion_compaction_fails() -> None:
+async def test_turn_error_persist_skips_error_time_compaction_for_exhaustion() -> None:
     session_manager = _CompactingErrorSessionManager(compact_raises=True)
     runner = TurnRunner(
         provider_selector=None,
@@ -191,10 +216,7 @@ async def test_turn_error_persist_still_records_error_when_exhaustion_compaction
         ),
     )
 
-    assert session_manager.calls == [
-        ("compact", "agent:main:webchat:test"),
-        ("append", "agent:main:webchat:test"),
-    ]
+    assert session_manager.calls == [("append", "agent:main:webchat:test")]
 
 
 @pytest.mark.asyncio
@@ -232,9 +254,11 @@ async def test_agent_blocks_repeated_identical_tool_failures_before_tail_growth(
     assert second.is_error is True
     assert third.is_error is True
     assert calls == 2
-    assert "tool_failure_loop_exhausted" in third.content
+    assert "tool_failure_loop_exhausted" not in third.content
+    assert "Do not retry this exact call unchanged" in third.content
     assert len(third.content) < len(second.content)
     assert third.execution_status is not None
+    assert third.execution_status.get("reason") == "tool_failure_loop_exhausted"
 
 
 @pytest.mark.asyncio
@@ -299,7 +323,51 @@ async def test_agent_blocks_repeated_missing_tool_handler_failures() -> None:
     await agent._execute_tool(tool_call)
     third = await agent._execute_tool(tool_call)
 
-    assert "tool_failure_loop_exhausted" in third.content
+    assert "tool_failure_loop_exhausted" not in third.content
+    assert "Do not retry this exact call unchanged" in third.content
+    assert third.execution_status is not None
+    assert third.execution_status.get("reason") == "tool_failure_loop_exhausted"
+
+
+@pytest.mark.asyncio
+async def test_agent_provider_request_proof_budget_is_separate_from_tool_result_cap() -> None:
+    provider = _ConfigCapturingProvider()
+    agent = Agent(
+        provider=provider,
+        config=AgentConfig(
+            context_window_tokens=200_000,
+            max_tokens=8192,
+            tool_result_provider_request_max_chars=96_000,
+            flush_enabled=False,
+        ),
+    )
+
+    events = [event async for event in agent.run_turn("hello")]
+
+    assert any(event.kind == "done" for event in events)
+    assert provider.configs
+    assert provider.configs[0] is not None
+    assert provider.configs[0].provider_request_max_chars > 96_000
+
+
+@pytest.mark.asyncio
+async def test_agent_provider_request_proof_budget_accepts_explicit_override() -> None:
+    provider = _ConfigCapturingProvider()
+    agent = Agent(
+        provider=provider,
+        config=AgentConfig(
+            provider_request_proof_max_chars=123_456,
+            tool_result_provider_request_max_chars=96_000,
+            flush_enabled=False,
+        ),
+    )
+
+    events = [event async for event in agent.run_turn("hello")]
+
+    assert any(event.kind == "done" for event in events)
+    assert provider.configs
+    assert provider.configs[0] is not None
+    assert provider.configs[0].provider_request_max_chars == 123_456
 
 
 def test_agent_child_config_inherits_tool_failure_loop_thresholds() -> None:
@@ -313,6 +381,40 @@ def test_agent_child_config_inherits_tool_failure_loop_thresholds() -> None:
     child = agent._make_child_agent(SubagentSpec(task="child task"), depth=1)
 
     assert child.config.tool_failure_loop_block_threshold == 7
+
+
+def test_agent_child_config_inherits_context_and_flush_budget_policy() -> None:
+    agent = Agent(
+        provider=_ContextOverflowProvider(success_after=1),
+        config=AgentConfig(
+            context_window_tokens=200_000,
+            max_tokens=8192,
+            provider_request_proof_max_chars=123_456,
+            tool_use_argument_provider_request_max_chars=12_345,
+            tool_result_provider_request_max_chars=54_321,
+            flush_enabled=True,
+            flush_timeout_seconds=1.5,
+            flush_background_timeout_seconds=15.0,
+            flush_backoff_initial_seconds=3.0,
+            flush_backoff_max_seconds=30.0,
+            flush_archive_max_bytes=999_999,
+            flush_compaction_requires_safe_receipt=False,
+        ),
+    )
+
+    child = agent._make_child_agent(SubagentSpec(task="child task"), depth=1)
+
+    assert child.config.context_window_tokens == 200_000
+    assert child.config.provider_request_proof_max_chars == 123_456
+    assert child.config.tool_use_argument_provider_request_max_chars == 12_345
+    assert child.config.tool_result_provider_request_max_chars == 54_321
+    assert child.config.flush_enabled is True
+    assert child.config.flush_timeout_seconds == 1.5
+    assert child.config.flush_background_timeout_seconds == 15.0
+    assert child.config.flush_backoff_initial_seconds == 3.0
+    assert child.config.flush_backoff_max_seconds == 30.0
+    assert child.config.flush_archive_max_bytes == 999_999
+    assert child.config.flush_compaction_requires_safe_receipt is False
 
 
 class _BudgetCheckingProvider:
@@ -838,7 +940,8 @@ async def test_provider_request_budget_recent_tail_reason_survives_noop_compacti
     errors = [event for event in events if isinstance(event, ErrorEvent)]
 
     assert len(provider.calls) == 1
-    assert errors[-1].code == "current_turn_context_exhausted"
+    assert errors[-1].code == "provider_request_too_large"
+    assert RAW_CURRENT_TURN_OVERFLOW_MESSAGE not in errors[-1].message
     assert not any(
         isinstance(event, ErrorEvent) and event.code == "compaction_not_smaller"
         for event in events
@@ -846,7 +949,7 @@ async def test_provider_request_budget_recent_tail_reason_survives_noop_compacti
 
 
 @pytest.mark.asyncio
-async def test_provider_request_budget_recent_tail_exhaustion_is_reported_precisely(
+async def test_provider_request_budget_recent_tail_exhaustion_is_reported_as_controlled_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def _effective_compact(request: Any) -> CompactionResult:
@@ -879,12 +982,13 @@ async def test_provider_request_budget_recent_tail_exhaustion_is_reported_precis
     errors = [event for event in events if isinstance(event, ErrorEvent)]
 
     assert len(provider.calls) == 2
-    assert errors[-1].code == "current_turn_context_exhausted"
-    assert "current turn" in errors[-1].message
+    assert errors[-1].code == "provider_request_too_large"
+    assert "current turn" not in errors[-1].message.lower()
+    assert RAW_CURRENT_TURN_OVERFLOW_MESSAGE not in errors[-1].message
 
 
 @pytest.mark.asyncio
-async def test_context_overflow_degraded_flush_still_runs_live_compaction(
+async def test_context_overflow_degraded_flush_still_runs_live_compaction_by_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     compact_called = False

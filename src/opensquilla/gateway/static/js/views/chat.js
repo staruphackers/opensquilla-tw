@@ -2103,26 +2103,14 @@ const ChatView = (() => {
       case 'compact_context':
       case 'sessions.contextCompact':
       case '/compact':
+        UI.toast('Compacting session context...', 'info', 1800);
         _rpc.call('sessions.contextCompact', { key: _sessionKey })
-          .then((result) => {
-            if (result && result.compacted) {
-              const summaryLen = Number(result.summary_len || 0);
-              const before = Number(result.tokens_before || 0);
-              const after = Number(result.tokens_after || 0);
-              const remaining = Number(result.remaining_budget_tokens || 0);
-              const source = result.summary_source || 'unknown';
-              const tokenStats = before || after
-                ? ' (' + before + ' -> ' + after + ' tokens, ' + remaining + ' remaining, ' + source + ')'
-                : (summaryLen ? ' (summary ' + summaryLen + ' chars)' : '');
-              UI.toast(
-                'Context compacted' + tokenStats,
-                'info'
-              );
-            } else {
-              UI.toast('Context already compact enough', 'info');
-            }
-          })
-          .catch((err) => UI.toast('Compact failed: ' + err.message, 'err'));
+          .then(() => {})
+          .catch((err) => _showCompactionToast({
+            source: 'manual',
+            status: 'failed',
+            message: err && err.message || 'unknown error',
+          }));
         break;
       case 'usage_status':
       case 'usage.status':
@@ -2195,6 +2183,49 @@ const ChatView = (() => {
     try {
       await _rpc.call('sessions.messages.unsubscribe', { key: _sessionKey });
     } catch { /* ignore */ }
+  }
+
+  function _compactionTokenStats(payload) {
+    const before = Number(payload && payload.tokens_before || 0);
+    const after = Number(payload && payload.tokens_after || 0);
+    const remaining = Number(payload && payload.remaining_budget_tokens || 0);
+    const source = payload && payload.summary_source || '';
+    const summaryLen = Number(payload && payload.summary_len || 0);
+    if (before || after) {
+      const remain = remaining ? ', ' + remaining + ' remaining' : '';
+      const by = source ? ', ' + source : '';
+      return ' (' + before + ' -> ' + after + ' tokens' + remain + by + ')';
+    }
+    if (summaryLen) return ' (summary ' + summaryLen + ' chars)';
+    return '';
+  }
+
+  function _showCompactionToast(payload) {
+    const status = String(payload && payload.status || '').toLowerCase();
+    const source = String(payload && payload.source || '').toLowerCase();
+    const details = _compactionTokenStats(payload || {});
+    if (status === 'started') {
+      UI.toast('Compacting session context...', 'info', 1800);
+      return;
+    }
+    if (status === 'skipped') {
+      UI.toast('Context already compact enough', 'info');
+      return;
+    }
+    if (status === 'failed' || status === 'error') {
+      const msg = payload && payload.message ? ': ' + payload.message : '';
+      UI.toast('Compact failed' + msg, 'err', 5000);
+      return;
+    }
+    if (source === 'manual') {
+      UI.toast('Context compacted' + details, 'info', 4500);
+      return;
+    }
+    UI.toast(
+      'Context compacted older messages to keep this session within budget' + details,
+      'info',
+      4500,
+    );
   }
 
   /* ── RPC Event Subscriptions ────────────────────────────────────────── */
@@ -2295,6 +2326,12 @@ const ChatView = (() => {
         msg.timestamp || null,
         { provenanceKind: msg.provenanceKind || '' },
       );
+    }));
+
+    _unsubs.push(_rpc.on('session.event.compaction', (payload) => {
+      if (_isStaleEpoch(payload)) return;
+      _noteStreamSeq(payload);
+      _showCompactionToast(payload || {});
     }));
 
     // Non-persistent warnings surfaced by the turn runner (e.g. model claimed

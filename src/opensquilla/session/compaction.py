@@ -16,7 +16,7 @@ from opensquilla.provider.protocol import provider_connection_config
 
 log = structlog.get_logger(__name__)
 
-_COMPACTION_TIMEOUT = 30.0
+_COMPACTION_TIMEOUT = 90.0
 _MAX_CUSTOM_INSTRUCTIONS_CHARS = 2000
 
 
@@ -30,7 +30,7 @@ class CompactionConfig:
     model: str | None = None  # None = use session model
     api_key: str = ""
     base_url: str = "https://openrouter.ai/api/v1"
-    timeout_seconds: float = 30.0
+    timeout_seconds: float = 90.0
 
 
 @dataclass
@@ -348,8 +348,8 @@ def _find_turn_boundary_cut(
     1. Start from the token-budget cut (walk from the end, accumulate up to budget).
     2. Walk backward from that cut until we find a boundary that is NOT
        mid-turn (i.e. the cut does not orphan a tool_call/tool_result pair).
-    3. If no clean boundary exists before reaching the start, accept the
-       initial cut — correctness beats perfect cut placement.
+    3. If the only possible cut still splits a tool call from its result,
+       return 0 so the caller skips compaction instead of orphaning tool state.
     """
     if not entries:
         return 0
@@ -374,7 +374,7 @@ def _find_turn_boundary_cut(
     # is NOT an assistant message that ends with a tool call whose result is
     # the first kept entry.
     cut = legacy_keep_start
-    while cut > 1:
+    while cut > 0:
         last_removed = entries[cut - 1]
         first_kept = entries[cut] if cut < len(entries) else None
 

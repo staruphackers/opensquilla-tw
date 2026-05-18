@@ -592,6 +592,7 @@ def test_cron_add_with_every_builds_canonical_schedule(stub_gateway) -> None:
     method, params = stub_gateway.calls[-1]
     assert method == "cron.add"
     assert params["schedule"] == {"kind": "every", "every_seconds": 300}
+    assert params["payloadKind"] == "reminder"
     assert "expression" not in params
 
 

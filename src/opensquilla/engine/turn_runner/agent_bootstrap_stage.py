@@ -76,6 +76,7 @@ class _AgentConfigAuxiliaries:
     flush_backoff_initial_seconds: float
     flush_backoff_max_seconds: float
     flush_archive_max_bytes: int
+    flush_compaction_requires_safe_receipt: bool
     # Agent-token-cfg-derived
     tool_result_compression_enabled: bool
     tool_result_compression_max_share: float
@@ -165,6 +166,19 @@ class AgentConfigBuilderPort(Protocol):
         session_id_for_log: str | None,
         turn: Any,
     ) -> _AgentConfigAuxiliaries: ...
+
+
+def _route_max_history_turns(metadata: dict[str, Any]) -> int:
+    value = metadata.get("route_max_history_turns")
+    if isinstance(value, int):
+        return max(0, value)
+    if isinstance(value, str):
+        try:
+            return max(0, int(value))
+        except ValueError:
+            return 0
+    return 0
+
 
 @runtime_checkable
 class SummarizerProviderPort(Protocol):
@@ -408,12 +422,16 @@ class AgentBootstrapStage:
             max_provider_retries=budgets.max_provider_retries,
             max_tokens=catalog.max_tokens,
             context_window_tokens=catalog.context_window,
+            max_history_turns=_route_max_history_turns(inp.turn.metadata),
             flush_enabled=aux.flush_enabled,
             flush_timeout_seconds=aux.flush_timeout_seconds,
             flush_background_timeout_seconds=aux.flush_background_timeout_seconds,
             flush_backoff_initial_seconds=aux.flush_backoff_initial_seconds,
             flush_backoff_max_seconds=aux.flush_backoff_max_seconds,
             flush_archive_max_bytes=aux.flush_archive_max_bytes,
+            flush_compaction_requires_safe_receipt=(
+                aux.flush_compaction_requires_safe_receipt
+            ),
             flush_workspace_dir=aux.flush_workspace_dir,
             model_capabilities=catalog.capabilities,
             thinking=aux.thinking,

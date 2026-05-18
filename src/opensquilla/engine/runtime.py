@@ -136,6 +136,7 @@ from opensquilla.session.keys import (
     is_subagent_key,
     normalize_agent_id,
 )
+from opensquilla.session.terminal_reply import sanitize_agent_error
 from opensquilla.tools.types import CallerKind, ToolContext
 
 # Stable user-facing envelope for LLM timeouts.
@@ -2142,6 +2143,19 @@ class TurnRunner:
             raise
 
         except Exception as exc:
+            error_code, error_message = sanitize_agent_error(
+                {
+                    "status": "failed",
+                    "terminal_reason": "error",
+                    "error_class": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                fallback_error_class="agent_error",
+                fallback_error_message=str(exc) or "Agent error",
+            )
+            event_code = (
+                error_code if error_code == "provider_request_too_large" else "agent_error"
+            )
             log.error(
                 "turn_runner.failed",
                 session_key=session_key,
@@ -2150,7 +2164,7 @@ class TurnRunner:
             )
             if self._session_manager is not None:
                 await self._session_manager.append_message(
-                    session_key, role="system", content=f"Error: {exc}"
+                    session_key, role="system", content=f"Error: {error_message}"
                 )
             if turn_call_logger is not None:
                 turn_call_logger.write(
@@ -2175,7 +2189,7 @@ class TurnRunner:
                         "error_chars": len(str(exc)),
                     },
                 )
-            yield ErrorEvent(message=str(exc), code="agent_error")
+            yield ErrorEvent(message=error_message, code=event_code)
 
     @staticmethod
     def _write_trace_event(
@@ -2339,9 +2353,21 @@ class TurnRunner:
         """Best-effort durable transcript record for terminal turn errors."""
         if self._session_manager is None or event is None:
             return
-        message = event.message or "Unknown error"
+        error_code, message = sanitize_agent_error(
+            {
+                "status": "failed",
+                "terminal_reason": event.code,
+                "error_class": event.code,
+                "error_message": event.message,
+            },
+            fallback_error_class=event.code,
+            fallback_error_message=event.message or "Unknown error",
+        )
+        event_code = (
+            error_code if error_code == "provider_request_too_large" else event.code
+        )
         try:
-            if event.code == "current_turn_context_exhausted":
+            if event_code == "current_turn_context_exhausted":
                 compact = getattr(self._session_manager, "compact", None)
                 if callable(compact):
                     budget = int(
@@ -2357,7 +2383,7 @@ class TurnRunner:
                         log.warning(
                             "turn_runner.error_compaction_failed",
                             session_key=session_key,
-                            code=event.code,
+                            code=event_code,
                             error=str(exc),
                         )
             await self._session_manager.append_message(
@@ -2369,7 +2395,7 @@ class TurnRunner:
             log.warning(
                 "turn_runner.error_persist_failed",
                 session_key=session_key,
-                code=event.code,
+                code=event_code,
                 error=str(exc),
             )
 
@@ -3911,6 +3937,14 @@ class TurnRunner:
             final_tier="t3",
             context_window_tokens=context_window_tokens,
         )
+        notify_compaction(
+            session_key,
+            source="automatic",
+            phase="t3_upgrade",
+            status="started",
+            previous_tier=previous,
+            context_window_tokens=context_window_tokens,
+        )
 
         if self._pre_compaction_flush_enabled():
             await self._await_pre_compaction_flush_grace(
@@ -3940,7 +3974,23 @@ class TurnRunner:
             self.mark_compacted_this_turn(session_key)
             self._record_compaction_success(session_key)
             if result:
-                notify_compaction(session_key)
+                notify_compaction(
+                    session_key,
+                    source="automatic",
+                    phase="t3_upgrade",
+                    status="completed",
+                    context_window_tokens=context_window_tokens,
+                    summary_len=len(result),
+                )
+            else:
+                notify_compaction(
+                    session_key,
+                    source="automatic",
+                    phase="t3_upgrade",
+                    status="skipped",
+                    reason="empty_summary",
+                    context_window_tokens=context_window_tokens,
+                )
             log.info(
                 "t3_upgrade_compaction.compact_done",
                 session_key=session_key,
@@ -3956,6 +4006,14 @@ class TurnRunner:
                 error=str(exc),
             )
             self._record_compaction_failure(session_key)
+            notify_compaction(
+                session_key,
+                source="automatic",
+                phase="t3_upgrade",
+                status="failed",
+                message=str(exc),
+                context_window_tokens=context_window_tokens,
+            )
             return _T3_COMPACT_FAILED
 
         return _T3_HANDLED
@@ -4010,6 +4068,14 @@ class TurnRunner:
             threshold=threshold,
             ratio=ratio,
         )
+        notify_compaction(
+            session_key,
+            source="automatic",
+            phase="preflight",
+            status="started",
+            tokens_before=total_tokens,
+            context_window_tokens=context_window_tokens,
+        )
         if self._pre_compaction_flush_enabled():
             await self._await_pre_compaction_flush_grace(
                 transcript,
@@ -4044,10 +4110,36 @@ class TurnRunner:
                 error=str(exc),
             )
             self._record_compaction_failure(session_key)
+            notify_compaction(
+                session_key,
+                source="automatic",
+                phase="preflight",
+                status="failed",
+                message=str(exc),
+                tokens_before=total_tokens,
+                context_window_tokens=context_window_tokens,
+            )
             return
         self._record_compaction_success(session_key)
         if result:
-            notify_compaction(session_key)
+            notify_compaction(
+                session_key,
+                source="automatic",
+                phase="preflight",
+                status="completed",
+                tokens_before=total_tokens,
+                context_window_tokens=context_window_tokens,
+            )
+        else:
+            notify_compaction(
+                session_key,
+                source="automatic",
+                phase="preflight",
+                status="skipped",
+                reason="empty_summary",
+                tokens_before=total_tokens,
+                context_window_tokens=context_window_tokens,
+            )
 
     def _pre_compaction_flush_enabled(self) -> bool:
         from opensquilla.memory.flush_config import is_session_flush_enabled
@@ -4066,20 +4158,20 @@ class TurnRunner:
 
     def _pre_compaction_flush_timeout_seconds(self) -> float:
         memory_cfg = getattr(self._config, "memory", None)
-        raw_timeout = getattr(memory_cfg, "flush_timeout_seconds", 5.0)
+        raw_timeout = getattr(memory_cfg, "flush_timeout_seconds", 15.0)
         try:
             timeout = float(raw_timeout)
         except (TypeError, ValueError):
-            return 5.0
+            return 15.0
         return max(timeout, 0.0)
 
     def _pre_compaction_flush_background_timeout_seconds(self) -> float:
         memory_cfg = getattr(self._config, "memory", None)
-        raw_timeout = getattr(memory_cfg, "flush_background_timeout_seconds", 60.0)
+        raw_timeout = getattr(memory_cfg, "flush_background_timeout_seconds", 120.0)
         try:
             timeout = float(raw_timeout)
         except (TypeError, ValueError):
-            return 60.0
+            return 120.0
         return max(timeout, 0.0)
 
     async def _await_pre_compaction_flush_grace(

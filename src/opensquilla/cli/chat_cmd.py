@@ -61,7 +61,7 @@ def _tool_result_success_from_status(status: Any, *, legacy_is_error: bool) -> b
     return not legacy_is_error
 
 _DEFAULT_STREAM_HEARTBEAT_INTERVAL_SECONDS = 15.0
-_DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS = 180.0
+_DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS = 600.0
 
 # Maximum number of inputs that may queue behind an in-flight turn. When the cap
 # is reached, additional Enter presses are rejected

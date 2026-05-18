@@ -166,6 +166,39 @@ async def test_new_avoids_mid_turn_cut_for_agent_flattened_tool_blocks():
 
 
 @pytest.mark.asyncio
+async def test_new_skips_when_only_cut_would_orphan_tool_result():
+    """If no clean boundary exists, compaction must not split tool state."""
+    entries = [
+        {
+            "role": "assistant",
+            "content": "calling tool",
+            "tool_calls": [{"id": "call_1", "type": "function"}],
+            "token_count": 4,
+        },
+        {
+            "role": "tool",
+            "content": "tool result",
+            "tool_call_id": "call_1",
+            "token_count": 4,
+        },
+        {"role": "user", "content": "q2", "token_count": 3},
+        {"role": "assistant", "content": "answer", "token_count": 3},
+    ]
+    request = CompactionRequest(
+        session_id="boundary-start-test",
+        entries=entries,
+        context_window_tokens=20,
+        config=CompactionConfig(safety_margin=0.5),
+    )
+
+    result = await compact_context_new(request)
+
+    assert result.removed_count == 0
+    assert result.summary_source == "skipped"
+    assert result.kept_entries == entries
+
+
+@pytest.mark.asyncio
 async def test_new_prev_summary_prefix_injected():
     """When custom_instructions carries __prev_summary__: the merged summary is prefixed."""
     entries = [

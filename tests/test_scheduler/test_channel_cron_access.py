@@ -1,8 +1,8 @@
 """Channel-callable cron tool.
 
 Drives the contract:
-- A Feishu / Slack chat user can create reminders and background tasks
-  (agent_turn + isolated) — both are normal use cases the
+- A Feishu / Slack chat user can create static reminders (reminder + isolated)
+  and background tasks (agent_turn + isolated) — both are normal use cases the
   model picks up from "提醒我喝水" / "每天早上总结邮件" style prompts.
 - target_session_key and tool_policy are owner-only knobs; passing them as a
   non-owner is rejected with a clear ToolError (the model would only emit
@@ -234,7 +234,7 @@ async def test_channel_user_can_add_reminder(fake_scheduler) -> None:
             action="add",
             schedule={"kind": "every", "every_seconds": 60},
             task="提醒喝水",
-            job_kind="agent_turn",
+            job_kind="reminder",
             session_target="isolated",
         )
 
@@ -244,10 +244,53 @@ async def test_channel_user_can_add_reminder(fake_scheduler) -> None:
     assert kwargs["creator_sender_id"] == "feishu-user-1"
     assert kwargs["creator_session_key"] == "agent:main:feishu:user-1"
     assert kwargs["creator_is_owner"] is False
-    assert kwargs["handler_key"] == "agent_run"
+    assert kwargs["handler_key"] == "static_message"
     assert kwargs["session_target"] == SessionTarget.ISOLATED
     assert kwargs["delivery"].originating_reply_target.to == "oc_chat_001"
     assert kwargs["delivery"].mode.value == "origin"
+
+
+async def test_channel_system_event_current_reminder_normalizes_to_static_message(
+    fake_scheduler,
+) -> None:
+    """Model repair path: 'this session reminder' should not start an agent turn."""
+    with _with_ctx(_channel_ctx("agent:main:webchat:user-1")):
+        raw = await cron_tool(
+            action="add",
+            schedule={"kind": "every", "every_seconds": 60},
+            task="提醒喝水",
+            job_kind="system_event",
+            session_target="current",
+        )
+
+    resp = json.loads(raw)
+    assert resp["status"] == "scheduled"
+    assert resp["payload_kind"] == "reminder"
+    assert resp["session_target"] == "isolated"
+    kwargs = fake_scheduler.add_calls[-1]
+    assert kwargs["handler_key"] == "static_message"
+    assert kwargs["session_target"] == SessionTarget.ISOLATED
+    assert kwargs["session_key"] == ""
+    assert kwargs["origin_session_key"] == "agent:main:webchat:user-1"
+    assert kwargs["delivery"].originating_reply_target.to == "oc_chat_001"
+
+
+async def test_channel_reminder_defaults_to_static_message(fake_scheduler) -> None:
+    """Omitted job_kind/session_target is the natural-language reminder path."""
+    with _with_ctx(_channel_ctx("agent:main:webchat:user-1")):
+        raw = await cron_tool(
+            action="add",
+            schedule={"kind": "every", "every_seconds": 60},
+            task="提醒喝水",
+        )
+
+    resp = json.loads(raw)
+    assert resp["payload_kind"] == "reminder"
+    assert resp["session_target"] == "isolated"
+    kwargs = fake_scheduler.add_calls[-1]
+    assert kwargs["handler_key"] == "static_message"
+    assert kwargs["payload"]["kind"] == "reminder"
+    assert kwargs["payload"]["text"] == "提醒喝水"
 
 
 async def test_channel_user_can_schedule_isolated_agent_turn(fake_scheduler) -> None:

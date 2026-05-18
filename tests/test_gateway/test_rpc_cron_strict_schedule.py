@@ -261,3 +261,19 @@ def test_job_to_wire_serializes_normalized_expression() -> None:
     assert wire["expression"] == "*/5 * * * *"
     assert wire["scheduleRaw"] == "每5分钟"
     assert wire["scheduleKind"] == "cron"
+
+
+def test_job_to_wire_exposes_status_for_cron_countdown_state() -> None:
+    job = CronJob(
+        id="x",
+        name="n",
+        cron_expr="60",
+        schedule_raw="60",
+        schedule_kind=ScheduleKind.EVERY,
+        handler_key="agent_run",
+        status="running",
+    )
+
+    wire = _job_to_wire(job)
+
+    assert wire["status"] == "running"

@@ -29,6 +29,7 @@ from typing import Any
 
 import structlog
 
+from opensquilla.engine.cache_break_monitor import notify_compaction
 from opensquilla.gateway.config import ContextOverflowPolicy, GatewayConfig
 from opensquilla.session.compaction import call_compact_with_optional_config
 from opensquilla.session.compaction_lifecycle import (
@@ -196,7 +197,7 @@ async def _await_auto_summarize_flush_grace(
     background_timeout = _memory_timeout_seconds(
         config,
         "flush_background_timeout_seconds",
-        60.0,
+        120.0,
     )
     task = asyncio.create_task(
         flush_service.execute(
@@ -209,7 +210,7 @@ async def _await_auto_summarize_flush_grace(
         )
     )
 
-    grace_timeout = _memory_timeout_seconds(config, "flush_timeout_seconds", 5.0)
+    grace_timeout = _memory_timeout_seconds(config, "flush_timeout_seconds", 15.0)
     try:
         receipt = await asyncio.wait_for(asyncio.shield(task), timeout=grace_timeout)
     except TimeoutError:
@@ -386,6 +387,14 @@ async def apply_context_overflow_policy(
                 )
                 return outcome
 
+            notify_compaction(
+                session_key,
+                source="automatic",
+                phase="gateway_auto_summarize",
+                status="started",
+                tokens_before=estimated,
+                context_window_tokens=budget,
+            )
             outcome.flush_receipt = await _await_auto_summarize_flush_grace(
                 config=config,
                 transcript=transcript,
@@ -446,6 +455,21 @@ async def apply_context_overflow_policy(
                     reason=outcome.reason,
                     tokens_after=post_estimate,
                 )
+                notify_compaction(
+                    session_key,
+                    source="automatic",
+                    phase="gateway_auto_summarize",
+                    status="failed",
+                    reason=outcome.reason,
+                    tokens_before=estimated,
+                    tokens_after=post_estimate,
+                    remaining_budget_tokens=outcome.remaining_budget_tokens,
+                    removed_count=outcome.removed_count,
+                    kept_count=outcome.kept_count,
+                    summary_len=outcome.summary_len,
+                    summary_source=outcome.summary_source,
+                    context_window_tokens=budget,
+                )
                 return outcome
 
             outcome.summarized = True
@@ -471,6 +495,19 @@ async def apply_context_overflow_policy(
                 remaining_budget_tokens=outcome.remaining_budget_tokens,
                 summary_source=outcome.summary_source,
             )
+            notify_compaction(
+                session_key,
+                source="automatic",
+                phase="gateway_auto_summarize",
+                status="completed",
+                tokens_before=estimated,
+                tokens_after=post_estimate,
+                remaining_budget_tokens=outcome.remaining_budget_tokens,
+                removed_count=outcome.removed_count,
+                kept_count=outcome.kept_count,
+                summary_len=outcome.summary_len,
+                summary_source=outcome.summary_source,
+            )
         except Exception as exc:  # noqa: BLE001 — best-effort
             outcome.reason = "compaction_failed"
             outcome.refusal = _build_refusal_envelope(estimated, budget, outcome.reason)
@@ -478,6 +515,16 @@ async def apply_context_overflow_policy(
                 "context_overflow.auto_summarize_failed",
                 session_key=session_key,
                 error=str(exc),
+            )
+            notify_compaction(
+                session_key,
+                source="automatic",
+                phase="gateway_auto_summarize",
+                status="failed",
+                message=str(exc),
+                reason=outcome.reason,
+                tokens_before=estimated,
+                context_window_tokens=budget,
             )
     else:
         # No session manager wired in — degrade to drop-oldest proxy so

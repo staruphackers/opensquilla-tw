@@ -7,9 +7,10 @@ from typing import Any, TypeGuard
 
 from opensquilla.gateway.rpc import RpcContext, RpcUnavailableError, get_dispatcher
 from opensquilla.scheduler.payloads import (
-    AGENT_TURN_KIND,
+    REMINDER_KIND,
     SYSTEM_EVENT_KIND,
     make_agent_turn_payload,
+    make_reminder_payload,
     make_system_event_payload,
     payload_agent_id,
     payload_kind,
@@ -82,6 +83,7 @@ def _job_to_wire(j: Any) -> dict[str, Any]:
         "text": text,
         "payloadKind": kind,
         "agentId": payload_agent_id(payload, "main"),
+        "status": status_str,
         "enabled": (
             bool(d.get("enabled", True)) and status_str not in ("paused", "disabled", "deleted")
         ),
@@ -442,7 +444,7 @@ def _build_payload(
     text = raw_text if isinstance(raw_text, str) else ""
     kind = params.get("payloadKind")
     if not isinstance(kind, str) or not kind:
-        kind = SYSTEM_EVENT_KIND if session_target == SessionTarget.MAIN else AGENT_TURN_KIND
+        kind = SYSTEM_EVENT_KIND if session_target == SessionTarget.MAIN else REMINDER_KIND
     agent_id = params.get("agentId", "main")
     if require_text and not text.strip():
         raise ValueError("Cron text is required")
@@ -450,9 +452,21 @@ def _build_payload(
         if session_target != SessionTarget.MAIN:
             raise ValueError("payloadKind='system_event' requires sessionTarget='main'")
         return kind, make_system_event_payload(text, agent_id)
+    if kind == REMINDER_KIND:
+        if session_target == SessionTarget.MAIN:
+            raise ValueError("payloadKind='reminder' cannot use sessionTarget='main'")
+        return kind, make_reminder_payload(text, agent_id)
     if session_target == SessionTarget.MAIN:
         raise ValueError("payloadKind='agent_turn' cannot use sessionTarget='main'")
     return kind, make_agent_turn_payload(text, agent_id)
+
+
+def _handler_key_for_payload_kind(kind: str) -> str:
+    if kind == SYSTEM_EVENT_KIND:
+        return "system_event"
+    if kind == REMINDER_KIND:
+        return "static_message"
+    return "agent_run"
 
 
 @_d.method("cron.list", scope="operator.read")
@@ -598,7 +612,7 @@ async def _finalize_cron_add(
         jitter_seconds = 0.0
     job = await scheduler.add_job(
         name=params.get("name") or text,
-        handler_key="system_event" if payload_kind_name == SYSTEM_EVENT_KIND else "agent_run",
+        handler_key=_handler_key_for_payload_kind(payload_kind_name),
         payload=payload,
         session_target=session_target,
         session_key=target_session_key,
@@ -742,9 +756,7 @@ async def _handle_cron_update(params: dict | None, ctx: RpcContext) -> dict[str,
             session_target,
             require_text=False,
         )
-        patch["handler_key"] = (
-            "system_event" if payload_kind_name == SYSTEM_EVENT_KIND else "agent_run"
-        )
+        patch["handler_key"] = _handler_key_for_payload_kind(payload_kind_name)
         patch["payload"] = payload
         patch["session_target"] = session_target
         patch["session_key"] = _resolve_target_session_key(merged_params, session_target)

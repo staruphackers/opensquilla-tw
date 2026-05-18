@@ -60,6 +60,7 @@ def _default_aux(
     thinking: bool | ThinkingLevel = False,
     mode: str = "off",
     summary_model: str | None = None,
+    flush_compaction_requires_safe_receipt: bool = False,
 ) -> _AgentConfigAuxiliaries:
     return _AgentConfigAuxiliaries(
         thinking=thinking,
@@ -69,11 +70,12 @@ def _default_aux(
         tool_result_store_dir="/tmp/store",
         tool_result_store_session_id="s1",
         flush_enabled=True,
-        flush_timeout_seconds=5.0,
-        flush_background_timeout_seconds=60.0,
+        flush_timeout_seconds=15.0,
+        flush_background_timeout_seconds=120.0,
         flush_backoff_initial_seconds=30.0,
         flush_backoff_max_seconds=300.0,
         flush_archive_max_bytes=800_000,
+        flush_compaction_requires_safe_receipt=flush_compaction_requires_safe_receipt,
         tool_result_compression_enabled=True,
         tool_result_compression_max_share=0.25,
         tool_result_compression_summary_max_tokens=1024,
@@ -265,6 +267,15 @@ async def test_case01_success_all_defaults() -> None:
     assert o.agent_config.system_prompt == "FINAL"
     assert o.agent_config.max_tokens == 4096
     assert o.agent_config.context_window_tokens == 200_000
+    assert o.agent_config.max_history_turns == 0
+
+
+@pytest.mark.asyncio
+async def test_route_history_limit_metadata_threads_to_agent_config() -> None:
+    stage = _make_stage()
+    inp = _make_input(turn=_make_turn(metadata={"route_max_history_turns": 1}))
+    out = await stage.run(inp)
+    assert out.output.agent_config.max_history_turns == 1
 
 
 @pytest.mark.asyncio

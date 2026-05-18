@@ -8,8 +8,10 @@ from typing import Any, Protocol
 import structlog
 
 from opensquilla.scheduler.payloads import (
+    REMINDER_KIND,
     SYSTEM_EVENT_KIND,
     make_agent_turn_payload,
+    make_reminder_payload,
     make_system_event_payload,
 )
 from opensquilla.scheduler.prompt_safety import scan_cron_prompt as _scan_cron_prompt
@@ -145,10 +147,12 @@ def _owns_cron_job(job: Any, sender_id: str, session_key: str) -> bool:
         "Use this tool (NOT exec_command or background_process) for any recurring/timed "
         "task scheduling or reminders. Translate any natural language into the "
         "structured schedule shape yourself; the tool will not parse free-form text. "
-        "For proactive channel reminders, use job_kind=agent_turn and "
-        "session_target=isolated so the scheduled run can deliver back without "
-        "main-session history. Use job_kind=system_event and session_target=main "
-        "only for internal main-session events. "
+        "For proactive reminders, including reminders phrased as 'this/current "
+        "session', use job_kind=reminder and session_target=isolated so the "
+        "scheduled run delivers static text without invoking the agent/model "
+        "chain or adding a fake user turn to the visible conversation. Use "
+        "job_kind=system_event and session_target=main only for internal "
+        "main-session events. "
         "For recurring background agent tasks such as 'every morning summarize "
         "yesterday's emails', use job_kind=agent_turn with session_target=isolated. "
         "Channel users can create reminders and tasks bound to the calling channel; "
@@ -166,7 +170,7 @@ def _owns_cron_job(job: Any, sender_id: str, session_key: str) -> bool:
                 "Do not pass human language in schedule; translate it before the tool call. "
                 "Examples: "
                 "for '每5分钟提醒我喝水' call schedule={kind:'cron', expr:'*/5 * * * *'}, "
-                "job_kind='agent_turn', session_target='isolated'; "
+                "job_kind='reminder', session_target='isolated'; "
                 "for '45分钟后提醒我' call "
                 "schedule={kind:'at', at:'<now+45min as ISO-8601 with timezone>'}; "
                 "for '每30秒打印一次' call schedule={kind:'every', every_seconds:30}; "
@@ -204,15 +208,22 @@ def _owns_cron_job(job: Any, sender_id: str, session_key: str) -> bool:
         },
         "job_kind": {
             "type": "string",
-            "description": "system_event for reminders, agent_turn for background agent tasks.",
-            "enum": ["system_event", "agent_turn"],
+            "description": (
+                "Use reminder for static user-facing reminders; it does not call "
+                "the model. Use agent_turn only for scheduled background tasks "
+                "that need the agent/model to work. Use system_event only for "
+                "internal main-session events."
+            ),
+            "enum": ["reminder", "system_event", "agent_turn"],
         },
         "session_target": {
             "type": "string",
             "description": (
                 "Target session mode for add. Use main for internal system events, "
-                "isolated for proactive reminders, current to bind the caller's "
-                "current session, or session with target_session_key for a named session."
+                "isolated for proactive reminders that should deliver back to the "
+                "caller, current only when the user explicitly wants the scheduled "
+                "run to continue the current transcript as a conversation, or session "
+                "with target_session_key for a named session."
             ),
             "enum": ["main", "isolated", "current", "session"],
         },
@@ -260,8 +271,8 @@ async def cron(
     action: str,
     schedule: dict[str, Any] | None = None,
     task: str | None = None,
-    job_kind: str = "system_event",
-    session_target: str = "main",
+    job_kind: str = "reminder",
+    session_target: str = "isolated",
     target_session_key: str | None = None,
     job_id: str | None = None,
     agent_id: str = "main",
@@ -347,12 +358,17 @@ async def cron(
         if blocked:
             raise ToolError(reason)
 
-        if job_kind not in ("system_event", "agent_turn"):
-            raise ToolError("job_kind must be system_event or agent_turn")
+        if job_kind not in ("reminder", "system_event", "agent_turn"):
+            raise ToolError("job_kind must be reminder, system_event, or agent_turn")
         if session_target not in ("main", "isolated", "current", "session"):
             raise ToolError("session_target must be main, isolated, current, or session")
+        if job_kind == "system_event" and session_target == "current":
+            job_kind = REMINDER_KIND
+            session_target = "isolated"
         if job_kind == "system_event" and session_target != "main":
             raise ToolError("system_event jobs must use session_target=main")
+        if job_kind == REMINDER_KIND and session_target == "main":
+            raise ToolError("reminder jobs cannot use session_target=main")
         if job_kind == "agent_turn" and session_target == "main":
             raise ToolError("agent_turn jobs cannot use session_target=main")
         if session_target == "current" and not caller_session_key:
@@ -438,15 +454,19 @@ async def cron(
                     delivery.channel_name = ctx.channel_kind or ""
                     delivery.channel_id = ctx.channel_id or ""
 
-        payload = (
-            make_system_event_payload(task, agent_id)
-            if job_kind == SYSTEM_EVENT_KIND
-            else make_agent_turn_payload(task, agent_id)
-        )
+        if job_kind == SYSTEM_EVENT_KIND:
+            payload = make_system_event_payload(task, agent_id)
+            handler_key = "system_event"
+        elif job_kind == REMINDER_KIND:
+            payload = make_reminder_payload(task, agent_id)
+            handler_key = "static_message"
+        else:
+            payload = make_agent_turn_payload(task, agent_id)
+            handler_key = "agent_run"
         effective_tz = (schedule_tz or tz or "").strip()
         job = await sched.add_job(
             name=task or "cron-tool-job",
-            handler_key="system_event" if job_kind == SYSTEM_EVENT_KIND else "agent_run",
+            handler_key=handler_key,
             payload=payload,
             session_target=SessionTarget(session_target),
             session_key=(

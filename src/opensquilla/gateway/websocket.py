@@ -628,11 +628,11 @@ async def handle_ws_connection(
                 * 1000
             ),
             agent_stream_idle_timeout_ms=int(
-                max(0.0, float(getattr(config, "agent_stream_idle_timeout_seconds", 180.0)))
+                max(0.0, float(getattr(config, "agent_stream_idle_timeout_seconds", 600.0)))
                 * 1000
             ),
             webui_stream_idle_grace_ms=int(
-                max(0.0, float(getattr(config, "webui_stream_idle_grace_seconds", 210.0)))
+                max(0.0, float(getattr(config, "webui_stream_idle_grace_seconds", 630.0)))
                 * 1000
             ),
             client_ws_keepalive_timeout_ms=int(

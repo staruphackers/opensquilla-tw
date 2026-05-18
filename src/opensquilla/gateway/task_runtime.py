@@ -35,7 +35,11 @@ from opensquilla.gateway.routing import RouteEnvelope, SourceKind
 from opensquilla.gateway.session_lifecycle import TaskLifecycleEvent, TaskLifecycleListener
 from opensquilla.session.keys import canonicalize_session_key, normalize_agent_id, parse_agent_id
 from opensquilla.session.models import AgentTaskRecord, AgentTaskStatus
-from opensquilla.session.terminal_reply import build_terminal_reply
+from opensquilla.session.terminal_reply import (
+    build_terminal_reply,
+    is_context_payload_too_large,
+    sanitize_agent_error,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -884,10 +888,16 @@ class TaskRuntime:
                 error_message=str(exc),
             )
         except Exception as exc:  # noqa: BLE001 - runtime ledger records the class.
+            terminal_reason = str(getattr(exc, "terminal_reason", None) or "error")
+            status = (
+                AgentTaskStatus.TIMEOUT
+                if terminal_reason == "timeout"
+                else AgentTaskStatus.FAILED
+            )
             await self._mark_terminal(
                 task,
-                AgentTaskStatus.FAILED,
-                terminal_reason="error",
+                status,
+                terminal_reason=terminal_reason,
                 error_class=str(getattr(exc, "code", None) or type(exc).__name__),
                 error_message=str(exc),
             )
@@ -1077,6 +1087,20 @@ class TaskRuntime:
                     if not active:
                         self._agent_active_sessions.pop(agent_id, None)
                         self._agent_session_rr.pop(agent_id, None)
+        terminal_payload = {
+            "status": status,
+            "terminal_reason": terminal_reason,
+            "error_class": error_class,
+            "error_message": error_message,
+        }
+        if is_context_payload_too_large(terminal_payload):
+            error_class, error_message = sanitize_agent_error(
+                terminal_payload,
+                fallback_error_class=error_class,
+                fallback_error_message=error_message or "Agent error",
+            )
+            terminal_payload["error_class"] = error_class
+            terminal_payload["error_message"] = error_message
         await self._storage.update_agent_task(
             task.task_id,
             status=status,
@@ -1091,14 +1115,7 @@ class TaskRuntime:
             "terminal_reason": terminal_reason,
         }
         if status != AgentTaskStatus.SUCCEEDED:
-            payload["terminal_message"] = build_terminal_reply(
-                {
-                    "status": status,
-                    "terminal_reason": terminal_reason,
-                    "error_class": error_class,
-                    "error_message": error_message,
-                }
-            )
+            payload["terminal_message"] = build_terminal_reply(terminal_payload)
         await self._emit(task.envelope.session_key, f"task.{status.value}", payload)
         await self._notify_task_lifecycle(
             TaskLifecycleEvent(

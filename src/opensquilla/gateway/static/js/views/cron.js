@@ -12,6 +12,7 @@ const CronView = (() => {
   let _editingJob = null; // null = new, object = existing
   let _viewMode = 'cards'; // 'cards' | 'table'
   let _previewTimer = null;
+  let _reloadTimer = null;
 
   // Sort state
   let _sortCol = 'next_run';
@@ -127,10 +128,11 @@ const CronView = (() => {
           <div class="cron-field">
             <label class="cron-field__label" for="cp-payload-kind">Job mode</label>
             <select class="cron-field__input" id="cp-payload-kind">
-              <option value="system_event">Reminder / System Event (Main)</option>
+              <option value="reminder">Static Reminder (no model)</option>
               <option value="agent_turn">Background Agent Task (choose session)</option>
+              <option value="system_event">System Event (Main)</option>
             </select>
-            <div class="cron-field__hint" id="cp-job-mode-hint">Reminders post to Main. Agent tasks run in current, isolated, or named sessions.</div>
+            <div class="cron-field__hint" id="cp-job-mode-hint">Static reminders deliver text directly. Agent tasks run the model in current, isolated, or named sessions.</div>
           </div>
 
           <div class="cron-field">
@@ -307,7 +309,7 @@ const CronView = (() => {
       .catch(() => { /* subscription is best-effort */ });
 
     _unsubs.push(_rpc.on('cron.run.finished', () => {
-        _loadData();
+        _scheduleCronReload();
     }));
   }
 
@@ -321,6 +323,7 @@ const CronView = (() => {
     _intervals.forEach(id => clearInterval(id));
     _intervals = [];
     if (_previewTimer) { clearTimeout(_previewTimer); _previewTimer = null; }
+    if (_reloadTimer) { clearTimeout(_reloadTimer); _reloadTimer = null; }
     _jobs = [];
     _selectedId = null;
     _panelOpen = false;
@@ -341,6 +344,36 @@ const CronView = (() => {
     }).catch(err => UI.toast('Failed to load cron jobs: ' + err.message, 'err'));
   }
 
+  function _scheduleCronReload() {
+    _loadData();
+    if (_reloadTimer) clearTimeout(_reloadTimer);
+    _reloadTimer = setTimeout(_loadData, 750);
+  }
+
+  function _isUpcomingRun(j, now = Date.now()) {
+    if (!j || !j.enabled || !j.next_run) return false;
+    if (j.status === 'running') return false;
+    const ts = new Date(j.next_run);
+    return !isNaN(ts) && ts.getTime() > now;
+  }
+
+  function _nextRunText(j) {
+    if (!j || !j.enabled) return '—';
+    if (j.status === 'running') return 'running';
+    if (!j.next_run) return '—';
+    const ts = new Date(j.next_run);
+    if (isNaN(ts)) return '—';
+    if (ts.getTime() <= Date.now()) return 'awaiting update';
+    return _humanCountdown(ts);
+  }
+
+  function _nextRunAbs(j) {
+    if (!j || !j.enabled || j.status === 'running' || !j.next_run) return '';
+    const ts = new Date(j.next_run);
+    if (isNaN(ts) || ts.getTime() <= Date.now()) return '';
+    return _humanTime(ts);
+  }
+
   // ---- summary stats ---------------------------------------------------
 
   function _renderSummary() {
@@ -349,13 +382,12 @@ const CronView = (() => {
     const total = _jobs.length;
     const enabled = _jobs.filter(j => j.enabled).length;
     const paused = total - enabled;
-    const reminders = _jobs.filter(j => (j.payloadKind || j.payload_kind) === 'system_event').length;
-    const agentTasks = total - reminders;
+    const reminders = _jobs.filter(j => (j.payloadKind || j.payload_kind) === 'reminder').length;
+    const agentTasks = _jobs.filter(j => (j.payloadKind || j.payload_kind) === 'agent_turn').length;
 
     const next = _jobs
-      .filter(j => j.enabled && j.next_run)
+      .filter(j => _isUpcomingRun(j))
       .map(j => ({ job: j, ts: new Date(j.next_run) }))
-      .filter(o => !isNaN(o.ts))
       .sort((a, b) => a.ts - b.ts)[0];
 
     // Last 24h aggregate from in-memory job snapshots is best-effort —
@@ -400,9 +432,8 @@ const CronView = (() => {
   function _tick() {
     if (!_el) return;
     const next = _jobs
-      .filter(j => j.enabled && j.next_run)
+      .filter(j => _isUpcomingRun(j))
       .map(j => ({ job: j, ts: new Date(j.next_run) }))
-      .filter(o => !isNaN(o.ts))
       .sort((a, b) => a.ts - b.ts)[0];
 
     const cd = _el.querySelector('#cron-next-countdown');
@@ -431,9 +462,9 @@ const CronView = (() => {
     if (!root || !rail || !axis) return;
 
     const upcoming = _jobs
-      .filter(j => j.enabled && j.next_run)
+      .filter(j => _isUpcomingRun(j))
       .map(j => ({ job: j, ts: new Date(j.next_run).getTime() }))
-      .filter(o => !isNaN(o.ts) && (o.ts - Date.now()) < 12 * 3600 * 1000 && o.ts >= Date.now() - 60_000);
+      .filter(o => o.ts > Date.now() && (o.ts - Date.now()) < 12 * 3600 * 1000);
 
     if (upcoming.length === 0) {
       root.hidden = true;
@@ -484,7 +515,7 @@ const CronView = (() => {
     rail.querySelectorAll('[data-cron-marker]').forEach(node => {
       const ts = Number(node.dataset.ts);
       const left = ((ts - now) / span) * 100;
-      if (left < -1 || left > 101) {
+      if (left < 0 || left > 101) {
         node.style.display = 'none';
       } else {
         node.style.display = '';
@@ -564,16 +595,28 @@ const CronView = (() => {
     _bindRowEvents(content);
   }
 
+  function _jobKindLabel(job) {
+    const kind = job.payloadKind || job.payload_kind;
+    if (kind === 'reminder') return 'Reminder';
+    if (kind === 'system_event') return 'System event';
+    return 'Agent task';
+  }
+
+  function _jobKindClass(job) {
+    const kind = job.payloadKind || job.payload_kind;
+    return kind === 'reminder' ? 'is-reminder' : 'is-agent';
+  }
+
   function _cardHtml(j, i) {
     const enabled = !!j.enabled;
     const lastStatus = j.last_status || (j.last_run ? 'ok' : null);
     const lastRun = j.last_run ? _humanCountdownPast(new Date(j.last_run)) : '—';
-    const nextRun = j.next_run ? _humanCountdown(new Date(j.next_run)) : '—';
-    const nextAbs = j.next_run ? _humanTime(new Date(j.next_run)) : '';
+    const nextRun = _nextRunText(j);
+    const nextAbs = _nextRunAbs(j);
     const schedule = _esc(j.expression || j.schedule || '—');
     const human = _explainCron(j.expression || '') || '';
-    const kind = (j.payloadKind || j.payload_kind) === 'system_event' ? 'Reminder' : 'Agent task';
-    const kindClass = (j.payloadKind || j.payload_kind) === 'system_event' ? 'is-reminder' : 'is-agent';
+    const kind = _jobKindLabel(j);
+    const kindClass = _jobKindClass(j);
     const target = j.sessionTarget || j.session_target || '—';
     const selected = _selectedId === j.id ? ' is-selected' : '';
     const dotClass = !enabled ? 'is-off' : (lastStatus === 'error' || lastStatus === 'fail') ? 'is-error' : 'is-on';
@@ -632,10 +675,10 @@ const CronView = (() => {
       const enabled = !!j.enabled;
       const lastStatus = j.last_status;
       const lastRun = j.last_run ? _humanCountdownPast(new Date(j.last_run)) : '—';
-      const nextRun = j.next_run ? _humanCountdown(new Date(j.next_run)) : '—';
+      const nextRun = _nextRunText(j);
       const schedule = _esc(j.expression || j.schedule || '—');
-      const kind = (j.payloadKind || j.payload_kind) === 'system_event' ? 'Reminder' : 'Agent task';
-      const kindClass = (j.payloadKind || j.payload_kind) === 'system_event' ? 'is-reminder' : 'is-agent';
+      const kind = _jobKindLabel(j);
+      const kindClass = _jobKindClass(j);
       const target = j.sessionTarget || j.session_target || '—';
       const dotClass = !enabled ? 'is-off' : (lastStatus === 'error' || lastStatus === 'fail') ? 'is-error' : 'is-on';
       const sel = _selectedId === j.id ? ' is-selected' : '';
@@ -783,7 +826,7 @@ const CronView = (() => {
       <button class="btn btn--primary cron-empty__cta" data-cron-empty-create>${icons.plus()}<span>Create your first schedule</span></button>
       <div class="cron-empty__hints">
         <span class="cron-empty__hints-label">Try a preset</span>
-        <button class="cron-empty-hint" data-cron-empty-template='{"name":"Daily standup nudge","expression":"0 9 * * 1-5","payloadKind":"system_event","message":"Good morning! Time for standup."}'>
+        <button class="cron-empty-hint" data-cron-empty-template='{"name":"Daily standup nudge","expression":"0 9 * * 1-5","payloadKind":"reminder","message":"Good morning! Time for standup."}'>
           <code>0 9 * * 1-5</code>
           <span>Weekday morning reminder</span>
         </button>
@@ -896,9 +939,9 @@ const CronView = (() => {
     const expression = job ? (job.expression || '') : (tpl.expression || '');
     const activeSessionKey = _activeChatSessionKey();
     const payloadKind = job ? (job.payloadKind || 'agent_turn')
-      : (tpl.payloadKind || (activeSessionKey ? 'agent_turn' : 'system_event'));
+      : (tpl.payloadKind || 'reminder');
     const sessionTarget = job ? (job.sessionTarget || job.session_target || 'isolated')
-      : (tpl.sessionTarget || (activeSessionKey ? 'current' : 'main'));
+      : (tpl.sessionTarget || (payloadKind === 'system_event' ? 'main' : 'isolated'));
     const targetSessionKey = job ? _jobSessionKey(job) : (tpl.targetSessionKey || activeSessionKey || '');
 
     _el.querySelector('#cp-name').value = name;
@@ -963,10 +1006,19 @@ const CronView = (() => {
     if (payloadKind === 'system_event') {
       targetSelect.value = 'main';
       targetSelect.disabled = true;
-      targetSelect.title = 'Reminder / System Event jobs always write to the agent main session.';
-      if (modeHint) modeHint.textContent = 'Reminder events are appended to this agent main session.';
-      if (targetHint) targetHint.textContent = 'Main is locked for reminders. Use Background Agent Task for current, isolated, or named sessions.';
-      if (targetSessionHint) targetSessionHint.textContent = 'Session keys are only used by Background Agent Task jobs.';
+      targetSelect.title = 'System events always write to the agent main session.';
+      if (modeHint) modeHint.textContent = 'System events append text to the agent main session and wake the heartbeat.';
+      if (targetHint) targetHint.textContent = 'Main is locked for system events. Use Static Reminder for direct reminders.';
+      if (targetSessionHint) targetSessionHint.textContent = 'Session keys are only used by Static Reminder and Background Agent Task jobs.';
+      _el.querySelector('#cp-message-label').textContent = 'Event text';
+      _el.querySelector('#cp-target-session-row').hidden = true;
+    } else if (payloadKind === 'reminder') {
+      targetSelect.value = 'isolated';
+      targetSelect.disabled = true;
+      targetSelect.title = 'Static reminders deliver text directly without creating a scheduled model turn.';
+      if (modeHint) modeHint.textContent = 'Static reminders deliver this message directly; no model call or scheduled agent turn is created.';
+      if (targetHint) targetHint.textContent = 'Static reminders run isolated and deliver back to the originating chat when one is available.';
+      if (targetSessionHint) targetSessionHint.textContent = 'Origin session is bound automatically from the active chat when saved.';
       _el.querySelector('#cp-message-label').textContent = 'Reminder text';
       _el.querySelector('#cp-target-session-row').hidden = true;
     } else {
@@ -1132,7 +1184,9 @@ const CronView = (() => {
     const agentId = _el.querySelector('#cp-agent-id').value.trim() || 'main';
     const sessionTarget = payloadKind === 'system_event'
       ? 'main'
-      : _el.querySelector('#cp-session-target').value;
+      : payloadKind === 'reminder'
+        ? 'isolated'
+        : _el.querySelector('#cp-session-target').value;
     const targetSessionKey = _el.querySelector('#cp-target-session-key').value.trim();
 
     const payload = { name, enabled, payloadKind, agentId, sessionTarget, text: message };
@@ -1171,6 +1225,9 @@ const CronView = (() => {
       payload.sessionKey = boundSessionKey;
       payload.targetSessionKey = boundSessionKey;
       payload.originSessionKey = boundSessionKey;
+    }
+    if (payloadKind === 'reminder' && _activeChatSessionKey()) {
+      payload.originSessionKey = _activeChatSessionKey();
     }
     if (sessionTarget === 'session') {
       if (!targetSessionKey) { UI.toast('Named session key is required', 'warn'); return; }

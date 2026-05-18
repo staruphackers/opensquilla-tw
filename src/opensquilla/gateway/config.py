@@ -638,11 +638,12 @@ class MemoryConfig(BaseSettings):
 
     # Flush (pre-compaction memory save)
     flush_enabled: bool = True
-    flush_timeout_seconds: float = 5.0
-    flush_background_timeout_seconds: float = 60.0
+    flush_timeout_seconds: float = 15.0
+    flush_background_timeout_seconds: float = 120.0
     flush_backoff_initial_seconds: float = 30.0
     flush_backoff_max_seconds: float = 300.0
     flush_archive_max_bytes: int = 800_000
+    flush_compaction_requires_safe_receipt: bool = False
 
     # Per-turn auto capture / recall
     auto_capture_enabled: bool = True
@@ -1111,7 +1112,7 @@ class CompactionLlmConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="OPENSQUILLA_COMPACTION_")
 
     model: str | None = None  # None = use session model
-    timeout_seconds: float = 30.0
+    timeout_seconds: float = 90.0
     enabled: bool = True
 
 
@@ -1578,10 +1579,10 @@ class GatewayConfig(BaseSettings):
     # non-persistent UI/CLI feedback while a turn is still active; the idle
     # timeout remains the real upstream stall detector.
     agent_stream_heartbeat_interval_seconds: float = 15.0
-    agent_stream_idle_timeout_seconds: float = 180.0
+    agent_stream_idle_timeout_seconds: float = 600.0
     # Browser-side fallback grace. Keep this above the gateway stream idle
     # timeout so server terminal errors arrive before the WebUI local fallback.
-    webui_stream_idle_grace_seconds: float = 210.0
+    webui_stream_idle_grace_seconds: float = 630.0
     # Maximum time the WebUI WebSocket may sit silent before the gateway
     # closes it with code 1011 and emits ``gateway.client_ws_keepalive_timeout``.
     # ``0`` disables the keepalive deadline entirely (legacy behaviour).

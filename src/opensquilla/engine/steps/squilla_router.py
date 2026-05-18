@@ -829,6 +829,7 @@ async def apply_squilla_router(ctx: TurnContext) -> TurnContext:
         ctx.metadata["applied_model"] = ctx.model
         ctx.metadata["routing_confidence"] = decision.confidence
         ctx.metadata["routing_source"] = decision.source
+        ctx.metadata["route_max_history_turns"] = 1
         ctx.metadata.update(_compute_savings(decision.model, tiers))
         _record_thinking_metadata(ctx, router_cfg, image_tiers[tier_name])
         log.debug("squilla_router.image_routed", tier=decision.tier, model=decision.model)

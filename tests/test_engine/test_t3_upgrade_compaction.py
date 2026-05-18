@@ -129,8 +129,8 @@ def _make_runner(
     enabled: bool = True,
     *,
     flush_enabled: bool = True,
-    flush_timeout_seconds: float = 5.0,
-    flush_background_timeout_seconds: float = 60.0,
+    flush_timeout_seconds: float = 15.0,
+    flush_background_timeout_seconds: float = 120.0,
 ) -> TurnRunner:
     config = SimpleNamespace(
         squilla_router=SimpleNamespace(upgrade_to_t3_compaction_enabled=enabled),
@@ -346,6 +346,21 @@ async def test_t3_flush_uses_background_timeout_for_service_call() -> None:
 
     assert result == "handled"
     assert fs.execute_calls[0]["timeout"] == 42.0
+
+
+@pytest.mark.asyncio
+async def test_t3_flush_uses_longer_default_background_timeout() -> None:
+    sm = _FakeSessionManager(_sample_transcript())
+    fs = _FakeFlushService()
+    runner = _make_runner(session_manager=sm, flush_service=fs)
+
+    turn = _make_turn(routed_tier="t3", previous_tier="t2")
+    result = await runner._maybe_compact_on_t3_upgrade(
+        "agent:main:webchat:default", turn, 100_000
+    )
+
+    assert result == "handled"
+    assert fs.execute_calls[0]["timeout"] == 120.0
 
 
 @pytest.mark.asyncio

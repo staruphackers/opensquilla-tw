@@ -10,6 +10,7 @@ from typing import Any, cast
 
 import structlog
 
+from opensquilla.engine.cache_break_monitor import notify_compaction
 from opensquilla.engine.start_turn import start_turn_via_runtime
 from opensquilla.gateway import attachment_ingest as _attachment_ingest
 from opensquilla.gateway.agent_tasks import get_agent_task_registry
@@ -32,7 +33,7 @@ from opensquilla.session.compaction_lifecycle import (
     pre_compaction_flush_enabled,
 )
 from opensquilla.session.keys import canonicalize_session_key, normalize_agent_id
-from opensquilla.session.terminal_reply import build_terminal_reply
+from opensquilla.session.terminal_reply import build_terminal_reply, sanitize_agent_error
 
 _d = get_dispatcher()
 log = structlog.get_logger(__name__)
@@ -1029,7 +1030,7 @@ async def _handle_sessions_send(params: dict | None, ctx: RpcContext) -> dict:
                 semantic_message=semantic_message_text,
             )
             stream_idle_timeout = _optional_positive_timeout(
-                ctx.config, "agent_stream_idle_timeout_seconds", 180.0
+                ctx.config, "agent_stream_idle_timeout_seconds", 600.0
             )
             heartbeat_interval = _optional_positive_timeout(
                 ctx.config, "agent_stream_heartbeat_interval_seconds", 15.0
@@ -1045,10 +1046,15 @@ async def _handle_sessions_send(params: dict | None, ctx: RpcContext) -> dict:
                 if event_kind in ("done", "error"):
                     if (
                         event_kind == "error"
-                        and event_dict.get("code") == "provider_request_budget_exhausted"
+                        and event_dict.get("code")
+                        in {
+                            "provider_request_budget_exhausted",
+                            "provider_request_too_large",
+                            "current_turn_context_exhausted",
+                        }
                     ):
                         await _rollback_persisted_user_message(
-                            "provider_request_budget_exhausted"
+                            str(event_dict.get("code") or "provider_request_too_large")
                         )
                     await _emit_terminal_once(f"session.event.{event_kind}", event_dict)
                 else:
@@ -1073,11 +1079,28 @@ async def _handle_sessions_send(params: dict | None, ctx: RpcContext) -> dict:
                 {"message": _STREAM_IDLE_TIMEOUT_MESSAGE, "code": _STREAM_IDLE_TIMEOUT_CODE},
             )
         except Exception as exc:
+            error_code, error_message = sanitize_agent_error(
+                {
+                    "status": "failed",
+                    "terminal_reason": "error",
+                    "error_class": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                fallback_error_class="agent_error",
+                fallback_error_message=str(exc) or "Agent error",
+            )
+            event_code = (
+                error_code if error_code == "provider_request_too_large" else "agent_error"
+            )
             log.error("sessions.send.agent_failed", session_key=key, error=str(exc), exc_info=True)
-            await ctx.session_manager.append_message(key, role="system", content=f"Error: {exc}")
+            await ctx.session_manager.append_message(
+                key,
+                role="system",
+                content=f"Error: {error_message}",
+            )
             await _emit_terminal_once(
                 "session.event.error",
-                {"message": str(exc), "code": "agent_error"},
+                {"message": error_message, "code": event_code},
             )
         finally:
             if not _terminal_emitted:
@@ -1548,89 +1571,119 @@ async def _handle_sessions_context_compact(params: dict | None, ctx: RpcContext)
             raise KeyError(f"Session not found: {key}")
         if storage is not None:
             session = await storage.get_session(key)
+        notify_compaction(
+            key,
+            source="manual",
+            phase="manual",
+            status="started",
+            context_window_tokens=context_window_tokens,
+        )
         transcript = []
         flush_enabled = pre_compaction_flush_enabled(ctx.config)
-        if flush_enabled:
-            get_transcript = getattr(ctx.session_manager, "get_transcript", None)
-            if not callable(get_transcript):
-                log.warning(
-                    "sessions.context_compact.flush_skipped",
-                    key=key,
-                    reason="transcript_reader_unavailable",
-                )
-                flush_enabled = False
-            else:
-                transcript = await get_transcript(key)
-
-        if flush_enabled and transcript:
-            if ctx.flush_service is None:
-                log.warning(
-                    "sessions.context_compact.flush_skipped",
-                    key=key,
-                    reason="flush_service_unavailable",
-                )
-            else:
-                agent_id = normalize_agent_id(getattr(session, "agent_id", None) or "main")
-                try:
-                    receipt = await ctx.flush_service.execute(
-                        transcript,
-                        key,
-                        agent_id=agent_id,
-                        timeout=30.0,
-                        message_window=0,
-                        segment_mode="auto",
-                    )
-                except Exception as exc:  # noqa: BLE001
+        try:
+            if flush_enabled:
+                get_transcript = getattr(ctx.session_manager, "get_transcript", None)
+                if not callable(get_transcript):
                     log.warning(
-                        "sessions.context_compact.flush_failed",
+                        "sessions.context_compact.flush_skipped",
                         key=key,
-                        error=str(exc),
+                        reason="transcript_reader_unavailable",
+                    )
+                    flush_enabled = False
+                else:
+                    transcript = await get_transcript(key)
+
+            if flush_enabled and transcript:
+                if ctx.flush_service is None:
+                    log.warning(
+                        "sessions.context_compact.flush_skipped",
+                        key=key,
+                        reason="flush_service_unavailable",
                     )
                 else:
-                    if not flush_receipt_allows_destructive_compaction(receipt):
-                        log.warning(
-                            "sessions.context_compact.flush_degraded",
-                            key=key,
-                            flush_receipt=flush_receipt_to_dict(receipt),
+                    agent_id = normalize_agent_id(getattr(session, "agent_id", None) or "main")
+                    memory_cfg = getattr(getattr(ctx, "config", None), "memory", None)
+                    raw_timeout = getattr(
+                        memory_cfg,
+                        "flush_background_timeout_seconds",
+                        120.0,
+                    )
+                    try:
+                        flush_timeout = max(float(raw_timeout), 0.0)
+                    except (TypeError, ValueError):
+                        flush_timeout = 120.0
+                    try:
+                        receipt = await ctx.flush_service.execute(
+                            transcript,
+                            key,
+                            agent_id=agent_id,
+                            timeout=flush_timeout,
+                            message_window=0,
+                            segment_mode="auto",
                         )
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning(
+                            "sessions.context_compact.flush_failed",
+                            key=key,
+                            error=str(exc),
+                        )
+                    else:
+                        if not flush_receipt_allows_destructive_compaction(receipt):
+                            log.warning(
+                                "sessions.context_compact.flush_degraded",
+                                key=key,
+                                flush_receipt=flush_receipt_to_dict(receipt),
+                            )
 
-        compaction_config = build_compaction_config_from_provider(
-            _resolve_compaction_provider(ctx, session),
-            model_override=_effective_compaction_model(session),
-            compaction_config=getattr(getattr(ctx, "config", None), "compaction", None),
-        )
+            compaction_config = build_compaction_config_from_provider(
+                _resolve_compaction_provider(ctx, session),
+                model_override=_effective_compaction_model(session),
+                compaction_config=getattr(getattr(ctx, "config", None), "compaction", None),
+            )
 
-        compact_with_result = getattr(ctx.session_manager, "compact_with_result", None)
-        if callable(compact_with_result):
-            result = await compact_with_result(
+            compact_with_result = getattr(ctx.session_manager, "compact_with_result", None)
+            if callable(compact_with_result):
+                result = await compact_with_result(
+                    key,
+                    context_window_tokens,
+                    compaction_config,
+                    custom_instructions=custom_instructions,
+                )
+                summary = getattr(result, "summary", "") or ""
+                removed_count = int(getattr(result, "removed_count", 0) or 0)
+                summary_source = getattr(result, "summary_source", "unknown") or "unknown"
+                kept_count = len(getattr(result, "kept_entries", []) or [])
+                tokens_before = int(getattr(result, "tokens_before", 0) or 0)
+                tokens_after = int(getattr(result, "tokens_after", 0) or 0)
+                remaining_budget_tokens = int(
+                    getattr(result, "remaining_budget_tokens", 0) or 0
+                )
+            else:
+                compact = ctx.session_manager.compact
+                summary = await call_compact_with_optional_config(
+                    compact,
+                    key,
+                    context_window_tokens,
+                    compaction_config,
+                )
+                removed_count = 1 if summary else 0
+                summary_source = "unknown"
+                kept_count = 0
+                tokens_before = 0
+                tokens_after = 0
+                remaining_budget_tokens = 0
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            notify_compaction(
                 key,
-                context_window_tokens,
-                compaction_config,
-                custom_instructions=custom_instructions,
+                source="manual",
+                phase="manual",
+                status="failed",
+                message=str(exc),
+                context_window_tokens=context_window_tokens,
             )
-            summary = getattr(result, "summary", "") or ""
-            removed_count = int(getattr(result, "removed_count", 0) or 0)
-            summary_source = getattr(result, "summary_source", "unknown") or "unknown"
-            kept_count = len(getattr(result, "kept_entries", []) or [])
-            tokens_before = int(getattr(result, "tokens_before", 0) or 0)
-            tokens_after = int(getattr(result, "tokens_after", 0) or 0)
-            remaining_budget_tokens = int(
-                getattr(result, "remaining_budget_tokens", 0) or 0
-            )
-        else:
-            compact = ctx.session_manager.compact
-            summary = await call_compact_with_optional_config(
-                compact,
-                key,
-                context_window_tokens,
-                compaction_config,
-            )
-            removed_count = 1 if summary else 0
-            summary_source = "unknown"
-            kept_count = 0
-            tokens_before = 0
-            tokens_after = 0
-            remaining_budget_tokens = 0
+            raise
         payload = {
             "key": key,
             "compacted": removed_count > 0,
@@ -1646,6 +1699,20 @@ async def _handle_sessions_context_compact(params: dict | None, ctx: RpcContext)
         }
         if receipt is not None:
             payload["flush_receipt"] = flush_receipt_to_dict(receipt)
+        notify_compaction(
+            key,
+            source="manual",
+            phase="manual",
+            status="completed" if removed_count > 0 else "skipped",
+            tokens_before=tokens_before,
+            tokens_after=tokens_after,
+            remaining_budget_tokens=remaining_budget_tokens,
+            removed_count=removed_count,
+            kept_count=kept_count,
+            summary_len=len(summary),
+            summary_source=summary_source,
+            context_window_tokens=context_window_tokens,
+        )
         return payload
 
     if lock is None:

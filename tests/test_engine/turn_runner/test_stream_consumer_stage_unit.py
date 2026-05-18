@@ -340,6 +340,21 @@ def test_error_handler_drops_unpaired_tool_use_on_incomplete_stream() -> None:
     assert state.turn_segments == []  # unpaired tool_use dropped
 
 
+def test_error_handler_drops_unpaired_tool_use_on_output_truncation() -> None:
+    state = _make_state()
+    state.turn_segments[:] = [
+        {"type": "text", "text": "partial"},
+        {"type": "tool_use", "tool_use_id": "t1", "name": "x", "input": ""},
+    ]
+    handler = _ErrorHandler()
+    result = handler.handle(
+        ErrorEvent(message="boom", code="provider_output_truncated"),
+        state,
+    )
+    assert result is _SUPPRESS
+    assert state.turn_segments == [{"type": "text", "text": "partial"}]
+
+
 def test_warning_handler_forwards_through_transformer() -> None:
     captured: list[WarningEvent] = []
 
@@ -534,7 +549,8 @@ async def test_outer_stage_disclosure_summarizes_current_turn_exhaustion() -> No
     disclosure = yielded[0]
     assert isinstance(disclosure, TextDeltaEvent)
     assert "Subagents: 1/2 succeeded" in disclosure.text
-    assert "current_turn_context_exhausted" in disclosure.text
+    assert "provider_request_too_large" in disclosure.text
+    assert "current_turn_context_exhausted" not in disclosure.text
     assert "history compaction cannot reduce it" not in disclosure.text
 
 

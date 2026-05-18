@@ -765,3 +765,56 @@ def test_provider_request_proof_emergency_compacts_old_user_tail_but_keeps_lates
     assert proof["emergency_current_turn_compacted"] is True
     assert compacted["messages"][1]["content"] != old_user_message
     assert compacted["messages"][3]["content"] == "hi"
+
+
+def test_provider_request_proof_final_hard_cap_preserves_critical_tool_result() -> None:
+    critical_tool_result = json.dumps(
+        {
+            "execution_status": {"status": "error", "reason": "runtime_error"},
+            "output": "BOUNDARY_FAILURE_DETAIL " + ("e" * 1800),
+        },
+        ensure_ascii=False,
+    )
+    payload = {
+        "messages": [
+            {"role": "user", "content": "old context\n" + ("u" * 8000)},
+            {"role": "assistant", "content": "old answer\n" + ("a" * 8000)},
+            {"role": "user", "content": "run the failing tool"},
+            {
+                "role": "assistant",
+                "content": "calling tool",
+                "tool_calls": [
+                    {
+                        "id": "call-critical",
+                        "type": "function",
+                        "function": {
+                            "name": "exec_command",
+                            "arguments": json.dumps(
+                                {"cmd": "x" * 5000},
+                                ensure_ascii=False,
+                            ),
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-critical",
+                "content": critical_tool_result,
+            },
+        ]
+    }
+
+    compacted, proof = prove_or_compact_provider_payload(
+        payload,
+        projection_adapter="openrouter",
+        proof_budget=2_200,
+        status_projection_mode="content_envelope",
+    )
+
+    assert proof is not None
+    assert proof["fits"] is True
+    assert proof["final_hard_cap_compacted"] is True
+    tool_content = compacted["messages"][4]["content"]
+    assert "BOUNDARY_FAILURE_DETAIL" in tool_content
+    assert "[opensquilla_compacted:tool_result" not in tool_content

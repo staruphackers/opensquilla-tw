@@ -441,9 +441,9 @@ class _TurnRunnerAgentConfigBuilderAdapter(AgentConfigBuilderPort):
             ),
             tool_result_store_session_id=session_id_for_log or session_key,
             flush_enabled=getattr(mem_cfg, "flush_enabled", True),
-            flush_timeout_seconds=getattr(mem_cfg, "flush_timeout_seconds", 5.0),
+            flush_timeout_seconds=getattr(mem_cfg, "flush_timeout_seconds", 15.0),
             flush_background_timeout_seconds=getattr(
-                mem_cfg, "flush_background_timeout_seconds", 60.0
+                mem_cfg, "flush_background_timeout_seconds", 120.0
             ),
             flush_backoff_initial_seconds=getattr(
                 mem_cfg, "flush_backoff_initial_seconds", 30.0
@@ -453,6 +453,11 @@ class _TurnRunnerAgentConfigBuilderAdapter(AgentConfigBuilderPort):
             ),
             flush_archive_max_bytes=getattr(
                 mem_cfg, "flush_archive_max_bytes", 800_000
+            ),
+            flush_compaction_requires_safe_receipt=getattr(
+                mem_cfg,
+                "flush_compaction_requires_safe_receipt",
+                False,
             ),
             tool_result_compression_enabled=getattr(
                 agent_token_cfg,
@@ -768,7 +773,14 @@ class _TurnRunnerCompactionPersistAdapter(CompactionPersistPort):
             summary,
             kept_entries,
         )
-        notify_compaction(session_key)
+        notify_compaction(
+            session_key,
+            source="automatic",
+            phase="agent_inline_overflow",
+            status="completed",
+            kept_count=len(kept_entries),
+            summary_len=len(summary or ""),
+        )
 
 class _TurnRunnerMemorySnapshotRefreshAdapter(MemorySnapshotRefreshPort):
     """Refresh ``runner._memory_snapshots[(agent_id, session_key)]`` after compaction.

@@ -79,6 +79,13 @@ def pre_compaction_flush_enabled(config: Any) -> bool:
     return bool(getattr(memory_cfg, "flush_enabled", True))
 
 
+def pre_compaction_flush_requires_safe_receipt(config: Any) -> bool:
+    memory_cfg = getattr(config, "memory", None)
+    if memory_cfg is None:
+        return False
+    return bool(getattr(memory_cfg, "flush_compaction_requires_safe_receipt", False))
+
+
 def flush_receipt_to_dict(receipt: Any) -> dict[str, Any]:
     if receipt is None:
         return {}

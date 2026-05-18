@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from opensquilla.gateway import context_overflow
 from opensquilla.gateway.config import ContextOverflowPolicy, GatewayConfig
 from opensquilla.gateway.context_overflow import (
     OverflowOutcome,
@@ -46,6 +47,12 @@ class _InsufficientCompactionSessionManager(_FakeSessionManager):
     async def compact(self, session_key: str, budget: int, config=None) -> str:
         self.compact_calls.append((session_key, budget, config))
         return "[summary]"
+
+
+class _FailingCompactionSessionManager(_FakeSessionManager):
+    async def compact(self, session_key: str, budget: int, config=None) -> str:
+        self.compact_calls.append((session_key, budget, config))
+        raise RuntimeError("compact boom")
 
 
 class _LegacyCompactSessionManager(_FakeSessionManager):
@@ -127,6 +134,7 @@ def _cfg(
     flush_enabled: bool = False,
     flush_timeout_seconds: float = 5.0,
     flush_background_timeout_seconds: float = 60.0,
+    flush_compaction_requires_safe_receipt: bool = False,
 ) -> GatewayConfig:
     return GatewayConfig(
         context_overflow_policy=policy,
@@ -135,6 +143,9 @@ def _cfg(
             "flush_enabled": flush_enabled,
             "flush_timeout_seconds": flush_timeout_seconds,
             "flush_background_timeout_seconds": flush_background_timeout_seconds,
+            "flush_compaction_requires_safe_receipt": (
+                flush_compaction_requires_safe_receipt
+            ),
         },
     )
 
@@ -236,6 +247,63 @@ async def test_auto_summarize_invokes_compaction_and_retries_once() -> None:
 
 
 @pytest.mark.asyncio
+async def test_auto_summarize_emits_started_and_completed_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10)
+    sm = _FakeSessionManager(_history(6, 40))
+    events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        context_overflow,
+        "notify_compaction",
+        lambda session_key, **payload: events.append((session_key, payload)),
+    )
+
+    outcome = await apply_context_overflow_policy(
+        config=cfg,
+        message="m",
+        transcript=sm._transcript,
+        session_key="s-auto-events",
+        session_manager=sm,
+    )
+
+    assert outcome.summarized is True
+    assert [(key, payload["status"]) for key, payload in events] == [
+        ("s-auto-events", "started"),
+        ("s-auto-events", "completed"),
+    ]
+    assert all(payload["source"] == "automatic" for _, payload in events)
+    assert all(payload["phase"] == "gateway_auto_summarize" for _, payload in events)
+
+
+@pytest.mark.asyncio
+async def test_auto_summarize_emits_failed_event_on_compaction_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10)
+    sm = _FailingCompactionSessionManager(_history(6, 40))
+    events: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr(
+        context_overflow,
+        "notify_compaction",
+        lambda session_key, **payload: events.append((session_key, payload)),
+    )
+
+    outcome = await apply_context_overflow_policy(
+        config=cfg,
+        message="m",
+        transcript=sm._transcript,
+        session_key="s-auto-failed",
+        session_manager=sm,
+    )
+
+    assert outcome.summarized is False
+    assert outcome.reason == "compaction_failed"
+    assert [payload["status"] for _, payload in events] == ["started", "failed"]
+    assert "compact boom" in events[-1][1]["message"]
+
+
+@pytest.mark.asyncio
 async def test_auto_summarize_refuses_when_compaction_still_exceeds_budget() -> None:
     cfg = _cfg(ContextOverflowPolicy.AUTO_SUMMARIZE, budget=10)
     sm = _InsufficientCompactionSessionManager(_history(6, 40))
@@ -313,6 +381,7 @@ async def test_auto_summarize_compacts_after_degraded_flush_receipt() -> None:
     assert outcome.flush_receipt is not None
     assert outcome.lifecycle is not None
     assert outcome.lifecycle.flush_receipt is outcome.flush_receipt
+    assert outcome.lifecycle.refused is False
     assert sm.compact_calls == [("agent:main:s-flush", 10, None)]
 
 

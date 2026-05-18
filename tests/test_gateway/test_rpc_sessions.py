@@ -14,6 +14,7 @@ import pytest
 
 from opensquilla.agents.registry import AgentRegistry
 from opensquilla.engine.types import DoneEvent
+from opensquilla.gateway import rpc_sessions
 from opensquilla.gateway.agent_tasks import get_agent_task_registry
 from opensquilla.gateway.attachment_ingest import (
     MAX_STAGED_PDF_BYTES,
@@ -1187,6 +1188,90 @@ class TestSessionsContextCompact:
         assert res.payload["remaining_budget_tokens"] == 834
         assert res.payload["removed_count"] == 1
         assert res.payload["kept_count"] == 0
+
+    @pytest.mark.asyncio
+    async def test_context_compact_emits_started_and_completed_events(
+        self,
+        dispatcher,
+        ctx_with_sessions,
+        session,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        events: list[tuple[str, dict[str, Any]]] = []
+        monkeypatch.setattr(
+            rpc_sessions,
+            "notify_compaction",
+            lambda session_key, **payload: events.append((session_key, payload)),
+        )
+
+        res = await dispatcher.dispatch(
+            "r1",
+            "sessions.contextCompact",
+            {"key": session.session_key, "contextWindowTokens": 1234},
+            ctx_with_sessions,
+        )
+
+        assert res.ok is True
+        assert [(key, payload["status"]) for key, payload in events] == [
+            (session.session_key, "started"),
+            (session.session_key, "completed"),
+        ]
+        assert all(payload["source"] == "manual" for _, payload in events)
+        assert all(payload["phase"] == "manual" for _, payload in events)
+
+    @pytest.mark.asyncio
+    async def test_context_compact_emits_skipped_when_nothing_removed(
+        self,
+        dispatcher,
+        session,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        manager = FakeSessionManager([session])
+        manager.compact_summary = ""
+        ctx = make_ctx(session_manager=manager)
+        events: list[tuple[str, dict[str, Any]]] = []
+        monkeypatch.setattr(
+            rpc_sessions,
+            "notify_compaction",
+            lambda session_key, **payload: events.append((session_key, payload)),
+        )
+
+        res = await dispatcher.dispatch(
+            "r1", "sessions.contextCompact", {"key": session.session_key}, ctx
+        )
+
+        assert res.ok is True
+        assert res.payload["compacted"] is False
+        assert [payload["status"] for _, payload in events] == ["started", "skipped"]
+
+    @pytest.mark.asyncio
+    async def test_context_compact_emits_failed_when_compaction_raises(
+        self,
+        dispatcher,
+        session,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        manager = FakeSessionManager([session])
+
+        async def _boom(*_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("compact boom")
+
+        manager.compact_with_result = _boom  # type: ignore[method-assign]
+        ctx = make_ctx(session_manager=manager)
+        events: list[tuple[str, dict[str, Any]]] = []
+        monkeypatch.setattr(
+            rpc_sessions,
+            "notify_compaction",
+            lambda session_key, **payload: events.append((session_key, payload)),
+        )
+
+        res = await dispatcher.dispatch(
+            "r1", "sessions.contextCompact", {"key": session.session_key}, ctx
+        )
+
+        assert res.ok is False
+        assert [payload["status"] for _, payload in events] == ["started", "failed"]
+        assert "compact boom" in events[-1][1]["message"]
 
     @pytest.mark.asyncio
     async def test_context_compact_passes_custom_instructions(

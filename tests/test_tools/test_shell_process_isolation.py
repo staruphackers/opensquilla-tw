@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+import shlex
+import sys
+import time
 from dataclasses import dataclass
 
 import pytest
@@ -101,6 +106,59 @@ def test_background_process_result_surfaces_local_http_server_url() -> None:
     assert "local_urls:" in result
     assert "- http://127.0.0.1:8080/" in result
     assert "include the local URL" in result
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process group behavior is POSIX-specific")
+@pytest.mark.asyncio
+async def test_exec_command_returns_when_shell_exits_even_if_descendant_holds_pipe() -> None:
+    child_script = "import time; time.sleep(5)"
+    parent_script = (
+        "import subprocess, sys; "
+        "subprocess.Popen([sys.executable, '-c', "
+        f"{child_script!r}], stdout=sys.stdout, stderr=sys.stderr)"
+    )
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(parent_script)}"
+
+    started = time.monotonic()
+    result = await shell.exec_command(command, timeout=1.0)
+    elapsed = time.monotonic() - started
+
+    assert result.startswith("exit_code=0\n")
+    assert elapsed < 1.0
+
+
+@pytest.mark.skipif(os.name != "posix", reason="process group behavior is POSIX-specific")
+@pytest.mark.asyncio
+async def test_exec_command_cleans_descendant_after_shell_exits(tmp_path) -> None:
+    marker = tmp_path / "descendant-ran"
+    child_script = (
+        "import pathlib, time; "
+        f"time.sleep(0.5); pathlib.Path({str(marker)!r}).write_text('ran')"
+    )
+    parent_script = (
+        "import subprocess, sys; "
+        "subprocess.Popen([sys.executable, '-c', "
+        f"{child_script!r}])"
+    )
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(parent_script)}"
+
+    result = await shell.exec_command(command, timeout=1.0)
+    await asyncio.sleep(0.8)
+
+    assert result.startswith("exit_code=0\n")
+    assert not marker.exists()
+
+
+@pytest.mark.asyncio
+async def test_exec_command_timeout_still_stops_foreground_process() -> None:
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote('import time; time.sleep(5)')}"
+
+    started = time.monotonic()
+    result = await shell.exec_command(command, timeout=0.1)
+    elapsed = time.monotonic() - started
+
+    assert "[timeout after 0.1s]" in result
+    assert elapsed < 1.0
 
 
 @pytest.mark.asyncio

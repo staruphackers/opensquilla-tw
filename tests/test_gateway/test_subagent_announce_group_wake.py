@@ -289,6 +289,35 @@ def test_group_outcome_summary_counts_and_bounds_non_success_children() -> None:
     assert failed["error_message_truncated"] is True
 
 
+def test_context_overflow_failure_is_sanitized_for_group_outcome_and_wake() -> None:
+    raw_error = (
+        "Context overflow is in the current turn's recent tool calls or "
+        "reasoning tail; history compaction cannot reduce it."
+    )
+    payloads = [
+        {
+            "child_session_key": "agent:worker:subagent:failed",
+            "task_id": "task-failed",
+            "agent_id": "worker-b",
+            "status": "failed",
+            "terminal_reason": "error",
+            "error_class": "current_turn_context_exhausted",
+            "error_message": raw_error,
+        }
+    ]
+
+    outcome = _build_subagent_group_outcome(payloads)
+    failed = outcome["failed_children"][0]
+    wake_message = _format_parent_wake_message(PARENT_TASK, payloads, outcome=outcome)
+
+    assert failed["error_class"] == "provider_request_too_large"
+    assert "too large" in failed["error_message"].lower()
+    assert raw_error not in failed["error_message"]
+    assert "current_turn_context_exhausted" not in wake_message
+    assert "history compaction cannot reduce it" not in wake_message
+    assert "too large" in wake_message.lower()
+
+
 @pytest.mark.asyncio
 async def test_group_payloads_fall_back_when_task_ledger_is_unavailable() -> None:
     child = "agent:worker:subagent:fallback"

@@ -9,6 +9,8 @@ import json
 import os
 import re
 import signal
+import subprocess
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -50,6 +52,8 @@ _DEFAULT_BACKGROUND_TIMEOUT = 1800.0
 _MAX_BACKGROUND_TIMEOUT = 3600.0
 _BACKGROUND_TERMINATE_TIMEOUT = 1.0
 _BACKGROUND_KILL_TIMEOUT = 1.0
+_EXEC_TERMINATE_TIMEOUT = 0.25
+_EXEC_KILL_TIMEOUT = 0.25
 _COMMAND_AUDIT_MAX_CHARS = 4096
 _SANDBOX_NETWORK_HINT = (
     "Hint: sandboxed shell/code has no network. Use http_request or web_fetch, "
@@ -467,6 +471,45 @@ async def _terminate_bg_session(session: _BgSession) -> None:
         log.warning("background_process_termination_timeout", session_id=session.session_id)
 
 
+async def _wait_exec_process(proc: Any, timeout: float) -> bool:
+    deadline = asyncio.get_running_loop().time() + max(0.0, timeout)
+    while proc.returncode is None:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            return proc.returncode is not None
+        await asyncio.sleep(min(0.01, remaining))
+    return True
+
+
+def _signal_exec_process_tree(proc: Any, sig: signal.Signals) -> bool:
+    if os.name == "posix":
+        os_mod = cast(Any, os)
+        try:
+            os_mod.killpg(proc.pid, sig)
+            return True
+        except ProcessLookupError:
+            return True
+        except OSError:
+            pass
+    if proc.returncode is not None:
+        return False
+    if sig == signal.SIGTERM:
+        proc.terminate()
+    else:
+        proc.kill()
+    return True
+
+
+async def _terminate_exec_process_tree(proc: Any) -> None:
+    _signal_exec_process_tree(proc, signal.SIGTERM)
+    if await _wait_exec_process(proc, _EXEC_TERMINATE_TIMEOUT):
+        return
+    kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
+    _signal_exec_process_tree(proc, kill_signal)
+    if not await _wait_exec_process(proc, _EXEC_KILL_TIMEOUT):
+        log.warning("exec_command_termination_timeout", pid=proc.pid)
+
+
 async def _await_bg_output_task(output_task: asyncio.Task[None]) -> None:
     try:
         await asyncio.wait_for(output_task, timeout=_BACKGROUND_KILL_TIMEOUT)
@@ -583,22 +626,31 @@ async def exec_command(
         log.info("shell_exec_elevated_host", command=_audit_command(command))
 
     try:
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=cwd,
-            env=merged_env,
-        )
-        try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=effective_timeout)
-        except TimeoutError:
-            proc.kill()
-            await proc.communicate()
-            return f"[timeout after {effective_timeout}s]\ncommand: {command}"
+        with tempfile.TemporaryFile() as output_file:
+            subprocess_kwargs: dict[str, Any] = {
+                "stdout": output_file,
+                "stderr": asyncio.subprocess.STDOUT,
+                "cwd": cwd,
+                "env": merged_env,
+            }
+            if os.name == "posix":
+                subprocess_kwargs["start_new_session"] = True
+            else:
+                creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                if creationflags:
+                    subprocess_kwargs["creationflags"] = creationflags
 
-        output = stdout.decode("utf-8", errors="replace")
-        return f"exit_code={proc.returncode}\n{output}"
+            proc = await asyncio.create_subprocess_shell(command, **subprocess_kwargs)
+            if not await _wait_exec_process(proc, effective_timeout):
+                await _terminate_exec_process_tree(proc)
+                return f"[timeout after {effective_timeout}s]\ncommand: {command}"
+            if os.name == "posix":
+                _signal_exec_process_tree(proc, signal.SIGTERM)
+
+            output_file.flush()
+            output_file.seek(0)
+            output = output_file.read().decode("utf-8", errors="replace")
+            return f"exit_code={proc.returncode}\n{output}"
     except Exception as e:
         return f"[error] {e}"
 

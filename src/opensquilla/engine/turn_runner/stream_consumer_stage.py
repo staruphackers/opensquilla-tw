@@ -394,7 +394,7 @@ class _ErrorHandler:
                 message=_LLM_TIMEOUT_ENVELOPE["user_message"],
                 code=_LLM_TIMEOUT_ENVELOPE["error_class"],
             )
-        if event.code == "incomplete_tool_stream":
+        if event.code in {"incomplete_tool_stream", "provider_output_truncated"}:
             state.turn_segments[:] = _drop_unpaired_tool_use_segments(
                 state.turn_segments
             )
@@ -628,8 +628,8 @@ def _format_subagent_failure_children(value: Any) -> str:
 def _format_subagent_failure_error(child: dict[str, Any]) -> str:
     error_class = _first_text(child.get("error_class"), default="")
     error_message = _first_text(child.get("error_message"), default="")
-    if error_class == "current_turn_context_exhausted":
-        return error_class
+    if error_class in {"current_turn_context_exhausted", "provider_request_too_large"}:
+        return "provider_request_too_large"
     if error_message and len(error_message) > 160:
         error_message = f"{error_message[:157]}..."
     if error_class and error_message:

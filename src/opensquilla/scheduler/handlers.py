@@ -13,7 +13,11 @@ from typing import Any
 import structlog
 
 from opensquilla.engine.stream_wrappers import wrap_stream
-from opensquilla.scheduler.delivery import DeliveryChain, build_reply_rendezvous_envelope
+from opensquilla.scheduler.delivery import (
+    DeliveryChain,
+    build_reply_rendezvous_envelope,
+    strip_reply_directives,
+)
 from opensquilla.scheduler.heartbeat_loop import DEFAULT_HEARTBEAT_PROMPT
 from opensquilla.scheduler.payloads import payload_agent_id, payload_text
 from opensquilla.scheduler.types import (
@@ -24,6 +28,11 @@ from opensquilla.scheduler.types import (
     SessionTarget,
 )
 from opensquilla.session.keys import build_main_key
+from opensquilla.session.terminal_reply import (
+    build_terminal_reply,
+    is_context_payload_too_large,
+    sanitize_agent_error,
+)
 from opensquilla.tools.types import ToolContext
 
 log = structlog.get_logger(__name__)
@@ -305,6 +314,8 @@ def make_agent_run_handler(
                             or getattr(record, "terminal_reason", None)
                             or "Agent error"
                         )
+                        if is_context_payload_too_large(record):
+                            error_message = build_terminal_reply(record)
                         result_text = error_message or ""
                     summary = result_text[:500] if result_text else error_message
             else:
@@ -326,12 +337,26 @@ def make_agent_run_handler(
                         run_kind="cron_turn",
                         input_provenance={"kind": "cron_job", "job_id": job.id},
                     ),
-                    idle_timeout=180.0,
+                    idle_timeout=None,
                 ):
                     event_kind = getattr(event, "kind", "")
                     if event_kind == "error":
                         success = False
                         error_message = getattr(event, "message", "Agent error") or "Agent error"
+                        if is_context_payload_too_large(
+                            {
+                                "terminal_reason": getattr(event, "code", ""),
+                                "error_class": getattr(event, "code", ""),
+                                "error_message": error_message,
+                            }
+                        ):
+                            error_message = build_terminal_reply(
+                                {
+                                    "terminal_reason": getattr(event, "code", ""),
+                                    "error_class": getattr(event, "code", ""),
+                                    "error_message": error_message,
+                                }
+                            )
                     elif (
                         event_kind not in {"done", "state_change", "tool_use_start", "tool_result"}
                         and hasattr(event, "text")
@@ -343,10 +368,21 @@ def make_agent_run_handler(
                     result_text = error_message or ""
                 summary = result_text[:500] if result_text else error_message
         except Exception as exc:
-            result_text = f"Cron job '{job.name}' failed: {exc}"
+            _, error_message = sanitize_agent_error(
+                {
+                    "status": "failed",
+                    "terminal_reason": "error",
+                    "error_class": getattr(exc, "code", None) or type(exc).__name__,
+                    "error_message": str(exc),
+                },
+                fallback_error_message=str(exc) or "Agent error",
+            )
+            result_text = f"Cron job '{job.name}' failed: {error_message}"
             summary = result_text[:500]
             success = False
-            error_message = str(exc)
+
+        result_text = strip_reply_directives(result_text) or ""
+        summary = strip_reply_directives(summary)
 
         # Delivery chain — Channel + WS + session forward in parallel
         report = await delivery_chain.deliver(
@@ -374,6 +410,45 @@ def make_agent_run_handler(
         )
 
     return agent_run_handler
+
+
+def make_static_message_handler(delivery_chain: DeliveryChain) -> Callable:
+    """Factory for reminder cron jobs that only deliver static text."""
+
+    async def static_message_handler(job: CronJob) -> HandlerResult:
+        session_key = _resolve_session_key(job)
+        text = payload_text(job.payload, job.session_target)
+        if not text.strip():
+            log.warning("static_message_handler.empty_text", job_id=job.id)
+            return HandlerResult(session_key=session_key)
+
+        await delivery_chain.notify_start(job, text)
+        log.info(
+            "static_message_handler.start",
+            job_id=job.id,
+            session_target=str(job.session_target),
+            session_key=session_key,
+        )
+        report = await delivery_chain.deliver(
+            job,
+            result_text=text,
+            success=True,
+            summary=text[:500],
+            session_key=session_key,
+            route_envelope=build_reply_rendezvous_envelope(job, session_key),
+        )
+        delivery_error = _required_delivery_error(job, report)
+        if delivery_error:
+            raise RuntimeError(delivery_error)
+        return HandlerResult(
+            summary=text[:500],
+            session_key=session_key,
+            delivery_status=(
+                f"{report.channel_status}|ws:{report.ws_status}|fwd:{report.session_status}"
+            ),
+        )
+
+    return static_message_handler
 
 
 async def _read_transcript_rows(sm: Any, session_key: str) -> list[Any]:

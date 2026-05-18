@@ -420,6 +420,19 @@ def test_chat_tracks_background_task_groups_as_active_run_state() -> None:
     assert "_activeTaskGroups.size > 0" in source
 
 
+def test_chat_surfaces_manual_and_passive_compaction_toasts() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+    compact_block = source[
+        source.index("case 'compact_context':") : source.index("case 'usage_status':")
+    ]
+
+    assert "function _showCompactionToast(payload)" in source
+    assert "Compacting session context..." in source
+    assert "_showCompactionToast({ ...(result || {}), source: 'manual'" not in compact_block
+    assert "session.event.compaction" in source
+    assert "Context compacted older messages to keep this session within budget" in source
+
+
 def test_chat_clears_background_task_groups_on_state_reset_paths() -> None:
     source = CHAT_JS.read_text(encoding="utf-8")
 

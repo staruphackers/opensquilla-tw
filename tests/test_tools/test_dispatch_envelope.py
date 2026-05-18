@@ -127,6 +127,8 @@ async def test_dispatch_rejects_unparsed_raw_tool_arguments_before_handler() -> 
     )
 
     assert result.is_error is True
+    assert result.execution_status is not None
+    assert result.execution_status["reason"] == "runtime_error"
     payload = json.loads(result.content)
     assert payload["tool"] == "echo"
     assert payload["error_class"] == "InvalidToolArgumentsError"
@@ -151,6 +153,8 @@ async def test_dispatch_rejects_provider_compacted_tool_arguments_before_handler
     )
 
     assert result.is_error is True
+    assert result.execution_status is not None
+    assert result.execution_status["reason"] == "provider_context_projection_reused"
     payload = json.loads(result.content)
     assert payload["tool"] == "echo"
     assert payload["error_class"] == "ProjectedToolArgumentsError"

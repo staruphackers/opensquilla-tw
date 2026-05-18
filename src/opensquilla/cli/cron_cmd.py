@@ -17,6 +17,7 @@ from opensquilla.cli.ui import ACCENT_HEADER, console
 cron_app = typer.Typer(help="Inspect and manage scheduled OpenSquilla runs.")
 
 _SESSION_TARGETS = {"isolated", "main", "current", "session"}
+_JOB_KINDS = {"auto", "reminder", "agent_turn", "system_event"}
 _WAKE_MODES = {"now", "next-heartbeat"}
 
 
@@ -25,6 +26,17 @@ def _validate_session_target(value: str) -> str:
     if normalized not in _SESSION_TARGETS:
         raise typer.BadParameter(
             "--session-target must be one of isolated, main, current, session"
+        )
+    return normalized
+
+
+def _validate_job_kind(value: Any) -> str:
+    if not isinstance(value, str):
+        return "auto"
+    normalized = value.strip().lower()
+    if normalized not in _JOB_KINDS:
+        raise typer.BadParameter(
+            "--job-kind must be one of auto, reminder, agent_turn, system_event"
         )
     return normalized
 
@@ -434,6 +446,14 @@ def cron_add(
     text: str = typer.Option(..., "--text", help="Prompt text to run"),
     name: str | None = typer.Option(None, "--name", help="Display name"),
     agent: str | None = typer.Option(None, "--agent", help="Agent id"),
+    job_kind: str = typer.Option(
+        "auto",
+        "--job-kind",
+        help=(
+            "Cron payload kind: auto, reminder, agent_turn, or system_event. "
+            "auto creates static reminders for non-main targets and system events for main."
+        ),
+    ),
     session_target: str = typer.Option(
         "isolated",
         "--session-target",
@@ -567,6 +587,15 @@ def cron_add(
     """Add a scheduled cron job."""
 
     target = _validate_session_target(session_target)
+    payload_kind = _validate_job_kind(job_kind)
+    if payload_kind == "auto":
+        payload_kind = "system_event" if target == "main" else "reminder"
+    if payload_kind == "reminder" and target == "main":
+        raise typer.BadParameter("--job-kind reminder cannot use --session-target main")
+    if payload_kind == "agent_turn" and target == "main":
+        raise typer.BadParameter("--job-kind agent_turn cannot use --session-target main")
+    if payload_kind == "system_event" and target != "main":
+        raise typer.BadParameter("--job-kind system_event requires --session-target main")
     if target == "current":
         raise typer.BadParameter(
             "--session-target current is only available from session-bound clients; "
@@ -581,6 +610,7 @@ def cron_add(
             tz=tz,
         ),
         "text": text,
+        "payloadKind": payload_kind,
         "sessionTarget": target,
     }
     if name:

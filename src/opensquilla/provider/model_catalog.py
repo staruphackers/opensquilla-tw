@@ -234,15 +234,18 @@ class ModelCatalog:
         else:
             effective = DEFAULT_MAX_TOKENS
 
-        # Clamp to context window
+        # Clamp to context window. Some provider catalogs report a model's
+        # max_completion_tokens as almost the entire context window; using that
+        # value as max_tokens leaves no room for ordinary prompt/tool/image input
+        # and causes preventable context-limit failures.
         if context_window > 0:
             effective = min(effective, context_window)
             if (
                 not using_user_override
                 and context_window > DEFAULT_MAX_TOKENS
-                and effective >= context_window
+                and effective >= context_window - DEFAULT_MAX_TOKENS
             ):
-                effective = DEFAULT_MAX_TOKENS
+                effective = min(effective, DEFAULT_MAX_TOKENS)
 
         return effective
 

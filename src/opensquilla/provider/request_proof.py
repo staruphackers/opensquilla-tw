@@ -400,6 +400,77 @@ def _hard_compact_content_for_provider(content: Any, *, label: str) -> Any:
     return compacted
 
 
+def _execution_status_is_failure(status: Any) -> bool:
+    if not isinstance(status, dict):
+        return False
+    return str(status.get("status") or "").lower() in {
+        "error",
+        "timeout",
+        "cancelled",
+    }
+
+
+def _tool_content_is_critical(content: Any) -> bool:
+    if isinstance(content, str):
+        with contextlib.suppress(json.JSONDecodeError):
+            parsed = json.loads(content)
+            if isinstance(parsed, dict):
+                if _execution_status_is_failure(parsed.get("execution_status")):
+                    return True
+                if parsed.get("is_error") is True:
+                    return True
+        lowered = content.lower()
+        return "execution_status" in lowered and any(
+            marker in lowered
+            for marker in (
+                '"status":"error"',
+                '"status": "error"',
+                '"status":"timeout"',
+                '"status": "timeout"',
+                '"status":"cancelled"',
+                '"status": "cancelled"',
+            )
+        )
+    if not isinstance(content, list):
+        return False
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get("is_error") is True:
+            return True
+        if _tool_content_is_critical(block.get("content")):
+            return True
+    return False
+
+
+def _critical_tool_content_for_provider(content: Any) -> Any:
+    if isinstance(content, str):
+        return _emergency_compact_string(content, label="tool_result")
+    if not isinstance(content, list):
+        return content
+    compacted: list[Any] = []
+    for block in content:
+        if not isinstance(block, dict):
+            compacted.append(block)
+            continue
+        next_block = dict(block)
+        if isinstance(next_block.get("content"), str):
+            next_block["content"] = _emergency_compact_string(
+                next_block["content"],
+                label="tool_result",
+            )
+        compacted.append(next_block)
+    return compacted
+
+
+def _compact_tool_arguments_for_final_cap(arguments: str) -> str:
+    return json.dumps(
+        {_INVALID_PROVIDER_CONTEXT_ARGUMENTS_KEY: True},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
 def _compact_tool_payload_once(payload: dict[str, Any]) -> dict[str, Any]:
     compacted = deepcopy(payload)
     for message in compacted.get("messages", []):
@@ -594,10 +665,13 @@ def _final_hard_cap_payload_once(payload: dict[str, Any]) -> dict[str, Any]:
                 )
             continue
         if role == "tool":
-            message["content"] = _hard_compact_content_for_provider(
-                content,
-                label="tool_result",
-            )
+            if _tool_content_is_critical(content):
+                message["content"] = _critical_tool_content_for_provider(content)
+            else:
+                message["content"] = _hard_compact_content_for_provider(
+                    content,
+                    label="tool_result",
+                )
             continue
         if role != "assistant":
             continue
@@ -622,15 +696,7 @@ def _final_hard_cap_payload_once(payload: dict[str, Any]) -> dict[str, Any]:
                 continue
             arguments = function.get("arguments")
             if isinstance(arguments, str):
-                normalized = _provider_context_arguments_json(arguments)
-                function["arguments"] = (
-                    normalized
-                    if normalized is not None
-                    else _hard_compact_string(
-                        arguments,
-                        label="tool_arguments",
-                    )
-                )
+                function["arguments"] = _compact_tool_arguments_for_final_cap(arguments)
     return compacted
 
 

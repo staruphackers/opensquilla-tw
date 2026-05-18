@@ -47,7 +47,7 @@ from opensquilla.gateway.session_streams import get_session_streams
 from opensquilla.gateway.websocket import get_registry
 from opensquilla.paths import default_opensquilla_home
 from opensquilla.permissions import configured_default_elevated
-from opensquilla.session.terminal_reply import build_terminal_reply
+from opensquilla.session.terminal_reply import build_terminal_reply, sanitize_agent_error
 
 log = structlog.get_logger(__name__)
 
@@ -70,9 +70,16 @@ _LOG_LEVELS = {
 class TaskRuntimeStreamError(RuntimeError):
     """Terminal error raised after a turn stream emits an error event."""
 
-    def __init__(self, message: str, *, code: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        terminal_reason: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.terminal_reason = terminal_reason
 
 
 # fmt: off
@@ -295,6 +302,14 @@ class ServiceContainer:
         an in-flight cron job or heartbeat tick can drive TurnRunner ->
         TurnCaptureService.capture_turn against an already-closed store.
         """
+        remove_compaction_listener = getattr(self, "_compaction_listener_remove", None)
+        if callable(remove_compaction_listener):
+            try:
+                remove_compaction_listener()
+            except Exception:
+                pass
+            self._compaction_listener_remove = None
+
         # ── 1. Stop scheduled producers (no further writes after this) ──
         if self.heartbeat_watcher is not None:
             try:
@@ -487,6 +502,22 @@ def _task_runtime_max_pending_per_session(config: GatewayConfig) -> int:
     return int(config.task_runtime.max_pending_per_session)
 
 
+def _task_runtime_turn_hard_deadline_s(config: GatewayConfig) -> float | None:
+    configured = getattr(config.task_runtime, "turn_hard_deadline_s", None)
+    if configured is not None:
+        return float(configured)
+    runtime_timeout = getattr(config, "agent_runtime_timeout_seconds", None)
+    if runtime_timeout is None:
+        runtime_timeout = 900.0
+    try:
+        runtime_timeout_value = float(runtime_timeout)
+    except (TypeError, ValueError):
+        runtime_timeout_value = 900.0
+    if runtime_timeout_value <= 0:
+        return None
+    return runtime_timeout_value + 30.0
+
+
 def _task_runtime_envelope_owner(envelope: Any) -> bool:
     """Resolve owner privileges from authenticated route metadata."""
     from opensquilla.gateway.routing import SourceKind
@@ -541,7 +572,7 @@ async def dispatch_task_runtime_turn(
     )
     raw_stream = turn_runner.run(run.message, run.session_key, **run_kwargs)
     stream_idle_timeout = _optional_positive_timeout(
-        config, "agent_stream_idle_timeout_seconds", 180.0
+        config, "agent_stream_idle_timeout_seconds", 600.0
     )
     heartbeat_interval = _optional_positive_timeout(
         config, "agent_stream_heartbeat_interval_seconds", 15.0
@@ -556,7 +587,11 @@ async def dispatch_task_runtime_turn(
             stream_event_sink=getattr(run, "stream_event_sink", None),
         )
     except TaskRuntimeStreamError as exc:
-        if exc.code == "provider_request_budget_exhausted":
+        if exc.code in {
+            "provider_request_budget_exhausted",
+            "provider_request_too_large",
+            "current_turn_context_exhausted",
+        }:
             message_id = getattr(run, "persisted_user_message_id", None)
             remove_message = getattr(session_manager, "remove_message", None)
             if isinstance(message_id, str) and message_id and callable(remove_message):
@@ -701,6 +736,7 @@ async def _emit_task_runtime_stream_events(
 
     error_message: str | None = None
     error_code: str | None = None
+    terminal_reason: str | None = None
     async for event in wrap_stream(
         raw_stream,
         idle_timeout=idle_timeout,
@@ -737,17 +773,35 @@ async def _emit_task_runtime_stream_events(
             error_code = str(code) if code else None
             code_text = str(code or "").lower()
             is_timeout = "timeout" in code_text or "stream idle" in error_message.lower()
+            is_output_truncated = code_text == "provider_output_truncated"
+            terminal_reason = (
+                "timeout"
+                if is_timeout
+                else "output_truncated"
+                if is_output_truncated
+                else "error"
+            )
             terminal_payload = {
                 "status": "timeout" if is_timeout else "failed",
-                "terminal_reason": "timeout" if is_timeout else "error",
+                "terminal_reason": terminal_reason,
                 "error_class": code,
                 "error_message": error_message,
             }
+            safe_error_code, safe_error_message = sanitize_agent_error(
+                terminal_payload,
+                fallback_error_class=error_code,
+                fallback_error_message=error_message,
+            )
+            if safe_error_code == "provider_request_too_large":
+                error_code = safe_error_code
+                event_dict["code"] = safe_error_code
+                terminal_payload["error_class"] = safe_error_code
+                terminal_payload["error_message"] = safe_error_message
             terminal_message = build_terminal_reply(terminal_payload)
             event_dict["message"] = terminal_message
             event_dict["terminal_message"] = terminal_message
             event_dict["terminal_reason"] = terminal_payload["terminal_reason"]
-            event_dict["error_message"] = error_message
+            event_dict["error_message"] = safe_error_message
         await event_emitter(
             session_key,
             f"session.event.{event_kind}",
@@ -757,7 +811,11 @@ async def _emit_task_runtime_stream_events(
             message = event_dict.get("error_message")
             error_message = message if isinstance(message, str) and message else "Agent error"
     if error_message is not None:
-        raise TaskRuntimeStreamError(error_message, code=error_code)
+        raise TaskRuntimeStreamError(
+            error_message,
+            code=error_code,
+            terminal_reason=terminal_reason,
+        )
 
 
 def _env_bool(name: str) -> bool | None:
@@ -1282,7 +1340,11 @@ async def build_services(
     try:
         from opensquilla.tools.builtin.media import configure_image_generation
 
-        configure_image_generation(config.image_generation, llm_config=config.llm)
+        configure_image_generation(
+            config.image_generation,
+            llm_config=config.llm,
+            squilla_router_config=config.squilla_router,
+        )
     except Exception as e:
         log.warning("build_services.image_generation_config_failed", error=str(e))
 
@@ -1702,6 +1764,30 @@ async def start_gateway_server(
         subscription_manager=subscription_manager,
         connection_registry=get_registry(),
     )
+
+    from opensquilla.engine.cache_break_monitor import add_compaction_listener
+
+    def _emit_runtime_compaction_event(
+        session_key: str,
+        payload: dict[str, Any],
+    ) -> None:
+        event_payload = dict(payload or {})
+        event_payload.setdefault("status", "completed")
+        event_payload.setdefault("source", "automatic")
+        emit_coro = runtime_event_bridge.emit(
+            session_key,
+            "session.event.compaction",
+            event_payload,
+        )
+        try:
+            create_background_task(emit_coro)
+        except RuntimeError:
+            emit_coro.close()
+
+    svc._compaction_listener_remove = add_compaction_listener(
+        _emit_runtime_compaction_event
+    )
+
     background_completion_manager = BackgroundCompletionManager(
         session_manager=svc.session_manager,
         event_emitter=runtime_event_bridge.emit,
@@ -1743,9 +1829,7 @@ async def start_gateway_server(
         subagent_reserved_slots=int(
             getattr(getattr(config, "subagents", None), "subagent_reserved_slots", 0)
         ),
-        turn_hard_deadline_s=getattr(
-            config.task_runtime, "turn_hard_deadline_s", None
-        ),
+        turn_hard_deadline_s=_task_runtime_turn_hard_deadline_s(config),
         pending_overflow_policy=getattr(
             config.task_runtime, "pending_overflow_policy", "reject_newest"
         ),
@@ -1790,7 +1874,11 @@ async def start_gateway_server(
         from opensquilla.memory.dream_factory import build_dream_factory
         from opensquilla.scheduler.delivery import DeliveryChain
         from opensquilla.scheduler.dream_handler import make_memory_dream_handler
-        from opensquilla.scheduler.handlers import make_agent_run_handler, make_system_event_handler
+        from opensquilla.scheduler.handlers import (
+            make_agent_run_handler,
+            make_static_message_handler,
+            make_system_event_handler,
+        )
         from opensquilla.scheduler.heartbeat_service import HeartbeatService
 
         async def _cron_ws_emitter(topic: str, event: str, payload: dict) -> int:
@@ -1929,6 +2017,7 @@ async def start_gateway_server(
             workspace_resolver=_cron_workspace_resolver,
             default_elevated=lambda: configured_default_elevated(config),
         )
+        static_handler = make_static_message_handler(delivery_chain=delivery_chain)
         dream_handler = make_memory_dream_handler(
             build_dream=build_dream_factory(
                 config=config,
@@ -1941,9 +2030,11 @@ async def start_gateway_server(
             ),
         )
         svc.cron_scheduler.register_handler("agent_run", agent_handler)
+        svc.cron_scheduler.register_handler("static_message", static_handler)
         svc.cron_scheduler.register_handler("system_event", system_handler)
         svc.cron_scheduler.register_handler("memory_dream", dream_handler)
         log.info("gateway.cron_handler_registered", handler_key="agent_run")
+        log.info("gateway.cron_handler_registered", handler_key="static_message")
         log.info("gateway.cron_handler_registered", handler_key="system_event")
         log.info("gateway.cron_handler_registered", handler_key="memory_dream")
         await _register_dream_crons(

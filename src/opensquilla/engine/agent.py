@@ -19,6 +19,7 @@ from typing import Any
 import structlog
 
 from opensquilla.artifacts import artifact_payload
+from opensquilla.context_budget import ContextBudgetClass, ContextBudgetGovernor
 from opensquilla.engine.cache_break_monitor import (
     check_response_for_cache_break,
     notify_compaction,
@@ -134,6 +135,10 @@ _TOOL_ARGUMENT_PROJECTION_PREFIX = "[tool_use_argument_projection]\n"
 _INVALID_PROVIDER_CONTEXT_PROJECTION_PREFIX = "[invalid_provider_context_projection:"
 _INVALID_PROVIDER_CONTEXT_ARGUMENTS_KEY = "_invalid_provider_context_arguments"
 _PROVIDER_CONTEXT_PROJECTION_REUSED_REASON = "provider_context_projection_reused"
+_PROVIDER_CONTEXT_PROJECTION_REUSED_USER_MESSAGE = (
+    "I could not execute the tool call because it reused provider-only compacted "
+    "tool arguments. Regenerate the real tool arguments and retry."
+)
 _COMPACTED_TOOL_ARGUMENT_MARKERS = frozenset(
     {
         "_opensquilla_compacted_tool_arguments",
@@ -248,6 +253,10 @@ def _tool_result_content_has_artifact(content: str) -> bool:
     if isinstance(payload.get("artifact"), dict) or isinstance(payload.get("artifacts"), list):
         return True
     return payload.get("status") in {"published", "already_published"}
+
+
+def _tool_result_budget_tokens(content: str) -> int:
+    return max(get_approx_tokens(content), len(content) // 4)
 
 
 def _artifact_event_kwargs(payload: dict[str, Any]) -> dict[str, Any]:
@@ -387,15 +396,15 @@ def _classify_provider_attempt(
             stop_reason=stop_reason,
             user_visible_emitted=user_visible_emitted,
         )
-    if visible_text or tool_calls:
-        return _ProviderAttemptClassification(
-            _ProviderAttemptKind.OK,
-            stop_reason=stop_reason,
-            user_visible_emitted=user_visible_emitted,
-        )
     if (stop_reason or "").lower() == "length":
         return _ProviderAttemptClassification(
             _ProviderAttemptKind.LENGTH_CAPPED,
+            stop_reason=stop_reason,
+            user_visible_emitted=user_visible_emitted,
+        )
+    if visible_text or tool_calls:
+        return _ProviderAttemptClassification(
+            _ProviderAttemptKind.OK,
             stop_reason=stop_reason,
             user_visible_emitted=user_visible_emitted,
         )
@@ -661,6 +670,38 @@ class Agent:
             return None
         return self._positive_int(proof.get("estimated_tokens"))
 
+    def _provider_request_proof_max_chars(self) -> int:
+        return self._context_budget_governor().snapshot().provider_request_max_chars
+
+    def _context_budget_governor(self) -> ContextBudgetGovernor:
+        return ContextBudgetGovernor.from_config(self.config)
+
+    @staticmethod
+    def _context_budget_class(
+        budget_class: ToolResultBudgetClass | None,
+    ) -> ContextBudgetClass:
+        if budget_class is ToolResultBudgetClass.EXTERNAL:
+            return ContextBudgetClass.EXTERNAL
+        if budget_class is ToolResultBudgetClass.ARTIFACT:
+            return ContextBudgetClass.ARTIFACT
+        if budget_class is ToolResultBudgetClass.ERROR:
+            return ContextBudgetClass.ERROR
+        if budget_class is ToolResultBudgetClass.CONTROL:
+            return ContextBudgetClass.CONTROL
+        return ContextBudgetClass.LOCAL
+
+    def _tool_use_argument_provider_request_max_chars(self, tool_name: str) -> int:
+        budget_class = self._context_budget_class(resolve_budget_class(tool_name))
+        return self._context_budget_governor().tool_argument_chars_for(budget_class)
+
+    def _tool_result_provider_request_max_chars(
+        self,
+        budget_class: ToolResultBudgetClass | None = None,
+    ) -> int:
+        return self._context_budget_governor().tool_result_provider_chars_for(
+            self._context_budget_class(budget_class)
+        )
+
     def _tool_execution_timeout(self, tool_call: ToolCall) -> float:
         timeout = float(self.config.tool_timeout)
         tool_def = self._tool_definition_by_name.get(tool_call.tool_name)
@@ -846,7 +887,7 @@ class Agent:
         total_tool_result_tokens = 0
         for message_index, block_index, block in tool_result_refs:
             content = block.content if isinstance(block.content, str) else str(block.content)
-            tokens = get_approx_tokens(content)
+            tokens = _tool_result_budget_tokens(content)
             total_tool_result_tokens += tokens
             if (
                 id(block) in recent_ids
@@ -883,7 +924,7 @@ class Agent:
                 "[aggregate_tool_result_compacted]\n"
                 f"tool_use_id: {block.tool_use_id}\n"
                 f"original_chars: {len(content)}\n"
-                f"original_tokens_estimate: {get_approx_tokens(content)}\n"
+                f"original_tokens_estimate: {_tool_result_budget_tokens(content)}\n"
                 f"sha256: {digest}\n"
                 f"{handle_line}"
                 f"omitted_chars: {omitted}\n"
@@ -897,7 +938,7 @@ class Agent:
                 content=compacted,
                 is_error=block.is_error,
             )
-            replacement_tokens = get_approx_tokens(compacted)
+            replacement_tokens = _tool_result_budget_tokens(compacted)
             total_tool_result_tokens -= max(0, original_tokens - replacement_tokens)
 
         if not replacements:
@@ -929,7 +970,7 @@ class Agent:
             )
 
         before_tokens = sum(
-            get_approx_tokens(
+            _tool_result_budget_tokens(
                 block.content if isinstance(block.content, str) else str(block.content)
             )
             for _message_index, _block_index, block in tool_result_refs
@@ -943,7 +984,7 @@ class Agent:
                     content = (
                         block.content if isinstance(block.content, str) else str(block.content)
                     )
-                    after_tokens += get_approx_tokens(content)
+                    after_tokens += _tool_result_budget_tokens(content)
 
         self.config.metadata["tool_aggregate_compression_applied"] = True
         self.config.metadata["tool_aggregate_compression_calls"] = (
@@ -984,7 +1025,7 @@ class Agent:
         tool_result_refs: list[tuple[int, int, ContentBlockToolResult]],
         tool_name_by_use_id: dict[str, str],
     ) -> list[Message]:
-        cap = int(getattr(self.config, "tool_result_provider_request_max_chars", 0) or 0)
+        cap = self._tool_result_provider_request_max_chars(ToolResultBudgetClass.LOCAL)
         if cap <= 0 or not tool_result_refs:
             return messages
 
@@ -992,8 +1033,20 @@ class Agent:
             return block.content if isinstance(block.content, str) else str(block.content)
 
         total_chars = sum(len(_content(block)) for _m, _b, block in tool_result_refs)
-        if total_chars <= cap:
+        external_cap = self._tool_result_provider_request_max_chars(
+            ToolResultBudgetClass.EXTERNAL
+        )
+        external_chars = sum(
+            len(_content(block))
+            for _m, _b, block in tool_result_refs
+            if resolve_budget_class(tool_name_by_use_id.get(block.tool_use_id, ""))
+            is ToolResultBudgetClass.EXTERNAL
+        )
+        if total_chars <= cap and external_chars <= external_cap:
             return messages
+
+        def _over_budget() -> bool:
+            return total_chars > cap or external_chars > external_cap
 
         keep_recent = max(0, int(getattr(self.config, "tool_result_external_keep_recent", 2)))
         external_refs = [
@@ -1006,7 +1059,7 @@ class Agent:
         replacements: dict[tuple[int, int], ContentBlockToolResult] = {}
 
         for message_index, block_index, block in tool_result_refs:
-            if total_chars <= cap:
+            if not _over_budget():
                 break
             content = _content(block)
             tool_name = tool_name_by_use_id.get(block.tool_use_id, "")
@@ -1028,18 +1081,9 @@ class Agent:
                 replacement_content = (
                     "[external_tool_result_compacted]\n"
                     f"tool: {tool_name or 'unknown'}\n"
-                    f"tool_use_id: {block.tool_use_id}\n"
-                    f"original_chars: {len(content)}\n"
-                    f"sha256: {digest}\n"
-                    "reason: older external tool result compacted for provider request budget."
-                )
-            elif block.is_error and len(content) > 800:
-                replacement_content = compact_tool_result_content(
-                    tool_name=tool_name,
-                    content=content,
-                    max_preview_chars=240,
-                    budget_class=ToolResultBudgetClass.ERROR,
-                    is_error=True,
+                    f"id: {block.tool_use_id}\n"
+                    f"chars: {len(content)}\n"
+                    f"sha256: {digest[:16]}"
                 )
 
             if replacement_content is None or len(replacement_content) >= len(content):
@@ -1049,33 +1093,10 @@ class Agent:
                 content=replacement_content,
                 is_error=block.is_error,
             )
-            total_chars -= len(content) - len(replacement_content)
-
-        if total_chars > cap:
-            for message_index, block_index, block in tool_result_refs:
-                if total_chars <= cap:
-                    break
-                if (message_index, block_index) in replacements:
-                    continue
-                tool_name = tool_name_by_use_id.get(block.tool_use_id, "")
-                if resolve_budget_class(tool_name) is ToolResultBudgetClass.CONTROL:
-                    continue
-                content = _content(block)
-                replacement_content = compact_tool_result_content(
-                    tool_name=tool_name or "unknown",
-                    content=content,
-                    max_preview_chars=80,
-                    budget_class=resolve_budget_class(tool_name),
-                    is_error=block.is_error,
-                )
-                if len(replacement_content) >= len(content):
-                    continue
-                replacements[(message_index, block_index)] = ContentBlockToolResult(
-                    tool_use_id=block.tool_use_id,
-                    content=replacement_content,
-                    is_error=block.is_error,
-                )
-                total_chars -= len(content) - len(replacement_content)
+            saved_chars = len(content) - len(replacement_content)
+            total_chars -= saved_chars
+            if budget_class is ToolResultBudgetClass.EXTERNAL:
+                external_chars -= saved_chars
 
         if not replacements:
             return messages
@@ -1115,10 +1136,7 @@ class Agent:
         self,
         messages: list[Message],
     ) -> list[Message]:
-        cap = int(
-            getattr(self.config, "tool_use_argument_provider_request_max_chars", 0)
-            or 0
-        )
+        cap = self._tool_use_argument_provider_request_max_chars("")
         if cap <= 0:
             return messages
 
@@ -1196,6 +1214,7 @@ class Agent:
                 if not isinstance(block, ContentBlockToolUse):
                     continue
                 input_chars = tool_input_sizes[(message_index, block_index)]
+                input_cap = self._tool_use_argument_provider_request_max_chars(block.name)
                 file_write_success = (
                     block.name in {"write_file", "edit_file", "apply_patch"}
                     and block.id in successful_tool_result_ids
@@ -1229,7 +1248,11 @@ class Agent:
                         input=legacy_projected_input,
                     )
                     continue
-                if input_chars <= cap and not aggregate_projection and not file_write_success:
+                if (
+                    input_chars <= input_cap
+                    and not aggregate_projection
+                    and not file_write_success
+                ):
                     continue
                 raw_input = json.dumps(
                     block.input,
@@ -1267,7 +1290,7 @@ class Agent:
                         "command",
                     }
                     if (
-                        key_chars <= cap
+                        key_chars <= input_cap
                         and not project_for_aggregate
                         and not project_for_success
                     ):
@@ -1747,7 +1770,7 @@ class Agent:
             thinking_level=(
                 self.config.thinking if isinstance(self.config.thinking, ThinkingLevel) else None
             ),
-            provider_request_max_chars=self.config.tool_result_provider_request_max_chars,
+            provider_request_max_chars=self._provider_request_proof_max_chars(),
         )
         _thinking_fallback_done = False
 
@@ -2224,7 +2247,7 @@ class Agent:
                                 ),
                             )
                             terminal_error = ErrorEvent(
-                                message="Provider stopped before producing visible content",
+                                message="Provider output limit reached before completion",
                                 code="provider_output_truncated",
                             )
                             yield terminal_error
@@ -2425,8 +2448,6 @@ class Agent:
                                 kept_count=len(overflow_outcome.messages),
                                 removed_count=overflow_outcome.removed_count,
                             )
-                            if self._session_key:
-                                notify_compaction(self._session_key)
                             window_input_tokens = 0
                             window_output_tokens = 0
                             _call_attempt += 1
@@ -2507,7 +2528,7 @@ class Agent:
                         break
                     if final_classification.kind == _ProviderAttemptKind.LENGTH_CAPPED:
                         terminal_error = ErrorEvent(
-                            message="Provider stopped before producing visible content",
+                            message="Provider output limit reached before completion",
                             code="provider_output_truncated",
                         )
                         yield terminal_error
@@ -2576,8 +2597,6 @@ class Agent:
                         kept_count=len(overflow_outcome.messages),
                         removed_count=overflow_outcome.removed_count,
                     )
-                    if self._session_key:
-                        notify_compaction(self._session_key)
                     window_input_tokens = 0
                     window_output_tokens = 0
                     overflow_retries = 0  # reset on success
@@ -2606,7 +2625,7 @@ class Agent:
                             else None
                         ),
                         provider_request_max_chars=(
-                            self.config.tool_result_provider_request_max_chars
+                            self._provider_request_proof_max_chars()
                         ),
                     )
 
@@ -3042,6 +3061,10 @@ class Agent:
                     Message(role="user", content=tool_result_blocks)  # type: ignore[arg-type]
                 )
                 if terminal_projection_preflight_error:
+                    if not any(part.strip() for part in final_text_parts):
+                        final_text_parts.append(
+                            _PROVIDER_CONTEXT_PROJECTION_REUSED_USER_MESSAGE
+                        )
                     self._write_turn_call_log(
                         "tool_argument_projection_rehydrate_terminal",
                         iteration=iterations,
@@ -3363,7 +3386,7 @@ class Agent:
 
         async def _await_flush_task() -> Any | None:
             # Give flush a grace period to complete instead of cancelling immediately.
-            # Adds up to flush_timeout_seconds (default 5s) of latency, but without
+            # Adds up to flush_timeout_seconds (default 15s) of latency, but without
             # this the flush is effectively dead code (always cancelled before finishing).
             if flush_task is not None and not flush_task.done():
                 if flush_task is self._flush_wait_timed_out_task:
@@ -3491,10 +3514,31 @@ class Agent:
             config=self._build_compaction_config(),
         )
 
+        if self._session_key:
+            notify_compaction(
+                self._session_key,
+                source="automatic",
+                phase="agent_inline_overflow",
+                status="started",
+                tokens_before=total_tokens,
+                context_window_tokens=window_tokens,
+            )
+
         try:
             result = await compact_context(request)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             self._last_compaction_refusal_reason = "compaction_failed"
+            if self._session_key:
+                notify_compaction(
+                    self._session_key,
+                    source="automatic",
+                    phase="agent_inline_overflow",
+                    status="failed",
+                    message=str(exc),
+                    reason=self._last_compaction_refusal_reason,
+                    tokens_before=total_tokens,
+                    context_window_tokens=window_tokens,
+                )
             return None  # signal failure
 
         # Removing history without a replacement summary is equivalent to
@@ -3507,12 +3551,34 @@ class Agent:
                 kept_count=len(result.kept_entries),
             )
             self._last_compaction_refusal_reason = "empty_summary_rejected"
+            if self._session_key:
+                notify_compaction(
+                    self._session_key,
+                    source="automatic",
+                    phase="agent_inline_overflow",
+                    status="failed",
+                    reason=self._last_compaction_refusal_reason,
+                    tokens_before=total_tokens,
+                    context_window_tokens=window_tokens,
+                    removed_count=result.removed_count,
+                    kept_count=len(result.kept_entries),
+                )
             return None
 
         has_structured_content = any(not isinstance(m.content, str) for m in messages)
         if result.removed_count == 0 and not result.summary and has_structured_content:
             await _await_flush_task()
             self._flush_done_this_cycle = False
+            if self._session_key:
+                notify_compaction(
+                    self._session_key,
+                    source="automatic",
+                    phase="agent_inline_overflow",
+                    status="skipped",
+                    reason="structured_content_noop",
+                    tokens_before=total_tokens,
+                    context_window_tokens=window_tokens,
+                )
             return CompactionOutcome(messages=messages)
 
         # Rebuild message list from compacted entries
@@ -4077,6 +4143,15 @@ class Agent:
             max_tokens=self.config.max_tokens,
             context_window_tokens=self.config.context_window_tokens,
             workspace_dir=spec.workspace_dir or self.config.workspace_dir,
+            flush_enabled=self.config.flush_enabled,
+            flush_timeout_seconds=self.config.flush_timeout_seconds,
+            flush_background_timeout_seconds=self.config.flush_background_timeout_seconds,
+            flush_backoff_initial_seconds=self.config.flush_backoff_initial_seconds,
+            flush_backoff_max_seconds=self.config.flush_backoff_max_seconds,
+            flush_archive_max_bytes=self.config.flush_archive_max_bytes,
+            flush_compaction_requires_safe_receipt=(
+                self.config.flush_compaction_requires_safe_receipt
+            ),
             tool_result_compression_enabled=self.config.tool_result_compression_enabled,
             tool_result_compression_mode=self.config.tool_result_compression_mode,
             tool_result_compression_max_share=self.config.tool_result_compression_max_share,
@@ -4095,6 +4170,7 @@ class Agent:
             tool_result_provider_request_max_chars=(
                 self.config.tool_result_provider_request_max_chars
             ),
+            provider_request_proof_max_chars=self.config.provider_request_proof_max_chars,
             tool_use_argument_provider_request_max_chars=(
                 self.config.tool_use_argument_provider_request_max_chars
             ),

@@ -7,6 +7,7 @@ from typing import Any
 
 from opensquilla.gateway.session_lifecycle import session_status_for_task_status
 from opensquilla.gateway.task_runtime import SubagentCompletionEvent
+from opensquilla.session.terminal_reply import is_context_payload_too_large, sanitize_agent_error
 
 _RESULT_MAX_CHARS = 12000
 _PARENT_WAKE_RESULTS_MAX_CHARS = 16000
@@ -16,6 +17,25 @@ _OUTCOME_FAILED_CHILDREN_MAX = 20
 _TERMINAL_SESSION_STATUSES = {"done", "failed", "killed", "timeout"}
 _SUCCESS_STATUS = "succeeded"
 _NON_SUCCESS_STATUSES = {"failed", "timeout", "cancelled", "abandoned"}
+
+
+def _sanitized_failure_fields(payload: dict[str, Any]) -> tuple[str | None, str | None]:
+    terminal_payload = {
+        "status": payload.get("status"),
+        "terminal_reason": payload.get("terminal_reason"),
+        "error_class": payload.get("error_class"),
+        "error_message": payload.get("error_message"),
+        "terminal_message": payload.get("terminal_message"),
+    }
+    if is_context_payload_too_large(terminal_payload):
+        error_class, error_message = sanitize_agent_error(terminal_payload)
+        return error_class, error_message
+    error_class = payload.get("error_class")
+    error_message = payload.get("error_message")
+    return (
+        error_class if isinstance(error_class, str) and error_class else None,
+        error_message if isinstance(error_message, str) and error_message else None,
+    )
 
 
 class SpawnGroupTracker:
@@ -527,11 +547,10 @@ def _failed_child_outcome(payload: dict[str, Any], *, status: str) -> dict[str, 
         if isinstance(value, str) and value:
             child[key] = value
     child["status"] = status
-    error_class = payload.get("error_class")
-    if isinstance(error_class, str) and error_class:
+    error_class, error_message = _sanitized_failure_fields({**payload, "status": status})
+    if error_class:
         child["error_class"] = error_class
-    error_message = payload.get("error_message")
-    if isinstance(error_message, str) and error_message:
+    if error_message:
         truncated = len(error_message) > _OUTCOME_ERROR_MAX_CHARS
         child["error_message"] = error_message[:_OUTCOME_ERROR_MAX_CHARS]
         child["error_message_truncated"] = truncated
@@ -705,11 +724,10 @@ def _format_parent_wake_message(
         result_truncated = result.get("truncated") if isinstance(result, dict) else False
         if result_truncated or truncated_for_wake:
             lines.append("result_truncated=true")
-        error_class = payload.get("error_class")
-        if isinstance(error_class, str) and error_class:
+        error_class, error_message = _sanitized_failure_fields(payload)
+        if error_class:
             lines.append(f"error_class={error_class}")
-        error_message = payload.get("error_message")
-        if isinstance(error_message, str) and error_message:
+        if error_message:
             lines.append(f"error_message={error_message}")
         lines.extend(
             [

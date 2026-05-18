@@ -594,6 +594,42 @@ def test_agent_provider_view_projects_large_tool_use_arguments(tmp_path) -> None
     assert agent.config.metadata["tool_argument_projection_calls"] == 1
 
 
+def test_agent_provider_view_derives_tool_argument_budget_above_legacy_default(
+    tmp_path,
+) -> None:
+    agent = Agent(
+        provider=CapturingProvider(),
+        config=AgentConfig(
+            context_window_tokens=200_000,
+            max_tokens=8192,
+            tool_result_store_dir=str(tmp_path / "tool-results"),
+            tool_result_store_session_id="session-1",
+            tool_result_store_session_key="agent:main:webchat:test",
+            tool_result_store_agent_id="main",
+        ),
+    )
+    large_code = "print('start')\n" + ("x = 1\n" * 2500) + "print('end')\n"
+    messages = [
+        Message(
+            role="assistant",
+            content=[
+                ContentBlockToolUse(
+                    id="code-derived-1",
+                    name="execute_code",
+                    input={"code": large_code, "timeout": 10},
+                )
+            ],
+        )
+    ]
+
+    projected = agent._project_large_tool_use_arguments_for_provider(messages)
+
+    projected_block = projected[0].content[0]
+    assert isinstance(projected_block, ContentBlockToolUse)
+    assert projected_block.input["code"] == large_code
+    assert "tool_use_argument_projection" not in projected_block.input["code"]
+
+
 def test_agent_provider_view_scrubs_legacy_projected_tool_argument(tmp_path) -> None:
     projection = (
         "[tool_use_argument_projection]\n"
@@ -684,6 +720,57 @@ def test_agent_provider_view_projects_aggregate_tool_use_arguments(tmp_path) -> 
     )
     assert agent.config.metadata["tool_argument_projection_applied"] is True
     assert agent.config.metadata["tool_argument_projection_calls"] >= 1
+
+
+def test_agent_provider_view_derives_tool_result_budget_above_legacy_default(
+    tmp_path,
+) -> None:
+    agent = Agent(
+        provider=CapturingProvider(),
+        config=AgentConfig(
+            context_window_tokens=200_000,
+            max_tokens=8192,
+            tool_result_store_dir=str(tmp_path / "tool-results"),
+            tool_result_store_session_id="session-1",
+            tool_result_store_session_key="agent:main:webchat:test",
+            tool_result_store_agent_id="main",
+        ),
+    )
+    messages: list[Message] = []
+    for index in range(3):
+        tool_id = f"fetch-derived-{index}"
+        payload = f"FETCH_DERIVED_{index}\n" + ("x" * 40_000)
+        messages.extend(
+            [
+                Message(
+                    role="assistant",
+                    content=[
+                        ContentBlockToolUse(
+                            id=tool_id,
+                            name="web_fetch",
+                            input={"url": f"https://example.com/{index}"},
+                        )
+                    ],
+                ),
+                Message(
+                    role="user",
+                    content=[
+                        ContentBlockToolResult(
+                            tool_use_id=tool_id,
+                            content=payload,
+                            is_error=False,
+                        )
+                    ],
+                ),
+            ]
+        )
+
+    compacted = agent._compact_aggregate_tool_results_for_provider(messages)
+
+    first_result = compacted[1].content[0]
+    assert isinstance(first_result, ContentBlockToolResult)
+    assert first_result.content.startswith("FETCH_DERIVED_0")
+    assert "external_tool_result_compacted" not in first_result.content
 
 
 def test_agent_provider_view_projects_small_aggregate_tool_use_arguments(tmp_path) -> None:
@@ -1360,6 +1447,8 @@ async def test_agent_refuses_copied_provider_compacted_tool_arguments(tmp_path) 
     events = [event async for event in agent.run_turn("open in chrome")]
 
     assert any(event.kind == "done" for event in events)
+    done_event = next(event for event in events if event.kind == "done")
+    assert "provider-only compacted tool arguments" in done_event.text
     assert len(provider.calls) == 1
     assert dispatched == []
     result_event = next(

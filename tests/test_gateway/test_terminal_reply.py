@@ -11,6 +11,8 @@ from opensquilla.session.terminal_reply import build_terminal_reply
 RAW_INTERNAL_STRINGS = (
     "Gateway task timeout",
     "Stream idle for more than",
+    "Context overflow is in the current turn",
+    "current_turn_context_exhausted",
 )
 
 
@@ -57,6 +59,46 @@ RAW_INTERNAL_STRINGS = (
                 "error_message": '{"fallback_reason":"provider_request_budget_exhausted"}',
             },
             "automatic context compaction",
+        ),
+        (
+            {
+                "status": "failed",
+                "terminal_reason": "error",
+                "error_class": "current_turn_context_exhausted",
+                "error_message": (
+                    "Context overflow is in the current turn's recent tool calls "
+                    "or reasoning tail; history compaction cannot reduce it."
+                ),
+            },
+            "too large",
+        ),
+        (
+            {
+                "status": "failed",
+                "terminal_reason": "provider_request_too_large",
+                "error_class": "provider_request_too_large",
+                "error_message": "provider request too large",
+            },
+            "too large",
+        ),
+        (
+            {
+                "status": "failed",
+                "terminal_message": (
+                    "Context overflow is in the current turn's recent tool calls "
+                    "or reasoning tail; history compaction cannot reduce it."
+                ),
+            },
+            "too large",
+        ),
+        (
+            {
+                "status": "failed",
+                "terminal_reason": "output_truncated",
+                "error_class": "provider_output_truncated",
+                "error_message": "Provider output limit reached before completion",
+            },
+            "output limit",
         ),
     ],
 )

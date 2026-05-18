@@ -141,8 +141,8 @@ class PolicyInfo(BaseModel):
     max_buffered_bytes: int = MAX_BUFFERED_BYTES
     tick_interval_ms: int = TICK_INTERVAL_MS
     agent_stream_heartbeat_interval_ms: int = 15_000
-    agent_stream_idle_timeout_ms: int = 180_000
-    webui_stream_idle_grace_ms: int = 210_000
+    agent_stream_idle_timeout_ms: int = 600_000
+    webui_stream_idle_grace_ms: int = 630_000
     client_ws_keepalive_timeout_ms: int = 120_000
 
 
