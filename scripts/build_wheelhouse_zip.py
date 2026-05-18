@@ -455,6 +455,33 @@ def extract_python_runtime_archive(archive_path: Path, runtime_root: Path) -> No
 
 
 def prune_portable_runtime(runtime_root: Path) -> None:
+    site_packages = runtime_root / "Lib" / "site-packages"
+    if site_packages.is_dir():
+        removable_names = {
+            "_distutils_hack",
+            "pip",
+            "pkg_resources",
+            "setuptools",
+            "wheel",
+        }
+        removable_globs = (
+            "pip-*.dist-info",
+            "setuptools-*.dist-info",
+            "wheel-*.dist-info",
+        )
+        for name in removable_names:
+            path = site_packages / name
+            if path.is_dir():
+                shutil.rmtree(path)
+            elif path.is_file():
+                path.unlink()
+        for pattern in removable_globs:
+            for path in site_packages.glob(pattern):
+                if path.is_dir():
+                    shutil.rmtree(path)
+                elif path.is_file():
+                    path.unlink()
+
     for pycache in sorted(runtime_root.rglob("__pycache__"), reverse=True):
         if pycache.is_dir():
             shutil.rmtree(pycache)
@@ -600,7 +627,7 @@ echo "Start it with:"
 echo "  opensquilla gateway run"
 echo
 echo "Then open:"
-echo "  http://127.0.0.1:18791/control/"
+echo "  http://127.0.0.1:18790/control/"
 """
 
 
@@ -696,7 +723,7 @@ Write-Host "Start it with:"
 Write-Host "  opensquilla gateway run"
 Write-Host ""
 Write-Host "Then open:"
-Write-Host "  http://127.0.0.1:18791/control/"
+Write-Host "  http://127.0.0.1:18790/control/"
 """
 
 
@@ -837,7 +864,7 @@ fi
 
 echo
 echo "Starting OpenSquilla gateway."
-echo "Web UI: http://127.0.0.1:18791/control/"
+echo "Web UI: http://127.0.0.1:18790/control/"
 echo "Press Ctrl+C in this terminal to stop the gateway."
 if [[ -t 1 ]]; then
   exec "${OPENSQUILLA_BIN}" "${OPENSQUILLA_MODULE[@]}" gateway run
@@ -908,7 +935,10 @@ function Install-WindowsVCRedistIfNeeded {
         return
     }
     if ($env:OPENSQUILLA_SKIP_VC_REDIST -eq '1') {
-        Write-Host 'OpenSquilla: skipping Microsoft Visual C++ Redistributable check because OPENSQUILLA_SKIP_VC_REDIST=1.'
+        Write-Host (
+            'OpenSquilla: skipping Microsoft Visual C++ Redistributable check ' +
+            'because OPENSQUILLA_SKIP_VC_REDIST=1.'
+        )
         return
     }
     if (Test-WindowsVCRedistInstalled) {
@@ -918,7 +948,10 @@ function Install-WindowsVCRedistIfNeeded {
     $redistUrl = 'https://aka.ms/vs/17/release/vc_redist.x64.exe'
     $winget = Get-Command winget -ErrorAction SilentlyContinue
     if ($winget) {
-        Write-Host 'OpenSquilla: Microsoft Visual C++ Redistributable not detected; installing with winget.'
+        Write-Host (
+            'OpenSquilla: Microsoft Visual C++ Redistributable not detected; ' +
+            'installing with winget.'
+        )
         $wingetArgs = @(
             'install',
             '--id',
@@ -933,12 +966,24 @@ function Install-WindowsVCRedistIfNeeded {
             Write-Host 'OpenSquilla: Microsoft Visual C++ Redistributable installation completed.'
             return
         }
-        Write-Warning "OpenSquilla: winget could not install Microsoft Visual C++ Redistributable (exit $LASTEXITCODE)."
+        Write-Warning (
+            'OpenSquilla: winget could not install Microsoft Visual C++ ' +
+            "Redistributable (exit $LASTEXITCODE)."
+        )
     }
 
-    Write-Warning 'OpenSquilla: Microsoft Visual C++ Redistributable is needed for the bundled router on many Windows machines.'
-    Write-Warning "OpenSquilla: install it from $redistUrl, then restart PowerShell if onnxruntime reports DLL load failures."
-    Write-Warning 'OpenSquilla: the gateway can still start with a safe router fallback while this runtime is missing.'
+    Write-Warning (
+        'OpenSquilla: Microsoft Visual C++ Redistributable is needed for the ' +
+        'bundled router on many Windows machines.'
+    )
+    Write-Warning (
+        "OpenSquilla: install it from $redistUrl, then restart PowerShell if " +
+        'onnxruntime reports DLL load failures.'
+    )
+    Write-Warning (
+        'OpenSquilla: the gateway can still start with a safe router fallback ' +
+        'while this runtime is missing.'
+    )
 }
 
 if (-not (Test-Path $VenvRoot)) {
@@ -1060,7 +1105,7 @@ if ($LASTEXITCODE -ne 0) {
 
 Write-Host ""
 Write-Host "Starting OpenSquilla gateway."
-Write-Host "Web UI: http://127.0.0.1:18791/control/"
+Write-Host "Web UI: http://127.0.0.1:18790/control/"
 Write-Host "Press Ctrl+C in this terminal to stop the gateway."
 $OutputRedirected = [Console]::IsOutputRedirected
 if (-not $OutputRedirected) {
@@ -1176,11 +1221,19 @@ def render_readme(
         if portable:
             command_section = f"""## Windows
 
-1. Double-click `Start OpenSquilla.cmd`.
-2. Keep the terminal open. Closing the terminal stops the gateway.
-3. Complete onboarding. On first run, choose a provider and paste the requested
-   keys; later starts let you review or change the config.
-4. Open `http://127.0.0.1:18791/control/`.
+1. Right-click `Start OpenSquilla.cmd` -> **Run as administrator**.
+2. Complete onboarding.
+3. Open `http://127.0.0.1:18790/control/`.
+
+Notes:
+- Keep the terminal open. Closing it stops the gateway.
+- OpenSquilla 0.1.0 preview builds are unsigned. The supported portable launch
+  path is administrator launch.
+- If SmartScreen appears, choose **More info** -> **Run anyway**.
+- If Smart App Control or enterprise policy blocks the unsigned app, use the
+  `uv tool install` wheel path instead.
+- Microsoft documents that SmartScreen checks downloaded apps and Smart App
+  Control can block unknown, unsigned code.
 
 <details>
 <summary>Advanced portable usage</summary>
@@ -1199,7 +1252,7 @@ writes an OpenRouter env-reference config and starts the gateway without asking
 you to paste the key.
 
 The portable package does not install a global `opensquilla` command. For a
-terminal where `opensquilla ...` commands work, double-click
+terminal where `opensquilla ...` commands work, run
 `OpenSquilla Shell.cmd`, or run commands from this folder:
 
 ```powershell
@@ -1229,7 +1282,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 2. Keep the terminal open. Closing the terminal stops the gateway.
 3. Complete onboarding. On first run, choose a provider and paste the requested
    keys; later starts let you review or change the config.
-4. Open `http://127.0.0.1:18791/control/`.
+4. Open `http://127.0.0.1:18790/control/`.
 """
         else:
             command_section = f"""## macOS / Linux
@@ -1242,7 +1295,7 @@ Set-ExecutionPolicy -Scope Process Bypass
     web_ui_note = (
         ""
         if portable
-        else "Open `http://127.0.0.1:18791/control/`.\n\n"
+        else "Open `http://127.0.0.1:18790/control/`.\n\n"
     )
 
     return f"""# OpenSquilla {app_version} {release_kind}

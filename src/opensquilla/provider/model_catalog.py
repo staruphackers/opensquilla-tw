@@ -6,6 +6,7 @@ import httpx
 import structlog
 
 from opensquilla.env import trust_env as _trust_env
+from opensquilla.secrets import clean_header_secret
 
 from .openrouter_attribution import openrouter_app_headers
 from .registry import UnknownProviderError, get_provider_spec
@@ -200,7 +201,9 @@ class ModelCatalog:
         URL constructed as: ``f"{base_url}/v1/models"``
         """
         url = f"{base_url}/v1/models"
-        headers = {"Authorization": f"Bearer {api_key}"}
+        headers = {
+            "Authorization": f"Bearer {clean_header_secret(api_key, label='OpenRouter API key')}"
+        }
         headers.update(openrouter_app_headers(base_url))
         async with httpx.AsyncClient(
             timeout=10.0, trust_env=_trust_env(), proxy=proxy or None

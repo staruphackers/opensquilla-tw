@@ -28,41 +28,33 @@ Choose the path that matches how you want to use OpenSquilla:
 
 | User type | Path | Status |
 | --- | --- | --- |
-| New user | [Preview release package](#preview-release-package) | Recommended |
-| Command-line user | [Install from source](#install-from-source) | Available now |
+| Windows user | [Windows portable](#windows-portable-no-python) | Recommended |
+| Command-line user | [Install with uv](#install-with-uv) | Recommended |
 | Developer | [Develop from source](#develop-from-source) | Available now |
 
 SquillaRouter is included by default in the preview release packages and in
 the normal source install path. Only choose the `core` profile or `--router
 disabled` if you intentionally want to skip the bundled router.
 
-### Preview release package
+### Windows portable (no Python)
 
-Download the preview package if you want to try OpenSquilla as a local app
-without cloning the repository or installing Git, Git LFS, or `uv`.
+Use this if you want the quickest Windows install.
 
-Current preview packages:
+1. Download `OpenSquilla-windows-x64-portable.zip` from
+   [GitHub Releases](https://github.com/opensquilla/opensquilla/releases/latest).
+2. Extract it to Downloads, Documents, or another writable folder.
+3. Right-click `Start OpenSquilla.cmd` -> **Run as administrator**.
+4. Complete onboarding, then open <http://127.0.0.1:18790/control/>.
 
-- `OpenSquilla-<version>-windows-x64-py312-recommended-portable.zip` for
-  Windows.
-
-The recommended portable zip includes Feishu websocket support by default. If a
-package is not available for your platform, use the source install path below.
-
-1. Open the [GitHub Releases](https://github.com/opensquilla/opensquilla/releases)
-   page and download the package.
-
-2. Extract to Downloads, Documents, or another folder you can write to.
-
-3. Double-click `Start OpenSquilla.cmd` from the extracted folder.
-
-   Keep the terminal window open. Closing it stops the gateway.
-
-4. Complete onboarding and open the Web UI.
-
-   The launcher opens onboarding before the gateway starts. On first run, choose
-   a provider and paste the requested keys; later starts let you review or change
-   the config. Then open <http://127.0.0.1:18791/control/>.
+Notes:
+- The recommended portable zip includes Feishu websocket support by default.
+- OpenSquilla 0.1.0 preview builds are unsigned. The supported portable launch
+  path is administrator launch.
+- If SmartScreen appears, choose **More info** -> **Run anyway**.
+- If Smart App Control or enterprise policy blocks the unsigned app, use
+  [Install with uv](#install-with-uv).
+- Microsoft docs: [SmartScreen checks downloaded apps][ms-smartscreen];
+  [Smart App Control blocks unknown, unsigned code][ms-sac].
 
 <details>
 <summary>Advanced portable usage</summary>
@@ -83,7 +75,7 @@ Use these options only when you want scripted setup or portable CLI commands.
    onboarding wizard lets you choose a provider freely.
 
 - The portable zip does not install a global `opensquilla` command. For a
-  terminal where `opensquilla ...` commands work, double-click
+  terminal where `opensquilla ...` commands work, run
   `OpenSquilla Shell.cmd`, or run commands from the extracted folder through
   `.\opensquilla.cmd`:
 
@@ -93,22 +85,25 @@ Use these options only when you want scripted setup or portable CLI commands.
 
 </details>
 
-<details>
-<summary>Portable troubleshooting</summary>
+### Install with uv
 
-- If Windows blocks the launcher, make sure the zip came from the official
-  GitHub Releases page, then use the Windows prompt to allow it.
-- If the Web UI does not open, keep the gateway terminal open and visit
-  <http://127.0.0.1:18791/control/> manually.
-- If `opensquilla` is not recognized, use `OpenSquilla Shell.cmd` or
-  `.\opensquilla.cmd` from the extracted folder.
+Use this on Windows, macOS, or Linux if you prefer a terminal install. You need
+`uv`; Python is managed automatically by uv.
 
-</details>
+```powershell
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+$env:Path = "$env:USERPROFILE\.local\bin;" + $env:Path
+uv tool install "opensquilla[recommended] @ https://github.com/opensquilla/opensquilla/releases/latest/download/opensquilla-latest-py3-none-any.whl"
+opensquilla onboard
+opensquilla gateway run
+```
 
-Preview packages are the recommended public distribution channel for validating
-installation, onboarding, the local gateway, and the Web UI before the stable
-`0.1.0` release. For a source checkout instead of a package, use the next
-section.
+Keep the quotes around `"opensquilla[recommended] @ ..."` in PowerShell.
+If you download the stable wheel alias manually, keep this PEP 508 form; do not
+install `opensquilla-latest-py3-none-any.whl` as a bare wheel path with extras.
+
+[ms-smartscreen]: https://learn.microsoft.com/en-us/windows/security/operating-system-security/virus-and-threat-protection/microsoft-defender-smartscreen/
+[ms-sac]: https://learn.microsoft.com/en-us/windows/apps/develop/smart-app-control/overview
 
 ### Install from source
 
@@ -264,7 +259,7 @@ installing, use `opensquilla ...` commands, not `uv run`.
    ```
 
 Wait until the gateway says it is running before opening the Web UI at
-<http://127.0.0.1:18791/control/>. Press `Ctrl+C` to stop the foreground
+<http://127.0.0.1:18790/control/>. Press `Ctrl+C` to stop the foreground
 gateway. If Windows lacks the Visual C++ Redistributable, the gateway still
 starts but the bundled router falls back to a safe direct route. If Windows
 prints an `onnxruntime` or `DLL load failed` warning, see the Visual C++ runtime
@@ -564,14 +559,14 @@ values.
 ### Run
 
 ```sh
-opensquilla gateway run                   # foreground, 127.0.0.1:18791
+opensquilla gateway run                   # foreground, 127.0.0.1:18790
 opensquilla gateway start --json          # background + health wait
 opensquilla chat                          # interactive REPL
 opensquilla agent -m "your prompt"        # one-shot, automation-friendly
 ```
 
-Open the Web UI at <http://127.0.0.1:18791/control/> and check health
-with `curl http://127.0.0.1:18791/health`.
+Open the Web UI at <http://127.0.0.1:18790/control/> and check health
+with `curl http://127.0.0.1:18790/health`.
 
 ### Public network binding — (optional)
 
@@ -579,19 +574,19 @@ To make the Web UI reachable from another machine, bind the gateway to
 all interfaces and use the host's public IP address:
 
 ```sh
-opensquilla gateway run --listen 0.0.0.0 --port 18791
+opensquilla gateway run --listen 0.0.0.0 --port 18790
 # or, for a background process:
-opensquilla gateway start --listen 0.0.0.0 --port 18791 --json
+opensquilla gateway start --listen 0.0.0.0 --port 18790 --json
 ```
 
-Then open `http://<public-ip>:18791/control/` and verify the public
+Then open `http://<public-ip>:18790/control/` and verify the public
 health endpoint with:
 
 ```sh
-curl http://<public-ip>:18791/health
+curl http://<public-ip>:18790/health
 ```
 
-If another gateway is already bound to `18791`, stop it first or choose
+If another gateway is already bound to `18790`, stop it first or choose
 a different `--port`. Public access also requires the host firewall or
 cloud security group to allow inbound TCP traffic on that port.
 Do not expose the gateway publicly with `[auth] mode = "none"`; configure
@@ -646,10 +641,6 @@ PinchBench 1.2.1 average results across 25 tasks:
   memory with FTS keyword search alongside `sqlite-vec` semantic recall.
   Bundled ONNX inference runs on CPU so embeddings stay on your machine;
   optionally swap to OpenAI- or Ollama-hosted embeddings.
-- **Private turn capture** — optional `auto_capture` writes raw turn
-  archives into agent state (`turns/`) for audit and future processing.
-  These files are not ordinary searchable memory; only curated
-  `MEMORY.md` and `memory/**/*.md` sources enter recall.
 - **Adaptive recall and consolidation** — frequently used memories
   auto-promote and dated ones decay exponentially (with an "evergreen"
   opt-out); periodic Dream consolidation merges scattered episodic
@@ -665,7 +656,7 @@ PinchBench 1.2.1 average results across 25 tasks:
   all skill metadata and tool results are XML-escaped to close common
   prompt-injection vectors.
 - **Unified gateway across all entry points** — Starlette ASGI server on
-  `127.0.0.1:18791` with WebSocket RPC and an embedded control console
+  `127.0.0.1:18790` with WebSocket RPC and an embedded control console
   (`/control/`). Web UI, CLI, and first-class adapters for Terminal,
   WebSocket, Slack, Telegram, Discord, Feishu, DingTalk, WeCom, MS
   Teams, Matrix, and QQ all converge on a shared `TurnRunner` for

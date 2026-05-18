@@ -18,6 +18,7 @@ import httpx
 import structlog
 
 from opensquilla.env import trust_env as _trust_env
+from opensquilla.secrets import clean_header_secret
 
 from .minimax_compat import contains_minimax_protocol, parse_minimax_tool_calls
 from .openrouter_attribution import openrouter_app_headers
@@ -626,7 +627,7 @@ class OpenAIProvider:
         provider_kind: str | None = None,
         provider_routing: Mapping[str, str] | None = None,
     ) -> None:
-        self._api_key = api_key
+        self._api_key = clean_header_secret(api_key, label="LLM API key")
         self._model = model
         self._base_url = base_url.rstrip("/")
         self._proxy = _resolve_llm_proxy(proxy)
