@@ -244,9 +244,8 @@ const ChatView = (() => {
     return _TOOL_EMOJI[name] || '\u26A1'; // ⚡ default
   }
 
-  // Context-usage tracking
-  let _totalTokens = 0;
-  const _CTX_WARN_THRESHOLD = 170000;
+  // Context-pressure tracking. This is current provider context, not lifetime usage.
+  let _contextStatus = null;
 
   // Token visualization shim. Gated by window.OPENSQUILLA_FEATURES.tokenViz; when off
   // every method is a no-op so downstream call sites don't need to special-case
@@ -311,7 +310,7 @@ const ChatView = (() => {
     if (!_sessionKey) return;
     try {
       await _rpc.waitForConnection();
-      const usage = await _rpc.call('usage.status');
+      const usage = await _rpc.call('usage.status', { sessionKey: _sessionKey });
       const sessions = usage?.sessions || [];
       const current = sessions.find(s =>
         (s.session || s.sessionKey || s.key) === _sessionKey
@@ -325,9 +324,14 @@ const ChatView = (() => {
         _usageAccum.cost = costVal > 0 ? costVal : null;
         _usageModel = current.model || '';
         _viz.update({ ..._usageAccum, model: _usageModel });
+        _applyContextStatus(current.contextStatus || current.context_status || null);
         _saveWidgetState();
+      } else {
+        _clearContextStatus();
       }
-    } catch { /* usage load optional */ }
+    } catch {
+      _clearContextStatus();
+    }
   }
 
   // Messages (for export)
@@ -942,7 +946,7 @@ const ChatView = (() => {
     _composer     = _el.querySelector('#chat-composer');
 
     _messages = [];
-    _totalTokens = 0;
+    _clearContextStatus();
     _lastHeaderRole = '';
     _lastHeaderDay = '';
     _applySessionRunState({ run_status: 'idle' });
@@ -1258,7 +1262,7 @@ const ChatView = (() => {
     _pendingSessionIntent = null;
     _pendingQueue = []; if (_pendingArea) _renderPendingQueue();
     _applySessionRunState({ run_status: 'idle' });
-    _totalTokens = 0;
+    _clearContextStatus();
     _lastHeaderRole = '';
     _lastHeaderDay = '';
     _usageAccum = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: null, routedTurns: 0, sessionSaved: 0 };
@@ -1782,7 +1786,7 @@ const ChatView = (() => {
       _persistSession(key);
       _pendingSessionIntent = 'new_chat'; _pendingQueue = []; if (_pendingArea) _renderPendingQueue();
       _messages = [];
-      _totalTokens = 0;
+      _clearContextStatus();
       _lastHeaderRole = '';
       _lastHeaderDay = '';
       _usageAccum = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: null, routedTurns: 0, sessionSaved: 0 };
@@ -2096,7 +2100,7 @@ const ChatView = (() => {
         _persistSession(key);
         _pendingSessionIntent = 'new_chat'; _pendingQueue = []; if (_pendingArea) _renderPendingQueue();
         _messages = [];
-        _totalTokens = 0;
+        _clearContextStatus();
         _lastHeaderRole = '';
         _lastHeaderDay = '';
         _usageAccum = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: null, routedTurns: 0, sessionSaved: 0 };
@@ -2119,7 +2123,7 @@ const ChatView = (() => {
             _messages = [];
             _pendingQueue = [];
             if (_pendingArea) _renderPendingQueue();
-            _totalTokens = 0;
+            _clearContextStatus();
             _clearActiveTaskGroups();
             _thread.innerHTML = _emptyStateHTML();
             UI.toast('Session reset', 'info');
@@ -2129,7 +2133,7 @@ const ChatView = (() => {
       case 'compact_context':
       case 'sessions.contextCompact':
       case '/compact':
-        UI.toast('Compacting session context...', 'info', 1800);
+        UI.toast('Checking whether compaction is needed...', 'info', 1800);
         _rpc.call('sessions.contextCompact', { key: _sessionKey })
           .then(() => {})
           .catch((err) => _showCompactionToast({
@@ -2234,11 +2238,11 @@ const ChatView = (() => {
     const source = String(payload && payload.source || '').toLowerCase();
     const details = _compactionTokenStats(payload || {});
     if (status === 'started') {
-      UI.toast('Compacting session context...', 'info', 1800);
+      UI.toast('Checking whether compaction is needed...', 'info', 1800);
       return;
     }
     if (status === 'skipped') {
-      UI.toast('Context already compact enough', 'info');
+      UI.toast('No compaction needed' + details, 'info', 4500);
       return;
     }
     if (status === 'failed' || status === 'error') {
@@ -2507,11 +2511,12 @@ const ChatView = (() => {
         if (u.model) _usageModel = u.model;
         _viz.update({ ..._usageAccum, model: _usageModel });
         _saveWidgetState();
-        // Track context usage
-        const total = (u.input_tokens || 0) + (u.output_tokens || 0);
-        if (total > 0) {
-          _totalTokens = total;
-          _updateCtxWarning();
+        const turnContextStatus = u.contextStatus || u.context_status
+          || u.session_totals?.contextStatus || u.session_totals?.context_status || null;
+        if (turnContextStatus) {
+          _applyContextStatus(turnContextStatus);
+        } else {
+          _loadCurrentSessionUsage();
         }
         const finalText = typeof u.text === 'string' ? u.text : '';
         if (finalText && finalText !== _streamRaw) {
@@ -2664,14 +2669,38 @@ const ChatView = (() => {
 
   /* ── Context Usage Warning ──────────────────────────────────────────── */
 
+  function _contextStatusNumber(status, ...names) {
+    for (const name of names) {
+      const value = Number(status && status[name]);
+      if (Number.isFinite(value) && value >= 0) return value;
+    }
+    return null;
+  }
+
+  function _applyContextStatus(status) {
+    _contextStatus = status || null;
+    _updateCtxWarning();
+  }
+
+  function _clearContextStatus() {
+    _contextStatus = null;
+    _updateCtxWarning();
+  }
+
   function _updateCtxWarning() {
     if (!_ctxWarn) return;
-    if (_totalTokens > _CTX_WARN_THRESHOLD) {
-      _ctxWarn.classList.remove('hidden');
-      _ctxWarn.textContent = `Context > 85% (~${Math.round(_totalTokens / 1000)}k tokens)`;
-    } else {
+    const status = _contextStatus || {};
+    const tokens = _contextStatusNumber(status, 'contextTokens', 'context_tokens');
+    const windowTokens = _contextStatusNumber(status, 'contextWindowTokens', 'context_window_tokens');
+    let pressure = _contextStatusNumber(status, 'pressure', 'contextPressure', 'context_pressure');
+    if (pressure == null && tokens != null && windowTokens > 0) pressure = tokens / windowTokens;
+    if (pressure != null) pressure = Math.min(1, Math.max(0, pressure));
+    if (tokens == null || !windowTokens || pressure == null || pressure < 0.85) {
       _ctxWarn.classList.add('hidden');
+      return;
     }
+    _ctxWarn.classList.remove('hidden');
+    _ctxWarn.textContent = `Request ctx ${Math.round(pressure * 100)}% (~${Math.round(tokens / 1000)}k/${Math.round(windowTokens / 1000)}k)`;
   }
 
   /* ── Chat History ───────────────────────────────────────────────────── */
@@ -4646,7 +4675,7 @@ const ChatView = (() => {
     _pendingQueue = [];
     _stopRequestedByUser = false;
     _messages = [];
-    _totalTokens = 0;
+    _clearContextStatus();
     _lastHeaderRole = '';
     _lastHeaderDay = '';
     _composing = false;

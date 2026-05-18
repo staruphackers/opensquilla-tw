@@ -7,9 +7,13 @@ from collections.abc import Mapping
 from typing import Any
 
 from opensquilla.gateway.rpc import RpcContext, get_dispatcher
+from opensquilla.provider.model_catalog import ModelCatalog
 from opensquilla.session.cost_rollup import rollup_cost_source
+from opensquilla.session.tokenizer import estimate_tokens
 
 _d = get_dispatcher()
+_CONTEXT_WARNING_RATIO = 0.85
+_CONTEXT_WINDOW_CATALOG = ModelCatalog()
 
 
 def _now_ms() -> int:
@@ -28,6 +32,99 @@ def _first_field(source: Any, *names: str, default: Any = None) -> Any:
         if value is not None:
             return value
     return default
+
+
+def _positive_int(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None or value == "":
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _transcript_entry_tokens(entry: Any) -> int:
+    token_count = _positive_int(_field(entry, "token_count"))
+    if token_count is not None:
+        return token_count
+    total = 0
+    for name in ("content", "reasoning_content"):
+        value = _field(entry, name)
+        if value:
+            total += estimate_tokens(str(value))
+    tool_calls = _field(entry, "tool_calls")
+    if tool_calls:
+        total += estimate_tokens(str(tool_calls))
+    return total
+
+
+def _resolve_context_window(model: str | None, ctx: RpcContext) -> tuple[int | None, str]:
+    config = ctx.config
+    for owner in (config, getattr(config, "llm", None)):
+        window = _positive_int(getattr(owner, "context_window_tokens", None))
+        if window is not None:
+            return window, "config"
+    if model:
+        catalog = getattr(getattr(ctx, "turn_runner", None), "_model_catalog", None)
+        if catalog is not None and hasattr(catalog, "resolve_context_window"):
+            window = _positive_int(catalog.resolve_context_window(model))
+            if window is not None:
+                return window, "runtime_model_catalog"
+        window = _positive_int(_CONTEXT_WINDOW_CATALOG.resolve_context_window(model))
+        if window is not None:
+            return window, "static_model_catalog"
+    return None, "unavailable"
+
+
+async def _context_status(
+    source: Any,
+    *,
+    ctx: RpcContext,
+    session_key: str,
+    model: str | None,
+    allow_transcript_estimate: bool = False,
+) -> dict[str, Any] | None:
+    context_tokens = _positive_int(
+        _first_field(source, "context_tokens", "current_context_tokens")
+    )
+    token_source = "session_context_tokens" if context_tokens is not None else "unavailable"
+    if context_tokens is None and allow_transcript_estimate and ctx.session_manager is not None:
+        get_transcript = getattr(ctx.session_manager, "get_transcript", None)
+        if callable(get_transcript):
+            try:
+                transcript = await get_transcript(session_key)
+            except (KeyError, AttributeError, NotImplementedError):
+                transcript = []
+            context_tokens = sum(_transcript_entry_tokens(entry) for entry in transcript)
+            token_source = "transcript_estimate"
+    if context_tokens is None:
+        return None
+
+    context_window, window_source = _resolve_context_window(model, ctx)
+    if context_window is None:
+        return None
+
+    threshold = int(context_window * _CONTEXT_WARNING_RATIO)
+    pressure = min(1.0, context_tokens / context_window) if context_window > 0 else 0.0
+    compaction_count = _positive_int(_field(source, "compaction_count")) or 0
+    return {
+        "contextTokens": context_tokens,
+        "contextWindowTokens": context_window,
+        "thresholdTokens": threshold,
+        "pressure": round(pressure, 6),
+        "warningRatio": _CONTEXT_WARNING_RATIO,
+        "compactionCount": compaction_count,
+        "tokenSource": token_source,
+        "windowSource": window_source,
+        "context_tokens": context_tokens,
+        "context_window_tokens": context_window,
+        "threshold_tokens": threshold,
+        "warning_ratio": _CONTEXT_WARNING_RATIO,
+        "compaction_count": compaction_count,
+        "token_source": token_source,
+        "window_source": window_source,
+    }
 
 
 def _resolved_session_cost_fields(
@@ -113,6 +210,7 @@ def _usage_row(
     updated_at: int | None = None,
     started_at: int | None = None,
     ended_at: int | None = None,
+    context_status: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     cost = round(cost_usd, 6)
     billed_cost = round(billed_cost_usd, 6)
@@ -135,6 +233,7 @@ def _usage_row(
         "startedAt": started_at,
         "endedAt": ended_at,
         "model": model,
+        "contextStatus": context_status,
         # Compatibility aliases used by the shipped web UI.
         "session": session_key,
         "key": session_key,
@@ -152,6 +251,7 @@ def _usage_row(
         "updated_at": updated_at,
         "started_at": started_at,
         "ended_at": ended_at,
+        "context_status": context_status,
     }
 
 
@@ -395,6 +495,11 @@ async def _handle_usage_status(params: dict | None, ctx: RpcContext) -> dict[str
             "sessions": tracker_rows,
         }
     try:
+        requested_session_key = None
+        if isinstance(params, Mapping):
+            requested_session_key = (
+                params.get("sessionKey") or params.get("session_key") or params.get("key")
+            )
         sessions = await ctx.session_manager.list_sessions()
         rows = []
         active = sum(1 for s in sessions if _field(s, "status", "") == "running")
@@ -415,9 +520,17 @@ async def _handle_usage_status(params: dict | None, ctx: RpcContext) -> dict[str
             session_model = _field(s, "model") or _field(s, "model_override")
             if not session_model and ctx.config:
                 session_model = getattr(ctx.config.llm, "model", None)
+            session_key = _field(s, "session_key", "unknown")
+            context_status = await _context_status(
+                s,
+                ctx=ctx,
+                session_key=session_key,
+                model=session_model,
+                allow_transcript_estimate=requested_session_key == session_key,
+            )
             rows.append(
                 _usage_row(
-                    session_key=_field(s, "session_key", "unknown"),
+                    session_key=session_key,
                     model=session_model,
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
@@ -428,6 +541,7 @@ async def _handle_usage_status(params: dict | None, ctx: RpcContext) -> dict[str
                     updated_at=_field(s, "updated_at"),
                     started_at=_field(s, "started_at"),
                     ended_at=_field(s, "ended_at"),
+                    context_status=context_status,
                 )
             )
         rows = _append_tracker_only_rows(rows, tracker_rows)

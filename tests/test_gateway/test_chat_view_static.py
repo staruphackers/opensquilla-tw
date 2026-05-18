@@ -487,7 +487,7 @@ def test_chat_surfaces_manual_and_passive_compaction_toasts() -> None:
     ]
 
     assert "function _showCompactionToast(payload, meta = {})" in source
-    assert "Compacting session context..." in source
+    assert "Checking whether compaction is needed..." in source
     assert "_showCompactionToast({ ...(result || {}), source: 'manual'" not in compact_block
     assert "session.event.compaction" in source
     assert "Context compacted older messages to keep this session within budget" in source
@@ -642,7 +642,9 @@ def test_chat_ignores_replayed_compaction_toasts() -> None:
 
     assert "function _showCompactionToast(payload, meta = {})" in source
     assert "if (meta && meta.replayed) return;" in body
-    assert body.index("meta.replayed") < body.index("UI.toast('Compacting session context...'")
+    assert body.index("meta.replayed") < body.index(
+        "UI.toast('Checking whether compaction is needed...'"
+    )
 
 
 def test_rpc_client_passes_event_meta_without_polluting_payload() -> None:
@@ -774,8 +776,33 @@ def test_session_api_token_totals_load_independently_of_token_widget() -> None:
     body = source[start:end]
 
     assert "OPENSQUILLA_FEATURES?.tokenViz" not in body
-    assert "const usage = await _rpc.call('usage.status');" in body
+    assert "const usage = await _rpc.call('usage.status', { sessionKey: _sessionKey });" in body
     assert "Turn — input:" in source
+
+
+def test_chat_context_warning_uses_backend_context_status_not_lifetime_usage() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+    start = source.index("function _updateCtxWarning()")
+    end = source.index("  /* ── Chat History", start)
+    body = source[start:end]
+
+    assert "const _CTX_WARN_THRESHOLD" not in source
+    assert "_totalTokens > _CTX_WARN_THRESHOLD" not in source
+    assert "Context > 85%" not in source
+    assert "_contextStatus" in body
+    assert "contextTokens" in body
+    assert "context_window_tokens" in body
+    assert "Request ctx" in body
+
+
+def test_chat_usage_status_applies_current_session_context_status() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+    start = source.index("async function _loadCurrentSessionUsage() {")
+    end = source.index("  function _relTime", start)
+    body = source[start:end]
+
+    assert "_applyContextStatus(current.contextStatus || current.context_status || null);" in body
+    assert "_clearContextStatus();" in body
 
 
 def test_combo_display_requires_current_saved_turn_but_suppressed_savings_can_count() -> None:

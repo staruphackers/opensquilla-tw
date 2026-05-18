@@ -141,6 +141,17 @@ class _FakeSessionManager:
         return self._sessions
 
 
+class _FakeTranscriptSessionManager(_FakeSessionManager):
+    def __init__(self, sessions, transcript):
+        super().__init__(sessions)
+        self._transcript = transcript
+        self.transcript_calls = 0
+
+    async def get_transcript(self, session_key):
+        self.transcript_calls += 1
+        return self._transcript
+
+
 def test_usage_status_session_manager_path_reads_cache_fields() -> None:
     """When session_manager has records, getattr on cache_read/cache_write must flow through."""
     session = SimpleNamespace(
@@ -168,6 +179,61 @@ def test_usage_status_session_manager_path_reads_cache_fields() -> None:
     assert row["billedCostUsd"] == 0.0
     assert row["costSource"] == "opensquilla_estimate"
     assert row["costEphemeral"] is False
+
+
+def test_usage_status_reports_context_pressure_from_session_context_not_lifetime_usage() -> None:
+    session = SimpleNamespace(
+        session_key="agent:webchat:compact",
+        status="running",
+        input_tokens=1_137_000,
+        output_tokens=18_000,
+        context_tokens=36_809,
+        compaction_count=0,
+        model="z-ai/glm-5.1",
+    )
+    sm = _FakeSessionManager([session])
+
+    ctx = _ctx(session_manager=sm, usage_tracker=UsageTracker())
+    payload = asyncio.run(_handle_usage_status(None, ctx))
+
+    [row] = payload["sessions"]
+    context_status = row["contextStatus"]
+    assert context_status == row["context_status"]
+    assert context_status["contextTokens"] == 36_809
+    assert context_status["context_tokens"] == 36_809
+    assert context_status["contextWindowTokens"] == 202_752
+    assert context_status["context_window_tokens"] == 202_752
+    assert context_status["compactionCount"] == 0
+    assert context_status["pressure"] < 0.25
+    assert context_status["pressure"] < row["inputTokens"] / context_status["contextWindowTokens"]
+
+
+def test_usage_status_only_estimates_transcript_context_for_requested_session() -> None:
+    session = SimpleNamespace(
+        session_key="agent:webchat:requested",
+        status="running",
+        input_tokens=500_000,
+        output_tokens=10_000,
+        model="z-ai/glm-5.1",
+    )
+    sm = _FakeTranscriptSessionManager(
+        [session],
+        [
+            SimpleNamespace(token_count=1_500),
+            SimpleNamespace(content="apple book chair"),
+        ],
+    )
+    ctx = _ctx(session_manager=sm, usage_tracker=UsageTracker())
+
+    unrequested = asyncio.run(_handle_usage_status(None, ctx))
+    assert sm.transcript_calls == 0
+    assert unrequested["sessions"][0]["contextStatus"] is None
+
+    requested = asyncio.run(_handle_usage_status({"sessionKey": "agent:webchat:requested"}, ctx))
+    assert sm.transcript_calls == 1
+    context_status = requested["sessions"][0]["contextStatus"]
+    assert context_status["tokenSource"] == "transcript_estimate"
+    assert context_status["contextTokens"] >= 1_500
 
 
 def test_usage_status_exposes_session_timestamp_aliases() -> None:
