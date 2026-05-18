@@ -71,13 +71,15 @@ jobs:
           python - <<'PY'
           from pathlib import Path
 
-          root = Path("src/opensquilla/squilla_router/models")
+          root = Path("src/opensquilla/squilla_router/models/v4.2_phase3_inference")
           required = [
-              root / "intent_head.joblib",
-              root / "router_meta.json",
-              root / "router_model.onnx",
-              root / "router_scaler.joblib",
-              root / "router_vocab.json",
+              root / "PROVENANCE.md",
+              root / "artifact_manifest.json",
+              root / "bge_onnx" / "model.onnx",
+              root / "features" / "tfidf.pkl",
+              root / "lgbm_main.bin",
+              root / "mlp" / "model.onnx",
+              root / "router.runtime.yaml",
           ]
           for path in required:
               assert path.is_file(), f"missing router asset: {path}"
