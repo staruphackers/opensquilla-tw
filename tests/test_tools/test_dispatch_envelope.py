@@ -42,7 +42,19 @@ def _build_registry() -> ToolRegistry:
 
 @pytest.mark.asyncio
 async def test_dispatch_missing_tool_returns_five_field_error_envelope() -> None:
-    handler = build_tool_handler(_build_registry())
+    # Use a trusted CLI ctx so the descriptive ``ToolNotFound`` branch is
+    # exercised. Anonymous/CHANNEL callers receive an opaque ``PolicyDenied``
+    # envelope to prevent registry enumeration; that branch is covered in
+    # ``test_dispatch_surface_hardening``.
+    handler = build_tool_handler(
+        _build_registry(),
+        ToolContext(
+            is_owner=True,
+            caller_kind=CallerKind.CLI,
+            agent_id="main",
+            session_key="cli:main:envelope",
+        ),
+    )
 
     result = await handler(
         ToolCall(
@@ -170,7 +182,20 @@ async def test_dispatch_unattended_cli_approval_payload_is_pending_status() -> N
 @pytest.mark.asyncio
 async def test_dispatch_unknown_tool_in_skill_name_context_raises_unsupported_surface() -> None:
     known_skill_names = {"shell"}
-    handler = build_tool_handler(_build_registry(), known_skill_names=known_skill_names)
+    # Use a trusted CLI ctx so the descriptive ``UnsupportedSurface`` skill
+    # branch is exercised. CHANNEL/anonymous callers receive an opaque
+    # ``PolicyDenied`` envelope to prevent skill-name enumeration; that
+    # branch is covered in ``test_dispatch_surface_hardening``.
+    handler = build_tool_handler(
+        _build_registry(),
+        ToolContext(
+            is_owner=True,
+            caller_kind=CallerKind.CLI,
+            agent_id="main",
+            session_key="cli:main:envelope",
+        ),
+        known_skill_names=known_skill_names,
+    )
 
     result = await handler(
         ToolCall(

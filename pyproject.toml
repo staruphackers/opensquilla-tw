@@ -166,3 +166,9 @@ module = [
     "yoyo.*",
 ]
 ignore_missing_imports = true
+
+[dependency-groups]
+dev = [
+    "laboratory>=1.0.2",
+    "syrupy>=5.1.0",
+]
