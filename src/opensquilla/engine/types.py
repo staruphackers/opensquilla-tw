@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Literal
 
+from opensquilla.execution_status import ExecutionStatus
 from opensquilla.tool_boundary import ToolCall as ToolCall
 from opensquilla.tool_boundary import ToolResult as ToolResult
 
@@ -81,6 +82,7 @@ class ToolResultEvent:
     result: str = ""
     is_error: bool = False
     arguments: dict[str, Any] | None = None
+    execution_status: ExecutionStatus | None = None
 
 
 @dataclass

@@ -504,6 +504,11 @@ def _to_benchmark_transcript(
                             tool_call_id=segment.get("tool_use_id", ""),
                             tool_name=segment.get("name", ""),
                             is_error=bool(segment.get("is_error", False)),
+                            execution_status=(
+                                segment.get("execution_status")
+                                if isinstance(segment.get("execution_status"), dict)
+                                else None
+                            ),
                         )
                     )
             if assistant_blocks:
@@ -534,6 +539,7 @@ def _message_event(
     tool_call_id: str | None = None,
     tool_name: str | None = None,
     is_error: bool | None = None,
+    execution_status: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     event: dict[str, Any] = {"type": "message", "message": {"role": role, "content": content}}
     message = event["message"]
@@ -543,6 +549,8 @@ def _message_event(
         message["toolName"] = tool_name
     if is_error is not None:
         message["isError"] = is_error
+    if execution_status is not None:
+        message["executionStatus"] = execution_status
     if timestamp:
         event["timestamp"] = timestamp
     return event

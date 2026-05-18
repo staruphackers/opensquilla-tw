@@ -26,7 +26,7 @@ from opensquilla.provider.types import ContentBlockDocument, ContentBlockImage
 _BLOCK_FIELDS: dict[str, set[str]] = {
     "text": {"type", "text"},
     "tool_use": {"type", "id", "name", "input"},
-    "tool_result": {"type", "tool_use_id", "content", "is_error"},
+    "tool_result": {"type", "tool_use_id", "content", "is_error", "execution_status"},
     "image": {"type", "source_type", "media_type", "data"},
     "document": {"type", "source_type", "media_type", "data", "title"},
     "thinking": {"type", "thinking", "signature"},

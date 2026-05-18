@@ -8,6 +8,19 @@ from typing import Any
 
 import structlog
 
+from opensquilla.execution_status import (
+    derive_is_error,
+    execution_status_for_tool_result,
+    mark_execution_status_truncated,
+    normalize_execution_status,
+)
+from opensquilla.result_budget import (
+    DEFAULT_TOOL_RESULT_BUDGET_POLICY,
+    ToolResultBudgetPolicy,
+    ToolResultBudgetTracker,
+    clamp_tool_arguments,
+    resolve_budget_class,
+)
 from opensquilla.safety.injection_guard import (
     REFUSAL_REASON_TOOL_CALL_IN_UNTRUSTED,
     extract_tool_call_refusal_reason,
@@ -17,13 +30,6 @@ from opensquilla.tool_boundary import AgentToolHandler, ToolCall, ToolResult
 from opensquilla.tools.envelope import build_tool_failure_envelope, is_denial_payload
 from opensquilla.tools.policy import private_memory_read_tool_denied
 from opensquilla.tools.registry import ToolRegistry, profile_allows_tool, resolve_profile
-from opensquilla.result_budget import (
-    DEFAULT_TOOL_RESULT_BUDGET_POLICY,
-    ToolResultBudgetPolicy,
-    ToolResultBudgetTracker,
-    clamp_tool_arguments,
-    resolve_budget_class,
-)
 from opensquilla.tools.types import (
     CallerKind,
     InteractionMode,
@@ -53,6 +59,18 @@ def _extract_pending_approval(content: Any) -> dict[str, Any] | None:
     return payload if payload.get("status") in _PENDING_APPROVAL_STATUSES else None
 
 
+def _denial_reason(content: Any) -> str:
+    payload: Any = content
+    if isinstance(content, str):
+        try:
+            payload = json.loads(content)
+        except (TypeError, ValueError):
+            return "denied"
+    if isinstance(payload, dict) and payload.get("status") == "approval_denied":
+        return "approval_denied"
+    return "denied"
+
+
 def _has_live_approval_surface(ctx: ToolContext | None) -> bool:
     return ctx is None or ctx.interaction_mode is InteractionMode.INTERACTIVE
 
@@ -65,6 +83,16 @@ def _build_envelope_result(
     error_class_override: str | None = None,
     user_message_override: str | None = None,
 ) -> ToolResult:
+    status = {
+        "version": 1,
+        "status": "error",
+        "exit_code": None,
+        "timed_out": False,
+        "truncated": False,
+        "reason": "denied" if policy_denial else "runtime_error",
+        "source": "tool_runtime",
+        "preservation_class": "diagnostic",
+    }
     return ToolResult(
         tool_use_id=tool_call.tool_use_id,
         tool_name=tool_call.tool_name,
@@ -78,6 +106,7 @@ def _build_envelope_result(
             )
         ),
         is_error=True,
+        execution_status=normalize_execution_status(status),
     )
 
 
@@ -351,10 +380,57 @@ def build_tool_handler(
                         tool_use_id=tool_call.tool_use_id,
                         tool_name=tool_call.tool_name,
                         content=json.dumps(envelope),
-                        is_error=True,
+                        is_error=False,
+                        execution_status={
+                            "version": 1,
+                            "status": "unknown",
+                            "exit_code": None,
+                            "timed_out": False,
+                            "truncated": False,
+                            "reason": "approval_pending",
+                            "source": "tool_runtime",
+                            "preservation_class": "ephemeral",
+                        },
                     )
 
             denial = is_denial_payload(result)
+            execution_status = execution_status_for_tool_result(tool_call.tool_name, result)
+            if execution_status is None:
+                pending = _extract_pending_approval(result)
+                if pending is not None:
+                    execution_status = {
+                        "version": 1,
+                        "status": "unknown",
+                        "exit_code": None,
+                        "timed_out": False,
+                        "truncated": False,
+                        "reason": "approval_pending",
+                        "source": "tool_runtime",
+                        "preservation_class": "ephemeral",
+                    }
+            if execution_status is None and denial:
+                denial_reason = _denial_reason(result)
+                execution_status = {
+                    "version": 1,
+                    "status": "error",
+                    "exit_code": None,
+                    "timed_out": False,
+                    "truncated": False,
+                    "reason": denial_reason,
+                    "source": "tool_runtime",
+                    "preservation_class": "diagnostic",
+                }
+            if execution_status is not None:
+                execution_status = normalize_execution_status(execution_status)
+                log.debug(
+                    "tool.execution_status_normalized",
+                    tool=tool_call.tool_name,
+                    status=execution_status["status"],
+                    reason=execution_status["reason"],
+                    source=execution_status["source"],
+                )
+            status_is_error = derive_is_error(execution_status) if execution_status else False
+            is_error = denial or status_is_error
             artifacts = (
                 list(effective_ctx.published_artifacts[artifact_start:])
                 if effective_ctx is not None
@@ -371,15 +447,18 @@ def build_tool_handler(
                     tool_name=tool_call.tool_name,
                     content=result,
                     budget_class=budget_class,
-                    is_error=denial,
+                    is_error=is_error,
                 )
                 content = budgeted.content
+                if budgeted.changed and execution_status is not None:
+                    execution_status = mark_execution_status_truncated(execution_status)
             return ToolResult(
                 tool_use_id=tool_call.tool_use_id,
                 tool_name=tool_call.tool_name,
                 content=content,
-                is_error=denial,
+                is_error=is_error,
                 artifacts=artifacts,
+                execution_status=execution_status,
             )
         except Exception as exc:
             # Stable failure envelope, no raw exception leakage.
@@ -398,6 +477,16 @@ def build_tool_handler(
                 tool_name=tool_call.tool_name,
                 content=json.dumps(envelope),
                 is_error=True,
+                execution_status={
+                    "version": 1,
+                    "status": "error",
+                    "exit_code": None,
+                    "timed_out": False,
+                    "truncated": False,
+                    "reason": "runtime_error",
+                    "source": "tool_runtime",
+                    "preservation_class": "diagnostic",
+                },
             )
         finally:
             current_tool_context.reset(token)

@@ -8,7 +8,12 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from opensquilla.cli.agent_cmd import AgentRunResult, run_agent_command, run_agent_once
+from opensquilla.cli.agent_cmd import (
+    AgentRunResult,
+    _to_benchmark_transcript,
+    run_agent_command,
+    run_agent_once,
+)
 from opensquilla.engine.types import ArtifactEvent, DoneEvent
 from opensquilla.gateway.config import AgentEntryConfig, GatewayConfig
 from opensquilla.tools.types import CallerKind, InteractionMode
@@ -42,6 +47,45 @@ class _FakeServices:
 
     async def close(self) -> None:
         return None
+
+
+def test_benchmark_transcript_preserves_tool_result_execution_status() -> None:
+    status = {
+        "version": 1,
+        "status": "timeout",
+        "exit_code": None,
+        "timed_out": True,
+        "truncated": False,
+        "reason": "runtime_timeout",
+        "source": "tool_runtime",
+        "preservation_class": "diagnostic",
+    }
+    entry = SimpleNamespace(
+        role="assistant",
+        content="",
+        created_at=None,
+        tool_calls=[
+            {
+                "type": "tool_use",
+                "tool_use_id": "call-1",
+                "name": "exec_command",
+                "input": {"cmd": "sleep"},
+            },
+            {
+                "type": "tool_result",
+                "tool_use_id": "call-1",
+                "name": "exec_command",
+                "result": "timeout",
+                "is_error": True,
+                "execution_status": status,
+            },
+        ],
+    )
+
+    transcript = _to_benchmark_transcript([entry])
+
+    assert transcript[1]["message"]["isError"] is True
+    assert transcript[1]["message"]["executionStatus"] == status
 
 
 @pytest.mark.asyncio

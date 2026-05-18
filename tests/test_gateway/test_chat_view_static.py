@@ -103,6 +103,17 @@ def test_chat_resets_stream_timeout_on_run_heartbeat() -> None:
     assert "webui_stream_idle_grace_ms" in source
 
 
+def test_chat_tool_results_use_execution_status_for_state() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+
+    assert "function _toolExecutionStatus(payload)" in source
+    assert "function _toolResultIsError(payload)" in source
+    assert "function _toolResultStateClass(payload)" in source
+    assert "chat-tools-collapse--unknown" in source
+    assert "_buildToolResultDOM(content, isError, _toolResultIsTruncated(payload))" in source
+    assert "_buildToolResultDOM(content, isError, _toolResultIsTruncated(seg))" in source
+
+
 def test_chat_url_agent_query_resolves_default_webchat_session() -> None:
     source = CHAT_JS.read_text(encoding="utf-8")
 

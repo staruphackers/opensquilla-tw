@@ -6,9 +6,9 @@ import json
 import pytest
 
 from opensquilla.engine.types import ToolCall
+from opensquilla.result_budget import ToolResultBudgetClass, ToolResultBudgetPolicy
 from opensquilla.tools.dispatch import build_tool_handler
 from opensquilla.tools.registry import ToolRegistry
-from opensquilla.result_budget import ToolResultBudgetClass, ToolResultBudgetPolicy
 from opensquilla.tools.types import (
     CallerKind,
     InteractionMode,
@@ -92,7 +92,7 @@ async def test_dispatch_tool_exception_envelope_is_canonical_five_key_shape() ->
 
 
 @pytest.mark.asyncio
-async def test_dispatch_unsupported_surface_approval_payload_is_error_envelope() -> None:
+async def test_dispatch_unsupported_surface_approval_payload_is_pending_status() -> None:
     handler = build_tool_handler(_build_registry())
     token = current_tool_context.set(
         ToolContext(
@@ -114,7 +114,11 @@ async def test_dispatch_unsupported_surface_approval_payload_is_error_envelope()
     finally:
         current_tool_context.reset(token)
 
-    assert result.is_error is True
+    assert result.is_error is False
+    assert result.execution_status is not None
+    assert result.execution_status["status"] == "unknown"
+    assert result.execution_status["reason"] == "approval_pending"
+    assert result.execution_status["preservation_class"] == "ephemeral"
     payload = json.loads(result.content)
     assert payload["status"] == "error"
     assert payload["tool"] == "pending"
@@ -123,7 +127,7 @@ async def test_dispatch_unsupported_surface_approval_payload_is_error_envelope()
 
 
 @pytest.mark.asyncio
-async def test_dispatch_unattended_cli_approval_payload_is_error_envelope() -> None:
+async def test_dispatch_unattended_cli_approval_payload_is_pending_status() -> None:
     handler = build_tool_handler(_build_registry())
     token = current_tool_context.set(
         ToolContext(
@@ -145,7 +149,10 @@ async def test_dispatch_unattended_cli_approval_payload_is_error_envelope() -> N
     finally:
         current_tool_context.reset(token)
 
-    assert result.is_error is True
+    assert result.is_error is False
+    assert result.execution_status is not None
+    assert result.execution_status["status"] == "unknown"
+    assert result.execution_status["reason"] == "approval_pending"
     payload = json.loads(result.content)
     assert set(payload.keys()) == {
         "status",

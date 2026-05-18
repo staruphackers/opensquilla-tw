@@ -819,6 +819,23 @@ async def test_standalone_turnrunner_wires_tool_strip(monkeypatch) -> None:
                 result="boom",
                 is_error=True,
             )
+            yield ToolUseStartEvent(tool_use_id="call-3", tool_name="execute_code")
+            yield ToolResultEvent(
+                tool_use_id="call-3",
+                tool_name="execute_code",
+                result="approval pending",
+                is_error=False,
+                execution_status={
+                    "version": 1,
+                    "status": "unknown",
+                    "exit_code": None,
+                    "timed_out": False,
+                    "truncated": False,
+                    "reason": "approval_pending",
+                    "source": "tool_runtime",
+                    "preservation_class": "ephemeral",
+                },
+            )
             yield DoneEvent()
 
     _RecordingRenderer.instances.clear()
@@ -845,10 +862,12 @@ async def test_standalone_turnrunner_wires_tool_strip(monkeypatch) -> None:
     assert renderer.tool_starts == [
         ("execute_code", None, "call-1"),
         ("execute_code", None, "call-2"),
+        ("execute_code", None, "call-3"),
     ]
     assert renderer.tool_finishes == [
         ("call-1", True),
         ("call-2", False),
+        ("call-3", False),
     ]
 
 

@@ -29,6 +29,7 @@ from opensquilla.cli.repl.session_state import ChatSessionState, messages_to_mar
 from opensquilla.cli.repl.stream import StreamingRenderer, TurnResult, UsageSummary
 from opensquilla.cli.ui import ACCENT, ACCENT_HEADER, console, error_panel, notice_panel
 from opensquilla.engine.commands import Surface
+from opensquilla.execution_status import derive_is_error
 from opensquilla.session.compaction import (
     build_compaction_config_from_provider,
     call_compact_with_optional_config,
@@ -42,6 +43,12 @@ _CLI_ALLOWED_FILE_MIMES = _cli_attachments.CLI_ALLOWED_FILE_MIMES
 _CLI_INLINE_THRESHOLD_BYTES = _cli_attachments.CLI_INLINE_THRESHOLD_BYTES
 _PATH_REMOTE_GATEWAY_MESSAGE = _cli_attachments.PATH_REMOTE_GATEWAY_MESSAGE
 _CLI_ATTACHMENT_COMPAT_EXPORTS = (_CLI_ALLOWED_FILE_MIMES, _CLI_INLINE_THRESHOLD_BYTES)
+
+
+def _tool_result_success_from_status(status: Any, *, legacy_is_error: bool) -> bool:
+    if isinstance(status, dict):
+        return status.get("status") == "success" and not derive_is_error(status)
+    return not legacy_is_error
 
 _DEFAULT_STREAM_HEARTBEAT_INTERVAL_SECONDS = 15.0
 _DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS = 180.0
@@ -1630,7 +1637,12 @@ async def _stream_response_gateway(
                     if not _is_approval_or_blocked_result(event.get("result")):
                         renderer.tool_finished(
                             event.get("tool_use_id") or event.get("toolUseId"),
-                            success=not bool(event.get("is_error") or event.get("isError")),
+                            success=_tool_result_success_from_status(
+                                event.get("execution_status") or event.get("executionStatus"),
+                                legacy_is_error=bool(
+                                    event.get("is_error") or event.get("isError")
+                                ),
+                            ),
                         )
                 elif event_name == "session.event.artifact":
                     artifact = _artifact_event_payload(event)
@@ -1750,7 +1762,13 @@ async def _stream_response_turnrunner(
                 elif isinstance(event, ToolResultEvent):
                     await _maybe_handle_approval(event.result, renderer, resolver)
                     if not _is_approval_or_blocked_result(event.result):
-                        renderer.tool_finished(event.tool_use_id, success=not event.is_error)
+                        renderer.tool_finished(
+                            event.tool_use_id,
+                            success=_tool_result_success_from_status(
+                                event.execution_status,
+                                legacy_is_error=event.is_error,
+                            ),
+                        )
                 elif isinstance(event, ArtifactEvent):
                     artifact = _artifact_event_payload(event)
                     artifacts.append(artifact)

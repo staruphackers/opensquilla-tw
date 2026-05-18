@@ -46,6 +46,10 @@ from opensquilla.engine.types import (
     ToolUseStartEvent,
     WarningEvent,
 )
+from opensquilla.execution_status import (
+    mark_execution_status_truncated,
+    normalize_execution_status,
+)
 from opensquilla.memory.session_flush import SessionFlushService
 from opensquilla.observability.decision_log import (
     DecisionEntry,
@@ -545,11 +549,17 @@ def _persisted_tool_result_segment(
         "result": result,
         "is_error": event.is_error,
     }
+    if event.execution_status is not None:
+        segment["execution_status"] = normalize_execution_status(event.execution_status)
     if len(result) <= max_chars:
         return segment
 
     segment["result_truncated"] = True
     segment["result_original_chars"] = len(result)
+    if "execution_status" in segment:
+        segment["execution_status"] = mark_execution_status_truncated(
+            segment["execution_status"]
+        )
     try:
         parsed = json.loads(result)
     except (json.JSONDecodeError, TypeError):

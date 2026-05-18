@@ -60,6 +60,16 @@ class FakeGatewayClient:
                             "name": "lookup",
                             "result": "world",
                             "is_error": False,
+                            "execution_status": {
+                                "version": 1,
+                                "status": "success",
+                                "exit_code": 0,
+                                "timed_out": False,
+                                "truncated": False,
+                                "reason": None,
+                                "source": "adapter",
+                                "preservation_class": "normal",
+                            },
                         },
                     ],
                 },
@@ -106,6 +116,19 @@ async def test_bridge_reuses_gateway_read_rpcs() -> None:
         ("sessions.resolve", {"key": "agent:main:main"}),
         ("chat.history", {"sessionKey": "agent:main:main", "limit": 5}),
     ]
+
+
+@pytest.mark.asyncio
+async def test_transcript_jsonl_preserves_tool_result_execution_status() -> None:
+    client = FakeGatewayClient()
+    bridge = OpenSquillaMCPBridge(gateway_client_factory=lambda: client)
+
+    transcript = await bridge.transcript_jsonl("agent:main:main", limit=5)
+
+    rows = [json.loads(line) for line in transcript.splitlines()]
+    tool_result_message = rows[2]["message"]
+    assert tool_result_message["isError"] is False
+    assert tool_result_message["executionStatus"]["status"] == "success"
 
 
 @pytest.mark.asyncio

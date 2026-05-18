@@ -3369,12 +3369,39 @@ const ChatView = (() => {
     return details;
   }
 
-  function _buildToolResultDOM(content, isError) {
+  function _toolExecutionStatus(payload) {
+    const status = payload && (payload.execution_status || payload.executionStatus);
+    return status && typeof status === 'object' ? status : null;
+  }
+
+  function _toolResultIsError(payload) {
+    const status = _toolExecutionStatus(payload);
+    if (status && typeof status.status === 'string') {
+      return ['error', 'timeout', 'cancelled'].includes(status.status);
+    }
+    return !!(payload && (payload.is_error || payload.isError || payload.error));
+  }
+
+  function _toolResultStateClass(payload) {
+    const status = _toolExecutionStatus(payload);
+    if (status && status.status === 'success') return 'chat-tools-collapse--success';
+    if (status && status.status === 'unknown') return 'chat-tools-collapse--unknown';
+    return _toolResultIsError(payload) ? 'chat-tools-collapse--error' : 'chat-tools-collapse--success';
+  }
+
+  function _toolResultIsTruncated(payload) {
+    const status = _toolExecutionStatus(payload);
+    return !!(status && status.truncated);
+  }
+
+  function _buildToolResultDOM(content, isError, isTruncated = false) {
     const preview = _truncate(content, 200);
     if (!preview || preview.trim() === '') return null;
 
     const div = document.createElement('div');
-    div.className = 'chat-tool-result' + (isError ? ' chat-tool-result--error' : '');
+    div.className = 'chat-tool-result'
+      + (isError ? ' chat-tool-result--error' : '')
+      + (isTruncated ? ' chat-tool-result--warn' : '');
 
     const previewDiv = document.createElement('div');
     previewDiv.className = 'chat-tool-result-preview';
@@ -3423,7 +3450,7 @@ const ChatView = (() => {
     if (!payload) return;
     const raw = payload.result || payload.content || payload.output || '';
     const content = typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2);
-    const isError = !!(payload.is_error || payload.isError || payload.error);
+    const isError = _toolResultIsError(payload);
     const toolId = payload.tool_use_id || '';
 
     const bubble = _ensureStreamBubble();
@@ -3432,10 +3459,10 @@ const ChatView = (() => {
     // Transition tool container from running → success/error and find target container
     let resultTarget = body; // default: append to msg-body
     if (toolId) {
-      const details = body.querySelector('[data-tool-id="' + toolId + '"]');
-      if (details) {
-        details.classList.remove('chat-tools-collapse--running');
-        details.classList.add(isError ? 'chat-tools-collapse--error' : 'chat-tools-collapse--success');
+        const details = body.querySelector('[data-tool-id="' + toolId + '"]');
+        if (details) {
+          details.classList.remove('chat-tools-collapse--running');
+          details.classList.add(_toolResultStateClass(payload));
         const summary = details.querySelector('.chat-tools-summary');
         if (summary) summary.removeAttribute('aria-disabled');
         const toolsBody = details.querySelector('.chat-tools-body');
@@ -3451,7 +3478,7 @@ const ChatView = (() => {
     }
 
     // Only show result preview if non-empty
-    const resultDiv = _buildToolResultDOM(content, isError);
+    const resultDiv = _buildToolResultDOM(content, isError, _toolResultIsTruncated(payload));
     if (!resultDiv) {
       if (_autoScroll) _scrollToBottom();
       return;
@@ -3601,16 +3628,16 @@ const ChatView = (() => {
           body.appendChild(details);
         } else if (seg.type === 'tool_result') {
           const toolId = seg.tool_use_id || '';
-          const isError = !!seg.is_error;
+          const isError = _toolResultIsError(seg);
           const content = seg.result || '';
 
           if (toolId) {
             const details = body.querySelector('[data-tool-id="' + toolId + '"]');
             if (details) {
               details.classList.remove('chat-tools-collapse--running');
-              details.classList.add(isError ? 'chat-tools-collapse--error' : 'chat-tools-collapse--success');
+              details.classList.add(_toolResultStateClass(seg));
               const toolsBody = details.querySelector('.chat-tools-body');
-              const resultDiv = _buildToolResultDOM(content, isError);
+              const resultDiv = _buildToolResultDOM(content, isError, _toolResultIsTruncated(seg));
               if (resultDiv && toolsBody) toolsBody.appendChild(resultDiv);
               else if (resultDiv) details.appendChild(resultDiv);
 

@@ -258,6 +258,11 @@ def _assistant_tool_events(
                     tool_call_id=str(segment.get("tool_use_id") or ""),
                     tool_name=str(segment.get("name") or ""),
                     is_error=bool(segment.get("is_error", False)),
+                    execution_status=(
+                        segment.get("execution_status")
+                        if isinstance(segment.get("execution_status"), dict)
+                        else None
+                    ),
                 )
             )
     if assistant_blocks:
@@ -273,6 +278,7 @@ def _message_event(
     tool_call_id: str | None = None,
     tool_name: str | None = None,
     is_error: bool | None = None,
+    execution_status: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     event: dict[str, Any] = {"type": "message", "message": {"role": role, "content": content}}
     if timestamp is not None:
@@ -283,4 +289,6 @@ def _message_event(
         event["message"]["toolName"] = tool_name
     if is_error is not None:
         event["message"]["isError"] = is_error
+    if execution_status is not None:
+        event["message"]["executionStatus"] = execution_status
     return event

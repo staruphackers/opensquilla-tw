@@ -39,6 +39,10 @@ from opensquilla.engine.tool_result_store import (
 from opensquilla.engine.tool_text_compat import strip_synthetic_tool_call_suffix
 from opensquilla.engine.tool_truncation import estimate_tokens as get_approx_tokens
 from opensquilla.engine.tool_truncation import truncate_result
+from opensquilla.execution_status import (
+    mark_execution_status_truncated,
+    runtime_execution_status,
+)
 from opensquilla.observability.turn_call_log import TurnCallLogger
 from opensquilla.provider import (
     ChatConfig,
@@ -374,6 +378,7 @@ def _chat_config_with_thinking_disabled(chat_cfg: ChatConfig) -> ChatConfig:
         cache_mode=chat_cfg.cache_mode,
         model_capabilities=chat_cfg.model_capabilities,
         thinking_level=None,
+        provider_request_max_chars=chat_cfg.provider_request_max_chars,
     )
 
 
@@ -1029,6 +1034,11 @@ class Agent:
                 content=guarded_content,
                 is_error=result.is_error,
                 artifacts=list(result.artifacts),
+                execution_status=(
+                    mark_execution_status_truncated(result.execution_status)
+                    if result.execution_status is not None
+                    else None
+                ),
             )
             self.config.metadata["tool_json_guard_applied"] = True
             self.config.metadata["tool_json_guard_calls"] = (
@@ -1109,6 +1119,11 @@ class Agent:
             content=compressed_content,
             is_error=result.is_error,
             artifacts=list(result.artifacts),
+            execution_status=(
+                mark_execution_status_truncated(result.execution_status)
+                if result.execution_status is not None
+                else None
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -1274,6 +1289,7 @@ class Agent:
             thinking_level=(
                 self.config.thinking if isinstance(self.config.thinking, ThinkingLevel) else None
             ),
+            provider_request_max_chars=self.config.tool_result_provider_request_max_chars,
         )
         _thinking_fallback_done = False
 
@@ -2091,6 +2107,9 @@ class Agent:
                             if isinstance(self.config.thinking, ThinkingLevel)
                             else None
                         ),
+                        provider_request_max_chars=(
+                            self.config.tool_result_provider_request_max_chars
+                        ),
                     )
 
                 assembled_text = "".join(assistant_text_parts)
@@ -2209,6 +2228,11 @@ class Agent:
                             tool_name=tc.tool_name,
                             content=(f"Tool '{tc.tool_name}' timed out after {tool_timeout}s"),
                             is_error=True,
+                            execution_status=runtime_execution_status(
+                                "timeout",
+                                reason="runtime_timeout",
+                                timed_out=True,
+                            ),
                         )
                     self._write_turn_call_log(
                         "tool_response",
@@ -2252,6 +2276,11 @@ class Agent:
                                                 f"{self.config.iteration_timeout}s"
                                             ),
                                             is_error=True,
+                                            execution_status=runtime_execution_status(
+                                                "timeout",
+                                                reason="runtime_timeout",
+                                                timed_out=True,
+                                            ),
                                         )
                                 return
                             wait_timeout = remaining if interval <= 0 else min(interval, remaining)
@@ -2276,6 +2305,11 @@ class Agent:
                                                     f"{self.config.iteration_timeout}s"
                                                 ),
                                                 is_error=True,
+                                                execution_status=runtime_execution_status(
+                                                    "timeout",
+                                                    reason="runtime_timeout",
+                                                    timed_out=True,
+                                                ),
                                             )
                                     return
                                 now = time.monotonic()
@@ -2298,6 +2332,10 @@ class Agent:
                                         tool_name=tc.tool_name,
                                         content=f"Tool '{tc.tool_name}' was cancelled",
                                         is_error=True,
+                                        execution_status=runtime_execution_status(
+                                            "cancelled",
+                                            reason="cancelled",
+                                        ),
                                     )
                                 except Exception as exc:  # noqa: BLE001
                                     outcome = ToolResult(
@@ -2305,6 +2343,10 @@ class Agent:
                                         tool_name=tc.tool_name,
                                         content=f"Tool '{tc.tool_name}' raised: {exc}",
                                         is_error=True,
+                                        execution_status=runtime_execution_status(
+                                            "error",
+                                            reason="runtime_error",
+                                        ),
                                     )
                                 results_by_id[tc.tool_use_id] = outcome
                     finally:
@@ -2362,6 +2404,7 @@ class Agent:
                         result=result.content,
                         is_error=result.is_error,
                         arguments=tc.arguments,
+                        execution_status=result.execution_status,
                     )
                     while self._pending_warnings:
                         yield self._pending_warnings.pop(0)
@@ -2372,6 +2415,7 @@ class Agent:
                             tool_use_id=result.tool_use_id,
                             content=result.content,
                             is_error=result.is_error,
+                            execution_status=result.execution_status,
                         )
                     )
 
@@ -3012,6 +3056,10 @@ class Agent:
                 tool_name=tc.tool_name,
                 content=f"No tool handler registered for tool '{tc.tool_name}'",
                 is_error=True,
+                execution_status=runtime_execution_status(
+                    "error",
+                    reason="runtime_error",
+                ),
             )
         try:
             return await self.tool_handler(tc)
@@ -3021,6 +3069,10 @@ class Agent:
                 tool_name=tc.tool_name,
                 content=f"Tool '{tc.tool_name}' raised: {exc}",
                 is_error=True,
+                execution_status=runtime_execution_status(
+                    "error",
+                    reason="runtime_error",
+                ),
             )
 
     # ------------------------------------------------------------------
@@ -3062,6 +3114,10 @@ class Agent:
                     tool_name=tc.tool_name,
                     content=f"No tool handler registered for tool '{tc.tool_name}'",
                     is_error=True,
+                    execution_status=runtime_execution_status(
+                        "error",
+                        reason="runtime_error",
+                    ),
                 )
             token = current_tool_context.set(subagent_ctx)
             try:

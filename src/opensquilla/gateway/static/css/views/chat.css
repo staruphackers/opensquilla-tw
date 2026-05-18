@@ -876,6 +876,10 @@
   border-left: 3px solid var(--danger);
 }
 
+.chat-tools-collapse--unknown {
+  border-left: 3px solid var(--warn);
+}
+
 .chat-tool-result--warn {
   border-color: var(--warn);
   background: rgba(232, 168, 76, 0.06);

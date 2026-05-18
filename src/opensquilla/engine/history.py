@@ -5,6 +5,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from opensquilla.execution_status import (
+    normalize_execution_status,
+    normalize_legacy_execution_status,
+)
 from opensquilla.provider import (
     ContentBlockText,
     ContentBlockToolResult,
@@ -223,6 +227,11 @@ def reconstruct_messages_from_entry(
                     tool_use_id=tool_use_id,
                     content=result_content,
                     is_error=bool(seg.get("is_error")),
+                    execution_status=(
+                        normalize_execution_status(seg.get("execution_status"))
+                        if "execution_status" in seg
+                        else normalize_legacy_execution_status(is_error=bool(seg.get("is_error")))
+                    ),
                 )
             )
 

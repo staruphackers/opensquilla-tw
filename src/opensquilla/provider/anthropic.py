@@ -10,7 +10,13 @@ import httpx
 import structlog
 
 from opensquilla.env import trust_env as _trust_env
+from opensquilla.execution_status import derive_is_error
 
+from .request_proof import (
+    ProviderRequestBudgetExceeded,
+    prove_or_compact_provider_payload,
+    prove_provider_payload_from_env,
+)
 from .types import (
     ChatConfig,
     DoneEvent,
@@ -177,12 +183,17 @@ def _build_message_payload(msg: Message, model: str | None = None) -> dict[str, 
                 thinking_block["signature"] = block.signature
             parts.append(thinking_block)
         elif block.type == "tool_result":
+            is_error = (
+                derive_is_error(block.execution_status)
+                if block.execution_status is not None
+                else block.is_error
+            )
             tool_result_parts.append(
                 {
                     "type": "tool_result",
                     "tool_use_id": block.tool_use_id,
                     "content": block.content,
-                    "is_error": block.is_error,
+                    "is_error": is_error,
                 }
             )
     if tool_result_parts:
@@ -323,6 +334,28 @@ class AnthropicProvider:
             payload["tools"] = [_build_tool_payload(t) for t in tools]
         if thinking_payload:
             payload["thinking"] = thinking_payload
+
+        try:
+            payload, _proof = prove_or_compact_provider_payload(
+                payload,
+                projection_adapter="anthropic",
+                proof_budget=cfg.provider_request_max_chars,
+                status_projection_mode="native_is_error",
+            )
+            if _proof is not None:
+                log.info("provider.request_proof", **_proof)
+            prove_provider_payload_from_env(
+                payload,
+                projection_adapter="anthropic",
+                status_projection_mode="native_is_error",
+            )
+        except ProviderRequestBudgetExceeded as exc:
+            log.warning("provider.request_budget_exhausted", **exc.proof)
+            yield ErrorEvent(
+                message=json.dumps(exc.proof, ensure_ascii=False, sort_keys=True),
+                code="provider_request_budget_exhausted",
+            )
+            return
 
         headers = {
             "anthropic-version": _ANTHROPIC_VERSION,
