@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from openpyxl import load_workbook
 from pptx import Presentation
+from pypdf import PdfReader
 
 from opensquilla.artifacts import ArtifactStore
 from opensquilla.tools.builtin.file_authoring import (
@@ -87,9 +88,7 @@ async def test_create_xlsx_publishes_channel_artifact(tmp_path: Path) -> None:
 
     artifact, material = _published_material(ctx, result)
     assert artifact["name"] == "metrics.xlsx"
-    assert artifact["mime"] == (
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    assert artifact["mime"] == ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     assert material.startswith(b"PK")
     workbook = load_workbook(BytesIO(material))
     sheet = workbook["Summary"]
@@ -195,3 +194,37 @@ async def test_create_pdf_report_publishes_channel_artifact(tmp_path: Path) -> N
     assert artifact["name"] == "report.pdf"
     assert artifact["mime"] == "application/pdf"
     assert material.startswith(b"%PDF")
+
+
+@pytest.mark.asyncio
+async def test_create_pdf_report_uses_unicode_fonts_for_channel_artifact(tmp_path: Path) -> None:
+    ctx = _channel_artifact_context(tmp_path)
+    token = current_tool_context.set(ctx)
+    try:
+        result = await create_pdf_report(
+            name="self-portrait.pdf",
+            title="皮皮虾自画像",
+            sections=[
+                {
+                    "heading": "我的自画像",
+                    "body": "╭──◉▼ 自画像\n中文内容不会变成黑方块 🦐",
+                }
+            ],
+        )
+    finally:
+        current_tool_context.reset(token)
+
+    artifact, material = _published_material(ctx, result)
+    assert artifact["name"] == "self-portrait.pdf"
+    assert artifact["mime"] == "application/pdf"
+
+    reader = PdfReader(BytesIO(material))
+    base_fonts: set[str] = set()
+    for page in reader.pages:
+        resources = page["/Resources"]
+        for font_ref in resources.get("/Font", {}).values():
+            font = font_ref.get_object()
+            base_fonts.add(str(font.get("/BaseFont", "")))
+
+    assert not any("ZapfDingbats" in font_name for font_name in base_fonts)
+    assert any("STSong-Light" in font_name for font_name in base_fonts)

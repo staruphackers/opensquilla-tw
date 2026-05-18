@@ -24,6 +24,23 @@ _CSV_MIME = "text/csv"
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 _PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 _PDF_MIME = "application/pdf"
+_PDF_SANS_FONT = "OpenSquillaPDFSans"
+_PDF_SANS_BOLD_FONT = "OpenSquillaPDFSans-Bold"
+_PDF_CJK_FONT = "STSong-Light"
+_PDF_SANS_CANDIDATES = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/local/share/fonts/dejavu/DejaVuSans.ttf",
+    "/Library/Fonts/Arial Unicode.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "C:/Windows/Fonts/arial.ttf",
+)
+_PDF_SANS_BOLD_CANDIDATES = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/local/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+    "C:/Windows/Fonts/arialbd.ttf",
+)
+_PDF_FONT_REGISTERED = False
 
 
 def _ensure_name(name: str | None, *, default: str, suffix: str) -> str:
@@ -71,8 +88,98 @@ def _text(value: Any) -> str:
     return str(value)
 
 
-def _pdf_text(value: Any) -> str:
-    return escape(_text(value))
+def _first_existing_path(candidates: tuple[str, ...]) -> str | None:
+    for candidate in candidates:
+        if Path(candidate).exists():
+            return candidate
+    return None
+
+
+def _register_pdf_fonts() -> tuple[str, str, str | None]:
+    global _PDF_FONT_REGISTERED
+
+    from reportlab.pdfbase import pdfmetrics  # type: ignore[import-untyped]
+    from reportlab.pdfbase.cidfonts import UnicodeCIDFont  # type: ignore[import-untyped]
+    from reportlab.pdfbase.ttfonts import TTFont  # type: ignore[import-untyped]
+
+    if not _PDF_FONT_REGISTERED:
+        sans_path = _first_existing_path(_PDF_SANS_CANDIDATES)
+        if sans_path is not None and _PDF_SANS_FONT not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(TTFont(_PDF_SANS_FONT, sans_path))
+
+        bold_path = _first_existing_path(_PDF_SANS_BOLD_CANDIDATES)
+        if bold_path is not None and _PDF_SANS_BOLD_FONT not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(TTFont(_PDF_SANS_BOLD_FONT, bold_path))
+
+        if _PDF_CJK_FONT not in pdfmetrics.getRegisteredFontNames():
+            pdfmetrics.registerFont(UnicodeCIDFont(_PDF_CJK_FONT))
+
+        _PDF_FONT_REGISTERED = True
+
+    font_names = set(pdfmetrics.getRegisteredFontNames())
+    base_font = _PDF_SANS_FONT if _PDF_SANS_FONT in font_names else "Helvetica"
+    bold_font = _PDF_SANS_BOLD_FONT if _PDF_SANS_BOLD_FONT in font_names else base_font
+    cjk_font = _PDF_CJK_FONT if _PDF_CJK_FONT in font_names else None
+    return base_font, bold_font, cjk_font
+
+
+def _is_cjk(char: str) -> bool:
+    codepoint = ord(char)
+    return (
+        0x3400 <= codepoint <= 0x4DBF
+        or 0x4E00 <= codepoint <= 0x9FFF
+        or 0xF900 <= codepoint <= 0xFAFF
+        or 0x20000 <= codepoint <= 0x2A6DF
+        or 0x2A700 <= codepoint <= 0x2B73F
+        or 0x2B740 <= codepoint <= 0x2B81F
+        or 0x2B820 <= codepoint <= 0x2CEAF
+        or 0x2CEB0 <= codepoint <= 0x2EBEF
+        or 0x30000 <= codepoint <= 0x3134F
+    )
+
+
+def _font_supports_char(font_name: str, char: str) -> bool:
+    from reportlab.pdfbase import pdfmetrics  # type: ignore[import-untyped]
+
+    font = pdfmetrics.getFont(font_name)
+    face = getattr(font, "face", None)
+    char_widths = getattr(face, "charWidths", None)
+    if char_widths is None:
+        return ord(char) < 256
+    return ord(char) in char_widths
+
+
+def _pdf_markup_text(value: Any, *, base_font: str, cjk_font: str | None) -> str:
+    text = _text(value)
+    if not text:
+        return ""
+
+    parts: list[str] = []
+    run: list[str] = []
+    run_font: str | None = None
+
+    def flush() -> None:
+        nonlocal run, run_font
+        if not run:
+            return
+        escaped = escape("".join(run))
+        if run_font is not None:
+            parts.append(f'<font name="{run_font}">{escaped}</font>')
+        else:
+            parts.append(escaped)
+        run = []
+        run_font = None
+
+    for char in text:
+        target_font = cjk_font if cjk_font is not None and _is_cjk(char) else None
+        if target_font is None and not _font_supports_char(base_font, char):
+            continue
+        if target_font != run_font:
+            flush()
+            run_font = target_font
+        run.append(char)
+    flush()
+    return "".join(parts)
 
 
 def _published_response(
@@ -349,7 +456,19 @@ async def create_pdf_report(
     output = io.BytesIO()
     doc = SimpleDocTemplate(output, pagesize=letter)
     styles = getSampleStyleSheet()
-    story: list[Any] = [Paragraph(_pdf_text(title) or "Report", styles["Title"]), Spacer(1, 12)]
+    base_font, bold_font, cjk_font = _register_pdf_fonts()
+    for style_name in ("Title", "Heading2", "BodyText"):
+        styles[style_name].fontName = (
+            bold_font if style_name in {"Title", "Heading2"} else base_font
+        )
+
+    story: list[Any] = [
+        Paragraph(
+            _pdf_markup_text(title, base_font=base_font, cjk_font=cjk_font) or "Report",
+            styles["Title"],
+        ),
+        Spacer(1, 12),
+    ]
 
     if sections:
         if not isinstance(sections, list):
@@ -359,16 +478,31 @@ async def create_pdf_report(
                 raise ToolError(f"sections[{index + 1}] must be an object")
             heading = _text(section.get("heading")) or f"Section {index + 1}"
             section_body = _text(section.get("body"))
-            story.append(Paragraph(_pdf_text(heading), styles["Heading2"]))
+            story.append(
+                Paragraph(
+                    _pdf_markup_text(heading, base_font=base_font, cjk_font=cjk_font),
+                    styles["Heading2"],
+                )
+            )
             if section_body:
                 for paragraph in section_body.splitlines():
                     if paragraph.strip():
-                        story.append(Paragraph(_pdf_text(paragraph), styles["BodyText"]))
+                        story.append(
+                            Paragraph(
+                                _pdf_markup_text(paragraph, base_font=base_font, cjk_font=cjk_font),
+                                styles["BodyText"],
+                            )
+                        )
             story.append(Spacer(1, 8))
     elif body:
         for paragraph in _text(body).splitlines():
             if paragraph.strip():
-                story.append(Paragraph(_pdf_text(paragraph), styles["BodyText"]))
+                story.append(
+                    Paragraph(
+                        _pdf_markup_text(paragraph, base_font=base_font, cjk_font=cjk_font),
+                        styles["BodyText"],
+                    )
+                )
     else:
         story.append(Paragraph("No report body was provided.", styles["BodyText"]))
 
