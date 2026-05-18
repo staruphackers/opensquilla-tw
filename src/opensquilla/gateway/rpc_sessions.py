@@ -1690,6 +1690,14 @@ async def _handle_sessions_context_compact(params: dict | None, ctx: RpcContext)
                 tokens_after = 0
                 remaining_budget_tokens = 0
         except asyncio.CancelledError:
+            notify_compaction(
+                key,
+                source="manual",
+                phase="manual",
+                status="cancelled",
+                message="Compaction was cancelled.",
+                context_window_tokens=context_window_tokens,
+            )
             raise
         except Exception as exc:
             notify_compaction(

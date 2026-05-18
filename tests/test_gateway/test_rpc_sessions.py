@@ -209,6 +209,20 @@ class FakeSessionManager:
         return session, True
 
 
+class SlowCompactionSessionManager(FakeSessionManager):
+    def __init__(self, sessions: list[FakeSession] | None = None):
+        super().__init__(sessions)
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def compact(
+        self, session_key: str, context_window_tokens: int, config=None
+    ) -> str:
+        self.started.set()
+        await self.release.wait()
+        return await super().compact(session_key, context_window_tokens, config)
+
+
 def make_ctx(session_manager=None, **kwargs) -> RpcContext:
     role = kwargs.pop("role", "operator")
     scopes = kwargs.pop("scopes", None)
@@ -1223,6 +1237,80 @@ class TestSessionsContextCompact:
         ]
         assert all(payload["source"] == "manual" for _, payload in events)
         assert all(payload["phase"] == "manual" for _, payload in events)
+
+    @pytest.mark.asyncio
+    async def test_context_compact_emits_started_while_slow_compaction_is_running(
+        self,
+        dispatcher,
+        session,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        manager = SlowCompactionSessionManager([session])
+        ctx = make_ctx(session_manager=manager)
+        events: list[tuple[str, dict[str, Any]]] = []
+        monkeypatch.setattr(
+            rpc_sessions,
+            "notify_compaction",
+            lambda session_key, **payload: events.append((session_key, payload)),
+        )
+
+        task = asyncio.create_task(
+            dispatcher.dispatch(
+                "r1",
+                "sessions.contextCompact",
+                {"key": session.session_key, "contextWindowTokens": 1234},
+                ctx,
+            )
+        )
+
+        await asyncio.wait_for(manager.started.wait(), timeout=1.0)
+        assert [payload["status"] for _, payload in events] == ["started"]
+        assert task.done() is False
+
+        manager.release.set()
+        res = await asyncio.wait_for(task, timeout=1.0)
+
+        assert res.ok is True
+        assert [payload["status"] for _, payload in events] == [
+            "started",
+            "completed",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_context_compact_emits_cancelled_when_slow_compaction_is_cancelled(
+        self,
+        dispatcher,
+        session,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        manager = SlowCompactionSessionManager([session])
+        ctx = make_ctx(session_manager=manager)
+        events: list[tuple[str, dict[str, Any]]] = []
+        monkeypatch.setattr(
+            rpc_sessions,
+            "notify_compaction",
+            lambda session_key, **payload: events.append((session_key, payload)),
+        )
+
+        task = asyncio.create_task(
+            dispatcher.dispatch(
+                "r1",
+                "sessions.contextCompact",
+                {"key": session.session_key, "contextWindowTokens": 1234},
+                ctx,
+            )
+        )
+        await asyncio.wait_for(manager.started.wait(), timeout=1.0)
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert [payload["status"] for _, payload in events] == [
+            "started",
+            "cancelled",
+        ]
+        assert manager.compact_calls == []
 
     @pytest.mark.asyncio
     async def test_context_compact_emits_skipped_when_nothing_removed(

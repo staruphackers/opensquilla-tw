@@ -491,6 +491,7 @@ def test_chat_surfaces_manual_and_passive_compaction_toasts() -> None:
     assert "_showCompactionToast({ ...(result || {}), source: 'manual'" not in compact_block
     assert "session.event.compaction" in source
     assert "Context compacted older messages to keep this session within budget" in source
+    assert "Compact cancelled" in source
 
 
 def test_chat_clears_background_task_groups_on_state_reset_paths() -> None:

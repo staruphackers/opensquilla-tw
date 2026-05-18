@@ -2250,6 +2250,10 @@ const ChatView = (() => {
       UI.toast('Compact failed' + msg, 'err', 5000);
       return;
     }
+    if (status === 'cancelled') {
+      UI.toast('Compact cancelled', 'info', 4500);
+      return;
+    }
     if (source === 'manual') {
       UI.toast('Context compacted' + details, 'info', 4500);
       return;

@@ -232,6 +232,34 @@ async def test_call_compaction_llm_adds_openrouter_app_attribution(monkeypatch) 
 
 
 @pytest.mark.asyncio
+async def test_call_compaction_llm_timeout_returns_none(monkeypatch) -> None:
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        async def post(self, url, *, json, headers):
+            raise TimeoutError("summary timed out")
+
+    monkeypatch.setattr(
+        "opensquilla.session.compaction.httpx.AsyncClient",
+        lambda **kwargs: FakeClient(),
+    )
+
+    result = await call_compaction_llm(
+        chunk_text="old conversation",
+        identifier_instruction="",
+        model="openai/gpt-4o-mini",
+        api_key="test-key",
+        timeout=0.01,
+    )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
 async def test_custom_instructions_are_user_scoped_and_identifier_policy_stays_system(
     monkeypatch,
 ) -> None:
