@@ -32,6 +32,7 @@ from typing import Any, cast
 import structlog
 
 from opensquilla.gateway.routing import RouteEnvelope, SourceKind
+from opensquilla.gateway.session_lifecycle import TaskLifecycleEvent, TaskLifecycleListener
 from opensquilla.session.keys import canonicalize_session_key, normalize_agent_id, parse_agent_id
 from opensquilla.session.models import AgentTaskRecord, AgentTaskStatus
 from opensquilla.session.terminal_reply import build_terminal_reply
@@ -250,6 +251,7 @@ class TaskRuntime:
         turn_handler: TaskHandler,
         event_emitter: EventEmitter | None = None,
         terminal_listener: TerminalListener | None = None,
+        lifecycle_listener: TaskLifecycleListener | None = None,
         max_concurrency: int = 4,
         max_pending_per_session: int | None = 64,
         subagent_reserved_slots: int = 0,
@@ -289,6 +291,7 @@ class TaskRuntime:
         self._turn_handler = turn_handler
         self._event_emitter = event_emitter
         self._terminal_listener = terminal_listener
+        self._lifecycle_listener = lifecycle_listener
         self._max_pending_per_session = max_pending_per_session
         self._max_concurrency = max_concurrency
         self._subagent_reserved_slots = subagent_reserved_slots
@@ -1019,6 +1022,15 @@ class TaskRuntime:
             started_at=_loop_time_ms(),
         )
         await self._emit(task.envelope.session_key, "task.running", {"task_id": task.task_id})
+        await self._notify_task_lifecycle(
+            TaskLifecycleEvent(
+                phase="running",
+                session_key=task.envelope.session_key,
+                task_id=task.task_id,
+                task_status=AgentTaskStatus.RUNNING,
+                run_kind=task.run_kind,
+            )
+        )
 
     async def _mark_terminal(
         self,
@@ -1088,6 +1100,18 @@ class TaskRuntime:
                 }
             )
         await self._emit(task.envelope.session_key, f"task.{status.value}", payload)
+        await self._notify_task_lifecycle(
+            TaskLifecycleEvent(
+                phase="terminal",
+                session_key=task.envelope.session_key,
+                task_id=task.task_id,
+                task_status=status,
+                run_kind=task.run_kind,
+                terminal_reason=terminal_reason,
+                error_class=error_class,
+                error_message=error_message,
+            )
+        )
         task.done.set()
         await self._notify_subagent_terminal(
             task,
@@ -1124,6 +1148,21 @@ class TaskRuntime:
         if self._event_emitter is None:
             return
         await self._event_emitter(session_key, event_name, payload)
+
+    async def _notify_task_lifecycle(self, event: TaskLifecycleEvent) -> None:
+        if self._lifecycle_listener is None:
+            return
+        try:
+            await self._lifecycle_listener(event)
+        except Exception:
+            log.warning(
+                "task_runtime.lifecycle_listener_failed",
+                session_key=event.session_key,
+                task_id=event.task_id,
+                phase=event.phase,
+                task_status=event.task_status,
+                exc_info=True,
+            )
 
     async def _notify_subagent_terminal(
         self,

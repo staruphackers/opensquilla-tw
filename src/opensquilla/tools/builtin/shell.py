@@ -86,6 +86,7 @@ class _BgSession:
     session_key: str | None = None
     agent_id: str | None = None
     is_owner_run: bool = False
+    local_urls: list[str] = field(default_factory=list)
     output_lines: list[str] = field(default_factory=list)
     done: bool = False
     timed_out: bool = False
@@ -319,7 +320,7 @@ def _bg_status(session: _BgSession) -> str:
 
 
 def _bg_session_payload(session: _BgSession) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "session_id": session.session_id,
         "command": session.command,
         "status": _bg_status(session),
@@ -329,6 +330,48 @@ def _bg_session_payload(session: _BgSession) -> dict[str, object]:
         "killed": session.killed,
         "timed_out": session.timed_out,
     }
+    if session.local_urls:
+        payload["local_urls"] = list(session.local_urls)
+    return payload
+
+
+def _local_server_urls_from_command(command: str) -> list[str]:
+    urls: list[str] = []
+    url_pattern = r"https?://(?:127\.0\.0\.1|localhost):\d{2,5}(?:/[^\s\"']*)?"
+    for match in re.finditer(url_pattern, command):
+        urls.append(match.group(0).rstrip(".,;)"))
+
+    http_server = re.search(
+        r"(?:^|[\s;&|])python(?:3(?:\.\d+)?)?\s+-m\s+http\.server(?:\s+(?P<port>\d{2,5}))?",
+        command,
+    )
+    if http_server is not None:
+        port = http_server.group("port") or "8000"
+        urls.append(f"http://127.0.0.1:{port}/")
+
+    seen: set[str] = set()
+    unique: list[str] = []
+    for url in urls:
+        if url not in seen:
+            seen.add(url)
+            unique.append(url)
+    return unique
+
+
+def _background_process_result(session: _BgSession) -> str:
+    lines = [
+        f"session_id={session.session_id}",
+        f"command: {session.command}",
+        "status: running",
+    ]
+    if session.local_urls:
+        lines.append("local_urls:")
+        lines.extend(f"- {url}" for url in session.local_urls)
+        lines.append(
+            "note: If the user asked to view this in a browser, include the local URL "
+            "in your reply."
+        )
+    return "\n".join(lines)
 
 
 def _current_bg_context_is_admin() -> bool:
@@ -645,6 +688,7 @@ async def background_process(
             session_key=ctx.session_key if ctx is not None else None,
             agent_id=ctx.agent_id if ctx is not None else None,
             is_owner_run=bool(ctx.is_owner) if ctx is not None else False,
+            local_urls=_local_server_urls_from_command(command),
         )
         _bg_sessions[session_id] = session
         effective_timeout = _resolve_background_timeout(timeout)
@@ -662,7 +706,7 @@ async def background_process(
                 _finalize_bg_session(session)
 
         session.collector_task = asyncio.create_task(_collect_restricted())
-        return f"session_id={session_id}\ncommand: {command}\nstatus: running"
+        return _background_process_result(session)
 
     if elevated_bypass:
         log.info("background_process_elevated_host", command=_audit_command(command))
@@ -697,6 +741,7 @@ async def background_process(
         session_key=ctx.session_key if ctx is not None else None,
         agent_id=ctx.agent_id if ctx is not None else None,
         is_owner_run=bool(ctx.is_owner) if ctx is not None else False,
+        local_urls=_local_server_urls_from_command(command),
     )
     _bg_sessions[session_id] = session
     effective_timeout = _resolve_background_timeout(timeout)
@@ -715,7 +760,7 @@ async def background_process(
 
     session.collector_task = asyncio.create_task(_collect_host())
 
-    return f"session_id={session_id}\ncommand: {command}\nstatus: running"
+    return _background_process_result(session)
 
 
 async def _spawn_sandboxed_background_process(

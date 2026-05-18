@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from opensquilla.gateway.session_lifecycle import session_status_for_task_status
 from opensquilla.gateway.task_runtime import SubagentCompletionEvent
 
 _RESULT_MAX_CHARS = 12000
@@ -152,16 +153,7 @@ async def _mark_child_terminal(
     finish = getattr(session_manager, "finish", None)
     if not callable(finish):
         return
-    from opensquilla.session.models import AgentTaskStatus, SessionStatus
-
-    status_map = {
-        AgentTaskStatus.SUCCEEDED: SessionStatus.DONE,
-        AgentTaskStatus.FAILED: SessionStatus.FAILED,
-        AgentTaskStatus.CANCELLED: SessionStatus.KILLED,
-        AgentTaskStatus.TIMEOUT: SessionStatus.TIMEOUT,
-        AgentTaskStatus.ABANDONED: SessionStatus.FAILED,
-    }
-    session_status = status_map.get(event.status)
+    session_status = session_status_for_task_status(event.status)
     if session_status is None:
         return
     try:

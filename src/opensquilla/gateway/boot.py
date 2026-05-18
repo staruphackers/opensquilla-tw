@@ -38,6 +38,10 @@ from opensquilla.gateway.app import create_gateway_app
 from opensquilla.gateway.config import GatewayConfig, is_public_bind
 from opensquilla.gateway.llm_runtime import resolve_llm_runtime_config
 from opensquilla.gateway.rpc import get_dispatcher
+from opensquilla.gateway.session_lifecycle import (
+    TaskLifecycleEvent,
+    apply_task_lifecycle_to_session,
+)
 from opensquilla.gateway.session_services import get_session_storage
 from opensquilla.gateway.session_streams import get_session_streams
 from opensquilla.gateway.websocket import get_registry
@@ -645,6 +649,30 @@ def build_sessions_changed_payload(session_key: str, reason: str) -> dict[str, s
     emit this event must call this helper.
     """
     return {"key": session_key, "reason": reason}
+
+
+def _make_task_session_lifecycle_listener(
+    *,
+    session_manager: Any,
+    event_emitter: Any,
+) -> Any:
+    async def _listener(event: TaskLifecycleEvent) -> None:
+        if event.run_kind == "subagent":
+            return
+        changed = await apply_task_lifecycle_to_session(
+            event,
+            session_manager=session_manager,
+        )
+        if not changed:
+            return
+        reason = "task_running" if event.phase == "running" else "task_terminal"
+        await event_emitter(
+            event.session_key,
+            "sessions.changed",
+            build_sessions_changed_payload(event.session_key, reason),
+        )
+
+    return _listener
 
 
 def _optional_positive_timeout(config: Any, attr: str, default: float) -> float | None:
@@ -1705,6 +1733,10 @@ async def start_gateway_server(
         turn_handler=_task_runtime_turn_handler,
         event_emitter=runtime_event_bridge.emit,
         terminal_listener=_subagent_completion_listener,
+        lifecycle_listener=_make_task_session_lifecycle_listener(
+            session_manager=svc.session_manager,
+            event_emitter=runtime_event_bridge.emit,
+        ),
         max_concurrency=_task_runtime_max_concurrency(config),
         max_pending_per_session=_task_runtime_max_pending_per_session(config),
         subagent_reserved_slots=int(

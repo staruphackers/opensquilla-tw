@@ -71,16 +71,36 @@ def _session(
     *,
     agent_id: str | None = "agent",
     done: bool = False,
+    command: str | None = None,
+    local_urls: list[str] | None = None,
 ) -> shell._BgSession:
     return shell._BgSession(
         session_id=session_id,
-        command=f"cmd {session_id}",
+        command=command or f"cmd {session_id}",
         process=_FakeProcess(returncode=0 if done else None),  # type: ignore[arg-type]
         session_key=session_key,
         agent_id=agent_id,
         done=done,
         returncode=0 if done else None,
+        local_urls=local_urls or [],
     )
+
+
+def test_background_process_result_surfaces_local_http_server_url() -> None:
+    session = _session(
+        "server",
+        "agent:main:one",
+        command="cd /workspace && python3 -m http.server 8080",
+        local_urls=shell._local_server_urls_from_command(
+            "cd /workspace && python3 -m http.server 8080"
+        ),
+    )
+
+    result = shell._background_process_result(session)
+
+    assert "local_urls:" in result
+    assert "- http://127.0.0.1:8080/" in result
+    assert "include the local URL" in result
 
 
 @pytest.mark.asyncio
@@ -148,6 +168,24 @@ async def test_process_owner_context_can_poll_other_sessions() -> None:
 
     assert payload["status"] == "ok"
     assert payload["session"]["session_id"] == "other"
+
+
+@pytest.mark.asyncio
+async def test_process_poll_includes_local_urls_for_server_sessions() -> None:
+    shell._bg_sessions["server"] = _session(
+        "server",
+        "agent:main:one",
+        command="python -m http.server 9090",
+        local_urls=["http://127.0.0.1:9090/"],
+    )
+
+    token = current_tool_context.set(_ctx("agent:main:one"))
+    try:
+        payload = json.loads(await shell.process("poll", session_id="server"))
+    finally:
+        current_tool_context.reset(token)
+
+    assert payload["session"]["local_urls"] == ["http://127.0.0.1:9090/"]
 
 
 @pytest.mark.asyncio

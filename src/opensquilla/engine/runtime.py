@@ -2331,6 +2331,25 @@ class TurnRunner:
             return
         message = event.message or "Unknown error"
         try:
+            if event.code == "current_turn_context_exhausted":
+                compact = getattr(self._session_manager, "compact", None)
+                if callable(compact):
+                    budget = int(
+                        getattr(self._config, "context_budget_tokens", None)
+                        or getattr(self._config, "context_window_tokens", None)
+                        or 100_000
+                    )
+                    try:
+                        maybe_summary = compact(session_key, budget)
+                        if inspect.isawaitable(maybe_summary):
+                            await maybe_summary
+                    except Exception as exc:  # noqa: BLE001 - error append must still run
+                        log.warning(
+                            "turn_runner.error_compaction_failed",
+                            session_key=session_key,
+                            code=event.code,
+                            error=str(exc),
+                        )
             await self._session_manager.append_message(
                 session_key,
                 role="system",

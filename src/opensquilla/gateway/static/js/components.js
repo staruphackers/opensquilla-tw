@@ -146,7 +146,13 @@ const UI = (() => {
 
   // -- Relative time --
   function relTime(isoOrTs) {
-    const d = typeof isoOrTs === 'number' ? new Date(isoOrTs * 1000) : new Date(isoOrTs);
+    const numeric = typeof isoOrTs === 'number'
+      ? isoOrTs
+      : (typeof isoOrTs === 'string' && isoOrTs.trim() !== '' ? Number(isoOrTs) : NaN);
+    const d = Number.isFinite(numeric)
+      ? new Date(Math.abs(numeric) < 10000000000 ? numeric * 1000 : numeric)
+      : new Date(isoOrTs);
+    if (Number.isNaN(d.getTime())) return '—';
     const diff = (Date.now() - d.getTime()) / 1000;
     if (diff < 60) return 'just now';
     if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;

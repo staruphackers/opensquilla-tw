@@ -520,6 +520,7 @@ class Agent:
         self._flush_backoff_seconds: float = 0.0
         self._session_flush_service = session_flush_service
         self._last_compaction_refusal_reason: str | None = None
+        self._tool_failure_loop_counts: dict[tuple[str, str], int] = {}
 
     def _context_overflow_error(self) -> ErrorEvent:
         reason = self._last_compaction_refusal_reason
@@ -619,7 +620,9 @@ class Agent:
         proof = self._provider_request_budget_proof(provider_error)
         if proof is None:
             return None
-        proof_budget = self._positive_int(proof.get("proof_budget"))
+        proof_budget = self._positive_int(
+            proof.get("effective_proof_budget") or proof.get("proof_budget")
+        )
         if proof_budget is None:
             return None
         estimated_chars = self._positive_int(proof.get("estimated_chars"))
@@ -1091,7 +1094,20 @@ class Agent:
         if cap <= 0:
             return messages
 
-        replacements: dict[tuple[int, int], ContentBlockToolUse] = {}
+        successful_tool_result_ids: set[str] = set()
+        for message in messages:
+            if not isinstance(message.content, list):
+                continue
+            for block in message.content:
+                if (
+                    isinstance(block, ContentBlockToolResult)
+                    and not block.is_error
+                    and isinstance(block.tool_use_id, str)
+                ):
+                    successful_tool_result_ids.add(block.tool_use_id)
+
+        tool_input_sizes: dict[tuple[int, int], int] = {}
+        aggregate_input_chars = 0
         for message_index, message in enumerate(messages):
             if not isinstance(message.content, list):
                 continue
@@ -1099,7 +1115,64 @@ class Agent:
                 if not isinstance(block, ContentBlockToolUse):
                     continue
                 input_chars = len(json.dumps(block.input, ensure_ascii=False))
-                if input_chars <= cap:
+                tool_input_sizes[(message_index, block_index)] = input_chars
+                aggregate_input_chars += input_chars
+        aggregate_projection = (
+            len(tool_input_sizes) > 1 and aggregate_input_chars > cap
+        )
+
+        def _projection(
+            *,
+            block: ContentBlockToolUse,
+            key: str,
+            value: str,
+            input_chars: int,
+            digest: str,
+            handle: str | None,
+            metadata_only: bool,
+            reason: str,
+        ) -> str:
+            handle_line = f"tool_argument_handle: {handle}\n" if handle is not None else ""
+            omitted = len(value)
+            path_line = ""
+            path = block.input.get("path")
+            if isinstance(path, str):
+                path_line = f"path: {path}\n"
+            projection = (
+                "[tool_use_argument_projection]\n"
+                f"tool: {block.name}\n"
+                f"tool_use_id: {block.id}\n"
+                f"field: {key}\n"
+                f"{path_line}"
+                f"original_chars: {len(value)}\n"
+                f"original_input_chars: {input_chars}\n"
+                f"sha256: {digest}\n"
+                f"{handle_line}"
+                f"omitted_chars: {omitted}\n"
+                f"reason: {reason}\n"
+            )
+            if metadata_only:
+                return projection.rstrip()
+            head = value[:360]
+            tail = value[-180:] if len(value) > 360 else ""
+            projection += f"head:\n{head}"
+            if tail and tail != head:
+                projection += f"\n...\ntail:\n{tail}"
+            return projection
+
+        replacements: dict[tuple[int, int], ContentBlockToolUse] = {}
+        for message_index, message in enumerate(messages):
+            if not isinstance(message.content, list):
+                continue
+            for block_index, block in enumerate(message.content):
+                if not isinstance(block, ContentBlockToolUse):
+                    continue
+                input_chars = tool_input_sizes[(message_index, block_index)]
+                file_write_success = (
+                    block.name in {"write_file", "edit_file", "apply_patch"}
+                    and block.id in successful_tool_result_ids
+                )
+                if input_chars <= cap and not aggregate_projection and not file_write_success:
                     continue
                 raw_input = json.dumps(
                     block.input,
@@ -1117,32 +1190,44 @@ class Agent:
                 for key, value in block.input.items():
                     if not isinstance(value, str):
                         continue
-                    if len(json.dumps({key: value}, ensure_ascii=False)) <= cap:
+                    key_chars = len(json.dumps({key: value}, ensure_ascii=False))
+                    project_for_success = (
+                        file_write_success
+                        and key in {"content", "code", "patch", "diff"}
+                    )
+                    project_for_aggregate = aggregate_projection and key not in {
+                        "path",
+                        "cwd",
+                        "cmd",
+                        "command",
+                    }
+                    if (
+                        key_chars <= cap
+                        and not project_for_aggregate
+                        and not project_for_success
+                    ):
                         continue
-                    head = value[:360]
-                    tail = value[-180:] if len(value) > 360 else ""
-                    omitted = max(0, len(value) - len(head) - len(tail))
-                    handle_line = (
-                        f"tool_argument_handle: {stored.handle}\n"
-                        if stored is not None
-                        else ""
+                    if project_for_success:
+                        reason = (
+                            "successful_file_write_projection: file write succeeded; "
+                            "raw argument omitted from provider context."
+                        )
+                    elif project_for_aggregate:
+                        reason = (
+                            "aggregate tool arguments compacted for provider context budget."
+                        )
+                    else:
+                        reason = "large tool argument compacted for provider context budget."
+                    projected_input[key] = _projection(
+                        block=block,
+                        key=key,
+                        value=value,
+                        input_chars=input_chars,
+                        digest=digest,
+                        handle=stored.handle if stored is not None else None,
+                        metadata_only=project_for_success or project_for_aggregate,
+                        reason=reason,
                     )
-                    projection = (
-                        "[tool_use_argument_projection]\n"
-                        f"tool: {block.name}\n"
-                        f"tool_use_id: {block.id}\n"
-                        f"field: {key}\n"
-                        f"original_chars: {len(value)}\n"
-                        f"original_input_chars: {input_chars}\n"
-                        f"sha256: {digest}\n"
-                        f"{handle_line}"
-                        f"omitted_chars: {omitted}\n"
-                        "reason: large tool argument compacted for provider context budget.\n"
-                        f"head:\n{head}"
-                    )
-                    if tail and tail != head:
-                        projection += f"\n...\ntail:\n{tail}"
-                    projected_input[key] = projection
                 if projected_input == block.input:
                     continue
                 replacements[(message_index, block_index)] = ContentBlockToolUse(
@@ -3703,8 +3788,37 @@ class Agent:
 
     async def _execute_tool(self, tc: ToolCall) -> ToolResult:
         """Dispatch a tool call to the registered handler."""
-        if self.tool_handler is None:
+        args_hash = hashlib.sha256(
+            json.dumps(tc.arguments, ensure_ascii=False, sort_keys=True, default=str).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        failure_signature = (tc.tool_name, args_hash)
+        block_threshold = max(
+            0,
+            int(getattr(self.config, "tool_failure_loop_block_threshold", 0) or 0),
+        )
+        if (
+            block_threshold > 0
+            and self._tool_failure_loop_counts.get(failure_signature, 0)
+            >= block_threshold - 1
+        ):
             return ToolResult(
+                tool_use_id=tc.tool_use_id,
+                tool_name=tc.tool_name,
+                content=(
+                    "tool_failure_loop_exhausted: repeated identical tool failure "
+                    f"for {tc.tool_name}; execution blocked to prevent unbounded "
+                    "repair-loop context growth."
+                ),
+                is_error=True,
+                execution_status=runtime_execution_status(
+                    "error",
+                    reason="tool_failure_loop_exhausted",
+                ),
+            )
+        if self.tool_handler is None:
+            result = ToolResult(
                 tool_use_id=tc.tool_use_id,
                 tool_name=tc.tool_name,
                 content=f"No tool handler registered for tool '{tc.tool_name}'",
@@ -3714,23 +3828,32 @@ class Agent:
                     reason="runtime_error",
                 ),
             )
-        try:
-            resolved = self._rehydrate_projected_tool_arguments(tc)
-            if isinstance(resolved, ToolResult):
-                return resolved
-            tc = resolved
-            return await self.tool_handler(tc)
-        except Exception as exc:  # noqa: BLE001
-            return ToolResult(
-                tool_use_id=tc.tool_use_id,
-                tool_name=tc.tool_name,
-                content=f"Tool '{tc.tool_name}' raised: {exc}",
-                is_error=True,
-                execution_status=runtime_execution_status(
-                    "error",
-                    reason="runtime_error",
-                ),
+        else:
+            try:
+                resolved = self._rehydrate_projected_tool_arguments(tc)
+                if isinstance(resolved, ToolResult):
+                    result = resolved
+                else:
+                    tc = resolved
+                    result = await self.tool_handler(tc)
+            except Exception as exc:  # noqa: BLE001
+                result = ToolResult(
+                    tool_use_id=tc.tool_use_id,
+                    tool_name=tc.tool_name,
+                    content=f"Tool '{tc.tool_name}' raised: {exc}",
+                    is_error=True,
+                    execution_status=runtime_execution_status(
+                        "error",
+                        reason="runtime_error",
+                    ),
+                )
+        if result.is_error:
+            self._tool_failure_loop_counts[failure_signature] = (
+                self._tool_failure_loop_counts.get(failure_signature, 0) + 1
             )
+        else:
+            self._tool_failure_loop_counts.pop(failure_signature, None)
+        return result
 
     # ------------------------------------------------------------------
     # Subagent factory
@@ -3808,6 +3931,9 @@ class Agent:
             ),
             tool_use_argument_provider_request_max_chars=(
                 self.config.tool_use_argument_provider_request_max_chars
+            ),
+            tool_failure_loop_block_threshold=(
+                self.config.tool_failure_loop_block_threshold
             ),
             max_safe_tool_concurrency=self.config.max_safe_tool_concurrency,
             tool_result_external_keep_recent=self.config.tool_result_external_keep_recent,

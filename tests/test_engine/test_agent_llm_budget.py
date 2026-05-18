@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -14,9 +15,12 @@ from opensquilla.engine import (
     DoneEvent,
     ErrorEvent,
     RunHeartbeatEvent,
+    SubagentSpec,
+    ToolCall,
     ToolResult,
     WarningEvent,
 )
+from opensquilla.engine.runtime import TurnRunner
 from opensquilla.engine.session_sanitize import session_payload_chars
 from opensquilla.provider import (
     ChatConfig,
@@ -127,6 +131,188 @@ class _ProviderRequestBudgetExceededProvider:
 
     async def list_models(self) -> list[Any]:
         return []
+
+
+class _CompactingErrorSessionManager:
+    def __init__(self, *, compact_raises: bool = False) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.compact_raises = compact_raises
+
+    async def compact(self, session_key: str, budget: int, config: Any | None = None) -> str:
+        self.calls.append(("compact", session_key))
+        assert budget > 0
+        if self.compact_raises:
+            raise RuntimeError("compact failed")
+        return "[summary]"
+
+    async def append_message(self, session_key: str, **kwargs: Any) -> None:
+        self.calls.append(("append", session_key))
+        assert kwargs["role"] == "system"
+        assert kwargs["content"].startswith("Error: ")
+
+
+@pytest.mark.asyncio
+async def test_turn_error_persist_compacts_current_turn_exhaustion_before_error() -> None:
+    session_manager = _CompactingErrorSessionManager()
+    runner = TurnRunner(
+        provider_selector=None,
+        session_manager=session_manager,
+        config=SimpleNamespace(context_budget_tokens=96_000),
+    )
+
+    await runner._persist_turn_error(
+        "agent:main:webchat:test",
+        ErrorEvent(
+            message="Context overflow is in the current turn's recent tool calls.",
+            code="current_turn_context_exhausted",
+        ),
+    )
+
+    assert session_manager.calls == [
+        ("compact", "agent:main:webchat:test"),
+        ("append", "agent:main:webchat:test"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_turn_error_persist_still_records_error_when_exhaustion_compaction_fails() -> None:
+    session_manager = _CompactingErrorSessionManager(compact_raises=True)
+    runner = TurnRunner(
+        provider_selector=None,
+        session_manager=session_manager,
+        config=SimpleNamespace(context_budget_tokens=96_000),
+    )
+
+    await runner._persist_turn_error(
+        "agent:main:webchat:test",
+        ErrorEvent(
+            message="Context overflow is in the current turn's recent tool calls.",
+            code="current_turn_context_exhausted",
+        ),
+    )
+
+    assert session_manager.calls == [
+        ("compact", "agent:main:webchat:test"),
+        ("append", "agent:main:webchat:test"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_agent_blocks_repeated_identical_tool_failures_before_tail_growth() -> None:
+    calls = 0
+
+    async def _failing_tool(call: Any) -> ToolResult:
+        nonlocal calls
+        calls += 1
+        return ToolResult(
+            tool_use_id=call.tool_use_id,
+            tool_name=call.tool_name,
+            content="write failed: " + ("permission denied " * 200),
+            is_error=True,
+        )
+
+    agent = Agent(
+        provider=_ContextOverflowProvider(success_after=1),
+        config=AgentConfig(
+            tool_failure_loop_block_threshold=3,
+        ),
+        tool_handler=_failing_tool,
+    )
+    tool_call = ToolCall(
+        tool_use_id="write-1",
+        tool_name="write_file",
+        arguments={"path": "index.html", "content": "<html>bad</html>"},
+    )
+
+    first = await agent._execute_tool(tool_call)
+    second = await agent._execute_tool(tool_call)
+    third = await agent._execute_tool(tool_call)
+
+    assert first.is_error is True
+    assert second.is_error is True
+    assert third.is_error is True
+    assert calls == 2
+    assert "tool_failure_loop_exhausted" in third.content
+    assert len(third.content) < len(second.content)
+    assert third.execution_status is not None
+
+
+@pytest.mark.asyncio
+async def test_agent_tool_failure_loop_allows_changed_arguments() -> None:
+    calls = 0
+
+    async def _failing_tool(call: Any) -> ToolResult:
+        nonlocal calls
+        calls += 1
+        return ToolResult(
+            tool_use_id=call.tool_use_id,
+            tool_name=call.tool_name,
+            content="write failed",
+            is_error=True,
+        )
+
+    agent = Agent(
+        provider=_ContextOverflowProvider(success_after=1),
+        config=AgentConfig(tool_failure_loop_block_threshold=3),
+        tool_handler=_failing_tool,
+    )
+
+    await agent._execute_tool(
+        ToolCall(
+            tool_use_id="write-1",
+            tool_name="write_file",
+            arguments={"path": "index.html", "content": "first"},
+        )
+    )
+    await agent._execute_tool(
+        ToolCall(
+            tool_use_id="write-2",
+            tool_name="write_file",
+            arguments={"path": "index.html", "content": "first"},
+        )
+    )
+    changed = await agent._execute_tool(
+        ToolCall(
+            tool_use_id="write-3",
+            tool_name="write_file",
+            arguments={"path": "index.html", "content": "changed"},
+        )
+    )
+
+    assert calls == 3
+    assert changed.content == "write failed"
+
+
+@pytest.mark.asyncio
+async def test_agent_blocks_repeated_missing_tool_handler_failures() -> None:
+    agent = Agent(
+        provider=_ContextOverflowProvider(success_after=1),
+        config=AgentConfig(tool_failure_loop_block_threshold=3),
+    )
+    tool_call = ToolCall(
+        tool_use_id="missing-1",
+        tool_name="missing_tool",
+        arguments={"value": "same"},
+    )
+
+    await agent._execute_tool(tool_call)
+    await agent._execute_tool(tool_call)
+    third = await agent._execute_tool(tool_call)
+
+    assert "tool_failure_loop_exhausted" in third.content
+
+
+def test_agent_child_config_inherits_tool_failure_loop_thresholds() -> None:
+    agent = Agent(
+        provider=_ContextOverflowProvider(success_after=1),
+        config=AgentConfig(
+            tool_failure_loop_block_threshold=7,
+        ),
+    )
+
+    child = agent._make_child_agent(SubagentSpec(task="child task"), depth=1)
+
+    assert child.config.tool_failure_loop_block_threshold == 7
 
 
 class _BudgetCheckingProvider:
@@ -568,6 +754,51 @@ async def test_provider_request_budget_retry_payload_is_rechecked_against_budget
     assert len(provider.calls) == 2
     assert provider.proofs[1]["estimated_chars"] <= provider.proof_budget
     assert session_payload_chars(provider.calls[1]) < provider.proof_budget
+    assert any(event.kind == "done" and getattr(event, "text", "") == "ok" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_provider_budget_retry_uses_effective_proof_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compaction_windows: list[int] = []
+
+    async def _record_compaction_window(request: Any) -> CompactionResult:
+        compaction_windows.append(request.context_window_tokens)
+        return CompactionResult(
+            summary="short summary",
+            kept_entries=[],
+            removed_count=len(request.entries),
+            chunks_processed=1,
+        )
+
+    monkeypatch.setattr("opensquilla.engine.agent.compact_context", _record_compaction_window)
+    provider = _ProviderRequestBudgetExceededProvider(
+        success_after=1,
+        proof={
+            "fallback_reason": "provider_request_budget_exhausted",
+            "estimated_chars": 100_000,
+            "estimated_tokens": 25_000,
+            "proof_budget": 96_000,
+            "raw_proof_budget": 96_000,
+            "effective_proof_budget": 86_400,
+            "proof_headroom_chars": 9_600,
+            "recent_tail_too_large": False,
+        },
+    )
+    agent = Agent(
+        provider=provider,
+        config=AgentConfig(
+            context_window_tokens=1_048_576,
+            max_provider_retries=0,
+            max_overflow_retries=2,
+            flush_enabled=False,
+        ),
+    )
+
+    events = [event async for event in agent.run_turn("x" * 4000)]
+
+    assert compaction_windows == [21_600]
     assert any(event.kind == "done" and getattr(event, "text", "") == "ok" for event in events)
 
 

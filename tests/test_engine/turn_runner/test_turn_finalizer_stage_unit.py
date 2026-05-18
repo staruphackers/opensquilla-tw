@@ -335,6 +335,74 @@ async def test_tool_use_segments_persist_with_tool_calls() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unknown_background_tool_status_adds_confirmation_guard() -> None:
+    segments: list[dict[str, Any]] = [
+        {
+            "type": "tool_result",
+            "tool_use_id": "t1",
+            "name": "background_process",
+            "result": "session: open-browser\nstatus: running",
+            "is_error": False,
+            "execution_status": {
+                "version": 1,
+                "status": "unknown",
+                "exit_code": None,
+                "timed_out": False,
+                "truncated": False,
+                "reason": "background_running",
+                "source": "adapter",
+                "preservation_class": "ephemeral",
+            },
+        },
+    ]
+    stage, recs = _make_stage()
+    inp = _make_input(
+        final_text_parts=["Opened it in the default browser."],
+        turn_segments=segments,
+    )
+
+    outcome = await stage.run(inp)
+
+    assert "Opened it in the default browser." in outcome.output.final_text
+    assert "could not confirm" in outcome.output.final_text
+    assert "background_process" in outcome.output.final_text
+    assert recs["transcript_append"].calls[0]["content"] == outcome.output.final_text
+
+
+@pytest.mark.asyncio
+async def test_successful_background_tool_status_does_not_add_confirmation_guard() -> None:
+    segments: list[dict[str, Any]] = [
+        {
+            "type": "tool_result",
+            "tool_use_id": "t1",
+            "name": "background_process",
+            "result": "session: open-browser\nstatus: complete",
+            "is_error": False,
+            "execution_status": {
+                "version": 1,
+                "status": "success",
+                "exit_code": 0,
+                "timed_out": False,
+                "truncated": False,
+                "reason": "exit_code_zero",
+                "source": "adapter",
+                "preservation_class": "durable",
+            },
+        },
+    ]
+    stage, recs = _make_stage()
+    inp = _make_input(
+        final_text_parts=["Opened it in the default browser."],
+        turn_segments=segments,
+    )
+
+    outcome = await stage.run(inp)
+
+    assert outcome.output.final_text == "Opened it in the default browser."
+    assert recs["transcript_append"].calls[0]["content"] == outcome.output.final_text
+
+
+@pytest.mark.asyncio
 async def test_pending_error_persists_via_error_port() -> None:
     err = ErrorEvent(message="boom", code="agent_error")
     stage, recs = _make_stage()

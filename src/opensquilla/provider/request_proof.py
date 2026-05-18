@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -12,6 +13,9 @@ _COMPACTED_STRING_MAX_CHARS = 1200
 _COMPACTED_TAIL_STRING_MAX_CHARS = 640
 _COMPACTED_ARGUMENT_PREVIEW_CHARS = 360
 _COMPACTED_ARGUMENT_TAIL_CHARS = 120
+_PROOF_BUDGET_HEADROOM_RATIO = 0.10
+_PROOF_BUDGET_HEADROOM_MAX_CHARS = 16_384
+_PROOF_BUDGET_HEADROOM_MIN_CHARS = 512
 
 
 class ProviderRequestBudgetExceededError(RuntimeError):
@@ -25,6 +29,17 @@ ProviderRequestBudgetExceeded = ProviderRequestBudgetExceededError
 
 def _payload_chars(payload: Any) -> int:
     return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+
+
+def _effective_proof_budget(proof_budget: int) -> tuple[int, int]:
+    if proof_budget <= 0:
+        return proof_budget, 0
+    ratio_headroom = int(proof_budget * _PROOF_BUDGET_HEADROOM_RATIO)
+    headroom = max(_PROOF_BUDGET_HEADROOM_MIN_CHARS, ratio_headroom)
+    headroom = min(_PROOF_BUDGET_HEADROOM_MAX_CHARS, headroom)
+    if proof_budget <= headroom:
+        headroom = max(0, proof_budget // 4)
+    return max(1, proof_budget - headroom), headroom
 
 
 def _is_data_url(value: str) -> bool:
@@ -142,17 +157,25 @@ def _emergency_compact_string(value: str, *, label: str) -> str:
     )
 
 
-def _compact_tool_arguments(value: str) -> str:
-    if len(value) <= _COMPACTED_TAIL_STRING_MAX_CHARS:
+def _compact_tool_arguments(value: str, *, preview: bool = True) -> str:
+    if preview and len(value) <= _COMPACTED_TAIL_STRING_MAX_CHARS:
         return value
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
     compacted = {
         "_opensquilla_compacted_tool_arguments": True,
         "original_chars": len(value),
         "sha256": digest,
-        "head": value[:_COMPACTED_ARGUMENT_PREVIEW_CHARS],
-        "tail": value[-_COMPACTED_ARGUMENT_TAIL_CHARS:],
     }
+    with contextlib.suppress(json.JSONDecodeError):
+        parsed = json.loads(value)
+        if isinstance(parsed, dict):
+            compacted["argument_keys"] = sorted(str(key) for key in parsed)
+            path = parsed.get("path")
+            if isinstance(path, str):
+                compacted["path"] = path
+    if preview:
+        compacted["head"] = value[:_COMPACTED_ARGUMENT_PREVIEW_CHARS]
+        compacted["tail"] = value[-_COMPACTED_ARGUMENT_TAIL_CHARS:]
     return json.dumps(compacted, ensure_ascii=False, separators=(",", ":"))
 
 
@@ -206,8 +229,32 @@ def _compact_tool_payload_once(payload: dict[str, Any]) -> dict[str, Any]:
     return compacted
 
 
-def _compact_recent_tail_payload_once(payload: dict[str, Any]) -> dict[str, Any]:
+def _compact_recent_tail_payload_once(
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
     compacted = deepcopy(payload)
+    tool_argument_refs: list[tuple[dict[str, Any], str]] = []
+    total_tool_argument_chars = 0
+    for message in compacted.get("messages", []):
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        tool_calls = message.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+            function = tool_call.get("function")
+            if not isinstance(function, dict):
+                continue
+            arguments = function.get("arguments")
+            if isinstance(arguments, str):
+                tool_argument_refs.append((function, arguments))
+                total_tool_argument_chars += len(arguments)
+    aggregate_tool_arguments = (
+        len(tool_argument_refs) > 1
+        and total_tool_argument_chars > _COMPACTED_TAIL_STRING_MAX_CHARS * 4
+    )
     for message in compacted.get("messages", []):
         if not isinstance(message, dict):
             continue
@@ -228,7 +275,10 @@ def _compact_recent_tail_payload_once(payload: dict[str, Any]) -> dict[str, Any]
                         continue
                     arguments = function.get("arguments")
                     if isinstance(arguments, str):
-                        function["arguments"] = _compact_tool_arguments(arguments)
+                        function["arguments"] = _compact_tool_arguments(
+                            arguments,
+                            preview=not aggregate_tool_arguments,
+                        )
         content = message.get("content")
         if not isinstance(content, list):
             continue
@@ -242,7 +292,7 @@ def _compact_recent_tail_payload_once(payload: dict[str, Any]) -> dict[str, Any]
                     block["thinking"],
                     label="thinking_block",
                 )
-    return compacted
+    return compacted, {"aggregate_tool_arguments_compacted": aggregate_tool_arguments}
 
 
 def _emergency_compact_current_turn_payload_once(payload: dict[str, Any]) -> dict[str, Any]:
@@ -361,7 +411,8 @@ def prove_provider_payload(
     budget_payload, media_chars, media_blocks = _budget_projection(payload)
     estimated_chars = _payload_chars(budget_payload)
     estimated_tokens = max(1, estimated_chars // 4)
-    fits = proof_budget <= 0 or estimated_chars <= proof_budget
+    effective_budget, headroom_chars = _effective_proof_budget(proof_budget)
+    fits = proof_budget <= 0 or estimated_chars <= effective_budget
     proof: dict[str, Any] = {
         "projection_adapter": projection_adapter,
         "execution_status_version": 1,
@@ -369,6 +420,9 @@ def prove_provider_payload(
         "estimated_chars": estimated_chars,
         "estimated_tokens": estimated_tokens,
         "proof_budget": proof_budget,
+        "raw_proof_budget": proof_budget,
+        "effective_proof_budget": effective_budget,
+        "proof_headroom_chars": headroom_chars,
         "fits": fits,
         "compact_needed": not fits,
         "recent_tail_too_large": False,
@@ -377,7 +431,7 @@ def prove_provider_payload(
         "fallback_reason": fallback_reason,
         "top_contributors": _top_contributors(budget_payload),
         "retry_count": 0,
-        **_payload_component_chars(budget_payload, proof_budget),
+        **_payload_component_chars(budget_payload, effective_budget),
     }
     if media_blocks:
         proof["media_chars_excluded"] = media_chars
@@ -428,7 +482,7 @@ def prove_or_compact_provider_payload(
         proof["recent_tail_too_large"] = False
         return tool_compacted, proof
 
-    tail_compacted = _compact_recent_tail_payload_once(tool_compacted)
+    tail_compacted, tail_metadata = _compact_recent_tail_payload_once(tool_compacted)
     tail_compacted_chars = _payload_chars(tail_compacted)
     try:
         proof = prove_provider_payload(
@@ -475,6 +529,7 @@ def prove_or_compact_provider_payload(
         )
         proof["compaction_not_smaller"] = emergency_compacted_chars >= first_chars
         proof["recent_tail_too_large"] = False
+        proof.update(tail_metadata)
         return emergency_compacted, proof
     proof["retry_count"] = 2
     proof["compact_needed"] = True
@@ -482,6 +537,7 @@ def prove_or_compact_provider_payload(
     proof["tail_compaction_not_smaller"] = tail_compacted_chars >= tool_compacted_chars
     proof["compaction_not_smaller"] = tail_compacted_chars >= first_chars
     proof["recent_tail_too_large"] = False
+    proof.update(tail_metadata)
     return tail_compacted, proof
 
 

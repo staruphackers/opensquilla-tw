@@ -178,7 +178,7 @@ const SessionsView = (() => {
     _filtered.sort((a, b) => {
       let va = a[_sortCol] ?? '';
       let vb = b[_sortCol] ?? '';
-      if (_sortCol === 'message_count') {
+      if (_sortCol === 'message_count' || _sortCol === 'updated_at') {
         va = Number(va) || 0;
         vb = Number(vb) || 0;
       } else {

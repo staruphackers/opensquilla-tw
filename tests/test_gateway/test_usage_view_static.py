@@ -17,6 +17,17 @@ def test_usage_view_renders_cost_source_badges_and_exports_fields() -> None:
     assert "cost_ephemeral" in source
 
 
+def test_usage_sessions_default_to_modified_time_sort() -> None:
+    source = USAGE_JS.read_text(encoding="utf-8")
+
+    assert "let _sortCol = 'updated_at';" in source
+    assert "{ key: 'updated_at', label: 'Modified' }" in source
+    assert "case 'updated_at':" in source
+    assert "return _sessionTimestamp(row) || 0;" in source
+    assert "'updated_at', 'input_tokens'" in source
+    assert "const modified = timestamp != null ? UI.relTime(timestamp) : '—';" in source
+
+
 def test_usage_collapsed_model_display_uses_model_breakdown() -> None:
     source = USAGE_JS.read_text(encoding="utf-8")
     start = source.index("function _renderModelCell(row)")

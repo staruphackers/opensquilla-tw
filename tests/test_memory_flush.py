@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from types import SimpleNamespace
 from typing import Any, cast
@@ -373,3 +374,41 @@ async def test_session_flush_raw_fallback_tool_error_returns_error_receipt() -> 
     assert first.raw_reason is None
     assert first.error == "raw fallback memory_save failed: disk full"
     assert second.mode == "error"
+
+
+@pytest.mark.asyncio
+async def test_session_flush_execute_logs_done_receipt_for_raw_fallback(caplog) -> None:
+    async def handler(call: ToolCall) -> ToolResult:
+        return ToolResult(
+            tool_use_id=call.tool_use_id,
+            tool_name=call.tool_name,
+            content="Saved to memory/.raw_fallbacks/raw.md (0 chunks indexed).",
+        )
+
+    service = SessionFlushService(
+        provider_selector=lambda _agent_id: None,
+        tool_registry=SimpleNamespace(to_tool_definitions=lambda: []),
+        tool_handler=handler,
+    )
+    caplog.set_level(logging.INFO, logger="opensquilla.memory.session_flush")
+
+    receipt = await service.execute(
+        [Message(role="user", content="flush this transcript")],
+        "agent:main:webchat:s1",
+        agent_id="main",
+    )
+
+    assert receipt.mode == "raw"
+    records = [
+        record
+        for record in caplog.records
+        if record.name == "opensquilla.memory.session_flush"
+        and record.getMessage() == "session_flush.done"
+    ]
+    assert len(records) == 1
+    assert records[0].session_key == "agent:main:webchat:s1"
+    assert records[0].agent_id == "main"
+    assert records[0].flush_mode == "raw"
+    assert records[0].raw_reason == "no_provider"
+    assert records[0].flushed_paths == receipt.flushed_paths
+    assert records[0].flushed_paths[0].startswith("memory/.raw_fallbacks/")

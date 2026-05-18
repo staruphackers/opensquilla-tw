@@ -9,7 +9,7 @@ const UsageView = (() => {
   // State
   let _currency = localStorage.getItem('opensquilla-currency') || 'USD';
   let _sessions = [];
-  let _sortCol = 'cost_usd';
+  let _sortCol = 'updated_at';
   let _sortAsc = false;
   let _chartMode = 'tokens';  // 'tokens' | 'cost'
   let _range = _normalizeRange(localStorage.getItem('opensquilla-usage-range'));
@@ -19,6 +19,7 @@ const UsageView = (() => {
   const CNY_RATE = (window.SquillaConstants && window.SquillaConstants.CNY_RATE) || 7.25;
   const USAGE_SESSION_TABLE_COLUMNS = [
     { key: 'session', label: 'Session' },
+    { key: 'updated_at', label: 'Modified' },
     { key: 'input_tokens', label: 'Input' },
     { key: 'output_tokens', label: 'Output' },
     { key: 'cache_read_tokens', label: 'Cache R' },
@@ -349,6 +350,8 @@ const UsageView = (() => {
     switch (key) {
       case 'session':
         return _rowVal(row, 'session', 'sessionKey', 'key') || '';
+      case 'updated_at':
+        return _sessionTimestamp(row) || 0;
       case 'input_tokens':
         return Number(_rowVal(row, 'input_tokens', 'inputTokens') || 0);
       case 'output_tokens':
@@ -478,7 +481,7 @@ const UsageView = (() => {
         .join(' · ');
     }
 
-    const sortable = ['session', 'input_tokens', 'output_tokens', 'cost_usd', 'model'];
+    const sortable = ['session', 'updated_at', 'input_tokens', 'output_tokens', 'cost_usd', 'model'];
 
     let html = '<table class="usage-table"><thead><tr>';
     USAGE_SESSION_TABLE_COLUMNS.forEach(col => {
@@ -506,8 +509,11 @@ const UsageView = (() => {
           ? `<a href="#" class="usage-sess-link" data-key="${_esc(sessionKey)}" title="Open chat for ${_esc(sessionKey)}">${_esc(sessionKey)}</a>`
           : '—';
         const cost = _rowVal(row, 'cost_usd', 'costUsd');
+        const timestamp = _sessionTimestamp(row);
+        const modified = timestamp != null ? UI.relTime(timestamp) : '—';
         html += `<tr>
           <td>${sessionLink}</td>
+          <td class="usage-mono usage-dim">${_esc(modified)}</td>
           <td class="usage-mono">${_rowVal(row, 'input_tokens', 'inputTokens') != null ? Number(_rowVal(row, 'input_tokens', 'inputTokens')).toLocaleString() : '—'}</td>
           <td class="usage-mono">${_rowVal(row, 'output_tokens', 'outputTokens') != null ? Number(_rowVal(row, 'output_tokens', 'outputTokens')).toLocaleString() : '—'}</td>
           <td class="usage-mono usage-dim">${_rowVal(row, 'cache_read_tokens', 'cacheReadTokens') != null ? Number(_rowVal(row, 'cache_read_tokens', 'cacheReadTokens')).toLocaleString() : '—'}</td>

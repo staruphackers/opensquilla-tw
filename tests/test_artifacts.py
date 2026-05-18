@@ -15,7 +15,7 @@ from opensquilla.artifacts import (
     artifact_payload,
 )
 from opensquilla.tools.builtin.artifacts import publish_artifact
-from opensquilla.tools.types import ToolContext, ToolError, current_tool_context
+from opensquilla.tools.types import CallerKind, ToolContext, ToolError, current_tool_context
 
 
 def test_artifact_store_round_trips_metadata_and_bytes(tmp_path: Path) -> None:
@@ -228,6 +228,8 @@ async def test_publish_artifact_tool_allows_workspace_file_only(tmp_path: Path) 
     output = workspace / "report.txt"
     output.write_text("ready", encoding="utf-8")
     ctx = ToolContext(
+        is_owner=True,
+        caller_kind=CallerKind.WEB,
         workspace_dir=str(workspace),
         artifact_media_root=str(tmp_path / "media"),
         artifact_session_id="session-1",
@@ -250,14 +252,52 @@ async def test_publish_artifact_tool_allows_workspace_file_only(tmp_path: Path) 
     # The LLM-facing artifact has no URL — models tend to fabricate a host
     # when shown a relative URL ending in /api/v1/artifacts/...
     assert "download_url" not in payload["artifact"]
+    assert payload["artifact"]["workspace_path"] == "report.txt"
+    assert payload["artifact"]["local_path"] == str(output.resolve())
     assert "note" in payload
+    assert "local_path" in payload["note"]
     # The frontend event path still gets the full payload (with download_url).
     assert len(ctx.published_artifacts) == 1
     full_artifact = ctx.published_artifacts[0]
     assert full_artifact["download_url"] == f"/api/v1/artifacts/{full_artifact['id']}"
-    assert {k: v for k, v in full_artifact.items() if k != "download_url"} == payload[
-        "artifact"
-    ]
+    llm_artifact = {
+        k: v
+        for k, v in payload["artifact"].items()
+        if k not in {"workspace_path", "local_path"}
+    }
+    assert {k: v for k, v in full_artifact.items() if k != "download_url"} == llm_artifact
+
+
+@pytest.mark.asyncio
+async def test_publish_artifact_tool_hides_local_path_from_non_owner_channel(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    output = workspace / "report.txt"
+    output.write_text("ready", encoding="utf-8")
+    ctx = ToolContext(
+        is_owner=False,
+        caller_kind=CallerKind.CHANNEL,
+        channel_kind="feishu",
+        workspace_dir=str(workspace),
+        artifact_media_root=str(tmp_path / "media"),
+        artifact_session_id="session-1",
+        session_key="agent:main:feishu:direct:u1",
+    )
+
+    token = current_tool_context.set(ctx)
+    try:
+        result = await publish_artifact(path="report.txt", name="final.txt", mime="text/plain")
+    finally:
+        current_tool_context.reset(token)
+
+    payload = json.loads(result)
+    assert payload["status"] == "published"
+    assert "download_url" not in payload["artifact"]
+    assert "local_path" not in payload["artifact"]
+    assert "workspace_path" not in payload["artifact"]
+    assert "local_path" not in payload["note"]
 
 
 @pytest.mark.asyncio

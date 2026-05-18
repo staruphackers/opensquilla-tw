@@ -41,6 +41,16 @@ def test_components_js_deduplicates_visible_toasts_by_type_and_message() -> None
     assert "_visibleToasts.delete(toastKey);" in body
 
 
+def test_components_rel_time_accepts_epoch_milliseconds() -> None:
+    source = COMPONENTS_JS.read_text(encoding="utf-8")
+    start = source.index("function relTime(isoOrTs) {")
+    end = source.index("  // -- Session status helpers --", start)
+    body = source[start:end]
+
+    assert "Math.abs(numeric) < 10000000000 ? numeric * 1000 : numeric" in body
+    assert "Number.isNaN(d.getTime())" in body
+
+
 def test_sessions_view_uses_status_helper() -> None:
     source = SESSIONS_JS.read_text(encoding="utf-8")
 
@@ -61,6 +71,16 @@ def test_sessions_view_uses_run_status_for_active_display() -> None:
     assert "Executing" in source
     assert "open ·" in source
     assert "live conversations" not in source
+
+
+def test_sessions_view_sorts_updated_at_numerically() -> None:
+    source = SESSIONS_JS.read_text(encoding="utf-8")
+    start = source.index("function _sortData() {")
+    end = source.index("  function _renderStats()", start)
+    body = source[start:end]
+
+    assert "_sortCol === 'message_count' || _sortCol === 'updated_at'" in body
+    assert "Number(va) || 0" in body
 
 
 def test_sessions_view_does_not_count_killed_as_errored() -> None:

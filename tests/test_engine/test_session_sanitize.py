@@ -574,6 +574,153 @@ def test_agent_provider_view_projects_large_tool_use_arguments(tmp_path) -> None
     assert agent.config.metadata["tool_argument_projection_calls"] == 1
 
 
+def test_agent_provider_view_projects_aggregate_tool_use_arguments(tmp_path) -> None:
+    agent = Agent(
+        provider=CapturingProvider(),
+        config=AgentConfig(
+            tool_result_store_dir=str(tmp_path / "tool-results"),
+            tool_result_store_session_id="session-1",
+            tool_result_store_session_key="agent:main:webchat:test",
+            tool_result_store_agent_id="main",
+            tool_use_argument_provider_request_max_chars=1200,
+        ),
+    )
+    messages = [
+        Message(
+            role="assistant",
+            content=[
+                ContentBlockToolUse(
+                    id=f"write-{index}",
+                    name="write_file",
+                    input={
+                        "path": f"generated/file-{index}.html",
+                        "content": "x" * 700,
+                    },
+                )
+                for index in range(5)
+            ],
+        )
+    ]
+
+    projected = agent._project_large_tool_use_arguments_for_provider(messages)
+
+    projected_blocks = [
+        block
+        for block in projected[0].content
+        if isinstance(block, ContentBlockToolUse)
+    ]
+    assert any(
+        "tool_use_argument_projection" in block.input["content"]
+        for block in projected_blocks
+    )
+    assert all(
+        original.input["content"] == "x" * 700
+        for original in messages[0].content
+        if isinstance(original, ContentBlockToolUse)
+    )
+    assert agent.config.metadata["tool_argument_projection_applied"] is True
+    assert agent.config.metadata["tool_argument_projection_calls"] >= 1
+
+
+def test_agent_provider_view_projects_small_aggregate_tool_use_arguments(tmp_path) -> None:
+    agent = Agent(
+        provider=CapturingProvider(),
+        config=AgentConfig(
+            tool_result_store_dir=str(tmp_path / "tool-results"),
+            tool_result_store_session_id="session-1",
+            tool_result_store_session_key="agent:main:webchat:test",
+            tool_result_store_agent_id="main",
+            tool_use_argument_provider_request_max_chars=1200,
+        ),
+    )
+    messages = [
+        Message(
+            role="assistant",
+            content=[
+                ContentBlockToolUse(
+                    id=f"write-{index}",
+                    name="write_file",
+                    input={
+                        "path": f"generated/file-{index}.html",
+                        "content": "x" * 200,
+                    },
+                )
+                for index in range(6)
+            ],
+        )
+    ]
+
+    projected = agent._project_large_tool_use_arguments_for_provider(messages)
+
+    projected_blocks = [
+        block
+        for block in projected[0].content
+        if isinstance(block, ContentBlockToolUse)
+    ]
+    assert any(
+        "tool_use_argument_projection" in block.input["content"]
+        for block in projected_blocks
+    )
+    assert all(block.input["path"].startswith("generated/") for block in projected_blocks)
+
+
+def test_agent_provider_view_keeps_successful_file_write_as_metadata(tmp_path) -> None:
+    agent = Agent(
+        provider=CapturingProvider(),
+        config=AgentConfig(
+            tool_result_store_dir=str(tmp_path / "tool-results"),
+            tool_result_store_session_id="session-1",
+            tool_result_store_session_key="agent:main:webchat:test",
+            tool_result_store_agent_id="main",
+            tool_use_argument_provider_request_max_chars=8000,
+        ),
+    )
+    large_html = "<html>\n" + ("<p>word</p>\n" * 900) + "</html>\n"
+    messages = [
+        Message(
+            role="assistant",
+            content=[
+                ContentBlockToolUse(
+                    id="write-1",
+                    name="write_file",
+                    input={"path": "index.html", "content": large_html},
+                )
+            ],
+        ),
+        Message(
+            role="user",
+            content=[
+                ContentBlockToolResult(
+                    tool_use_id="write-1",
+                    content='{"status":"ok","path":"index.html"}',
+                    is_error=False,
+                )
+            ],
+        ),
+    ]
+
+    projected = agent._project_large_tool_use_arguments_for_provider(messages)
+
+    projected_block = next(
+        block
+        for block in projected[0].content
+        if isinstance(block, ContentBlockToolUse)
+    )
+    assert projected_block.input["path"] == "index.html"
+    assert projected_block.input["content"] != large_html
+    assert "successful_file_write_projection" in projected_block.input["content"]
+    assert "path: index.html" in projected_block.input["content"]
+    assert "sha256:" in projected_block.input["content"]
+    assert "original_chars:" in projected_block.input["content"]
+    assert "<p>word</p>" not in projected_block.input["content"]
+    history_block = next(
+        block
+        for block in messages[0].content
+        if isinstance(block, ContentBlockToolUse)
+    )
+    assert history_block.input["content"] == large_html
+
+
 @pytest.mark.asyncio
 async def test_agent_static_cost_source_is_explicitly_distinct_from_provider_billed() -> None:
     provider = StaticCostProvider()
