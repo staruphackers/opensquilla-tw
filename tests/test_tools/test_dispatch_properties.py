@@ -23,10 +23,12 @@ import json
 from typing import Any
 
 import pytest
+from test_tools.dispatch_corpus import ALL_CASES, CorpusCase
 
 from opensquilla.execution_status import normalize_execution_status
-from opensquilla.tool_boundary import ToolCall, ToolResult
+from opensquilla.tool_boundary import ToolCall
 from opensquilla.tools.dispatch import build_tool_handler
+from opensquilla.tools.registry import ToolRegistry
 from opensquilla.tools.types import (
     CallerKind,
     InteractionMode,
@@ -34,10 +36,6 @@ from opensquilla.tools.types import (
     ToolSpec,
     current_tool_context,
 )
-from opensquilla.tools.registry import ToolRegistry
-
-from test_tools.dispatch_corpus import ALL_CASES, CorpusCase
-
 
 # ---------------------------------------------------------------------------
 # Property 1: Idempotent status normalisation

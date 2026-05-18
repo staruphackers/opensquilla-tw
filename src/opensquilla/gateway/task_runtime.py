@@ -206,7 +206,7 @@ class TaskQueueFullError(RuntimeError):
         self.max_pending = max_pending
 
 
-class _TurnHardDeadlineExceeded(TimeoutError):
+class _TurnHardDeadlineExceeded(TimeoutError):  # noqa: N818
     """Internal breaker error raised when a turn exceeds its hard deadline.
 
     Subclasses TimeoutError so legacy ``except TimeoutError`` paths still

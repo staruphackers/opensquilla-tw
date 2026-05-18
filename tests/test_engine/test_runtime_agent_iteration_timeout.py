@@ -129,9 +129,7 @@ async def test_run_threads_iteration_timeout_into_agent_config(
         seen_kwargs.append(kwargs)
         return real_agent_config(**kwargs)
 
-    monkeypatch.setattr(
-        "opensquilla.engine.runtime.AgentConfig", recording_agent_config
-    )
+    monkeypatch.setattr("opensquilla.engine.types.AgentConfig", recording_agent_config)
 
     provider = MagicMock()
     provider.provider_name = "stub"
@@ -151,6 +149,7 @@ async def test_run_threads_iteration_timeout_into_agent_config(
     session_manager.append_message = AsyncMock(return_value=None)
     session_manager.update = AsyncMock(return_value=None)
     session_manager.get_compaction_summary = AsyncMock(return_value=None)
+    session_manager.get_transcript = AsyncMock(return_value=[])
 
     runner = TurnRunner(
         provider_selector=selector,

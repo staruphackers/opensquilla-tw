@@ -161,7 +161,10 @@ def test_per_turn_bubble_chip_differs_across_turns_in_real_browser(tmp_path: Pat
 
               // Wait for WebSocket RPC connection (chat.js needs it to register listeners)
               await page.waitForFunction(
-                () => typeof App !== "undefined" && App.getRpc && App.getRpc()?.state === "connected",
+                () =>
+                  typeof App !== "undefined" &&
+                  App.getRpc &&
+                  App.getRpc()?.state === "connected",
                 { timeout: 15000 }
               );
 

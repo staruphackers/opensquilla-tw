@@ -15,7 +15,6 @@ lives in:
 
 from __future__ import annotations
 
-import asyncio
 import copy
 import json
 from typing import Any
@@ -23,16 +22,14 @@ from typing import Any
 import pytest
 import structlog.testing
 from laboratory import Experiment
+from test_tools.dispatch_corpus import ALL_CASES, CorpusCase  # noqa: E402
 
-from opensquilla.tool_boundary import ToolCall, ToolResult
-from opensquilla.tools.types import ToolContext, current_tool_context
+from opensquilla.tool_boundary import ToolResult
+from opensquilla.tools.dispatch import build_tool_handler as _build_candidate
 
 # Both sides use the policy-pipeline factory (PR4: legacy removed).
 from opensquilla.tools.dispatch import build_tool_handler as _build_control
-from opensquilla.tools.dispatch import build_tool_handler as _build_candidate
-
-from test_tools.dispatch_corpus import ALL_CASES, CorpusCase  # noqa: E402
-
+from opensquilla.tools.types import ToolContext, current_tool_context
 
 # -----------------------------------------------------------------------
 # Envelope comparator
@@ -59,8 +56,16 @@ def _envelope_eq(a: ToolResult, b: ToolResult) -> bool:
         return False
     if a.is_error != b.is_error:
         return False
-    a_es = normalize_execution_status(a.execution_status) if a.execution_status is not None else None
-    b_es = normalize_execution_status(b.execution_status) if b.execution_status is not None else None
+    a_es = (
+        normalize_execution_status(a.execution_status)
+        if a.execution_status is not None
+        else None
+    )
+    b_es = (
+        normalize_execution_status(b.execution_status)
+        if b.execution_status is not None
+        else None
+    )
     if a_es != b_es:
         return False
     if _parse_content(a.content) != _parse_content(b.content):

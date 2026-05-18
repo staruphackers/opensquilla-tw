@@ -214,7 +214,7 @@ async def test_inner_timeout_not_reclassified_as_hard_deadline() -> None:
     async def instantly_timing_out_handler(_run: Any) -> None:
         # Raise a bare asyncio.TimeoutError immediately — elapsed is ~0 s,
         # far less than the 5 s hard deadline.
-        raise asyncio.TimeoutError("inner tool timed out")
+        raise TimeoutError("inner tool timed out")
 
     rt = _make_runtime(
         turn_handler=instantly_timing_out_handler,

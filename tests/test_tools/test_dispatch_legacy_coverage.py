@@ -21,13 +21,12 @@ import types
 from pathlib import Path
 
 import pytest
+from test_tools.dispatch_corpus import ALL_CASES
 
 import opensquilla.tools.dispatch as _dispatch_module
 from opensquilla.engine.hooks import NoopToolHook
-from test_tools.dispatch_corpus import ALL_CASES
 from opensquilla.tools.dispatch import build_tool_handler
 from opensquilla.tools.types import current_tool_context
-
 
 # ---------------------------------------------------------------------------
 # Constants — the _handler closure in build_tool_handler

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 _CHAT_JS = (
     Path(__file__).parent.parent.parent
     / "src"

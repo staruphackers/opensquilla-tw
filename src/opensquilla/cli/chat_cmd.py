@@ -8,6 +8,7 @@ Two modes:
 from __future__ import annotations
 
 import asyncio
+import collections
 import getpass
 import inspect
 import json
@@ -24,8 +25,10 @@ from rich.table import Table
 
 from opensquilla.cli import attachments as _cli_attachments
 from opensquilla.cli.repl.commands import is_exit_command, render_help_table
-from opensquilla.cli.repl.prompt import prompt_approval, prompt_user
+from opensquilla.cli.repl.prompt import interactive_session, prompt_approval
 from opensquilla.cli.repl.session_state import ChatSessionState, messages_to_markdown
+from opensquilla.cli.repl.signal_handlers import install_chat_signal_handlers
+from opensquilla.cli.repl.slash_policy import SlashCategory, classify
 from opensquilla.cli.repl.stream import StreamingRenderer, TurnResult, UsageSummary
 from opensquilla.cli.ui import ACCENT, ACCENT_HEADER, console, error_panel, notice_panel
 from opensquilla.engine.commands import Surface
@@ -52,6 +55,12 @@ def _tool_result_success_from_status(status: Any, *, legacy_is_error: bool) -> b
 
 _DEFAULT_STREAM_HEARTBEAT_INTERVAL_SECONDS = 15.0
 _DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS = 180.0
+
+# Maximum number of inputs that may queue behind an in-flight turn (D2 lock,
+# plan §S4). When the cap is reached, additional Enter presses are rejected
+# with a toast and the user must wait for the current turn to finish before
+# enqueueing more. Module-level so tests can monkeypatch a tighter cap.
+_PENDING_QUEUE_MAX_SIZE = 8
 
 GATEWAY_SLASH_HANDLER_WORDS = frozenset(
     {
@@ -266,6 +275,8 @@ async def _maybe_handle_approval(
     live: Any,
     resolver: Callable[..., Awaitable[Any]],
     elevated_state: dict[str, str | None] | None = None,
+    *,
+    surface: Surface = Surface.CLI_GATEWAY,
 ) -> None:
     """If *result* is an approval-required/pending payload, prompt/notify the user.
 
@@ -340,7 +351,7 @@ async def _maybe_handle_approval(
             "(sensitive paths still blocked)[/dim]\n"
             "[dim]  [bold]d[/bold]eny    reject[/dim]"
         )
-        answer = await prompt_approval("Decision [o/a/b/d]: ")
+        answer = await prompt_approval("Decision [o/a/b/d]: ", surface=surface)
 
         flip_to_bypass = False
         # Backwards compatibility: y still means once, n still means deny.
@@ -404,6 +415,340 @@ def _clear_current_cancel() -> None:
     task = asyncio.current_task()
     if task is not None and hasattr(task, "uncancel"):
         task.uncancel()
+
+
+async def _run_concurrent_repl(
+    *,
+    surface: Surface,
+    scope: dict[str, Any],
+    dispatch: Callable[[str], Awaitable[bool]],
+) -> None:
+    """Concurrent input/turn loop driven by a long-lived ChatApplication.
+
+    The Application stays attached for the lifetime of the REPL so input
+    keystrokes are accepted while a turn task is in flight. New input
+    that arrives mid-turn is routed by category (see ``slash_policy``):
+
+    * ``DESTRUCTIVE`` (``/clear`` / ``/reset`` / ``/compact``) — PURGE the
+      pending deque, cancel the active turn (await ``CancelledError``),
+      then run the handler synchronously (NOT as a turn task — a
+      destructive command must not be cancellable by a subsequent Ctrl+G
+      while it is the only thing running).
+    * ``EXIT`` (``/exit`` / ``/quit``) — drain the pending deque (process
+      each queued input in order through ``dispatch``), then dispatch the
+      exit command itself which returns ``False`` to terminate the loop.
+      Queued user work is preserved across the exit (locked policy).
+    * ``STATE_MUTATION`` / ``PURE_INFO`` / ``NON_SLASH`` — enqueue behind
+      the in-flight turn (FIFO); when nothing is in flight, spawn a turn
+      task and await it.
+
+    Ctrl+G is bound on the Application's key bindings
+    (``app.py:_build_key_bindings``) and invokes a cancel callback
+    registered here that cancels the in-flight turn task. Per
+    ``engine/runtime.py:2318-2366``, cancellation lands at the next
+    ``await`` point in the turn task — no engine modification required.
+    """
+    pending_commands: collections.deque[str] = collections.deque()
+
+    async with interactive_session(
+        surface=surface,
+        model=scope.get("model"),
+        session_id=scope.get("session_key"),
+    ) as handle:
+        chat_app = handle.application
+        # Expose the active ChatApplication to dispatch closures so the
+        # production stream paths can route token writes through the S2b
+        # output mutex (`StreamingRenderer.aappend_text`) and so
+        # ``_maybe_handle_approval`` can prompt against this surface's own
+        # Application instead of the default gateway lookup.
+        scope["chat_app"] = chat_app
+        turn_task: asyncio.Task[bool] | None = None
+
+        def _cancel_inflight_turn() -> None:
+            # Registered as the Ctrl+G callback. The task may have completed
+            # between the keypress and the callback firing — guard with
+            # `done()` so cancel() on a finished task is a no-op.
+            task = turn_task
+            if task is not None and not task.done():
+                task.cancel()
+
+        chat_app.set_cancel_callback(_cancel_inflight_turn)
+
+        def _shutdown_drain_then_exit() -> None:
+            # Registered as the Ctrl+C double-press callback (S7). Emit
+            # EOF on the submit queue so the main loop's existing EOF
+            # path runs: drain pending → finalize in-flight turn → print
+            # "Goodbye." → return. We do NOT cancel the turn — the
+            # Ctrl-D / EOF contract preserves queued work and finishes
+            # the active turn rather than aborting it. Guarded with
+            # `getattr` so unit tests faking a minimal ChatApplication
+            # without `_emit_eof` cannot tear down the binding.
+            emit_eof = getattr(chat_app, "_emit_eof", None)
+            if callable(emit_eof):
+                emit_eof()
+
+        # `set_shutdown_callback` is owned by ChatApplication; unit tests
+        # using a minimal fake skip it silently via getattr so existing
+        # fakes do not have to grow a method they never exercise.
+        _set_shutdown_cb = getattr(chat_app, "set_shutdown_callback", None)
+        if callable(_set_shutdown_cb):
+            _set_shutdown_cb(_shutdown_drain_then_exit)
+
+        # NEW-S4a: install SIGWINCH (redraw on resize) + SIGTSTP (block
+        # Ctrl-Z mid-turn; default at idle) handlers. Platform-guarded
+        # inside the install helper — Windows skips silently. Lifetime
+        # is bounded to the chat loop via try/finally so subsequent
+        # tests / REPL runs are not polluted. ``getattr`` on the inner
+        # prompt-toolkit Application lets unit tests that fake the
+        # ChatApplication surface skip signal wiring without having to
+        # stub a full Application — the production path always sees a
+        # real Application with ``invalidate``.
+        def _is_turn_in_flight() -> bool:
+            return turn_task is not None and not turn_task.done()
+
+        _pt_app = getattr(chat_app, "application", None)
+        _on_resize_cb = getattr(_pt_app, "invalidate", lambda: None)
+        _uninstall_signals = install_chat_signal_handlers(
+            loop=asyncio.get_running_loop(),
+            on_resize=_on_resize_cb,
+            is_turn_in_flight=_is_turn_in_flight,
+        )
+
+        task_name = f"chat-turn-{surface.value if hasattr(surface, 'value') else surface}"
+
+        async def _await_turn_or_cancel() -> bool:
+            """Await the in-flight ``turn_task`` and surface cancellation.
+
+            Returns ``True`` to keep the loop going (including the
+            "user pressed Ctrl+G mid-turn" case) and ``False`` when the
+            dispatch signalled exit.
+            """
+            nonlocal turn_task
+            current = turn_task
+            if current is None:
+                return True
+            try:
+                keep_going = await current
+            except asyncio.CancelledError:
+                _clear_current_cancel()
+                console.print("[yellow]Cancelled.[/yellow]")
+                keep_going = True
+            finally:
+                turn_task = None
+            return keep_going
+
+        # Persistent next-line read armed exactly once at a time. The
+        # main loop races this against any in-flight turn_task via
+        # asyncio.wait so a destructive `/clear` arriving mid-turn can
+        # actually preempt the turn (S4 requirement). When turn_task
+        # finishes first the next_line read stays armed for the next
+        # iteration, so no input is dropped.
+        next_line_task: asyncio.Task[str | None] | None = None
+
+        async def _drop_next_line() -> None:
+            """Cancel the pending next-line read on shutdown paths."""
+            nonlocal next_line_task
+            if next_line_task is None:
+                return
+            if not next_line_task.done():
+                next_line_task.cancel()
+                try:
+                    await next_line_task
+                except BaseException:  # noqa: BLE001 - shutdown path
+                    pass
+            next_line_task = None
+
+        try:
+            while True:
+                if next_line_task is None:
+                    next_line_task = asyncio.create_task(
+                        handle.next_line(),
+                        name=f"chat-input-{task_name}",
+                    )
+
+                # Race the pending next_line read against any in-flight
+                # turn. Both wakeups are valid; we always process the
+                # turn completion (if any) first so destructive routing
+                # sees a clean state.
+                waitables: set[asyncio.Task] = {next_line_task}
+                if turn_task is not None and not turn_task.done():
+                    waitables.add(turn_task)
+                await asyncio.wait(
+                    waitables, return_when=asyncio.FIRST_COMPLETED
+                )
+
+                # Drain a finished turn task before consuming any input.
+                if turn_task is not None and turn_task.done():
+                    keep_going = await _await_turn_or_cancel()
+                    if not keep_going:
+                        await _drop_next_line()
+                        return
+                    # Promote-and-race: if queued work waits behind the
+                    # finished turn, spawn the next queued item as a fresh
+                    # turn_task and continue. The next loop iteration arms
+                    # a fresh next_line read and races it against the
+                    # promoted turn, so a destructive `/clear` arriving
+                    # while the promoted turn is running can still preempt
+                    # it via the same code path that preempts user-typed
+                    # turns. Without this, awaiting each queued item to
+                    # completion inside a private drain loop made queued
+                    # turns un-preemptible until the deque emptied.
+                    if pending_commands:
+                        queued = pending_commands.popleft()
+                        turn_task = asyncio.create_task(
+                            dispatch(queued), name=task_name
+                        )
+                        continue
+                    # If next_line is still armed (turn won the race), loop
+                    # so the next iteration either reads the input or
+                    # waits on it alongside any newly-spawned turn.
+                    if not next_line_task.done():
+                        continue
+
+                # next_line_task is done (or finished alongside turn) —
+                # consume it.
+                if not next_line_task.done():
+                    # Defensive: should not happen because asyncio.wait
+                    # only returns when at least one waitable completes.
+                    continue
+                user_input = next_line_task.result()
+                next_line_task = None
+
+                if user_input is None:
+                    # Ctrl-D / EOF — drain pending then any in-flight turn
+                    # before exiting so queued work is preserved and no
+                    # task is left dangling on the loop.
+                    if turn_task is not None and not turn_task.done():
+                        try:
+                            await turn_task
+                        except asyncio.CancelledError:
+                            pass
+                        turn_task = None
+                    # Shutdown drain: process queued work serially. This is
+                    # an intentional shutdown-time drain — preemption is
+                    # NOT desired because the user has signalled exit and
+                    # queued user work must run to completion (locked
+                    # policy §S4) before the loop returns.
+                    while pending_commands:
+                        queued = pending_commands.popleft()
+                        turn_task = asyncio.create_task(
+                            dispatch(queued), name=task_name
+                        )
+                        keep_going = await _await_turn_or_cancel()
+                        if not keep_going:
+                            return
+                    console.print("[yellow]Goodbye.[/yellow]")
+                    return
+
+                category = classify(user_input)
+
+                if category is SlashCategory.DESTRUCTIVE:
+                    # Locked policy (plan §S4): destructive commands invalidate
+                    # everything queued behind them AND the active turn.
+                    # 1) PURGE the pending deque first so queued state-
+                    #    mutation slash commands do not race the handler.
+                    # 2) Cancel the active turn task (if any) and swallow
+                    #    CancelledError — we want the destructive handler to
+                    #    run, not surface a cancellation notice.
+                    # 3) Run the destructive handler synchronously (NOT as a
+                    #    turn task). Destructive commands MUST run to
+                    #    completion; a follow-up Ctrl+G is meaningless here.
+                    pending_commands.clear()
+                    if turn_task is not None and not turn_task.done():
+                        turn_task.cancel()
+                        try:
+                            await turn_task
+                        except asyncio.CancelledError:
+                            _clear_current_cancel()
+                        turn_task = None
+                    keep_going = await dispatch(user_input)
+                    if not keep_going:
+                        return
+                    continue
+
+                if category is SlashCategory.EXIT:
+                    # Locked policy (plan §S4): exit drains pending work
+                    # before terminating, mirroring Ctrl-D semantics. Queued
+                    # user inputs must run before the loop exits.
+                    if turn_task is not None and not turn_task.done():
+                        try:
+                            await turn_task
+                        except asyncio.CancelledError:
+                            _clear_current_cancel()
+                        turn_task = None
+                    # Shutdown drain: process queued work serially. This is
+                    # an intentional shutdown-time drain — preemption is
+                    # NOT desired because the user has signalled exit and
+                    # queued user work must run to completion (locked
+                    # policy §S4) before the loop returns.
+                    while pending_commands:
+                        queued = pending_commands.popleft()
+                        turn_task = asyncio.create_task(
+                            dispatch(queued), name=task_name
+                        )
+                        keep_going = await _await_turn_or_cancel()
+                        if not keep_going:
+                            return
+                    # The dispatch closure routes /exit and /quit through
+                    # is_exit_command and returns False — that signal
+                    # terminates the loop. Run synchronously so the
+                    # "Goodbye." notice lands in order.
+                    keep_going = await dispatch(user_input)
+                    if not keep_going:
+                        return
+                    # Defensive: a dispatch closure that doesn't recognise
+                    # /exit (shouldn't happen given the shared registry)
+                    # falls through to the normal loop.
+                    continue
+
+                # Enqueue path (STATE_MUTATION, PURE_INFO, NON_SLASH all reach
+                # here). If a turn is in flight, append to pending FIFO and
+                # let the next loop iteration race the read against it;
+                # otherwise spawn the dispatch as a child task. We DO NOT
+                # await it inline — the next iteration's asyncio.wait
+                # services both the in-flight turn and the next read so
+                # destructive inputs can preempt the turn.
+                if turn_task is not None and not turn_task.done():
+                    if len(pending_commands) >= _PENDING_QUEUE_MAX_SIZE:
+                        # D2 lock (plan §S4): reject overflow with a toast.
+                        # The user must wait for the current turn before
+                        # enqueuing more. The rejected input is dropped on
+                        # the floor; this matches the locked decision over
+                        # the alternative of silent oldest-eviction or
+                        # blocking the input task.
+                        console.print(
+                            f"[yellow]Queue full ({_PENDING_QUEUE_MAX_SIZE} items)."
+                            " Wait for the current turn to complete.[/yellow]"
+                        )
+                        continue
+                    pending_commands.append(user_input)
+                    continue
+
+                turn_task = asyncio.create_task(dispatch(user_input), name=task_name)
+                # Fall through to the top of the loop; the next iteration
+                # arms a fresh next_line and races it against turn_task.
+        finally:
+            # Drop the chat_app handle from scope so callers that retain
+            # a reference to ``scope`` after the REPL exits cannot reach a
+            # torn-down Application.
+            scope.pop("chat_app", None)
+            # Clear the cancel callback before the Application tears down so a
+            # stale binding cannot reach a finished task on the next session.
+            chat_app.set_cancel_callback(None)
+            # S7: clear the shutdown callback for the same reason — a
+            # stale binding firing on the next session would emit EOF on
+            # an unrelated submit queue. `getattr` keeps minimal-fake
+            # tests happy.
+            _clear_shutdown_cb = getattr(chat_app, "set_shutdown_callback", None)
+            if callable(_clear_shutdown_cb):
+                _clear_shutdown_cb(None)
+            await _drop_next_line()
+            # NEW-S4a: restore previous signal handlers so subsequent
+            # REPL runs / tests start from a clean signal-handler state.
+            try:
+                _uninstall_signals()
+            except Exception:
+                pass
 
 
 def run_chat(
@@ -591,193 +936,215 @@ async def _standalone_repl(
 
     turn_runner = build_turn_runner_from_services(svc)
 
-    try:
-        while True:
-            try:
-                user_input = await prompt_user(
-                    state.prompt_state().label,
-                    surface=Surface.CLI_STANDALONE,
-                    model=state.model,
-                    session_id=state.session_key,
+    # Mutable scope shared with the per-input helper so a /new command can
+    # rotate session_key / tool_ctx / state in place without redefining the
+    # helper. Wrapping in a single-element list is the simplest way to
+    # rebind without `nonlocal` chains across an async closure.
+    scope: dict[str, Any] = {
+        "session_key": session_key,
+        "tool_ctx": tool_ctx,
+        "state": state,
+        "model": model,
+    }
+
+    async def _dispatch_input(user_input: str) -> bool:
+        """Process one input line. Returns True to keep looping, False to exit.
+
+        S3 keeps slash handlers synchronous-inside-the-loop (per plan §S3).
+        S4 will split this into the cancel-then-execute / enqueue policy.
+        """
+        if user_input is None or is_exit_command(user_input):
+            console.print("[yellow]Goodbye.[/yellow]")
+            return False
+
+        stripped = user_input.strip()
+        if not stripped:
+            return True
+
+        active_state: ChatSessionState = scope["state"]
+        active_session_key: str = scope["session_key"]
+        active_tool_ctx = scope["tool_ctx"]
+        active_model: str | None = scope["model"]
+
+        if stripped.startswith("/"):
+            if stripped == "/help":
+                console.print(render_help_table(Surface.CLI_STANDALONE))
+                return True
+            if parts := _slash_parts(stripped, "/new"):
+                new_session_key = f"agent:main:standalone:{uuid4().hex[:8]}"
+                await session_manager.get_or_create(new_session_key, agent_id="main")
+                scope["session_key"] = new_session_key
+                scope["tool_ctx"] = _build_tool_ctx(new_session_key)
+                scope["state"] = ChatSessionState(session_key=new_session_key, model=active_model)
+                title = parts[1].strip() if len(parts) > 1 else None
+                label = f" ({title})" if title else ""
+                console.print(f"[green]Started new session{label}:[/green] {new_session_key}")
+                return True
+            if stripped in {"/status", "/session"}:
+                console.print(
+                    f"[{ACCENT}]session[/] [dim]{active_state.session_key}[/dim]\n"
+                    f"[{ACCENT}]model[/] [dim]{active_state.model or 'default'}[/dim]"
                 )
-            except (EOFError, KeyboardInterrupt):
-                console.print("\n[yellow]Goodbye.[/yellow]")
-                break
-
-            if user_input is None or is_exit_command(user_input):
-                console.print("[yellow]Goodbye.[/yellow]")
-                break
-
-            stripped = user_input.strip()
-            if not stripped:
-                continue
-
-            if stripped.startswith("/"):
-                if stripped == "/help":
-                    console.print(render_help_table(Surface.CLI_STANDALONE))
-                    continue
-                if parts := _slash_parts(stripped, "/new"):
-                    session_key = f"agent:main:standalone:{uuid4().hex[:8]}"
-                    await session_manager.get_or_create(session_key, agent_id="main")
-                    tool_ctx = _build_tool_ctx(session_key)
-                    state = ChatSessionState(session_key=session_key, model=model)
-                    title = parts[1].strip() if len(parts) > 1 else None
-                    label = f" ({title})" if title else ""
-                    console.print(f"[green]Started new session{label}:[/green] {session_key}")
-                    continue
-                if stripped in {"/status", "/session"}:
-                    console.print(
-                        f"[{ACCENT}]session[/] [dim]{state.session_key}[/dim]\n"
-                        f"[{ACCENT}]model[/] [dim]{state.model or 'default'}[/dim]"
+                return True
+            if stripped == "/models":
+                console.print("[yellow]/models requires gateway mode.[/yellow]")
+                return True
+            if parts := _slash_parts(stripped, "/model"):
+                if len(parts) == 1:
+                    console.print(f"[dim]model={active_state.model or 'default'}[/dim]")
+                else:
+                    new_model = parts[1].strip()
+                    scope["model"] = new_model
+                    active_state.model = new_model
+                    console.print(f"[green]model:[/green] {new_model}")
+                return True
+            if stripped == "/cost":
+                console.print(active_state.usage.render())
+                return True
+            if _slash_parts(stripped, "/tool-compress"):
+                await _handle_tool_compress_command(stripped, config=svc.config)
+                return True
+            if stripped in {"/clear", "/reset"}:
+                if svc.session_manager is not None:
+                    safe_to_reset = await _flush_before_standalone_rewrite(
+                        svc,
+                        active_session_key,
+                        operation="Reset",
                     )
-                    continue
-                if stripped == "/models":
-                    console.print("[yellow]/models requires gateway mode.[/yellow]")
-                    continue
-                if parts := _slash_parts(stripped, "/model"):
-                    if len(parts) == 1:
-                        console.print(f"[dim]model={state.model or 'default'}[/dim]")
+                    if not safe_to_reset:
+                        return True
+                    await svc.session_manager.truncate(active_session_key, max_messages=0)
+                active_state.transcript.clear()
+                active_state.usage.reset()
+                console.print(f"[{ACCENT}]cleared[/] [dim]{active_state.session_key}[/dim]")
+                return True
+            if stripped == "/compact":
+                if svc.session_manager is not None:
+                    safe_to_compact = await _flush_before_standalone_rewrite(
+                        svc,
+                        active_session_key,
+                        operation="Compact",
+                    )
+                    if not safe_to_compact:
+                        return True
+                    context_window = (
+                        getattr(svc.config, "context_budget_tokens", 100_000)
+                        if svc.config is not None
+                        else 100_000
+                    )
+                    compaction_config = build_compaction_config_from_provider(
+                        _resolve_compaction_provider(svc.provider_selector, active_model),
+                        model_override=active_model,
+                        compaction_config=getattr(svc.config, "compaction", None),
+                    )
+                    compact_with_result = getattr(
+                        svc.session_manager, "compact_with_result", None
+                    )
+                    if callable(compact_with_result):
+                        result = await compact_with_result(
+                            active_session_key,
+                            context_window,
+                            compaction_config,
+                        )
+                        summary = getattr(result, "summary", "") or ""
+                        token_stats = (
+                            f"{getattr(result, 'tokens_before', 0)} -> "
+                            f"{getattr(result, 'tokens_after', 0)} tokens, "
+                            f"{getattr(result, 'remaining_budget_tokens', 0)} remaining, "
+                            f"{getattr(result, 'summary_source', 'unknown')}"
+                        )
                     else:
-                        model = parts[1].strip()
-                        state.model = model
-                        console.print(f"[green]model:[/green] {model}")
-                    continue
-                if stripped == "/cost":
-                    console.print(state.usage.render())
-                    continue
-                if _slash_parts(stripped, "/tool-compress"):
-                    await _handle_tool_compress_command(stripped, config=svc.config)
-                    continue
-                if stripped in {"/clear", "/reset"}:
-                    if svc.session_manager is not None:
-                        safe_to_reset = await _flush_before_standalone_rewrite(
-                            svc,
-                            session_key,
-                            operation="Reset",
+                        summary = await call_compact_with_optional_config(
+                            svc.session_manager.compact,
+                            active_session_key,
+                            context_window,
+                            compaction_config,
                         )
-                        if not safe_to_reset:
-                            continue
-                        await svc.session_manager.truncate(session_key, max_messages=0)
-                    state.transcript.clear()
-                    state.usage.reset()
-                    console.print(f"[{ACCENT}]cleared[/] [dim]{state.session_key}[/dim]")
-                    continue
-                if stripped == "/compact":
-                    if svc.session_manager is not None:
-                        safe_to_compact = await _flush_before_standalone_rewrite(
-                            svc,
-                            session_key,
-                            operation="Compact",
+                        token_stats = f"summary {len(summary)} chars"
+                    if summary:
+                        console.print(
+                            f"[{ACCENT}]compacted[/] "
+                            f"[dim]{token_stats}[/dim]"
                         )
-                        if not safe_to_compact:
-                            continue
-                        context_window = (
-                            getattr(svc.config, "context_budget_tokens", 100_000)
-                            if svc.config is not None
-                            else 100_000
-                        )
-                        compaction_config = build_compaction_config_from_provider(
-                            _resolve_compaction_provider(svc.provider_selector, model),
-                            model_override=model,
-                            compaction_config=getattr(svc.config, "compaction", None),
-                        )
-                        compact_with_result = getattr(
-                            svc.session_manager, "compact_with_result", None
-                        )
-                        if callable(compact_with_result):
-                            result = await compact_with_result(
-                                session_key,
-                                context_window,
-                                compaction_config,
-                            )
-                            summary = getattr(result, "summary", "") or ""
-                            token_stats = (
-                                f"{getattr(result, 'tokens_before', 0)} -> "
-                                f"{getattr(result, 'tokens_after', 0)} tokens, "
-                                f"{getattr(result, 'remaining_budget_tokens', 0)} remaining, "
-                                f"{getattr(result, 'summary_source', 'unknown')}"
-                            )
-                        else:
-                            summary = await call_compact_with_optional_config(
-                                svc.session_manager.compact,
-                                session_key,
-                                context_window,
-                                compaction_config,
-                            )
-                            token_stats = f"summary {len(summary)} chars"
-                        if summary:
-                            console.print(
-                                f"[{ACCENT}]compacted[/] "
-                                f"[dim]{token_stats}[/dim]"
-                            )
-                        else:
-                            console.print(
-                                f"[{ACCENT}]compact skipped[/] "
-                                "[dim]context already within budget[/dim]"
-                            )
                     else:
-                        console.print("[yellow]No session manager available.[/yellow]")
-                    continue
-                if _slash_parts(stripped, "/save"):
-                    _save_transcript_command(stripped, state)
-                    continue
-                if parts := _slash_parts(stripped, "/image"):
-                    if len(parts) == 1 or not parts[1].strip():
-                        console.print("[red]Usage: /image <path> [prompt][/red]")
-                        continue
-                    result = await _handle_image_command_turnrunner(
-                        turn_runner,
-                        session_key,
-                        tool_ctx,
-                        stripped,
-                        model=model,
-                        svc=svc,
-                        timeout=timeout,
-                    )
-                    state.transcript.add("user", _image_prompt_from_command(stripped))
-                    state.transcript.add("assistant", result.text)
-                    state.usage.apply(result.usage)
-                    continue
-                if parts := _slash_parts(stripped, "/path"):
-                    if len(parts) == 1 or not parts[1].strip():
-                        console.print("[red]Usage: /path <path> [prompt][/red]")
-                        continue
-                    try:
-                        prompt, attachments = _path_prompt_and_attachments(stripped)
-                    except ValueError as exc:
-                        console.print(error_panel(str(exc)))
-                        continue
-                    if attachments:
-                        console.print(error_panel("/path must not create attachments."))
-                        continue
-                    result = await _stream_response_turnrunner(
-                        turn_runner,
-                        session_key,
-                        tool_ctx,
-                        prompt,
-                        model=model,
-                        svc=svc,
-                        timeout=timeout,
-                    )
-                    state.transcript.add("user", prompt)
-                    state.transcript.add("assistant", result.text)
-                    state.usage.apply(result.usage)
-                    continue
-                console.print("[red]Unknown command.[/red] [dim]Use /help.[/dim]")
-                continue
+                        console.print(
+                            f"[{ACCENT}]compact skipped[/] "
+                            "[dim]context already within budget[/dim]"
+                        )
+                else:
+                    console.print("[yellow]No session manager available.[/yellow]")
+                return True
+            if _slash_parts(stripped, "/save"):
+                _save_transcript_command(stripped, active_state)
+                return True
+            if parts := _slash_parts(stripped, "/image"):
+                if len(parts) == 1 or not parts[1].strip():
+                    console.print("[red]Usage: /image <path> [prompt][/red]")
+                    return True
+                result = await _handle_image_command_turnrunner(
+                    turn_runner,
+                    active_session_key,
+                    active_tool_ctx,
+                    stripped,
+                    model=active_model,
+                    svc=svc,
+                    timeout=timeout,
+                    chat_app=scope.get("chat_app"),
+                )
+                active_state.transcript.add("user", _image_prompt_from_command(stripped))
+                active_state.transcript.add("assistant", result.text)
+                active_state.usage.apply(result.usage)
+                return True
+            if parts := _slash_parts(stripped, "/path"):
+                if len(parts) == 1 or not parts[1].strip():
+                    console.print("[red]Usage: /path <path> [prompt][/red]")
+                    return True
+                try:
+                    prompt, attachments = _path_prompt_and_attachments(stripped)
+                except ValueError as exc:
+                    console.print(error_panel(str(exc)))
+                    return True
+                if attachments:
+                    console.print(error_panel("/path must not create attachments."))
+                    return True
+                result = await _stream_response_turnrunner(
+                    turn_runner,
+                    active_session_key,
+                    active_tool_ctx,
+                    prompt,
+                    model=active_model,
+                    svc=svc,
+                    timeout=timeout,
+                    chat_app=scope.get("chat_app"),
+                )
+                active_state.transcript.add("user", prompt)
+                active_state.transcript.add("assistant", result.text)
+                active_state.usage.apply(result.usage)
+                return True
+            console.print("[red]Unknown command.[/red] [dim]Use /help.[/dim]")
+            return True
 
-            result = await _stream_response_turnrunner(
-                turn_runner,
-                session_key,
-                tool_ctx,
-                user_input,
-                model=model,
-                svc=svc,
-                timeout=timeout,
-            )
-            state.transcript.add("user", user_input)
-            state.transcript.add("assistant", result.text)
-            state.usage.apply(result.usage)
+        result = await _stream_response_turnrunner(
+            turn_runner,
+            active_session_key,
+            active_tool_ctx,
+            user_input,
+            model=active_model,
+            svc=svc,
+            timeout=timeout,
+            chat_app=scope.get("chat_app"),
+        )
+        active_state.transcript.add("user", user_input)
+        active_state.transcript.add("assistant", result.text)
+        active_state.usage.apply(result.usage)
+        return True
+
+    try:
+        await _run_concurrent_repl(
+            surface=Surface.CLI_STANDALONE,
+            scope=scope,
+            dispatch=_dispatch_input,
+        )
     finally:
         await svc.close()
 
@@ -832,52 +1199,69 @@ async def _gateway_chat(model: str | None, session_id: str | None) -> None:
             )
         )
 
-        while True:
-            try:
-                user_input = await prompt_user(
-                    state.prompt_state().label,
-                    surface=Surface.CLI_GATEWAY,
-                    model=state.model,
-                    session_id=state.session_key,
-                )
-            except (EOFError, KeyboardInterrupt):
-                console.print("\n[yellow]Goodbye.[/yellow]")
-                break
+        scope: dict[str, Any] = {
+            "session_key": session_key,
+            "state": state,
+            "model": model,
+        }
 
+        async def _dispatch_input(user_input: str) -> bool:
+            """Process one input line. Returns True to keep looping, False to exit."""
             if user_input is None or is_exit_command(user_input):
                 console.print("[yellow]Goodbye.[/yellow]")
-                break
+                return False
 
             stripped = user_input.strip()
             if not stripped:
-                continue
+                return True
+
+            active_state: ChatSessionState = scope["state"]
+            active_session_key: str = scope["session_key"]
 
             if stripped.startswith("/"):
                 try:
                     handled = await _handle_gateway_slash_command(
-                        stripped, state, client, elevated_state
+                        stripped,
+                        active_state,
+                        client,
+                        elevated_state,
+                        chat_app=scope.get("chat_app"),
                     )
                 except GatewayRPCError as exc:
                     console.print(error_panel(str(exc)))
-                    continue
+                    return True
                 if handled:
-                    session_key = state.session_key
-                    model = state.model
-                    continue
+                    # Slash commands may have rotated the session key / model;
+                    # mirror those mutations back into the scope dict so the
+                    # next turn sees the latest values.
+                    scope["session_key"] = active_state.session_key
+                    scope["model"] = active_state.model
+                    return True
                 console.print("[red]Unknown command.[/red] [dim]Use /help.[/dim]")
-                continue
+                return True
 
             try:
                 result = await _stream_response_gateway(
-                    client, session_key, user_input, elevated_state
+                    client,
+                    active_session_key,
+                    user_input,
+                    elevated_state,
+                    chat_app=scope.get("chat_app"),
                 )
             except GatewayRPCError as exc:
                 console.print(error_panel(str(exc)))
-                continue
-            state.model = result.model_after or state.model
-            state.transcript.add("user", user_input)
-            state.transcript.add("assistant", result.text)
-            state.usage.apply(result.usage)
+                return True
+            active_state.model = result.model_after or active_state.model
+            active_state.transcript.add("user", user_input)
+            active_state.transcript.add("assistant", result.text)
+            active_state.usage.apply(result.usage)
+            return True
+
+        await _run_concurrent_repl(
+            surface=Surface.CLI_GATEWAY,
+            scope=scope,
+            dispatch=_dispatch_input,
+        )
     finally:
         await client.close()
 
@@ -887,8 +1271,19 @@ async def _handle_gateway_slash_command(
     state: ChatSessionState,
     client: _GatewayClientLike,
     elevated_state: dict[str, str | None],
+    *,
+    chat_app: Any | None = None,
 ) -> bool:
-    """Handle gateway-mode slash commands. Returns False for unknown commands."""
+    """Handle gateway-mode slash commands. Returns False for unknown commands.
+
+    ``chat_app`` is the active ``ChatApplication`` for the REPL surface;
+    it threads through to the per-slash streaming paths (``/image``,
+    ``/path``, ``/file``) so their renderer goes through ``aappend_text``
+    + ``ChatApplication.write_through`` instead of a direct
+    ``console.file`` write, honoring the S2b output mutex and approval
+    suspend gate. Defaults to ``None`` for non-REPL callers that never
+    enter the concurrent loop.
+    """
 
     if cmd == "/help":
         console.print(render_help_table(Surface.CLI_GATEWAY))
@@ -1046,6 +1441,7 @@ async def _handle_gateway_slash_command(
             prompt,
             elevated_state,
             attachments=attachments,
+            chat_app=chat_app,
         )
         state.transcript.add("user", prompt)
         state.transcript.add("assistant", result.text)
@@ -1070,6 +1466,7 @@ async def _handle_gateway_slash_command(
             prompt,
             elevated_state,
             attachments=attachments,
+            chat_app=chat_app,
         )
         state.transcript.add("user", prompt)
         state.transcript.add("assistant", result.text)
@@ -1097,6 +1494,7 @@ async def _handle_gateway_slash_command(
             prompt,
             elevated_state,
             attachments=attachments,
+            chat_app=chat_app,
         )
         state.transcript.add("user", prompt)
         state.transcript.add("assistant", result.text)
@@ -1561,22 +1959,36 @@ async def _stream_response_gateway(
     message: str,
     elevated_state: dict[str, str | None] | None = None,
     attachments: list[dict] | None = None,
+    *,
+    chat_app: Any | None = None,
 ) -> TurnResult:
-    """Stream response from gateway with Rich live display."""
+    """Stream response from gateway with Rich live display.
+
+    When ``chat_app`` is provided, token writes are routed through the
+    S2b output mutex via ``StreamingRenderer.aappend_text`` so stream
+    chunks cannot collide with the inline approval ``PromptSession`` that
+    owns the screen during the Option B″ suspend window.
+    """
     elevated = elevated_state["mode"] if elevated_state else None
     usage: UsageSummary | None = None
     cancelled = False
     artifacts: list[dict[str, Any]] = []
     model_after: str | None = None
 
-    with StreamingRenderer() as renderer:
+    approval_surface = (
+        chat_app.surface
+        if chat_app is not None and hasattr(chat_app, "surface")
+        else Surface.CLI_GATEWAY
+    )
+
+    with StreamingRenderer(chat_app=chat_app) as renderer:
         try:
             async for event in client.send_message(
                 session_key, message, attachments=attachments, elevated=elevated
             ):
                 event_name = event.get("event", "")
                 if event_name == "session.event.text_delta":
-                    renderer.append_text(event.get("text", ""))
+                    await renderer.aappend_text(event.get("text", ""))
                 elif event_name == "session.event.tool_use_start":
                     renderer.tool_start(
                         event.get("tool_name") or event.get("toolName") or "tool",
@@ -1589,6 +2001,7 @@ async def _stream_response_gateway(
                         renderer,
                         client.resolve_approval,
                         elevated_state=elevated_state,
+                        surface=approval_surface,
                     )
                     if not _is_approval_or_blocked_result(event.get("result")):
                         renderer.tool_finished(
@@ -1664,8 +2077,16 @@ async def _stream_response_turnrunner(
     model: str | None = None,
     svc: object = None,
     timeout: float | None = None,
+    *,
+    chat_app: Any | None = None,
 ) -> TurnResult:
-    """Stream TurnRunner response with Rich live display (standalone mode)."""
+    """Stream TurnRunner response with Rich live display (standalone mode).
+
+    When ``chat_app`` is provided, token writes are routed through the
+    S2b output mutex via ``StreamingRenderer.aappend_text`` so stream
+    chunks cannot collide with the inline approval ``PromptSession`` that
+    owns the screen during the Option B″ suspend window.
+    """
     from opensquilla.engine.runtime import TurnRunner
     from opensquilla.engine.types import (
         ArtifactEvent,
@@ -1697,20 +2118,31 @@ async def _stream_response_turnrunner(
     artifacts: list[dict[str, Any]] = []
     model_after: str | None = None
 
-    with StreamingRenderer() as renderer:
+    approval_surface = (
+        chat_app.surface
+        if chat_app is not None and hasattr(chat_app, "surface")
+        else Surface.CLI_STANDALONE
+    )
+
+    with StreamingRenderer(chat_app=chat_app) as renderer:
         try:
             stream = turn_runner.run(
                 message, session_key, tool_context=tool_ctx, model=model, timeout=timeout
             )
             async for event in _wrap_cli_turn_stream(stream, svc):
                 if isinstance(event, TextDeltaEvent):
-                    renderer.append_text(event.text)
+                    await renderer.aappend_text(event.text)
                 elif isinstance(event, RunHeartbeatEvent):
                     renderer.pulse()
                 elif isinstance(event, ToolUseStartEvent):
                     renderer.tool_start(event.tool_name, None, event.tool_use_id)
                 elif isinstance(event, ToolResultEvent):
-                    await _maybe_handle_approval(event.result, renderer, resolver)
+                    await _maybe_handle_approval(
+                        event.result,
+                        renderer,
+                        resolver,
+                        surface=approval_surface,
+                    )
                     if not _is_approval_or_blocked_result(event.result):
                         renderer.tool_finished(
                             event.tool_use_id,
@@ -1766,8 +2198,18 @@ async def _handle_image_command_turnrunner(
     model: str | None = None,
     svc: object = None,
     timeout: float | None = None,
+    *,
+    chat_app: Any | None = None,
 ) -> TurnResult:
-    """Handle /image <path> [prompt] — send image via TurnRunner attachments."""
+    """Handle /image <path> [prompt] — send image via TurnRunner attachments.
+
+    ``chat_app`` is the active ``ChatApplication`` for the REPL surface;
+    when provided, token streaming routes through ``aappend_text`` +
+    ``ChatApplication.write_through`` so the S2b output mutex and
+    approval suspend gate apply to /image output the same way they
+    apply to regular turn output. Defaults to ``None`` for non-REPL
+    callers.
+    """
     from opensquilla.engine.runtime import TurnRunner
     from opensquilla.engine.types import (
         DoneEvent,
@@ -1797,7 +2239,7 @@ async def _handle_image_command_turnrunner(
             prompt = _persisted.content
 
     usage: UsageSummary | None = None
-    with StreamingRenderer() as renderer:
+    with StreamingRenderer(chat_app=chat_app) as renderer:
         try:
             stream = turn_runner.run(
                 prompt,
@@ -1809,7 +2251,7 @@ async def _handle_image_command_turnrunner(
             )
             async for event in _wrap_cli_turn_stream(stream, svc):
                 if isinstance(event, TextDeltaEvent):
-                    renderer.append_text(event.text)
+                    await renderer.aappend_text(event.text)
                 elif isinstance(event, RunHeartbeatEvent):
                     renderer.pulse()
                 elif isinstance(event, ToolUseStartEvent):

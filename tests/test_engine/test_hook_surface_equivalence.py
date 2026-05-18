@@ -45,7 +45,6 @@ from opensquilla.engine.runtime import TurnRunner
 from opensquilla.observability.trace import TraceContext, TraceEvent
 from opensquilla.tool_boundary import ToolCall, ToolResult
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

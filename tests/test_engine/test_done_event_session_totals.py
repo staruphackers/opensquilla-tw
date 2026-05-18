@@ -6,11 +6,7 @@ import json
 from dataclasses import asdict
 
 from opensquilla.engine.types import DoneEvent
-from opensquilla.engine.usage import (
-    SessionTotalsSnapshot,
-    SessionUsage,
-    UsageTracker,
-)
+from opensquilla.engine.usage import UsageTracker
 
 
 def test_tracked_session_emits_six_field_snapshot():
@@ -62,8 +58,8 @@ def test_stale_replay_roundtrips_through_json_and_live_tracker_wins():
     replay-precedence rule: live tracker beats embedded for re-emitted events."""
     tracker = UsageTracker()
     tracker.add("sess-C", input_tokens=10, output_tokens=20, model_id="gpt-test")
-    snap_S1 = tracker.session_snapshot("sess-C")
-    done = DoneEvent(session_totals=snap_S1)
+    snap_s1 = tracker.session_snapshot("sess-C")
+    done = DoneEvent(session_totals=snap_s1)
 
     serialized = json.loads(json.dumps(asdict(done)))
     assert serialized["session_totals"] is not None
@@ -72,9 +68,9 @@ def test_stale_replay_roundtrips_through_json_and_live_tracker_wins():
     # Advance tracker beyond S1 — server-side consumers should NOT
     # see the frozen S1 if they re-derive from the live tracker.
     tracker.add("sess-C", input_tokens=99, output_tokens=99, model_id="gpt-test")
-    snap_S2 = tracker.session_snapshot("sess-C")
-    assert snap_S2.input_tokens == 109
-    assert snap_S2.input_tokens != snap_S1.input_tokens  # live > frozen
+    snap_s2 = tracker.session_snapshot("sess-C")
+    assert snap_s2.input_tokens == 109
+    assert snap_s2.input_tokens != snap_s1.input_tokens  # live > frozen
 
 
 def test_positional_construction_through_reasoning_content_leaves_session_totals_none():

@@ -42,65 +42,41 @@ def test_pulse_restart_preserves_monotonic_elapsed() -> None:
     assert e2 >= e1
 
 
-class _RecordingLive:
-    """Recorder for Rich Live constructions inside the renderer."""
+def test_streaming_renderer_uses_toolbar_status_not_rich_live() -> None:
+    """Lock down: pre-token feedback is the prompt-toolkit `bottom_toolbar`
+    status string, not a Rich ``Live`` region.
 
-    instances: list[_RecordingLive] = []
-
-    def __init__(self, renderable=None, **kwargs):
-        self.renderable = renderable
-        self.kwargs = kwargs
-        self.updates: list[dict] = []
-        self.started = 0
-        self.stopped = 0
-        _RecordingLive.instances.append(self)
-
-    def start(self) -> None:
-        self.started += 1
-
-    def stop(self) -> None:
-        self.stopped += 1
-
-    def update(self, renderable, *, refresh: bool = False) -> None:
-        self.renderable = renderable
-        self.updates.append({"refresh": refresh})
-
-
-@pytest.fixture
-def recording_live(monkeypatch):
-    _RecordingLive.instances = []
-    monkeypatch.setattr("opensquilla.cli.repl.stream.Live", _RecordingLive)
-    yield _RecordingLive
-    _RecordingLive.instances = []
-
-
-def test_only_waiting_live_is_constructed(recording_live) -> None:
-    """Lock down: token streaming must not start a second Rich ``Live``.
-
-    The historical Markdown+Panel Live update loop produced ghost panel
-    borders on Windows PowerShell once the panel grew taller than the
-    terminal viewport (especially with CJK content). The fix replaces it
-    with plain-text writes plus a one-shot final Markdown panel. A second
-    Live during streaming is the regression signal we guard against here.
+    Historical context: a Markdown+Panel Live update loop produced ghost
+    panel borders on Windows PowerShell whenever the rendered height grew
+    past the visible viewport. S2′ removed the last remaining Live
+    instance (the waiting indicator) and routed the "thinking…" status
+    through `_toolbar_context['status']` so the prompt-toolkit toolbar
+    surfaces it instead.
     """
-    with StreamingRenderer() as renderer:
-        renderer.append_text("foo")
-        renderer.append_text("bar")
-        renderer.pulse()
+    from opensquilla.cli.repl import prompt as prompt_mod
 
-    # Exactly one Live — the transient waiting indicator. No main Live
-    # is created during the streaming phase any more.
-    assert len(recording_live.instances) == 1, (
-        f"expected only the waiting Live, got {len(recording_live.instances)}"
+    # Module no longer carries a Live symbol — that's the canonical
+    # regression gate: any future Rich-Live re-introduction would re-bind
+    # the attribute, so its absence is load-bearing.
+    assert not hasattr(stream_module, "Live"), (
+        "stream.py must not import or expose Rich `Live` any more"
     )
-    waiting_live = recording_live.instances[0]
-    assert waiting_live.kwargs.get("transient") is True
-    # Waiting indicator keeps auto-refresh so the elapsed-seconds counter
-    # animates without external ticks.
-    assert waiting_live.kwargs.get("auto_refresh", True) is not False
-    # First append_text stops the waiting indicator before any text writes.
-    assert waiting_live.stopped == 1
-    assert waiting_live.updates == []
+
+    previous_status = prompt_mod._toolbar_context.get("status")
+    try:
+        prompt_mod._toolbar_context["status"] = None
+        with StreamingRenderer() as renderer:
+            # Entering the context mounts the toolbar status block.
+            assert prompt_mod._toolbar_context.get("status") == "thinking…"
+            renderer.append_text("foo")
+            # First chunk clears the status block before any text writes.
+            assert prompt_mod._toolbar_context.get("status") is None
+            renderer.append_text("bar")
+            renderer.pulse()
+        # On stop the status block stays cleared.
+        assert prompt_mod._toolbar_context.get("status") is None
+    finally:
+        prompt_mod._toolbar_context["status"] = previous_status
 
 
 def test_append_text_writes_plain_to_console_stream(monkeypatch) -> None:
@@ -114,8 +90,6 @@ def test_append_text_writes_plain_to_console_stream(monkeypatch) -> None:
     buf = io.StringIO()
     test_console = Console(file=buf, force_terminal=False, width=120, highlight=False)
     monkeypatch.setattr(stream_module, "console", test_console)
-    monkeypatch.setattr(stream_module, "Live", _RecordingLive)
-    _RecordingLive.instances = []
 
     with StreamingRenderer() as renderer:
         renderer.append_text("hello ")
@@ -145,8 +119,6 @@ def test_finalize_does_not_re_render_response_as_panel(monkeypatch) -> None:
     def fake_print(*args, **kwargs) -> None:
         captured.extend(args)
 
-    monkeypatch.setattr(stream_module, "Live", _RecordingLive)
-    _RecordingLive.instances = []
     monkeypatch.setattr(stream_module.console, "print", fake_print)
     monkeypatch.setattr(stream_module.console, "file", io.StringIO(), raising=False)
 
@@ -186,8 +158,6 @@ def test_append_text_strips_terminal_control_sequences(
         file=buf, force_terminal=False, width=120, highlight=False
     )
     monkeypatch.setattr(stream_module, "console", test_console)
-    monkeypatch.setattr(stream_module, "Live", _RecordingLive)
-    _RecordingLive.instances = []
 
     with StreamingRenderer() as renderer:
         renderer.append_text(hostile)
@@ -214,8 +184,6 @@ def test_append_text_keeps_newlines_and_tabs(monkeypatch) -> None:
         file=buf, force_terminal=False, width=120, highlight=False
     )
     monkeypatch.setattr(stream_module, "console", test_console)
-    monkeypatch.setattr(stream_module, "Live", _RecordingLive)
-    _RecordingLive.instances = []
 
     payload = "# heading\n\n- item one\n- item two\n\tindented"
     with StreamingRenderer() as renderer:

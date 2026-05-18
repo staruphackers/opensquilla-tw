@@ -14,7 +14,7 @@ sits in front of.
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 from opensquilla.tools.policy.checks import (
     AllowListPolicy,

@@ -43,9 +43,14 @@ def test_footer_renders_per_turn_only_without_snapshot(renderer):
 
 def test_usage_counter_apply_overwrites_from_snapshot():
     counter = UsageCounter(input_tokens=50, output_tokens=99)
-    snap = SessionTotalsSnapshot(input_tokens=10, output_tokens=20, cache_read_tokens=3, cost_usd=0.5)
+    snap = SessionTotalsSnapshot(
+        input_tokens=10,
+        output_tokens=20,
+        cache_read_tokens=3,
+        cost_usd=0.5,
+    )
     counter.apply(_usage(session_totals=snap))
-    assert counter.input_tokens == 10   # overwrote, not summed
+    assert counter.input_tokens == 10  # overwrote, not summed
     assert counter.output_tokens == 20
 
 

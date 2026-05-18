@@ -21,7 +21,7 @@ from opensquilla.engine.hooks.types import (
     TurnHookContext,
     TurnHookResult,
 )
-from opensquilla.observability.trace import TraceContext, TraceEvent, write_trace_event
+from opensquilla.observability.trace import TraceEvent, write_trace_event
 
 log = structlog.get_logger("opensquilla.engine.hooks")
 

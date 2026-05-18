@@ -221,7 +221,7 @@ class SessionTotalsSnapshot:
     billed_cost: float = 0.0
 
     @classmethod
-    def from_session(cls, usage: "SessionUsage") -> "SessionTotalsSnapshot":
+    def from_session(cls, usage: SessionUsage) -> SessionTotalsSnapshot:
         return cls(
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,

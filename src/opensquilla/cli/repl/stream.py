@@ -12,9 +12,9 @@ from typing import TYPE_CHECKING, Any, Literal
 if TYPE_CHECKING:
     from opensquilla.engine.usage import SessionTotalsSnapshot
 
-from rich.live import Live
 from rich.text import Text
 
+from opensquilla.cli.repl.prompt import _toolbar_context
 from opensquilla.cli.ui import ACCENT, ACCENT_SOFT, console, error_panel
 
 # ESC-introduced terminal sequences: CSI (cursor / SGR / mode), OSC (title,
@@ -63,7 +63,7 @@ class UsageSummary:
     cost_source: str = "none"
     model: str = ""
     aggregate: bool = False
-    session_totals: "SessionTotalsSnapshot | None" = None
+    session_totals: SessionTotalsSnapshot | None = None
 
     @classmethod
     def from_done_event(cls, event: object) -> UsageSummary:
@@ -138,7 +138,7 @@ class UsageCounter:
         self.cached_tokens += usage.cached_tokens
         self.cost_usd += usage.cost_usd
 
-    def apply(self, usage: "UsageSummary | None") -> None:
+    def apply(self, usage: UsageSummary | None) -> None:
         """Update counter from a turn's UsageSummary.
 
         If the upstream DoneEvent shipped a `session_totals` snapshot, the
@@ -293,7 +293,17 @@ class _ToolCallStrip:
 
 
 class WaitingIndicator:
-    """Small custom waiting indicator for the REPL pre-token state."""
+    """Pre-token waiting verb/elapsed renderable.
+
+    Kept as a pure data class so the gateway-side `chat.js` mirror (which
+    references `_verbs` and `_verb_dwell_seconds`) stays in lockstep with the
+    CLI surface. The CLI no longer mounts this inside a Rich ``Live`` —
+    pre-token visual feedback now lives in the prompt-toolkit
+    `bottom_toolbar` slot via the shared ``_toolbar_context['status']`` key
+    (see ``StreamingRenderer._start_waiting``). The class still renders as
+    a Rich ``Text`` so any out-of-tree caller that builds a string from the
+    elapsed/verb pair continues to work.
+    """
 
     # kept in sync with chat.js _showThinkingIndicatorNow
     _verbs = (
@@ -303,8 +313,6 @@ class WaitingIndicator:
     _verb_dwell_seconds = 2.5
 
     def __init__(self, started_at: float) -> None:
-        # Owner of the wait clock is the host StreamingRenderer so the elapsed
-        # counter survives a pulse() restart of the underlying Live.
         self._started = started_at
 
     def _elapsed(self) -> float:
@@ -324,27 +332,51 @@ class WaitingIndicator:
         )
 
 
+# Status string surfaced through the prompt-toolkit bottom toolbar while the
+# turn is in flight but has not yet produced its first chunk. The toolbar
+# function in ``cli/repl/prompt.py:_bottom_toolbar`` reads
+# ``_toolbar_context['status']`` on every redraw.
+_THINKING_STATUS = "thinking…"
+
+
 class StreamingRenderer:
     """One streaming renderer for gateway and standalone responses.
 
-    Strategy: a transient ``Live`` waiting indicator before the first token,
-    then a plain-text token stream that writes deltas straight to the
-    terminal. There is no post-stream re-render — the streamed text is the
-    final view, matching how Claude Code, codex, aider, and other agent
-    CLIs present model output. This avoids the Rich ``Live`` + ``Markdown``
-    + ``Panel`` update loop, which leaked ghost panel borders on Windows
-    PowerShell and other terminals whenever the rendered height grew past
-    the visible viewport (CJK width-measurement made the overflow common),
-    and it also avoids the doubled output a one-shot re-render produces.
+    Strategy: a transient *toolbar status block* before the first token (no
+    Rich ``Live`` instance), then a plain-text token stream that writes
+    deltas straight to the terminal. There is no post-stream re-render —
+    the streamed text is the final view, matching how Claude Code, codex,
+    aider, and other agent CLIs present model output. This avoids the Rich
+    ``Live`` + ``Markdown`` + ``Panel`` update loop, which leaked ghost
+    panel borders on Windows PowerShell and other terminals whenever the
+    rendered height grew past the visible viewport (CJK width-measurement
+    made the overflow common), and it also avoids the doubled output a
+    one-shot re-render produces.
+
+    The pre-token "thinking…" state lives in the prompt-toolkit
+    ``bottom_toolbar`` slot via the shared ``_toolbar_context['status']``
+    key. Mutating that key here keeps the indicator owned by the renderer
+    while reusing the existing themed toolbar surface for actual display.
     """
 
-    def __init__(self, *, title: str = "assistant") -> None:
+    def __init__(
+        self,
+        *,
+        title: str = "assistant",
+        chat_app: Any | None = None,
+    ) -> None:
         self.title = title
         self.buffer = ""
         self.started_at = time.monotonic()
-        self._waiting_live: Live | None = None
+        self._waiting_active = False
         self._stream_started = False
         self._strip = _ToolCallStrip()
+        # Optional ChatApplication handle. When provided, async callers can
+        # route token writes through `aappend_text` so the S2b output mutex
+        # serializes the write-and-flush with concurrent slash-handler /
+        # input-echo writes. Sync `append_text` is preserved unchanged for
+        # legacy callers; migration to the async path is incremental.
+        self._chat_app: Any | None = chat_app
 
     def __enter__(self) -> StreamingRenderer:
         self.started_at = time.monotonic()
@@ -356,19 +388,16 @@ class StreamingRenderer:
         return False
 
     def _start_waiting(self) -> None:
-        if self._waiting_live is None:
-            self._waiting_live = Live(
-                WaitingIndicator(self.started_at),
-                console=console,
-                refresh_per_second=12,
-                transient=True,
-            )
-            self._waiting_live.start()
+        if self._waiting_active:
+            return
+        _toolbar_context["status"] = _THINKING_STATUS
+        self._waiting_active = True
 
     def _stop_waiting(self) -> None:
-        if self._waiting_live is not None:
-            self._waiting_live.stop()
-            self._waiting_live = None
+        if not self._waiting_active:
+            return
+        _toolbar_context["status"] = None
+        self._waiting_active = False
 
     def _begin_stream(self) -> None:
         """Drop the waiting indicator and print the assistant section header.
@@ -405,6 +434,29 @@ class StreamingRenderer:
         # cursor math, no Live repaint loop. The terminal handles wrapping.
         console.file.write(safe)
         console.file.flush()
+
+    async def aappend_text(self, delta: str) -> None:
+        """Async sibling of `append_text` that routes through the output mutex.
+
+        Mirrors the sync path's sanitization and buffer accounting, then
+        delegates the write-and-flush to `ChatApplication.write_through`
+        which holds the S2b output lock for the microsecond write window.
+        When no `chat_app` was attached the call falls back to the direct
+        sync write so callers can use a single async API without paying for
+        a lock that isn't wired.
+        """
+        if not delta:
+            return
+        safe = _sanitize_stream_text(delta)
+        if not safe:
+            return
+        self.buffer += safe
+        self._begin_stream()
+        if self._chat_app is not None:
+            await self._chat_app.write_through(safe)
+        else:
+            console.file.write(safe)
+            console.file.flush()
 
     def pulse(self) -> None:
         """Refresh visible feedback when the stream is alive but quiet.
@@ -505,7 +557,7 @@ class StreamingRenderer:
 
     @contextmanager
     def paused(self) -> Iterator[None]:
-        had_waiting = self._waiting_live is not None
+        had_waiting = self._waiting_active
         self.stop()
         try:
             yield

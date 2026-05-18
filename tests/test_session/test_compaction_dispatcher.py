@@ -98,7 +98,11 @@ async def test_new_avoids_mid_turn_cut():
     # The new impl should walk back one more step so last_removed = u_1 (turn_boundary).
     entries = [
         {"role": "user", "content": "q1", "token_count": 5},
-        {"role": "assistant", "content": "[tool_call:read_file({\"path\": \"x\"})]", "token_count": 5},
+        {
+            "role": "assistant",
+            "content": "[tool_call:read_file({\"path\": \"x\"})]",
+            "token_count": 5,
+        },
         {"role": "tool", "content": "[tool_result:read_file] contents", "token_count": 5},
         {"role": "user", "content": "q2", "token_count": 5},
         {"role": "assistant", "content": "answer", "token_count": 5},

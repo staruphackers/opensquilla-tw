@@ -9,11 +9,10 @@ coupling to a particular test framework fixture shape.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
-from opensquilla.safety.injection_guard import REFUSAL_REASON_TOOL_CALL_IN_UNTRUSTED
-from opensquilla.safety.permission_matrix import clear_channel_overrides
 from opensquilla.tool_boundary import ToolCall
 from opensquilla.tools.registry import ToolRegistry
 from opensquilla.tools.types import (
@@ -23,7 +22,6 @@ from opensquilla.tools.types import (
     ToolSpec,
     current_tool_context,
 )
-
 
 # ---------------------------------------------------------------------------
 # Shared minimal artifact dict used across multiple cases
