@@ -2160,7 +2160,6 @@ const ChatView = (() => {
       case 'compact_context':
       case 'sessions.contextCompact':
       case '/compact':
-        UI.toast('Checking whether compaction is needed...', 'info', 1800);
         _rpc.call('sessions.contextCompact', { key: _sessionKey })
           .then(() => {})
           .catch((err) => _showCompactionToast({
@@ -2275,11 +2274,9 @@ const ChatView = (() => {
     const status = String(payload && payload.status || '').toLowerCase();
     const source = String(payload && payload.source || '').toLowerCase();
     if (status === 'started') {
-      UI.toast('Checking whether compaction is needed...', 'info', 1800);
       return;
     }
     if (status === 'skipped') {
-      UI.toast('No compaction needed', 'info', 4500);
       return;
     }
     if (status === 'failed' || status === 'error') {

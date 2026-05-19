@@ -447,10 +447,8 @@ def test_chat_compaction_events_render_recoverable_toasts_in_real_browser(
               );
 
               await emitCompaction(page, { status: "started", source: "manual" });
-              await page.waitForFunction(
-                () => document.body.innerText.includes("Checking whether compaction is needed..."),
-                { timeout: 5000 }
-              );
+              await emitCompaction(page, { status: "skipped", source: "manual" });
+              await page.waitForTimeout(250);
 
               await emitCompaction(page, {
                 status: "completed",
@@ -473,6 +471,7 @@ def test_chat_compaction_events_render_recoverable_toasts_in_real_browser(
               const bodyText = await page.locator("body").innerText();
               const result = {
                 hasStartedToast: bodyText.includes("Checking whether compaction is needed..."),
+                hasSkippedToast: bodyText.includes("No compaction needed"),
                 hasCompletedToast: bodyText.includes("Context compacted"),
                 hasReplayedFailureToast: bodyText.includes("old replay"),
                 pageErrors: errors,
@@ -519,7 +518,8 @@ def test_chat_compaction_events_render_recoverable_toasts_in_real_browser(
         _stop_process(server)
 
     assert payload == {
-        "hasStartedToast": True,
+        "hasStartedToast": False,
+        "hasSkippedToast": False,
         "hasCompletedToast": True,
         "hasReplayedFailureToast": False,
         "pageErrors": [],

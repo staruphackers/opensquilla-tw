@@ -480,14 +480,19 @@ def test_chat_tracks_background_task_groups_as_active_run_state() -> None:
     assert "_activeTaskGroups.size > 0" in source
 
 
-def test_chat_surfaces_manual_and_passive_compaction_toasts() -> None:
+def test_chat_surfaces_compaction_outcome_toasts_without_noop_chatter() -> None:
     source = CHAT_JS.read_text(encoding="utf-8")
     compact_block = source[
         source.index("case 'compact_context':") : source.index("case 'usage_status':")
     ]
+    start = source.index("function _showCompactionToast(payload, meta = {})")
+    end = source.index("  /* ── RPC Event Subscriptions", start)
+    body = source[start:end]
 
     assert "function _showCompactionToast(payload, meta = {})" in source
-    assert "Checking whether compaction is needed..." in source
+    assert "Checking whether compaction is needed..." not in compact_block
+    assert "Checking whether compaction is needed..." not in body
+    assert "No compaction needed" not in body
     assert "_showCompactionToast({ ...(result || {}), source: 'manual'" not in compact_block
     assert "session.event.compaction" in source
     assert "Context compacted older messages to keep this session within budget" in source
@@ -506,7 +511,7 @@ def test_chat_compaction_token_details_are_success_only() -> None:
     skipped_end = body.index("if (status === 'failed'", skipped_start)
     skipped_block = body[skipped_start:skipped_end]
 
-    assert "UI.toast('No compaction needed', 'info', 4500);" in skipped_block
+    assert "UI.toast(" not in skipped_block
     assert "No compaction needed' + details" not in skipped_block
     assert "payload && payload.tokens_after || 0" not in stats_body
     assert body.index("_compactionTokenStats(payload || {})") > body.index(
@@ -663,9 +668,7 @@ def test_chat_ignores_replayed_compaction_toasts() -> None:
 
     assert "function _showCompactionToast(payload, meta = {})" in source
     assert "if (meta && meta.replayed) return;" in body
-    assert body.index("meta.replayed") < body.index(
-        "UI.toast('Checking whether compaction is needed...'"
-    )
+    assert body.index("meta.replayed") < body.index("UI.toast('Compact failed'")
 
 
 def test_rpc_client_passes_event_meta_without_polluting_payload() -> None:
