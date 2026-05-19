@@ -369,6 +369,24 @@ flow at `/control/setup`.
 defaults. Environment values for individual secrets always win over
 file values.
 
+### Migrate from OpenClaw or Hermes Agent
+
+If you already have state under `~/.openclaw` or `~/.hermes`, run a
+dry run first to inspect the migration report, then apply it explicitly:
+
+```sh
+opensquilla migrate openclaw --json
+opensquilla migrate openclaw --apply
+
+opensquilla migrate hermes --json
+opensquilla migrate hermes --apply
+```
+
+Use `opensquilla migrate --source openclaw,hermes --apply` to import
+both default homes. Add `--migrate-secrets` only after reviewing the dry-run
+report. See [`MIGRATION.md`](MIGRATION.md) for custom paths and conflict
+handling.
+
 ### Run
 
 ```sh
@@ -382,9 +400,9 @@ Open the Web UI at <http://127.0.0.1:18791/control/> and check health
 with `curl http://127.0.0.1:18791/health`. Press `Ctrl+C` to stop a
 foreground gateway.
 
-Other command groups include `sessions`, `skills`, `memory`, `cron`,
-`channels`, `providers`, `models`, and `cost`. Run `opensquilla --help`
-or `opensquilla <group> --help` for details.
+Other command groups include `sessions`, `skills`, `memory`, `migrate`,
+`cron`, `channels`, `providers`, `models`, and `cost`. Run
+`opensquilla --help` or `opensquilla <group> --help` for details.
 
 <details>
 <summary>Advanced configuration — verify a channel, public network binding, Docker</summary>
@@ -446,10 +464,10 @@ settings live in `opensquilla.toml.example`.
 This preview expands OpenSquilla across migration, CLI chat, channels,
 scheduling, and long-running tool work:
 
-- **Migration path from existing agent homes** — planned for this preview via
-  PR #29: `opensquilla migrate` previews and applies imports from existing
-  OpenClaw/Hermes homes, including memory, persona files, skills, MCP/channel
-  config, and migration reports.
+- **Migration path from existing agent homes** — `opensquilla migrate` previews
+  and applies imports from existing OpenClaw/Hermes homes, including memory,
+  persona files, skills, MCP/channel config, conflict handling, and migration
+  reports.
 - **Usable chat CLI** — `opensquilla chat` now has a persistent terminal UI,
   streaming output, queued input, slash-mode discovery, tool/status strips, and
   more deterministic live prompt behavior.

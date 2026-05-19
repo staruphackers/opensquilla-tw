@@ -16,11 +16,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
-- Planned for this preview, pending PR #29 before the tag: `opensquilla migrate`
-  imports existing OpenClaw/Hermes homes into OpenSquilla with dry-run previews,
-  explicit `--apply`, source auto-detection, migration reports, memory/persona
-  conflict handling, skill compatibility reporting, and MCP/channel config
-  mapping.
+- `opensquilla migrate` imports existing OpenClaw/Hermes homes into OpenSquilla
+  with dry-run previews, explicit `--apply`, source auto-detection, migration
+  reports, memory/persona conflict handling, skill compatibility reporting, and
+  MCP/channel config mapping.
 - `opensquilla chat` is now an early usable interactive CLI chat surface with a
   persistent terminal UI, streaming output, queued input, slash-mode discovery,
   prompt/status chrome, tool-call feedback, inline approval handling, and
