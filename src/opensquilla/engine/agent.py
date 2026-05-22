@@ -1670,10 +1670,6 @@ class Agent:
 
         # Build initial message list
         turn_messages: list[Message] = list(history)
-        # Keep large request-scoped context at a stable provider prefix. If
-        # history is allowed to move ahead of it after the first turn,
-        # prefix-based provider caches can no longer reuse that block.
-        request_context_insert_index = 0
         # Insert this turn's skills context BEFORE the user content so it
         # joins turn_messages permanently (persists into self._history at
         # turn end). Re-inserting a fresh skills_ctx into request_messages
@@ -1685,6 +1681,11 @@ class Agent:
         skills_context_message = self._skills_context_message()
         if skills_context_message is not None:
             turn_messages.append(skills_context_message)
+        # Keep persisted history and persisted skills as the provider-visible
+        # prefix. Request-scoped context can change every turn, so keep it near
+        # the current turn instead of letting it invalidate implicit prefix
+        # caches from messages[0].
+        request_context_insert_index = len(turn_messages)
         runtime_context_insert_index = len(turn_messages)
         if extra_messages:
             turn_messages.extend(extra_messages)

@@ -1527,16 +1527,16 @@ async def test_agent_request_context_is_request_only_after_history() -> None:
     assert "<memory_context>volatile recall</memory_context>" not in call["config"].system
     assert [message.role for message in call["messages"]] == [
         "user",
-        "user",
         "assistant",
         "user",
         "user",
+        "user",
     ]
-    assert "[Request context for this turn]" in call["messages"][0].content
-    assert "<memory_context>volatile recall</memory_context>" in call["messages"][0].content
-    assert call["messages"][1] == Message(role="user", content="old question")
-    assert call["messages"][2] == Message(role="assistant", content="old answer")
-    assert "[Available skills for this turn]" in call["messages"][3].content
+    assert call["messages"][0] == Message(role="user", content="old question")
+    assert call["messages"][1] == Message(role="assistant", content="old answer")
+    assert "[Available skills for this turn]" in call["messages"][2].content
+    assert "[Request context for this turn]" in call["messages"][3].content
+    assert "<memory_context>volatile recall</memory_context>" in call["messages"][3].content
     assert call["messages"][4].content.startswith("hello")
     assert "[Runtime context for this turn]" in call["messages"][4].content
     assert all(
