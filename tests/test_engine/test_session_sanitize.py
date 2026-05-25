@@ -195,6 +195,26 @@ class CompactedToolArgumentsProvider(ToolLoopCapturingProvider):
         yield ProviderDone(stop_reason="end_turn", input_tokens=4, output_tokens=1)
 
 
+class TextThenCompactedToolArgumentsProvider(ToolLoopCapturingProvider):
+    async def _stream(self, call_number: int) -> AsyncIterator[Any]:
+        if call_number == 1:
+            yield ProviderText(text="I will prepare the file, then run the tool.")
+            yield ProviderToolUseStart(tool_use_id="tool-compact", tool_name="write_file")
+            yield ProviderToolUseEnd(
+                tool_use_id="tool-compact",
+                tool_name="write_file",
+                arguments={
+                    "_opensquilla_compacted_tool_arguments": True,
+                    "tool": "write_file",
+                    "reason": "provider_context_omitted",
+                },
+            )
+            yield ProviderDone(stop_reason="tool_use", input_tokens=3, output_tokens=1)
+            return
+        yield ProviderText(text="done")
+        yield ProviderDone(stop_reason="end_turn", input_tokens=4, output_tokens=1)
+
+
 class CapturingTurnLog:
     def __init__(self) -> None:
         self.records: list[dict[str, Any]] = []
@@ -2024,6 +2044,81 @@ async def test_agent_refuses_copied_provider_compacted_tool_arguments(tmp_path) 
     assert "_invalid_provider_context_arguments" not in replay_payload
     assert "provider_context_omitted" not in replay_payload
     assert "tool-compact" not in replay_payload
+
+
+@pytest.mark.asyncio
+async def test_agent_repair_prompt_keeps_provider_request_from_ending_on_assistant(
+    tmp_path,
+) -> None:
+    provider = TextThenCompactedToolArgumentsProvider()
+
+    async def tool_handler(call: Any) -> ToolResult:
+        return ToolResult(
+            tool_use_id=call.tool_use_id,
+            tool_name=call.tool_name,
+            content="tool ok",
+        )
+
+    agent = Agent(
+        provider=provider,
+        config=AgentConfig(
+            max_iterations=2,
+            tool_result_store_dir=str(tmp_path / "tool-results"),
+            tool_result_store_session_id="session-1",
+            tool_result_store_session_key="agent:main:webchat:test",
+            tool_result_store_agent_id="main",
+        ),
+        tool_handler=tool_handler,
+    )
+
+    events = [event async for event in agent.run_turn("make a deck")]
+
+    assert any(event.kind == "done" for event in events)
+    assert len(provider.calls) == 2
+    repair_messages = provider.calls[1]["messages"]
+    assert repair_messages[-1].role == "user"
+    assert isinstance(repair_messages[-1].content, str)
+    assert "Regenerate the complete tool arguments" in repair_messages[-1].content
+    replay_payload = json.dumps(
+        [message.model_dump(mode="json") for message in repair_messages],
+        ensure_ascii=False,
+    )
+    assert "tool-compact" not in replay_payload
+    assert "_invalid_provider_context_arguments" not in replay_payload
+    assert "provider_context_omitted" not in replay_payload
+
+
+def test_agent_repair_prompt_handles_tool_use_without_tool_result() -> None:
+    agent = Agent(provider=CapturingProvider(), config=AgentConfig())
+    messages = [
+        Message(role="user", content="make a deck"),
+        Message(
+            role="assistant",
+            content=[
+                ContentBlockText(text="I will prepare the file."),
+                ContentBlockToolUse(
+                    id="tool-compact",
+                    name="write_file",
+                    input={
+                        "_opensquilla_compacted_tool_arguments": True,
+                        "reason": "provider_context_omitted",
+                    },
+                ),
+            ],
+        ),
+    ]
+
+    stripped = agent._strip_provider_context_marker_replay_for_provider(messages)
+
+    assert stripped[-1].role == "user"
+    assert isinstance(stripped[-1].content, str)
+    assert "Regenerate the complete tool arguments" in stripped[-1].content
+    replay_payload = json.dumps(
+        [message.model_dump(mode="json") for message in stripped],
+        ensure_ascii=False,
+    )
+    assert "tool-compact" not in replay_payload
+    assert "provider_context_omitted" not in replay_payload
 
 
 @pytest.mark.asyncio

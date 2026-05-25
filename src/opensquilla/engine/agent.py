@@ -162,6 +162,11 @@ _INVALID_PROVIDER_CONTEXT_PROJECTION_PREFIX = "[invalid_provider_context_project
 _INVALID_PROVIDER_CONTEXT_ARGUMENTS_KEY = "_invalid_provider_context_arguments"
 _TOOL_ARGUMENT_HEARTBEAT_CHARS = 4096
 _PROVIDER_CONTEXT_PROJECTION_REUSED_REASON = "provider_context_projection_reused"
+_PROVIDER_CONTEXT_REPAIR_PROMPT = (
+    "A previous tool call was rejected because it reused provider-only compacted "
+    "tool arguments. Regenerate the complete tool arguments from the available "
+    "source context and retry the tool call. Do not copy compacted placeholders."
+)
 _COMPACTED_TOOL_ARGUMENT_MARKERS = frozenset(
     {
         "_opensquilla_compacted_tool_arguments",
@@ -4278,6 +4283,15 @@ class Agent:
                     content=next_content,
                     reasoning_content=getattr(message, "reasoning_content", None),
                 )
+            )
+
+        if (
+            stripped_blocks
+            and stripped_messages
+            and stripped_messages[-1].role == "assistant"
+        ):
+            stripped_messages.append(
+                Message(role="user", content=_PROVIDER_CONTEXT_REPAIR_PROMPT)
             )
 
         self.config.metadata["tool_argument_projection_replay_stripped"] = (
