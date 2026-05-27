@@ -29,6 +29,7 @@ composition:
         mode: form
         intro: |
           在开始规划之前，请先确认 4 件事 —— 我会用它生成完整行程。
+        nl_extract: true
         fields:
           - name: destination
             type: string

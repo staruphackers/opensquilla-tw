@@ -160,6 +160,111 @@ async def test_travel_planner_pauses_at_trip_collect_then_resumes(writer):
 
 
 @pytest.mark.asyncio
+async def test_travel_planner_natural_language_reply_auto_fills_via_nl_extract(writer):
+    """PR9 end-to-end: user replies with one free-form sentence; the
+    deterministic parser rejects it (1 line for a 4-field form → fewer
+    lines than fields → required-field errors); nl_extract LLM extracts
+    all four fields from the natural language; DAG resumes and downstream
+    sees the structured collected values.
+    """
+    from opensquilla.engine.steps.meta_resolution import meta_resolution
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    plan = _load_travel_planner_plan()
+    # Sanity: nl_extract is enabled on trip_collect.
+    assert plan.steps[0].clarify_config.nl_extract is True
+
+    inputs = {"user_message": "plan a trip", "collected": {}}
+    snapshot_json = json.dumps(to_jsonable(plan), sort_keys=True, ensure_ascii=False)
+    with writer._lock:
+        writer._conn.execute(
+            "INSERT INTO meta_skill_runs "
+            "(run_id, meta_skill_name, meta_skill_digest, plan_snapshot_json, "
+            " triggered_by, session_key, status, started_at_ms, inputs_json) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            ("r3", plan.name, "d", snapshot_json, "soft_meta_invoke",
+             "S3", "running", 0, json.dumps(inputs)),
+        )
+        writer._conn.commit()
+
+    orch = MetaOrchestrator(
+        agent_runner=None, skill_loader=None, dao=writer,  # type: ignore[arg-type]
+    )
+
+    async def _dispatch(step, effective_skill, match_inputs, outputs):
+        if step.kind == "user_input":
+            async for ev in orch._dispatch_one_step(
+                step, effective_skill, match_inputs, outputs,
+                run_id="r3", session_id="S3",
+            ):
+                yield ev
+            return
+        yield _StepDone(text=f"{step.id}-stub", status="ok")
+
+    # 1) First call pauses at trip_collect.
+    paused = await orch.run_once(
+        MetaMatch(plan=plan, inputs=inputs),
+        run_id="r3", session_id="S3",
+        dispatch_step_stream=_dispatch, yield_skill_view_preface=_sv,
+    )
+    assert paused.paused is True
+
+    # 2) Simulate the user replying in natural language. The
+    # deterministic parser cannot extract 4 separate fields from one
+    # sentence; nl_extract picks up the structured JSON the (mock) LLM
+    # returns.
+
+    async def _mock_llm_chat(system_prompt: str, user_message: str) -> str:
+        # The system prompt must instruct strict JSON output (defensive
+        # check — proves we got the right caller).
+        assert "STRICT JSON" in system_prompt
+        assert "<user_reply>" in user_message
+        # Return a realistic extraction of the natural-language sentence.
+        return json.dumps({
+            "destination": "Tokyo",
+            "days": 5,
+            "party_size": 2,
+            "budget": "mid",
+        })
+
+    # We drive meta_resolution directly (instead of the full TurnRunner)
+    # because we want to assert the nl_extract path. After meta_resolution
+    # sets ctx.metadata["meta_resume"], we feed that into orch.resume().
+    loader = MagicMock()
+    loader.load_all.return_value = []
+    ctx = SimpleNamespace(
+        message="我们俩去东京玩五天预算 mid",
+        session_key="S3",
+        metadata={
+            "skill_loader": loader,
+            "meta_run_writer": writer,
+            "meta_llm_chat": _mock_llm_chat,
+        },
+        system_prompt="",
+        config=SimpleNamespace(squilla_router=SimpleNamespace(tiers={})),
+        surface_kind="cli",
+    )
+    resolved = await meta_resolution(ctx)
+    assert "meta_resume" in resolved.metadata, (
+        f"expected nl_extract to fill all 4 fields; got "
+        f"metadata={dict(resolved.metadata)}"
+    )
+    claim, parsed = resolved.metadata["meta_resume"]
+    assert parsed == {
+        "destination": "Tokyo",
+        "days": 5,
+        "party_size": 2,
+        "budget": "mid",
+    }
+    # meta_resolution already claimed resume (status moved to 'running').
+    # In production, the runtime would now feed `parsed` into
+    # MetaOrchestrator.resume(); we don't re-claim here because that
+    # would race-lose on the CAS. Verify the run is no longer awaiting:
+    assert writer.peek_awaiting(session_id="S3") is None
+
+
+@pytest.mark.asyncio
 async def test_travel_planner_cancel_keyword_terminates_run(writer):
     """User can bail out by replying with one of the cancel_keywords."""
     plan = _load_travel_planner_plan()
