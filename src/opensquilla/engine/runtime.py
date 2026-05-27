@@ -3462,6 +3462,7 @@ class TurnRunner:
             filter_skills,
             inject_platform_hint,
             inject_subagent_grounding,
+            meta_resolution,
             observe_reasoning_hint,
             resolve_model,
         )
@@ -3505,7 +3506,10 @@ class TurnRunner:
 
         _bounded_apply_squilla_router.__name__ = "apply_squilla_router"
 
-        initial_metadata: dict[str, Any] = {"skill_loader": self._skill_loader}
+        initial_metadata: dict[str, Any] = {
+            "skill_loader": self._skill_loader,
+            "meta_run_writer": getattr(self, "_meta_run_writer", None),
+        }
         if ingress_pipeline_steps:
             initial_metadata["pipeline_steps"] = list(ingress_pipeline_steps)
         if prev_assistant_text:
@@ -3538,6 +3542,7 @@ class TurnRunner:
                 resolve_model,
                 _bounded_apply_squilla_router,
                 observe_reasoning_hint,
+                meta_resolution,
                 filter_skills,
                 inject_subagent_grounding,
                 inject_platform_hint,
