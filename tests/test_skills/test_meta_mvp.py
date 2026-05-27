@@ -202,6 +202,28 @@ async def test_meta_resolution_matches_trigger() -> None:
 
 
 @pytest.mark.asyncio
+async def test_meta_resolution_noops_when_meta_skill_config_disabled() -> None:
+    spec = _make_meta_spec(
+        composition={"steps": [{"id": "a", "skill": "summarize"}]},
+        triggers=["pdf briefing"],
+        priority=10,
+    )
+    loader = _FakeLoader([spec])
+    ctx = SimpleNamespace(
+        message="please make me a PDF briefing on rust",
+        semantic_message="please make me a PDF briefing on rust",
+        config=SimpleNamespace(meta_skill=SimpleNamespace(enabled=False)),
+        metadata={"skill_loader": loader},
+        system_prompt="base",
+    )
+
+    out = await meta_resolution(ctx)  # type: ignore[arg-type]
+
+    assert "meta_match" not in out.metadata
+    assert out.system_prompt == "base"
+
+
+@pytest.mark.asyncio
 async def test_meta_resolution_highest_priority_wins() -> None:
     lo = _make_meta_spec(
         name="meta-lo",

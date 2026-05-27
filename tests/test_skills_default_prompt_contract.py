@@ -189,6 +189,23 @@ async def test_default_prompt_prefers_matching_meta_skills_over_direct_answers(
 
 
 @pytest.mark.asyncio
+async def test_meta_skill_disabled_hides_meta_prompt_without_hiding_normal_skills(
+    tmp_path: Path,
+) -> None:
+    loader = SkillLoader(bundled_dir=BUNDLED, snapshot_path=tmp_path / "snapshot.json")
+    ctx = _ctx(loader)
+    ctx.config.meta_skill = SimpleNamespace(enabled=False)
+
+    ctx = await filter_skills(ctx)
+    prompt = ctx.system_prompt[1]
+
+    assert "When a kind=\"meta\" entry clearly matches" not in prompt
+    assert "prefer `meta_invoke(name=\"<name>\")` over answering directly" not in prompt
+    assert "multi-skill orchestration" not in prompt
+    assert "<available_skills>" in prompt
+
+
+@pytest.mark.asyncio
 async def test_internal_meta_helpers_stay_loadable_but_hidden_from_model(
     tmp_path: Path,
 ) -> None:

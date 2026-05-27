@@ -1797,8 +1797,14 @@ async def build_services(
 
     meta_run_writer = None
     try:
+        from opensquilla.skills.meta.enabled import is_meta_skill_enabled
+
         persistence_cfg = getattr(getattr(config, "meta_skill", None), "persistence", None)
-        if persistence_cfg is not None and getattr(persistence_cfg, "enabled", False):
+        if (
+            is_meta_skill_enabled(config)
+            and persistence_cfg is not None
+            and getattr(persistence_cfg, "enabled", False)
+        ):
             meta_storage = get_session_storage(session_manager)
             db_path = (
                 getattr(meta_storage, "_db_path", None)

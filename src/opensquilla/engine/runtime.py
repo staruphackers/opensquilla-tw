@@ -3060,6 +3060,7 @@ class TurnRunner:
         """Build tool definitions and handler from registry, filtered by ToolContext."""
         if self._tool_registry is None:
             return [], None
+        from opensquilla.skills.meta.enabled import is_meta_skill_enabled
         from opensquilla.tools.dispatch import build_tool_handler
         from opensquilla.tools.policy import apply_tool_policy_from_config
         from opensquilla.tools.registry import filter_by_profile, resolve_profile
@@ -3070,7 +3071,8 @@ class TurnRunner:
                 loaded_skills = list(self._skill_loader.load_all())
             except Exception:
                 loaded_skills = []
-        if ctx is not None and any(
+        meta_skill_enabled = is_meta_skill_enabled(self._config)
+        if ctx is not None and meta_skill_enabled and any(
             getattr(skill, "kind", "skill") == "meta"
             and not getattr(skill, "disable_model_invocation", False)
             for skill in loaded_skills
@@ -3078,6 +3080,8 @@ class TurnRunner:
             if ctx.surfaced_tools is None:
                 ctx.surfaced_tools = set()
             ctx.surfaced_tools.add("meta_invoke")
+        if metadata is not None:
+            metadata["meta_skill_enabled"] = meta_skill_enabled
 
         if ctx is not None:
             ctx = apply_tool_policy_from_config(
@@ -3122,6 +3126,10 @@ class TurnRunner:
             skill.name
             for skill in loaded_skills
             if not getattr(skill, "disable_model_invocation", False)
+            and (
+                meta_skill_enabled
+                or getattr(skill, "kind", "skill") != "meta"
+            )
         }
         tool_handler = build_tool_handler(
             self._tool_registry,

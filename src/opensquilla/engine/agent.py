@@ -4444,6 +4444,7 @@ class Agent:
         """Stream a meta_invoke tool call inline and return a terminal ToolResult."""
 
         import opensquilla.skills.creator  # noqa: F401
+        from opensquilla.skills.meta.enabled import is_meta_skill_enabled
         from opensquilla.skills.meta.inputs import make_meta_inputs
         from opensquilla.skills.meta.orchestrator import (
             MetaOrchestrator,
@@ -4455,6 +4456,16 @@ class Agent:
         from opensquilla.skills.meta.types import MetaMatch, MetaResult
         from opensquilla.tools.dispatch import preflight_tool_call
         from opensquilla.tools.types import current_tool_context
+
+        if not is_meta_skill_enabled(self.config):
+            yield ToolResult(
+                tool_use_id=tc.tool_use_id,
+                tool_name="meta_invoke",
+                content="meta-skill is disabled by configuration",
+                is_error=True,
+                terminates_turn=False,
+            )
+            return
 
         current_depth = _meta_invoke_depth.get()
         turn_count = _meta_invoke_turn_count.get()

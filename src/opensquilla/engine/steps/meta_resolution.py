@@ -157,6 +157,11 @@ def _build_hint(
 async def meta_resolution(ctx: TurnContext) -> TurnContext:
     """Resolve a Meta-Skill trigger, stash a MetaMatch, and inject a soft hint."""
 
+    from opensquilla.skills.meta.enabled import is_meta_skill_enabled
+
+    if not is_meta_skill_enabled(getattr(ctx, "config", None)):
+        return ctx
+
     loader = ctx.metadata.get("skill_loader")
     if loader is None:
         return ctx
@@ -179,6 +184,8 @@ async def meta_resolution(ctx: TurnContext) -> TurnContext:
     matched: list[tuple[int, str, object, str]] = []
     for spec in all_skills:
         if getattr(spec, "kind", "skill") != "meta":
+            continue
+        if getattr(spec, "disable_model_invocation", False):
             continue
         triggers = getattr(spec, "triggers", None) or []
         if not any(

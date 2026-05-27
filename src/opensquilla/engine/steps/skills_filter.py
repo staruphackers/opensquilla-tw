@@ -100,9 +100,24 @@ async def filter_skills(ctx: TurnContext) -> TurnContext:
     if not all_skills:
         return ctx
 
+    from opensquilla.skills.meta.enabled import is_meta_skill_enabled
+
+    meta_skill_enabled = is_meta_skill_enabled(ctx.config)
+    ctx.metadata["meta_skill_enabled"] = meta_skill_enabled
+
     # ── deterministic gate (no LLM, pure Python) ──
     available_tools = {t.name for t in ctx.tool_defs} if ctx.tool_defs else set()
     gated = _deterministic_gate(all_skills, available_tools)
+    if not meta_skill_enabled:
+        gated = [
+            s for s in gated if getattr(s, "kind", "skill") != "meta"
+        ]
+        for key in (
+            "meta_match",
+            "meta_match_trigger",
+            "meta_match_candidates",
+        ):
+            ctx.metadata.pop(key, None)
 
     # ── always skills bypass filter, guaranteed visibility ──
     pinned = [s for s in gated if s.always]
