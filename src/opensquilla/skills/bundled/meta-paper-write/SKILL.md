@@ -4,7 +4,7 @@ description: "Use this meta-skill instead of answering directly when the user ne
 kind: meta
 meta_priority: 50
 always: false
-final_text_mode: "step:final_manuscript_package"
+final_text_mode: "step:deliver_paper"
 triggers:
   - "draft a paper"
   - "write paper"
@@ -694,6 +694,106 @@ composition:
           NEXT_STEP: run latex-compile explicitly when the user asks for a PDF
           BLOCKERS:
             - <blocker or none>
+    - id: compile_pdf
+      kind: tool_call
+      tool: exec_command
+      tool_allowlist: [exec_command]
+      depends_on: [latex_sanitizer]
+      when: "inputs.collected.paper_collect.paper_mode in ('FULL_MANUSCRIPT', 'COMPACT_SKELETON', 'REPAIR_EXISTING')"
+      tool_args:
+        # Runs the actual xelatex × bibtex × xelatex × 2 cycle so the
+        # user gets a real PDF, not just LaTeX source. Extracts
+        # MANUSCRIPT_TEX / REFERENCES_BIB from the final_manuscript_package
+        # contract (passed via env var to dodge shell-escape hell).
+        command: |
+          python3 - <<'PY'
+          import os, re, subprocess
+          from pathlib import Path
+          pkg = os.environ.get('MANUSCRIPT_PKG', '')
+          # Extract MANUSCRIPT_TEX (drop optional ```latex fences).
+          m = re.search(r'MANUSCRIPT_TEX:\s*(.+?)(?:REFERENCES_BIB:|\Z)', pkg, re.DOTALL)
+          tex = m.group(1).strip() if m else ''
+          tex = re.sub(r'^```(?:latex|tex)?\s*\n', '', tex)
+          tex = re.sub(r'\n```\s*$', '', tex)
+          m = re.search(r'REFERENCES_BIB:\s*(.+?)(?:COMPILE_NOTES:|\Z)', pkg, re.DOTALL)
+          bib = m.group(1).strip() if m else ''
+          paper = Path('paper'); paper.mkdir(exist_ok=True)
+          (paper / 'paper.tex').write_text(tex, encoding='utf-8')
+          (paper / 'references.bib').write_text(bib, encoding='utf-8')
+          logs = []
+          for cmd in (
+              ['xelatex','-interaction=nonstopmode','-halt-on-error','paper.tex'],
+              ['bibtex','paper'],
+              ['xelatex','-interaction=nonstopmode','-halt-on-error','paper.tex'],
+              ['xelatex','-interaction=nonstopmode','-halt-on-error','paper.tex'],
+          ):
+              r = subprocess.run(cmd, cwd='paper', capture_output=True, text=True)
+              logs.append(f"--- {' '.join(cmd)} (rc={r.returncode}) ---")
+          pdf = (paper / 'paper.pdf').resolve()
+          if pdf.is_file():
+              # Page count from xelatex log if available.
+              log_text = (paper / 'paper.log').read_text(encoding='utf-8', errors='ignore') if (paper / 'paper.log').is_file() else ''
+              pm = re.search(r'Output written on .+?\((\d+) pages?', log_text)
+              pages = pm.group(1) if pm else '?'
+              print(f'PDF_PATH: {pdf}')
+              print(f'PDF_PAGES: {pages}')
+              print(f'PDF_BYTES: {pdf.stat().st_size}')
+          else:
+              tail = '\n'.join(logs[-3:])
+              print(f'COMPILE_FAILED:\n{tail}')
+              import sys
+              sys.exit(1)
+          PY
+        workdir: "{{ inputs.workspace_dir }}"
+        timeout: 120
+        env:
+          MANUSCRIPT_PKG: "{{ outputs.final_manuscript_package }}"
+    - id: publish_pdf
+      kind: tool_call
+      tool: publish_artifact
+      tool_allowlist: [publish_artifact]
+      depends_on: [compile_pdf]
+      when: "inputs.collected.paper_collect.paper_mode in ('FULL_MANUSCRIPT', 'COMPACT_SKELETON', 'REPAIR_EXISTING')"
+      tool_args:
+        path: "paper/paper.pdf"
+        name: "paper.pdf"
+        mime: "application/pdf"
+    - id: deliver_paper
+      kind: llm_chat
+      depends_on: [final_manuscript_package, compile_pdf, publish_pdf, citation_map]
+      when: "inputs.collected.paper_collect.paper_mode in ('FULL_MANUSCRIPT', 'COMPACT_SKELETON', 'REPAIR_EXISTING')"
+      with:
+        system: "You write a one-paragraph delivery note for a compiled academic paper. Output is concise — no LaTeX source, no markdown fences."
+        task: |
+          Produce the user-facing delivery message. Confirm the PDF
+          is ready, name its location, page count, citation summary,
+          and list any open warnings from the citation audit. Keep
+          the message under 200 words. Reply in the same language as
+          the user's original request.
+
+          Original request:
+          {{ inputs.user_message | xml_escape | truncate(400) }}
+
+          PDF compile result (paths are absolute):
+          {{ outputs.compile_pdf | truncate(800) }}
+
+          Artifact publication result:
+          {{ outputs.publish_pdf | truncate(800) }}
+
+          Citation audit summary tail:
+          {{ outputs.citation_map | truncate(2000) }}
+
+          Format:
+          📄 论文已生成 / Paper compiled
+
+          - PDF: <absolute path or artifact id>
+          - 页数 / Pages: <N>
+          - 引用 / Citations: <total / strong / weak / invalid>
+          - 备注 / Notes: <one line about figures, tables, analysis dimensions>
+
+          If the audit shows INVALID > 0, prefix the message with
+          "⚠️ 注意 / Warning: <N> 处引用未在 bib 中，建议重新生成" and list
+          the offending cite keys.
 ---
 
 # meta-paper-write (Meta-Skill)
