@@ -289,6 +289,7 @@ const ChatView = (() => {
     memory_store: '\uD83E\uDDE0', // 🧠
   };
   function _toolEmoji(name) {
+    if (name && name.startsWith('meta-step:')) return '⚙️'; // ⚙️ meta-skill step
     return _TOOL_EMOJI[name] || '\u26A1'; // ⚡ default
   }
 
@@ -3784,6 +3785,12 @@ const ChatView = (() => {
       const target = _publishArtifactTargetName(input);
       if (target) return `${name} - ${target}`;
     }
+    // Meta-skill step: render as a clean step name (drop the 'meta-step:'
+    // prefix and replace underscores with spaces).
+    if (name && name.startsWith('meta-step:')) {
+      const stepId = name.slice('meta-step:'.length);
+      return 'Step · ' + stepId.replace(/_/g, ' ');
+    }
     return name || 'tool';
   }
 
@@ -3796,6 +3803,10 @@ const ChatView = (() => {
 
     const details = document.createElement('details');
     details.className = 'chat-tools-collapse' + (isRunning ? ' chat-tools-collapse--running' : '');
+    // Auto-open meta-skill step cards so the spinner border + body are
+    // visible while the step is running. (Generic tools stay collapsed
+    // by default to keep the chat tidy.)
+    if (name && name.startsWith('meta-step:')) details.setAttribute('open', '');
     if (toolId) details.setAttribute('data-tool-id', toolId);
     details.setAttribute('data-tool-name', name || 'tool');
 
@@ -3964,6 +3975,7 @@ const ChatView = (() => {
   function _appendToolCall(payload) {
     if (!payload) return;
     const name = payload.name || payload.tool_name || 'tool';
+    try { if (name && name.startsWith('meta-step:')) console.log('[meta-step] start', name); } catch (e) {}
     const input = typeof payload.input === 'string'
       ? payload.input
       : JSON.stringify(payload.input || payload.arguments || '', null, 2);
@@ -4002,12 +4014,24 @@ const ChatView = (() => {
     // arguments.kind === 'user_input' and arguments.clarify_schema as the
     // surface protocol payload (see clarify_schema.schema_to_protocol).
     const _args = payload && payload.arguments;
+    // Diagnostic: log every tool_result event so the form-card branch
+    // can be debugged from the browser console.
+    try {
+      console.log('[clarify-debug] tool_result', {
+        tool_name: payload && payload.tool_name,
+        args_kind: _args && _args.kind,
+        args_paused: _args && _args.paused,
+        has_schema: !!(_args && _args.clarify_schema),
+        payload: payload,
+      });
+    } catch (e) {}
     if (
       _args
       && _args.kind === 'user_input'
       && _args.paused === true
       && _args.clarify_schema
     ) {
+      try { console.log('[clarify-debug] firing _appendClarifyForm'); } catch (e) {}
       _appendClarifyForm(payload, _args);
       return;
     }
