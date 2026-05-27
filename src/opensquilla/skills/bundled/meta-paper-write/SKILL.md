@@ -722,10 +722,10 @@ composition:
           (paper / 'references.bib').write_text(bib, encoding='utf-8')
           logs = []
           for cmd in (
-              ['xelatex','-interaction=nonstopmode','-halt-on-error','paper.tex'],
+              ['xelatex','-interaction=nonstopmode','paper.tex'],
               ['bibtex','paper'],
-              ['xelatex','-interaction=nonstopmode','-halt-on-error','paper.tex'],
-              ['xelatex','-interaction=nonstopmode','-halt-on-error','paper.tex'],
+              ['xelatex','-interaction=nonstopmode','paper.tex'],
+              ['xelatex','-interaction=nonstopmode','paper.tex'],
           ):
               r = subprocess.run(cmd, cwd='paper', capture_output=True, text=True)
               logs.append(f"--- {' '.join(cmd)} (rc={r.returncode}) ---")
