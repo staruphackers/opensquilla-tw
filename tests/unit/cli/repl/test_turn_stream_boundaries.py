@@ -8,6 +8,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[4]
 CHAT_CMD = PROJECT_ROOT / "src/opensquilla/cli/chat_cmd.py"
 TURN_STREAM = PROJECT_ROOT / "src/opensquilla/cli/chat/turn_stream.py"
 TURN_BRIDGE = PROJECT_ROOT / "src/opensquilla/cli/tui/turn_bridge.py"
+TURN_STREAM_DEFAULTS = PROJECT_ROOT / "src/opensquilla/cli/tui/turn_stream_defaults.py"
 GATEWAY_SLASH_ADAPTER = PROJECT_ROOT / "src/opensquilla/cli/tui/slash_adapter.py"
 STANDALONE_SLASH_ADAPTER = (
     PROJECT_ROOT / "src/opensquilla/cli/tui/standalone_slash_adapter.py"
@@ -190,7 +191,7 @@ def test_chat_cmd_uses_typed_launch_request_instead_of_private_runner_names() ->
 
     assert "_ChatCommandRequest" in source
     assert "_ChatCommandLaunchOverrides" in source
-    assert "_launch_chat_command" in source
+    assert "_run_chat_request" in source
     assert "legacy_overrides" not in source
     assert "_launch_bridge" not in source
     assert "_standalone_repl" not in source
@@ -206,6 +207,12 @@ def test_chat_cmd_star_import_keeps_legacy_public_names_visible() -> None:
     assert "_file_prompt_and_attachments" not in chat_cmd.__all__
     assert "GATEWAY_SLASH_HANDLER_WORDS" in dir(chat_cmd)
     assert "_file_prompt_and_attachments" in dir(chat_cmd)
+
+    namespace: dict[str, object] = {}
+    exec("from opensquilla.cli.chat_cmd import *", namespace)
+    assert "run_chat" in namespace
+    assert "GATEWAY_SLASH_HANDLER_WORDS" in namespace
+    assert "_file_prompt_and_attachments" not in namespace
 
 
 def test_chat_cmd_only_defines_typer_entrypoint_and_export_hooks() -> None:
@@ -297,15 +304,27 @@ def test_turn_bridge_does_not_import_concrete_streaming_renderer() -> None:
     )
 
 
-def test_turn_bridge_uses_tui_approval_adapter() -> None:
+def test_turn_stream_defaults_uses_tui_approval_adapter() -> None:
     assert _imports_name_from_module(
-        TURN_BRIDGE,
+        TURN_STREAM_DEFAULTS,
         TUI_APPROVAL_ADAPTER,
         "maybe_handle_approval",
     )
     assert not _imports_name_from_module(
-        TURN_BRIDGE,
+        TURN_STREAM_DEFAULTS,
         "opensquilla.cli.repl.approval",
+        "maybe_handle_approval",
+    )
+
+
+def test_turn_bridge_delegates_tui_approval_defaults() -> None:
+    assert _imports_from_module(
+        TURN_BRIDGE,
+        "opensquilla.cli.tui.turn_stream_defaults",
+    )
+    assert not _imports_name_from_module(
+        TURN_BRIDGE,
+        TUI_APPROVAL_ADAPTER,
         "maybe_handle_approval",
     )
 

@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
-from typing import Any
 
-type ChatCommandRunner = Callable[..., Coroutine[Any, Any, None]]
-type ChatCommandLauncher = Callable[..., None]
+from opensquilla.cli.chat.frontend import ChatCommandLauncher, ChatSessionRunner
+
+type ChatCommandRunner = ChatSessionRunner
 
 
 @dataclass(frozen=True)
@@ -23,5 +22,5 @@ class ChatCommandRequest:
 @dataclass(frozen=True)
 class ChatCommandLaunchOverrides:
     launch_chat: ChatCommandLauncher | None = None
-    standalone_runner: ChatCommandRunner | None = None
-    gateway_runner: ChatCommandRunner | None = None
+    standalone_runner: ChatSessionRunner | None = None
+    gateway_runner: ChatSessionRunner | None = None

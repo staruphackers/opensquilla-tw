@@ -16,7 +16,7 @@ from opensquilla.cli.chat.session_state import ChatSessionState
 from opensquilla.cli.tui import runtime_bridge as _runtime_bridge
 from opensquilla.cli.tui import slash_bridge as _slash_bridge
 from opensquilla.cli.tui import turn_bridge as _turn_bridge
-from opensquilla.cli.tui.contracts import TuiOutputHandle
+from opensquilla.cli.tui.backend.contracts import TuiOutputHandle
 from opensquilla.engine.commands import Surface
 
 CLI_ALLOWED_FILE_MIMES = _input_bridge.CLI_ALLOWED_FILE_MIMES

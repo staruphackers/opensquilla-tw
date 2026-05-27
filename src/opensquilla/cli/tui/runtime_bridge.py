@@ -23,7 +23,7 @@ from opensquilla.cli.chat.turn import TurnResult
 from opensquilla.cli.tui import commands as _commands
 from opensquilla.cli.tui import slash_bridge as _slash_bridge
 from opensquilla.cli.tui import standalone_runtime as _standalone_runtime
-from opensquilla.cli.tui.contracts import TuiOutputHandle
+from opensquilla.cli.tui.backend.contracts import TuiOutputHandle
 from opensquilla.cli.ui import ACCENT, console, error_panel
 from opensquilla.engine.commands import Surface
 

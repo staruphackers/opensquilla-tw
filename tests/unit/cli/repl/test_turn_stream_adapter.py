@@ -161,13 +161,18 @@ async def test_tui_gateway_stream_coerces_invalid_output_approval_surface(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from opensquilla.cli.repl import turn_bridge
+    from opensquilla.cli.tui import turn_stream_defaults
 
     captured: dict[str, Any] = {}
 
     async def fake_maybe_handle_approval(*_args: Any, **kwargs: Any) -> None:
         captured.update(kwargs)
 
-    monkeypatch.setattr(turn_bridge, "maybe_handle_approval", fake_maybe_handle_approval)
+    monkeypatch.setattr(
+        turn_stream_defaults,
+        "maybe_handle_approval",
+        fake_maybe_handle_approval,
+    )
 
     deps = turn_bridge.default_turn_stream_dependencies(
         renderer_factory=_ApprovalRenderer,
@@ -248,8 +253,9 @@ def test_turn_stream_adapter_has_no_raw_prompt_application_dependency() -> None:
 async def test_chat_cmd_stream_wrapper_uses_bridge_owned_renderer_dependency(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from opensquilla.cli.repl import turn_bridge, turn_stream
+    from opensquilla.cli.repl import turn_stream
     from opensquilla.cli.repl.terminal_renderer import TerminalRenderer
+    from opensquilla.cli.tui import turn_stream_defaults
 
     captured: dict[str, Any] = {}
 
@@ -268,13 +274,17 @@ async def test_chat_cmd_stream_wrapper_uses_bridge_owned_renderer_dependency(
     ) -> TurnResult:
         captured.update(
             {
-                "renderer_global": turn_bridge.TerminalRenderer,
+                "renderer_global": turn_stream_defaults.TerminalRenderer,
                 "renderer_dependency": None if deps is None else deps.renderer_factory,
             }
         )
         return TurnResult(text="ok")
 
-    monkeypatch.setattr(turn_bridge, "TerminalRenderer", _TemporaryTerminalRenderer)
+    monkeypatch.setattr(
+        turn_stream_defaults,
+        "TerminalRenderer",
+        _TemporaryTerminalRenderer,
+    )
     monkeypatch.setattr(turn_stream, "stream_response_gateway", fake_stream_response_gateway)
 
     result = await chat_cmd._stream_response_gateway(
@@ -289,4 +299,4 @@ async def test_chat_cmd_stream_wrapper_uses_bridge_owned_renderer_dependency(
         "renderer_global": _TemporaryTerminalRenderer,
         "renderer_dependency": _TemporaryTerminalRenderer,
     }
-    assert turn_bridge.TerminalRenderer is not TerminalRenderer
+    assert turn_stream_defaults.TerminalRenderer is not TerminalRenderer

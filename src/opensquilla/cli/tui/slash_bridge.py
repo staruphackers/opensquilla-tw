@@ -12,7 +12,7 @@ from typing import Any
 from opensquilla.cli.chat.session_state import ChatSessionState
 from opensquilla.cli.tui import slash_adapter as _gateway_slash_adapter
 from opensquilla.cli.tui import standalone_slash_adapter as _standalone_slash_adapter
-from opensquilla.cli.tui.contracts import TuiOutputHandle
+from opensquilla.cli.tui.backend.contracts import TuiOutputHandle
 from opensquilla.cli.tui.slash_adapter import (
     GatewayClientLike,
     GatewaySlashContext,

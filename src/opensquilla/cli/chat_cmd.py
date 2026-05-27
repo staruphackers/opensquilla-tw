@@ -7,36 +7,35 @@ Two modes:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import typer
 
+from opensquilla.cli.chat.entrypoint import (
+    LazyChatCommandAll as _LazyChatCommandAll,
+)
+from opensquilla.cli.chat.entrypoint import (
+    legacy_chat_export as _legacy_chat_export,
+)
+from opensquilla.cli.chat.entrypoint import (
+    legacy_chat_export_names as _legacy_chat_export_names,
+)
+from opensquilla.cli.chat.entrypoint import run_chat_request as _run_chat_request
 from opensquilla.cli.chat.launch import (
     ChatCommandLaunchOverrides as _ChatCommandLaunchOverrides,
 )
 from opensquilla.cli.chat.launch import ChatCommandRequest as _ChatCommandRequest
-from opensquilla.cli.tui.chat_cmd_exports import (
-    LEGACY_CHAT_CMD_EXPORT_NAMES,
-    resolve_legacy_chat_cmd_export,
-    resolve_legacy_chat_cmd_launch_overrides,
-)
 
-__all__ = tuple(
-    sorted(
-        {
-            "run_chat",
-            *(name for name in LEGACY_CHAT_CMD_EXPORT_NAMES if not name.startswith("_")),
-        }
-    )
-)
+__all__: Sequence[str] = _LazyChatCommandAll()
 
 
 def __dir__() -> list[str]:
-    return sorted({*globals(), *LEGACY_CHAT_CMD_EXPORT_NAMES})
+    return sorted({*globals(), *_legacy_chat_export_names()})
 
 
 def __getattr__(name: str) -> Any:
-    return resolve_legacy_chat_cmd_export(name)
+    return _legacy_chat_export(name)
 
 
 def run_chat(
@@ -57,16 +56,7 @@ def run_chat(
     (tools, skills, session persistence). Use --standalone for direct
     TurnRunner mode without a gateway daemon.
     """
-    module_globals = globals()
-    launch_chat_command = (
-        module_globals["_launch_chat_command"]
-        if "_launch_chat_command" in module_globals
-        else resolve_legacy_chat_cmd_export("_launch_chat_command")
-    )
-    launch_overrides: _ChatCommandLaunchOverrides = (
-        resolve_legacy_chat_cmd_launch_overrides(module_globals)
-    )
-    launch_chat_command(
+    _run_chat_request(
         _ChatCommandRequest(
             model=model,
             session_id=session_id,
@@ -75,5 +65,8 @@ def run_chat(
             workspace_strict=workspace_strict,
             timeout=timeout,
         ),
-        overrides=launch_overrides,
+        module_globals=globals(),
     )
+
+
+type _ChatCommandLaunchOverridesType = _ChatCommandLaunchOverrides

@@ -3,6 +3,7 @@
 __all__ = [
     "approval_adapter",
     "app",
+    "backend",
     "chat_compat",
     "chat_cmd_exports",
     "contracts",
@@ -24,4 +25,5 @@ __all__ = [
     "terminal_renderer",
     "terminal_surface",
     "turn_bridge",
+    "turn_stream_defaults",
 ]

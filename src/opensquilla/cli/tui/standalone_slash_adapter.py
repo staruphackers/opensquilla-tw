@@ -17,8 +17,8 @@ from uuid import uuid4
 import opensquilla.cli.tui.input_bridge as _input_bridge
 from opensquilla.cli.chat.session_state import ChatSessionState
 from opensquilla.cli.chat.turn import TurnResult
+from opensquilla.cli.tui.backend.contracts import TuiOutputHandle
 from opensquilla.cli.tui.commands import is_exit_command, render_help_table
-from opensquilla.cli.tui.contracts import TuiOutputHandle
 from opensquilla.cli.ui import ACCENT, console, error_panel
 from opensquilla.engine.commands import Surface
 from opensquilla.session.compaction import (

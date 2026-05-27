@@ -18,8 +18,8 @@ from rich.table import Table
 import opensquilla.cli.tui.input_bridge as _input_bridge
 from opensquilla.cli.chat.session_state import ChatSessionState, messages_to_markdown
 from opensquilla.cli.chat.turn import TurnResult
+from opensquilla.cli.tui.backend.contracts import TuiOutputHandle
 from opensquilla.cli.tui.commands import render_help_table
-from opensquilla.cli.tui.contracts import TuiOutputHandle
 from opensquilla.cli.ui import ACCENT, ACCENT_HEADER, console, error_panel
 from opensquilla.engine.commands import Surface
 

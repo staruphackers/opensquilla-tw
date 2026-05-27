@@ -29,6 +29,14 @@ TUI_BACKEND_MODULES = {
     "slash_policy.py",
     "state.py",
 }
+TUI_BACKEND_PACKAGE_MODULES = {
+    "__init__.py",
+    "contracts.py",
+    "events.py",
+    "output_binding.py",
+    "runtime.py",
+    "state.py",
+}
 TUI_TERMINAL_ADAPTER_MODULES = {
     "approval_adapter.py",
     "app.py",
@@ -50,11 +58,14 @@ TUI_TERMINAL_ADAPTER_MODULES = {
     "terminal_renderer.py",
     "terminal_surface.py",
     "turn_bridge.py",
+    "turn_stream_defaults.py",
     "standalone_slash_adapter.py",
 }
 CHAT_CORE_MODULES = {
     "__init__.py",
     "commands.py",
+    "entrypoint.py",
+    "frontend.py",
     "gateway_runtime.py",
     "input_assets.py",
     "launch.py",
@@ -153,6 +164,44 @@ def test_tui_backend_core_modules_do_not_import_repl_or_prompt_toolkit() -> None
         path.relative_to(PROJECT_ROOT).as_posix()
         for path in (tui_dir / name for name in TUI_BACKEND_MODULES)
         if _imports_tui_forbidden_runtime_dependency(path)
+    )
+
+    assert offenders == []
+
+
+def test_tui_backend_package_contains_only_backend_modules() -> None:
+    backend_dir = PROJECT_ROOT / "src/opensquilla/cli/tui/backend"
+    modules = sorted(path.name for path in backend_dir.glob("*.py"))
+
+    assert modules == sorted(TUI_BACKEND_PACKAGE_MODULES)
+
+
+def test_tui_backend_package_does_not_import_terminal_or_chat_adapters() -> None:
+    backend_dir = PROJECT_ROOT / "src/opensquilla/cli/tui/backend"
+    forbidden_modules = {
+        "opensquilla.cli.ui",
+        "opensquilla.engine.commands",
+        "opensquilla.cli.tui.app",
+        "opensquilla.cli.tui.prompt",
+        "opensquilla.cli.tui.approval_adapter",
+        "opensquilla.cli.tui.runtime_bridge",
+        "opensquilla.cli.tui.slash_adapter",
+        "opensquilla.cli.tui.slash_bridge",
+        "opensquilla.cli.tui.standalone_runtime",
+        "opensquilla.cli.tui.standalone_slash_adapter",
+        "opensquilla.cli.tui.terminal_bridge",
+        "opensquilla.cli.tui.terminal_chat_adapter",
+        "opensquilla.cli.tui.terminal_renderer",
+        "opensquilla.cli.tui.terminal_surface",
+        "opensquilla.cli.tui.turn_bridge",
+        "opensquilla.cli.tui.turn_stream_defaults",
+    }
+    offenders = sorted(
+        path.relative_to(PROJECT_ROOT).as_posix()
+        for path in backend_dir.glob("*.py")
+        if _imports_tui_forbidden_runtime_dependency(path)
+        or _imports_from_package_prefix(path, "opensquilla.cli.chat")
+        or any(_imports_from_module(path, module) for module in forbidden_modules)
     )
 
     assert offenders == []
@@ -310,6 +359,74 @@ def test_tui_turn_bridge_uses_chat_turn_stream_core() -> None:
     )
 
 
+def test_tui_turn_stream_defaults_owns_terminal_turn_dependencies() -> None:
+    defaults_path = PROJECT_ROOT / "src/opensquilla/cli/tui/turn_stream_defaults.py"
+
+    assert _imports_name_from_module(
+        defaults_path,
+        "opensquilla.cli.tui.terminal_renderer",
+        "TerminalRenderer",
+    )
+    assert _imports_name_from_module(
+        defaults_path,
+        "opensquilla.cli.tui.approval_adapter",
+        "maybe_handle_approval",
+    )
+    assert _imports_from_module(defaults_path, "opensquilla.cli.tui.input_bridge")
+    assert _imports_from_module(defaults_path, "opensquilla.cli.tui.terminal_bridge")
+    assert _imports_from_module(defaults_path, "opensquilla.cli.ui")
+
+
+def test_tui_turn_bridge_delegates_terminal_turn_defaults() -> None:
+    bridge_path = PROJECT_ROOT / "src/opensquilla/cli/tui/turn_bridge.py"
+
+    assert _imports_from_module(
+        bridge_path,
+        "opensquilla.cli.tui.turn_stream_defaults",
+    )
+    assert not _imports_name_from_module(
+        bridge_path,
+        "opensquilla.cli.tui.terminal_renderer",
+        "TerminalRenderer",
+    )
+    assert not _imports_name_from_module(
+        bridge_path,
+        "opensquilla.cli.tui.approval_adapter",
+        "maybe_handle_approval",
+    )
+    assert not _imports_from_module(
+        bridge_path,
+        "opensquilla.cli.tui.input_bridge",
+    )
+    assert not _imports_from_module(
+        bridge_path,
+        "opensquilla.cli.tui.terminal_bridge",
+    )
+    assert not _imports_from_module(bridge_path, "opensquilla.cli.ui")
+
+
+def test_tui_turn_bridge_import_does_not_load_terminal_turn_defaults(
+    monkeypatch,
+) -> None:  # noqa: ANN001
+    for module_name in (
+        "opensquilla.cli.tui.turn_bridge",
+        "opensquilla.cli.tui.turn_stream_defaults",
+        "opensquilla.cli.tui.terminal_renderer",
+        "opensquilla.cli.tui.approval_adapter",
+        "opensquilla.cli.tui.input_bridge",
+        "opensquilla.cli.tui.terminal_bridge",
+    ):
+        monkeypatch.delitem(sys.modules, module_name, raising=False)
+
+    importlib.import_module("opensquilla.cli.tui.turn_bridge")
+
+    assert "opensquilla.cli.tui.turn_stream_defaults" not in sys.modules
+    assert "opensquilla.cli.tui.terminal_renderer" not in sys.modules
+    assert "opensquilla.cli.tui.approval_adapter" not in sys.modules
+    assert "opensquilla.cli.tui.input_bridge" not in sys.modules
+    assert "opensquilla.cli.tui.terminal_bridge" not in sys.modules
+
+
 def test_chat_gateway_runtime_has_no_terminal_presentation_dependencies() -> None:
     runtime_path = PROJECT_ROOT / "src/opensquilla/cli/chat/gateway_runtime.py"
 
@@ -318,14 +435,18 @@ def test_chat_gateway_runtime_has_no_terminal_presentation_dependencies() -> Non
     assert not _imports_from_module(runtime_path, "opensquilla.engine.commands")
 
 
-def test_chat_cmd_uses_tui_legacy_export_resolver() -> None:
+def test_chat_cmd_imports_only_chat_entrypoint_not_tui_resolver() -> None:
     chat_cmd_path = PROJECT_ROOT / "src/opensquilla/cli/chat_cmd.py"
 
-    assert _imports_from_module(chat_cmd_path, "opensquilla.cli.tui.chat_cmd_exports")
+    assert _imports_from_module(chat_cmd_path, "opensquilla.cli.chat.entrypoint")
     assert _imports_name_from_module(
         chat_cmd_path,
         "opensquilla.cli.chat.launch",
         "ChatCommandRequest",
+    )
+    assert not _imports_from_module(
+        chat_cmd_path,
+        "opensquilla.cli.tui.chat_cmd_exports",
     )
     assert not _imports_from_module(
         chat_cmd_path,
@@ -588,6 +709,10 @@ def test_tui_input_and_command_adapters_do_not_import_repl_helpers() -> None:
             "forbidden": {"opensquilla.cli.repl.input_bridge"},
         },
         "src/opensquilla/cli/tui/turn_bridge.py": {
+            "required": {"opensquilla.cli.tui.turn_stream_defaults"},
+            "forbidden": {"opensquilla.cli.repl.input_bridge"},
+        },
+        "src/opensquilla/cli/tui/turn_stream_defaults.py": {
             "required": {"opensquilla.cli.tui.input_bridge"},
             "forbidden": {"opensquilla.cli.repl.input_bridge"},
         },
@@ -890,10 +1015,7 @@ def test_runtime_module_does_not_import_chat_or_engine_surface(monkeypatch) -> N
 
 def test_chat_cmd_import_does_not_load_terminal_runtime(monkeypatch) -> None:
     for name in list(sys.modules):
-        if name in {
-            "opensquilla.cli.chat_cmd",
-            "opensquilla.cli.tui.chat_cmd_exports",
-        }:
+        if name == "opensquilla.cli.chat_cmd" or name.startswith("opensquilla.cli.tui."):
             del sys.modules[name]
 
     original_import = __import__
@@ -903,10 +1025,8 @@ def test_chat_cmd_import_does_not_load_terminal_runtime(monkeypatch) -> None:
             raise AssertionError(f"chat_cmd imported prompt_toolkit via {name}")
         if name == "opensquilla.cli.repl" or name.startswith("opensquilla.cli.repl."):
             raise AssertionError(f"chat_cmd imported legacy repl runtime via {name}")
-        if name.startswith("opensquilla.cli.tui.") and name not in {
-            "opensquilla.cli.tui.chat_cmd_exports",
-        }:
-            raise AssertionError(f"chat_cmd imported terminal runtime via {name}")
+        if name.startswith("opensquilla.cli.tui."):
+            raise AssertionError(f"chat_cmd imported TUI compatibility via {name}")
         return original_import(name, globals, locals, fromlist, level)
 
     monkeypatch.setattr("builtins.__import__", _guarded_import)

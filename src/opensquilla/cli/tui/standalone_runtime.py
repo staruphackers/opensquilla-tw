@@ -22,8 +22,8 @@ from opensquilla.cli.chat.session_context import (
 from opensquilla.cli.chat.session_state import ChatSessionState
 from opensquilla.cli.chat.turn import TurnResult
 from opensquilla.cli.tui import standalone_slash_adapter as _standalone_slash_adapter
+from opensquilla.cli.tui.backend.contracts import TuiOutputHandle
 from opensquilla.cli.tui.commands import is_exit_command
-from opensquilla.cli.tui.contracts import TuiOutputHandle
 from opensquilla.cli.ui import console
 from opensquilla.engine.commands import Surface
 from opensquilla.permissions import configured_default_elevated

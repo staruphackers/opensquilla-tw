@@ -88,6 +88,7 @@ def test_turn_bridge_default_image_builder_uses_input_bridge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from opensquilla.cli.repl import turn_bridge
+    from opensquilla.cli.tui import turn_stream_defaults
 
     captured: dict[str, str] = {}
 
@@ -96,7 +97,7 @@ def test_turn_bridge_default_image_builder_uses_input_bridge(
         return "describe via input assets", [{"type": "image/png", "data": "x", "name": "x.png"}]
 
     monkeypatch.setattr(
-        turn_bridge._input_bridge,
+        turn_stream_defaults._input_bridge,
         "image_prompt_and_attachments",
         fake_image_prompt_and_attachments,
     )

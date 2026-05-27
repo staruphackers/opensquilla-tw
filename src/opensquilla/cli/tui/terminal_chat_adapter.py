@@ -7,19 +7,19 @@ from collections.abc import Awaitable, Callable, MutableMapping
 from dataclasses import dataclass
 from typing import Any
 
-from opensquilla.cli.tui.contracts import (
+from opensquilla.cli.tui.backend.contracts import (
     TuiInputKind,
     TuiOutputHandle,
     TuiRuntimeConfig,
     TuiRuntimeHooks,
     TuiSurface,
 )
-from opensquilla.cli.tui.output_binding import TuiOutputBinding
+from opensquilla.cli.tui.backend.output_binding import TuiOutputBinding
+from opensquilla.cli.tui.backend.runtime import run_tui_runtime
 from opensquilla.cli.tui.prompt import (
     queued_input_start_payload,
     user_input_echo_payload,
 )
-from opensquilla.cli.tui.runtime import run_tui_runtime
 from opensquilla.cli.tui.signal_handlers import install_chat_signal_handlers
 from opensquilla.cli.tui.slash_policy import SlashCategory, classify
 from opensquilla.cli.tui.terminal_surface import open_terminal_surface
