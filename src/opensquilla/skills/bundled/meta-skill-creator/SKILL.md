@@ -212,7 +212,13 @@ composition:
           REGRESSIONS:
           - <what the orchestrated candidate lacks versus the baseline>
           REQUIRED_IMPROVEMENTS:
-          - <concrete edit before acceptance, or "none">
+          - <blocking edit required before acceptance, or "none">
+
+          Treat REQUIRED_IMPROVEMENTS as a hard acceptance gate. Do not list
+          optional nice-to-have enhancements there. If the orchestrated
+          candidate is production-acceptable and any baseline advantages are
+          non-blocking, put those advantages under REGRESSIONS and set
+          REQUIRED_IMPROVEMENTS to "none".
 
     - id: smoke
       kind: tool_call
