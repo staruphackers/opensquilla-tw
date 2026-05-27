@@ -29,7 +29,7 @@ import time
 import structlog
 
 from opensquilla.engine.pipeline import TurnContext
-from opensquilla.engine.steps.clarify_reply_parser_stub import parse_clarify_reply
+from opensquilla.skills.meta.clarify_text import parse_clarify_reply
 from opensquilla.skills.meta.inputs import make_meta_inputs
 from opensquilla.skills.meta.parser import MetaPlanError, parse_meta_plan
 from opensquilla.skills.meta.types import MetaMatch

@@ -127,7 +127,9 @@ async def test_cancel_keyword_marks_cancelled(tmp_path):
 async def test_parse_failure_strikes_increment(tmp_path):
     writer = _writer(tmp_path)
     _seed_awaiting(writer)
-    ctx = _ctx(writer, message="garbage", session_id="S1")
+    # Seed schema has one required string field "x". Real parser rejects
+    # unknown keys, so "bogus: x" triggers a parse error.
+    ctx = _ctx(writer, message="bogus: x", session_id="S1")
 
     out = await meta_resolution(ctx)
     assert "meta_clarify_errors" in out.metadata
@@ -144,7 +146,9 @@ async def test_parse_failure_strikes_increment(tmp_path):
 async def test_three_consecutive_parse_failures_auto_cancel(tmp_path):
     writer = _writer(tmp_path)
     _seed_awaiting(writer)
-    ctx = _ctx(writer, message="garbage", session_id="S1")
+    # Seed schema has one required string field "x". Real parser rejects
+    # unknown keys, so "bogus: x" triggers a parse error.
+    ctx = _ctx(writer, message="bogus: x", session_id="S1")
 
     for _ in range(3):
         ctx.metadata.pop("meta_clarify_errors", None)
@@ -229,3 +233,33 @@ async def test_db_outage_falls_through_to_trigger_match(tmp_path):
     out = await meta_resolution(ctx)
     awaiting_keys = [k for k in out.metadata if k.startswith("meta_clarify")]
     assert not awaiting_keys
+
+
+# ── PR4: real parser happy-path integration ──
+
+@pytest.mark.asyncio
+async def test_real_parser_key_value_success_claims_resume(tmp_path):
+    """End-to-end: with the real clarify_text parser, a valid 'key: value'
+    reply succeeds → try_claim_resume CAS fires → meta_resume metadata set."""
+    writer = _writer(tmp_path)
+    _seed_awaiting(writer)
+    # Schema has one required string field "x".
+    ctx = _ctx(writer, message="x: Tokyo", session_id="S1")
+    out = await meta_resolution(ctx)
+    assert "meta_resume" in out.metadata
+    claim, parsed = out.metadata["meta_resume"]
+    assert claim.run_id == "r1"
+    assert parsed == {"x": "Tokyo"}
+    assert writer.peek_awaiting(session_id="S1") is None
+
+
+@pytest.mark.asyncio
+async def test_real_parser_positional_success_claims_resume(tmp_path):
+    """Positional-mode reply also succeeds end-to-end."""
+    writer = _writer(tmp_path)
+    _seed_awaiting(writer)
+    ctx = _ctx(writer, message="Shanghai", session_id="S1")
+    out = await meta_resolution(ctx)
+    assert "meta_resume" in out.metadata
+    _, parsed = out.metadata["meta_resume"]
+    assert parsed == {"x": "Shanghai"}
