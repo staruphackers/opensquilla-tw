@@ -61,11 +61,19 @@ _jinja_env = jinja2.Environment(
 _jinja_env.filters["tojson"] = lambda v, **kw: json.dumps(v)
 
 
-def _build_bootstrap_context(config: GatewayConfig) -> dict:
+def _request_ws_url(request: Request, config: GatewayConfig) -> str:
+    """Build the browser-facing websocket URL from the current request."""
+    host = request.headers.get("host") or f"{config.host}:{config.port}"
+    scheme = request.headers.get("x-forwarded-proto") or request.url.scheme
+    ws_scheme = "wss" if scheme == "https" else "ws"
+    return f"{ws_scheme}://{host}/ws"
+
+
+def _build_bootstrap_context(config: GatewayConfig, request: Request) -> dict:
     """Build the template context for bootstrap config injection."""
     return {
         "version": f"{config.version}+{_TEMPLATE_VERSION_SUFFIX}",
-        "ws_url": f"ws://{config.host}:{config.port}/ws",
+        "ws_url": _request_ws_url(request, config),
         "auth_mode": config.auth.mode,
         "base_path": config.control_ui.base_path,
         "features": {
@@ -80,10 +88,10 @@ def create_control_ui_routes(config: GatewayConfig) -> list[Route | Mount]:
         return []
 
     base = config.control_ui.base_path
-    ctx = _build_bootstrap_context(config)
     template = _jinja_env.get_template("index.html")
 
     async def serve_index(request: Request) -> HTMLResponse:
+        ctx = _build_bootstrap_context(config, request)
         html = template.render(**ctx)
         return HTMLResponse(html)
 
