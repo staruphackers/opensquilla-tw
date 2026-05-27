@@ -544,12 +544,24 @@ def test_bundled_sample_loads(tmp_path: Path) -> None:
     loader = SkillLoader(bundled_dir=bundled, snapshot_path=snapshot)
     loader.invalidate_cache()
     specs = {s.name: s for s in loader.load_all()}
-    meta = specs.get("meta-web-to-pdf-briefing")
+    meta = specs.get("meta-web-research-to-report")
     assert meta is not None
     assert meta.kind == "meta"
     plan = parse_meta_plan(meta)
     assert plan is not None
-    assert [s.id for s in plan.steps] == ["search", "digest", "render"]
+    assert [s.id for s in plan.steps] == [
+        "preferences",
+        "report_mode",
+        "search",
+        "source_quality",
+        "research",
+        "outline",
+        "report_draft",
+        "source_to_claim",
+        "quality_gate",
+        "final_report",
+        "export",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -2375,33 +2387,6 @@ async def test_drain_agent_runner_fails_when_sub_agent_produces_no_text() -> Non
     assert result.ok is False
     assert result.failed_step_id == "a"
     assert result.error and "no plain-text output" in result.error
-
-
-def test_bundled_kb_bootstrap_has_routes() -> None:
-    bundled = Path(__file__).resolve().parents[2] / "src" / "opensquilla" / "skills" / "bundled"
-    skill_path = bundled / "meta-knowledge-base-bootstrap" / "SKILL.md"
-    assert skill_path.is_file()
-    loader = SkillLoader(
-        bundled_dir=bundled,
-        snapshot_path=Path("/tmp/_kb_bootstrap_snap.json"),
-    )
-    loader.invalidate_cache()
-    specs = {s.name: s for s in loader.load_all()}
-    kb = specs["meta-knowledge-base-bootstrap"]
-    plan = parse_meta_plan(kb)
-    assert plan is not None
-    by_id = {s.id: s for s in plan.steps}
-    assert {"classify", "ingest", "memorize", "index"} <= set(by_id)
-    # classify must use the lightweight llm_classify executor, not a sub-Agent.
-    assert by_id["classify"].kind == "llm_classify"
-    assert set(by_id["classify"].output_choices) == {"URL", "PDF", "GIT", "TEXT"}
-    # ingest must run multi-search-engine deterministically via skill_exec
-    # (no sub-Agent in the loop for the wrapped-CLI step).
-    assert by_id["ingest"].kind == "skill_exec"
-    assert by_id["ingest"].skill == "multi-search-engine"
-    # memorize must call memory_save directly — no LLM in the loop.
-    assert by_id["memorize"].kind == "tool_call"
-    assert by_id["memorize"].tool == "memory_save"
 
 
 def test_bundled_migration_assistant_has_routes() -> None:

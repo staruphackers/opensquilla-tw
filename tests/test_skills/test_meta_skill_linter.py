@@ -73,16 +73,10 @@ def test_g2_passes_on_valid_p1() -> None:
 
 
 EXISTING_META_BUNDLES = [
-    "meta-pdf-intelligence", "meta-travel-planner", "meta-security-review-bundle",
-    "meta-migration-assistant", "meta-knowledge-base-bootstrap",
-    "meta-multi-format-export-pack", "meta-compliance-audit-bundle",
-    "meta-spreadsheet-insight", "meta-web-research-to-report",
-    "meta-web-to-pdf-briefing", "meta-github-pr-watch-digest",
-    "meta-issue-to-pr-autopilot", "meta-long-running-build-watchdog",
-    "meta-pdf-reformat-pipeline", "meta-scheduled-morning-digest",
-    "meta-stack-trace-investigator", "meta-arxiv-daily-digest-deck",
-    "meta-diagram-triangulation", "meta-codereview-current-diff",
-    "meta-pre-commit-quality-gate",
+    "meta-pdf-intelligence", "meta-travel-planner",
+    "meta-migration-assistant", "meta-web-research-to-report",
+    "meta-stack-trace-investigator", "meta-paper-write",
+    "meta-skill-creator",
 ]
 
 
