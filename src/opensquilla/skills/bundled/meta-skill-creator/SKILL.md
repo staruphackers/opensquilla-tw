@@ -89,7 +89,12 @@ composition:
       output_choices: [p1_sequential, p2_fan_out_merge]
       with:
         history_summary: "{{ outputs.harvest | truncate(2000) }}"
-        user_intent: "{{ outputs.clarify_intent | truncate(1000) }}"
+        user_intent: |
+          Raw user request:
+          {{ inputs.user_message | xml_escape | truncate(1200) }}
+
+          Clarified intent:
+          {{ outputs.clarify_intent | truncate(1000) }}
 
     - id: fill_slots
       kind: tool_call
@@ -98,7 +103,12 @@ composition:
       tool_args:
         pattern_id: "{{ outputs.pick_pattern }}"
         history_summary: "{{ outputs.harvest | truncate(2000) }}"
-        user_intent: "{{ outputs.clarify_intent | truncate(1000) }}"
+        user_intent: |
+          Raw user request:
+          {{ inputs.user_message | xml_escape | truncate(1200) }}
+
+          Clarified intent:
+          {{ outputs.clarify_intent | truncate(1000) }}
 
     - id: assemble
       kind: tool_call

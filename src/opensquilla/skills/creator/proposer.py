@@ -9,6 +9,7 @@ import sys
 import tempfile
 from collections.abc import Callable
 from contextvars import ContextVar
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -52,11 +53,33 @@ def _strip_code_fences(text: str) -> str:
 
 
 def _jinja_env() -> Environment:
-    return Environment(
+    env = Environment(
         loader=FileSystemLoader(_TEMPLATES_DIR),
         undefined=StrictUndefined,
         keep_trailing_newline=True,
     )
+    env.globals["creator_step_kind"] = _creator_step_kind
+    return env
+
+
+@lru_cache(maxsize=256)
+def _creator_step_kind(skill_name: str) -> str:
+    """Return the safest generated meta-step kind for a bundled skill.
+
+    Skills with an entrypoint should be composed as ``skill_exec`` so the
+    runtime executes the wrapped CLI directly instead of asking a sub-Agent to
+    describe a command. Plain skills stay as agent steps.
+    """
+    bundled = Path(__file__).resolve().parents[1] / "bundled"
+    loader = SkillLoader(
+        bundled_dir=bundled,
+        snapshot_path=Path(tempfile.gettempdir()) / "creator-kind-snap.json",
+    )
+    loader.invalidate_cache()
+    spec = loader.get_by_name(skill_name)
+    if spec is not None and getattr(spec, "entrypoint", None):
+        return "skill_exec"
+    return "agent"
 
 
 def meta_skill_assemble(pattern_id: str, slots_json: str) -> str:
@@ -340,6 +363,58 @@ def _build_pattern_example(pattern_id: str) -> dict:
     return {}
 
 
+def _extract_required_triggers_from_intent(user_intent: str) -> list[str]:
+    """Extract trigger phrases the user explicitly required.
+
+    The LLM prompt asks for verbatim preservation, but FULL_GATED creator
+    output should not rely on the model remembering exact trigger phrases.
+    Keep this intentionally conservative: only parse clear "trigger phrases
+    include:" style clauses and stop at sentence/newline boundaries.
+    """
+    patterns = [
+        r"触发(?:短语|词)?(?:要|应|必须)?(?:包含|包括)\s*[:：]\s*([^\n。；;]+)",
+        r"trigger phrases?\s+(?:must\s+)?(?:include|contain)\s*[:：]\s*([^\n.;]+)",
+    ]
+    captured = ""
+    for pattern in patterns:
+        match = _re.search(pattern, user_intent, flags=_re.IGNORECASE)
+        if match:
+            captured = match.group(1)
+            break
+    if not captured:
+        return []
+
+    phrases: list[str] = []
+    seen: set[str] = set()
+    for raw in _re.split(r"[、，,]+", captured):
+        phrase = raw.strip().strip("`'\"“”‘’[]()")
+        if not phrase or phrase in seen:
+            continue
+        # Preserve only safe, plausible trigger phrases. This mirrors schema
+        # YAML-safety constraints without accepting long trailing prose.
+        if any(ch in phrase for ch in ('"', "\n", "\r", "\\")):
+            continue
+        if len(phrase) > 80:
+            continue
+        seen.add(phrase)
+        phrases.append(phrase)
+    return phrases
+
+
+def _preserve_required_triggers(validated: Any, schema: Any, user_intent: str) -> Any:
+    required = _extract_required_triggers_from_intent(user_intent)
+    if not required:
+        return validated
+    data = validated.model_dump()
+    current = [t for t in data.get("triggers", []) if isinstance(t, str)]
+    merged: list[str] = []
+    for phrase in [*required, *current]:
+        if phrase not in merged:
+            merged.append(phrase)
+    data["triggers"] = merged[:8]
+    return schema.model_validate(data)
+
+
 def meta_skill_fill_slots(
     pattern_id: str, history_summary: str, user_intent: str,
 ) -> str:
@@ -373,6 +448,8 @@ def meta_skill_fill_slots(
         f"Emit ONLY a JSON object matching the schema above. No prose. No markdown.\n"
         f"CRITICAL field-name rules:\n"
         f"- The list of phrases is called `triggers` (NOT `trigger_condition`).\n"
+        f"- If User intent names exact required trigger phrases, include those "
+        f"phrases verbatim in `triggers` before adding optional synonyms.\n"
         f"- The pipeline is called `steps` (NOT `execution_sequence`, `pipeline`, "
         f"`actions`, or `sequence`).\n"
         f"- Each step must have: id (str, snake_case), skill (str from catalog), "
@@ -384,6 +461,7 @@ def meta_skill_fill_slots(
     response = _strip_code_fences(response)  # Fix #A
     try:
         validated = schema.model_validate_json(response)
+        validated = _preserve_required_triggers(validated, schema, user_intent)
         return str(validated.model_dump_json())
     except ValidationError as exc:
         # Fix #B: log raw response on initial failure so E2E logs capture LLM output.
@@ -407,6 +485,7 @@ def meta_skill_fill_slots(
         retry_response = _strip_code_fences(retry_response)  # Fix #A
         try:
             validated = schema.model_validate_json(retry_response)
+            validated = _preserve_required_triggers(validated, schema, user_intent)
             return str(validated.model_dump_json())
         except ValidationError as retry_exc:
             # Fix #B: log raw response on retry failure.

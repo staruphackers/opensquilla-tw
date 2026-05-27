@@ -85,6 +85,87 @@ def test_e2e_p1_proposal_lint_pass(tmp_path, monkeypatch) -> None:
     assert (proposal_dir / "gates.json").is_file()
 
 
+def test_creator_preserves_required_triggers_and_prior_step_context(monkeypatch) -> None:
+    """Creator output must keep explicit trigger requirements and complete
+    the evidence chain for sequential templates."""
+    from opensquilla.skills.creator import proposer
+
+    canned_slots = {
+        "name": "traceback-debug-orchestrator",
+        "description": (
+            "Diagnose traceback root causes by chaining history, diff, and summary."
+        ),
+        "meta_priority": 55,
+        "triggers": [
+            "diagnose this traceback",
+            "debug this stack trace with history and diff",
+        ],
+        "steps": [
+            {
+                "id": "history_scan",
+                "skill": "history-explorer",
+                "task": "Find related traceback history",
+                "with_keys": {},
+            },
+            {
+                "id": "diff_capture",
+                "skill": "git-diff",
+                "task": "Capture current diff",
+                "with_keys": {},
+            },
+            {
+                "id": "synthesize_report",
+                "skill": "summarize",
+                "task": "Produce a Chinese root-cause report from all evidence",
+                "with_keys": {},
+            },
+        ],
+    }
+    monkeypatch.setattr(
+        proposer,
+        "_call_llm_for_slots",
+        lambda prompt, **_: json.dumps(canned_slots),
+    )
+
+    slots_json = proposer.meta_skill_fill_slots(
+        "p1_sequential",
+        history_summary="history-explorer -> git-diff -> summarize freq=5",
+        user_intent=(
+            "请创建中文 traceback 根因诊断 meta-skill。"
+            "触发短语要包含：诊断 traceback、traceback 根因、stack trace root cause。"
+        ),
+    )
+
+    slots = json.loads(slots_json)
+    assert slots["triggers"][:3] == [
+        "诊断 traceback",
+        "traceback 根因",
+        "stack trace root cause",
+    ]
+
+    skill_md = proposer.meta_skill_assemble("p1_sequential", slots_json)
+    assert "kind: skill_exec\n      skill: \"history-explorer\"" in skill_md
+    assert "kind: skill_exec\n      skill: \"git-diff\"" in skill_md
+    assert "outputs.history_scan" in skill_md
+    assert "outputs.diff_capture" in skill_md
+
+
+def test_creator_dag_passes_raw_user_request_to_slot_filling(tmp_path) -> None:
+    """Slot filling must see raw user requirements, not only clarification
+    summaries, so hard constraints compete fairly with the baseline gate."""
+    loader = SkillLoader(bundled_dir=BUNDLED, snapshot_path=tmp_path / "snap.json")
+    loader.invalidate_cache()
+    creator_spec = loader.get_by_name("meta-skill-creator")
+    assert creator_spec is not None
+    plan = parse_meta_plan(creator_spec)
+    assert plan is not None
+
+    fill_slots = {step.id: step for step in plan.steps}["fill_slots"]
+    user_intent = str(fill_slots.tool_args["user_intent"])
+    assert "inputs.user_message" in user_intent
+    assert "outputs.clarify_intent" in user_intent
+
+
 def test_manual_creator_persist_auto_enables_when_setting_is_on(tmp_path) -> None:
     """The manual meta-skill-creator persist tool should use the same
     conservative auto-enable path as cron/dream auto-propose when the
