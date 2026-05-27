@@ -158,6 +158,9 @@ def test_report_meta_skill_uses_fast_final_report_path(tmp_path: Path) -> None:
     assert "Avoid Reddit" in source_prompt
     assert "Evidence type: <direct|indirect|background>" in source_prompt
     assert "indirect/background" in source_prompt
+    report_mode_prompt = str(steps["report_mode"].with_args)
+    assert "Prefer this even when the phrase" in report_mode_prompt
+    assert "planning-meeting memo" in report_mode_prompt
 
 
 def test_paper_meta_skill_has_pre_compile_quality_gates(tmp_path: Path) -> None:
