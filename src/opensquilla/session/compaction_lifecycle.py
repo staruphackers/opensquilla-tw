@@ -14,6 +14,8 @@ FlushCompactionDecision = Literal[
     "disabled",
 ]
 FlushCompactionSafetyMode = Literal["protect", "best_effort", "block", "off"]
+CompactionSafetyStatus = Literal["safe", "degraded_archive", "unsafe", "not_required"]
+SemanticMemoryStatus = Literal["healthy", "pending", "degraded", "failed", "not_required"]
 
 SAFE_FLUSH_OUTPUT_COVERAGE_STATUSES: Final[frozenset[str]] = frozenset({"ok"})
 SAFE_FLUSH_OBLIGATION_STATUSES: Final[frozenset[str]] = frozenset(
@@ -33,6 +35,13 @@ ARCHIVED_DEGRADED_FLUSH_RESULT_STATUSES: Final[frozenset[str]] = frozenset(
     {"parse_failed_archived", "provider_failed_archived"}
 )
 FAILED_FLUSH_RESULT_STATUSES: Final[frozenset[str]] = frozenset({"archive_failed"})
+
+
+@dataclass(frozen=True)
+class CompactionMemoryStatus:
+    safety_status: CompactionSafetyStatus
+    semantic_status: SemanticMemoryStatus
+    allows_destructive_compaction: bool
 
 
 @dataclass(frozen=True)
@@ -283,6 +292,86 @@ def durable_receipt_allows_destructive_compaction(receipt: Any) -> bool:
         target_path = str(_receipt_value(receipt, "target_path", "") or "")
         return status == "flush_appended" and bool(target_path)
     return flush_receipt_allows_destructive_compaction(receipt)
+
+
+def _receipt_has_archive_evidence(receipt: Any) -> bool:
+    content_hash = str(_receipt_value(receipt, "content_hash", "") or "")
+    flushed_paths = _receipt_value(receipt, "flushed_paths", []) or []
+    if isinstance(flushed_paths, str):
+        flushed_paths = [flushed_paths]
+    return bool(content_hash) and any(
+        str(path).startswith("memory/.raw_fallbacks/") for path in flushed_paths
+    )
+
+
+def compaction_safety_allows_destructive_compaction(
+    receipt: Any,
+    *,
+    deterministic_receipt_safe: bool = False,
+) -> bool:
+    if deterministic_receipt_safe:
+        return True
+    if flush_receipt_allows_destructive_compaction(receipt):
+        return True
+    result_status = str(_receipt_value(receipt, "result_status", "") or "")
+    return (
+        result_status in ARCHIVE_ONLY_FLUSH_RESULT_STATUSES
+        or result_status in ARCHIVED_DEGRADED_FLUSH_RESULT_STATUSES
+    ) and _receipt_has_archive_evidence(receipt)
+
+
+def _semantic_memory_status(receipt: Any) -> SemanticMemoryStatus:
+    if receipt is None:
+        return "pending"
+    if flush_receipt_allows_destructive_compaction(receipt):
+        return "healthy"
+    result_status = str(_receipt_value(receipt, "result_status", "") or "")
+    if result_status in NOOP_FLUSH_RESULT_STATUSES:
+        return "healthy"
+    if result_status in ARCHIVE_ONLY_FLUSH_RESULT_STATUSES:
+        return "degraded"
+    if result_status in ARCHIVED_DEGRADED_FLUSH_RESULT_STATUSES:
+        return "failed"
+    if result_status in FAILED_FLUSH_RESULT_STATUSES:
+        return "failed"
+    return "degraded"
+
+
+def compaction_memory_status(
+    receipt: Any,
+    *,
+    deterministic_receipt_safe: bool = False,
+    required: bool = True,
+) -> CompactionMemoryStatus:
+    if not required:
+        return CompactionMemoryStatus(
+            safety_status="not_required",
+            semantic_status="not_required",
+            allows_destructive_compaction=True,
+        )
+    if deterministic_receipt_safe:
+        return CompactionMemoryStatus(
+            safety_status="safe",
+            semantic_status=_semantic_memory_status(receipt),
+            allows_destructive_compaction=True,
+        )
+    if flush_receipt_allows_destructive_compaction(receipt):
+        return CompactionMemoryStatus(
+            safety_status="safe",
+            semantic_status="healthy",
+            allows_destructive_compaction=True,
+        )
+    if compaction_safety_allows_destructive_compaction(receipt):
+        return CompactionMemoryStatus(
+            safety_status="degraded_archive",
+            semantic_status=_semantic_memory_status(receipt),
+            allows_destructive_compaction=True,
+        )
+    return CompactionMemoryStatus(
+        safety_status="unsafe",
+        semantic_status=_semantic_memory_status(receipt),
+        allows_destructive_compaction=False,
+    )
 
 
 def pre_compaction_flush_enabled(config: Any) -> bool:

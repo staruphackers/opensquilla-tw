@@ -3,6 +3,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from opensquilla.session.compaction_lifecycle import (
+    compaction_memory_status,
+    compaction_safety_allows_destructive_compaction,
     durable_receipt_allows_destructive_compaction,
     flush_compaction_decision,
     flush_receipt_allows_destructive_compaction,
@@ -130,3 +132,104 @@ def test_raw_archive_flush_receipt_has_distinct_compaction_status() -> None:
 
     assert flush_receipt_allows_destructive_compaction(receipt) is False
     assert flush_receipt_status_for_compaction(receipt, config) == "archive_only"
+
+
+def test_deterministic_safety_evidence_makes_semantic_flush_failure_non_fatal() -> None:
+    receipt = _receipt(
+        mode="raw",
+        result_status="parse_failed_archived",
+        flushed_paths=["memory/.raw_fallbacks/raw.md"],
+        content_hash="h1",
+        indexed_chunk_count=0,
+        integrity_status="unverified",
+        output_coverage_status="unverified",
+        obligation_status="unverified",
+    )
+
+    status = compaction_memory_status(
+        receipt,
+        deterministic_receipt_safe=True,
+    )
+
+    assert status.safety_status == "safe"
+    assert status.semantic_status == "failed"
+    assert status.allows_destructive_compaction is True
+
+
+def test_raw_archive_receipt_is_degraded_archive_safety_evidence() -> None:
+    receipt = _receipt(
+        mode="raw",
+        result_status="ok_archive_only",
+        flushed_paths=["memory/.raw_fallbacks/raw.md"],
+        content_hash="h1",
+        indexed_chunk_count=0,
+        integrity_status="unverified",
+        output_coverage_status="unverified",
+        obligation_status="unverified",
+    )
+
+    status = compaction_memory_status(receipt)
+
+    assert status.safety_status == "degraded_archive"
+    assert status.semantic_status == "degraded"
+    assert status.allows_destructive_compaction is True
+    assert compaction_safety_allows_destructive_compaction(receipt) is True
+
+
+def test_raw_archive_receipt_without_content_hash_is_unsafe() -> None:
+    receipt = _receipt(
+        mode="raw",
+        result_status="ok_archive_only",
+        flushed_paths=["memory/.raw_fallbacks/raw.md"],
+        content_hash="",
+        indexed_chunk_count=0,
+        integrity_status="unverified",
+        output_coverage_status="unverified",
+        obligation_status="unverified",
+    )
+
+    status = compaction_memory_status(receipt)
+
+    assert status.safety_status == "unsafe"
+    assert status.semantic_status == "degraded"
+    assert status.allows_destructive_compaction is False
+    assert compaction_safety_allows_destructive_compaction(receipt) is False
+
+
+def test_raw_archive_receipt_accepts_string_flushed_path() -> None:
+    receipt = _receipt(
+        mode="raw",
+        result_status="ok_archive_only",
+        flushed_paths="memory/.raw_fallbacks/raw.md",
+        content_hash="h1",
+        indexed_chunk_count=0,
+        integrity_status="unverified",
+        output_coverage_status="unverified",
+        obligation_status="unverified",
+    )
+
+    status = compaction_memory_status(receipt)
+
+    assert status.safety_status == "degraded_archive"
+    assert status.semantic_status == "degraded"
+    assert status.allows_destructive_compaction is True
+    assert compaction_safety_allows_destructive_compaction(receipt) is True
+
+
+def test_archive_failed_without_deterministic_evidence_is_unsafe() -> None:
+    receipt = _receipt(
+        mode="error",
+        result_status="archive_failed",
+        flushed_paths=[],
+        content_hash="h1",
+        indexed_chunk_count=0,
+        integrity_status="unverified",
+        output_coverage_status="unverified",
+        obligation_status="unverified",
+    )
+
+    status = compaction_memory_status(receipt)
+
+    assert status.safety_status == "unsafe"
+    assert status.semantic_status == "failed"
+    assert status.allows_destructive_compaction is False
