@@ -18,6 +18,7 @@ except ImportError:  # pragma: no cover - exercised only on platforms without pt
     pty = None  # type: ignore[assignment]
 
 DriverKind = Literal["tmux", "pty"]
+DriverSelection = Literal["auto", "tmux", "pty"]
 
 
 @dataclass(frozen=True)
@@ -395,7 +396,7 @@ def open_real_terminal_session(
     run_id: str,
     size: TerminalSize,
     artifact_dir: Path,
-    driver: Literal["auto", "tmux", "pty"] = "auto",
+    driver: DriverSelection = "auto",
 ) -> RealTerminalSession:
     capabilities = probe_terminal_capabilities()
     selected = capabilities.preferred_driver if driver == "auto" else driver
