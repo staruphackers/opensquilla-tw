@@ -1203,6 +1203,7 @@ async def handle_image_command_turnrunner(
     from opensquilla.engine.types import (
         DoneEvent,
         ErrorEvent,
+        RouterDecisionEvent,
         RunHeartbeatEvent,
         TextDeltaEvent,
         ToolUseStartEvent,
@@ -1213,6 +1214,7 @@ async def handle_image_command_turnrunner(
     assert isinstance(tool_ctx, ToolContext)
 
     stream_deps = _resolve_deps(deps)
+    stream_deps = _resolve_tui_event_sink_for_output(stream_deps, tui_output)
     try:
         prompt, attachments = stream_deps.image_attachment_builder(command)
     except ValueError as exc:
@@ -1226,7 +1228,17 @@ async def handle_image_command_turnrunner(
             prompt = _persisted.content
 
     usage: UsageSummary | None = None
+    model_after: str | None = None
     with stream_deps.renderer_factory(output_handle=tui_output) as renderer:
+        streaming_plane = (
+            StreamingPlane(
+                event_sink=stream_deps.tui_event_sink,
+                source="turn_runner",
+                turn_id=session_key,
+            )
+            if tui_output is not None or stream_deps.tui_event_sink is not None
+            else None
+        )
         try:
             try:
                 stream = turn_runner.run(
@@ -1239,10 +1251,50 @@ async def handle_image_command_turnrunner(
                 )
                 async for event in stream_deps.stream_wrapper(stream, svc):
                     if isinstance(event, TextDeltaEvent):
-                        await renderer.aappend_text(event.text)
+                        await _append_text_delta(
+                            renderer,
+                            stream_deps,
+                            streaming_plane,
+                            event.text,
+                            source="turn_runner",
+                            turn_id=session_key,
+                        )
+                    elif isinstance(event, RouterDecisionEvent):
+                        await _finish_text_delta_stream(
+                            renderer,
+                            stream_deps,
+                            streaming_plane,
+                            source="turn_runner",
+                            turn_id=session_key,
+                        )
+                        _emit_tui_domain_event(
+                            stream_deps,
+                            kind=KIND_ROUTER_DECISION,
+                            source="turn_runner",
+                            payload=normalize_router_decision_payload(event.__dict__),
+                            turn_id=session_key,
+                        )
                     elif isinstance(event, RunHeartbeatEvent):
                         renderer.pulse()
                     elif isinstance(event, ToolUseStartEvent):
+                        await _finish_text_delta_stream(
+                            renderer,
+                            stream_deps,
+                            streaming_plane,
+                            source="turn_runner",
+                            turn_id=session_key,
+                        )
+                        _emit_tui_domain_event(
+                            stream_deps,
+                            kind=KIND_TOOL_STARTED,
+                            source="turn_runner",
+                            payload={
+                                "tool_name": event.tool_name,
+                                "tool_use_id": event.tool_use_id,
+                                "synthetic_from_text": event.synthetic_from_text,
+                            },
+                            turn_id=session_key,
+                        )
                         await renderer_tool_start(
                             renderer,
                             event.tool_name,
@@ -1251,15 +1303,71 @@ async def handle_image_command_turnrunner(
                         )
                     elif isinstance(event, ErrorEvent):
                         message_text = turn_stream_error_message(event)
+                        await _finish_text_delta_stream(
+                            renderer,
+                            stream_deps,
+                            streaming_plane,
+                            source="turn_runner",
+                            turn_id=session_key,
+                        )
+                        _emit_tui_domain_event(
+                            stream_deps,
+                            kind=KIND_ERROR,
+                            source="turn_runner",
+                            payload={"message": message_text},
+                            turn_id=session_key,
+                        )
                         await renderer_error(renderer, message_text)
                         return TurnResult(text=renderer.buffer, usage=usage, error=message_text)
                     elif isinstance(event, DoneEvent):
                         usage = UsageSummary.from_done_event(event)
+                        model_after = usage.model or None
+                        await _finish_text_delta_stream(
+                            renderer,
+                            stream_deps,
+                            streaming_plane,
+                            source="turn_runner",
+                            turn_id=session_key,
+                        )
+                        _emit_tui_domain_event(
+                            stream_deps,
+                            kind=KIND_DONE,
+                            source="turn_runner",
+                            payload={
+                                "model": model_after,
+                                "cancelled": False,
+                                "stop_reason": getattr(event, "stop_reason", None),
+                            },
+                            turn_id=session_key,
+                        )
             except TimeoutError as exc:
                 message_text = timeout_exception_message(exc)
+                await _finish_text_delta_stream(
+                    renderer,
+                    stream_deps,
+                    streaming_plane,
+                    source="turn_runner",
+                    turn_id=session_key,
+                )
                 await renderer_error(renderer, message_text)
                 return TurnResult(text=renderer.buffer, error=message_text)
+            except Exception:
+                await _finish_text_delta_stream(
+                    renderer,
+                    stream_deps,
+                    streaming_plane,
+                    source="turn_runner",
+                    turn_id=session_key,
+                )
+                raise
+            await _finish_text_delta_stream(
+                renderer,
+                stream_deps,
+                streaming_plane,
+                source="turn_runner",
+                turn_id=session_key,
+            )
             await renderer_finalize(renderer, usage)
         finally:
             await renderer_close(renderer)
-    return TurnResult(text=renderer.buffer, usage=usage)
+    return TurnResult(text=renderer.buffer, usage=usage, model_after=model_after)

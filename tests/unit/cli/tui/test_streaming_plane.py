@@ -3,14 +3,22 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Literal
 
 from opensquilla.cli.chat.turn_stream import (
     TurnStreamDependencies,
+    handle_image_command_turnrunner,
     stream_response_gateway,
 )
-from opensquilla.cli.tui.backend.domain_events import KIND_TEXT_FLUSH, TuiDomainEvent
+from opensquilla.cli.tui.backend.domain_events import (
+    KIND_DONE,
+    KIND_ROUTER_DECISION,
+    KIND_TEXT_FLUSH,
+    TuiDomainEvent,
+)
 from opensquilla.cli.tui.backend.streaming import StreamingFlushPolicy, StreamingPlane
+from opensquilla.engine.types import DoneEvent, RouterDecisionEvent, TextDeltaEvent
+from opensquilla.tools.types import CallerKind, ToolContext
 
 
 class MutableClock:
@@ -140,7 +148,7 @@ class _FakeRenderer:
     def __enter__(self) -> _FakeRenderer:
         return self
 
-    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> Literal[False]:
         del exc_type, exc, tb
         return False
 
@@ -187,6 +195,15 @@ def _text_delta_events(count: int, chunk: str) -> list[dict[str, Any]]:
         {"event": "session.event.text_delta", "text": chunk}
         for _ in range(count)
     ] + [{"event": "session.event.done"}]
+
+
+class _ImageTurnRunner:
+    def __init__(self, events: list[object]) -> None:
+        self._events = events
+
+    async def run(self, *_args: Any, **_kwargs: Any) -> AsyncIterator[object]:
+        for event in self._events:
+            yield event
 
 
 def test_turn_stream_coalesces_many_text_deltas_for_tui_output() -> None:
@@ -246,3 +263,66 @@ def test_turn_stream_keeps_one_delta_per_append_without_tui_streaming_surface() 
     renderer = renderer_factory.created[0]
     assert result.text == "x" * 12
     assert renderer.append_calls == ["x"] * 12
+
+
+def test_image_command_turnrunner_uses_tui_streaming_plane_and_events(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("opensquilla.engine.runtime.TurnRunner", _ImageTurnRunner)
+    renderer_factory = _RendererFactory()
+    events: list[TuiDomainEvent] = []
+    deps = TurnStreamDependencies(
+        renderer_factory=renderer_factory,
+        stream_wrapper=lambda stream, _svc: stream,
+        approval_handler=lambda *_args, **_kwargs: asyncio.sleep(0),
+        cancel_clearer=lambda: None,
+        image_attachment_builder=lambda _command: (
+            "describe image",
+            [{"path": "/tmp/image.png"}],
+        ),
+        output_console=object(),
+        error_panel_factory=lambda message: message,
+        tui_event_sink=events.append,
+    )
+    tool_ctx = ToolContext(
+        caller_kind=CallerKind.CLI,
+        channel_kind="cli",
+        channel_id="cli:chat",
+    )
+    router_event = RouterDecisionEvent(
+        tier="t2",
+        tier_index=2,
+        model="anthropic/claude-sonnet-4.6",
+        baseline_model="anthropic/claude-opus-4.7",
+        source="router",
+        confidence=0.71,
+        savings_pct=64.0,
+    )
+    turn_runner = _ImageTurnRunner(
+        [router_event]
+        + [TextDeltaEvent(text="abcd") for _ in range(4_000)]
+        + [DoneEvent(model="anthropic/claude-sonnet-4.6")]
+    )
+
+    result = asyncio.run(
+        handle_image_command_turnrunner(
+            turn_runner,
+            "agent:main:image",
+            tool_ctx,
+            "/image /tmp/image.png",
+            tui_output=_FakeOutputHandle(),
+            deps=deps,
+        )
+    )
+
+    renderer = renderer_factory.created[0]
+    assert result.text == "abcd" * 4_000
+    assert renderer.buffer == result.text
+    assert len(renderer.append_calls) < 100
+    assert [event.kind for event in events if event.kind != KIND_TEXT_FLUSH] == [
+        KIND_ROUTER_DECISION,
+        KIND_DONE,
+    ]
+    assert sum(1 for event in events if event.kind == KIND_TEXT_FLUSH) == len(
+        renderer.append_calls
+    )
