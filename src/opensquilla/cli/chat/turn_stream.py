@@ -26,6 +26,7 @@ from opensquilla.cli.tui.backend.domain_events import (
     TuiDomainEventSource,
     now_ms,
 )
+from opensquilla.cli.tui.backend.streaming import StreamingPlane
 from opensquilla.execution_status import derive_is_error
 from opensquilla.session.terminal_reply import build_terminal_reply
 
@@ -202,6 +203,55 @@ def _emit_tui_domain_event(
             timestamp_ms=now_ms(),
         )
     )
+
+
+async def _flush_streaming_text(
+    renderer: Any,
+    plane: StreamingPlane,
+    text: str,
+) -> None:
+    del plane
+    await renderer.aappend_text(text)
+
+
+async def _append_text_delta(
+    renderer: Any,
+    deps: TurnStreamDependencies,
+    plane: StreamingPlane | None,
+    delta: str,
+    *,
+    source: TuiDomainEventSource,
+    turn_id: str | None,
+) -> None:
+    if plane is None:
+        await renderer.aappend_text(delta)
+        return
+    flush = plane.append(delta)
+    if flush is not None:
+        await _flush_streaming_text(
+            renderer,
+            plane,
+            flush.text,
+        )
+
+
+async def _finish_text_delta_stream(
+    renderer: Any,
+    deps: TurnStreamDependencies,
+    plane: StreamingPlane | None,
+    *,
+    source: TuiDomainEventSource,
+    turn_id: str | None,
+) -> None:
+    if plane is None:
+        return
+    flush = plane.finish()
+    if flush is not None:
+        await _flush_streaming_text(
+            renderer,
+            plane,
+            flush.text,
+        )
 
 
 def _async_renderer_method(method: object) -> Callable[..., Awaitable[None]]:
@@ -502,6 +552,15 @@ async def stream_response_gateway(
     )
 
     with stream_deps.renderer_factory(output_handle=tui_output) as renderer:
+        streaming_plane = (
+            StreamingPlane(
+                event_sink=stream_deps.tui_event_sink,
+                source="gateway",
+                turn_id=session_key,
+            )
+            if tui_output is not None or stream_deps.tui_event_sink is not None
+            else None
+        )
         try:
             try:
                 async for event in client.send_message(
@@ -509,8 +568,22 @@ async def stream_response_gateway(
                 ):
                     event_name = event.get("event", "")
                     if event_name == "session.event.text_delta":
-                        await renderer.aappend_text(event.get("text", ""))
+                        await _append_text_delta(
+                            renderer,
+                            stream_deps,
+                            streaming_plane,
+                            event.get("text", ""),
+                            source="gateway",
+                            turn_id=session_key,
+                        )
                     elif event_name == "session.event.tool_use_start":
+                        await _finish_text_delta_stream(
+                            renderer,
+                            stream_deps,
+                            streaming_plane,
+                            source="gateway",
+                            turn_id=session_key,
+                        )
                         tool_name = (
                             event.get("tool_name") or event.get("toolName") or "tool"
                         )
@@ -534,6 +607,13 @@ async def stream_response_gateway(
                             tool_use_id,
                         )
                     elif event_name == "session.event.tool_result":
+                        await _finish_text_delta_stream(
+                            renderer,
+                            stream_deps,
+                            streaming_plane,
+                            source="gateway",
+                            turn_id=session_key,
+                        )
                         await stream_deps.approval_handler(
                             event.get("result"),
                             renderer,
@@ -571,6 +651,13 @@ async def stream_response_gateway(
                                 success=success,
                             )
                     elif event_name == "session.event.artifact":
+                        await _finish_text_delta_stream(
+                            renderer,
+                            stream_deps,
+                            streaming_plane,
+                            source="gateway",
+                            turn_id=session_key,
+                        )
                         artifact = artifact_event_payload(event)
                         artifacts.append(artifact)
                         status_line = artifact_status_line(artifact)
@@ -587,6 +674,13 @@ async def stream_response_gateway(
                             deps=stream_deps,
                         )
                     elif event_name.startswith("session.event.task_group."):
+                        await _finish_text_delta_stream(
+                            renderer,
+                            stream_deps,
+                            streaming_plane,
+                            source="gateway",
+                            turn_id=session_key,
+                        )
                         status_item = gateway_task_group_status(event_name, event)
                         if status_item is not None:
                             message, style = status_item
@@ -609,6 +703,13 @@ async def stream_response_gateway(
                             )
                     elif event_name == "session.event.error":
                         message_text = event.get("message", "unknown")
+                        await _finish_text_delta_stream(
+                            renderer,
+                            stream_deps,
+                            streaming_plane,
+                            source="gateway",
+                            turn_id=session_key,
+                        )
                         _emit_tui_domain_event(
                             stream_deps,
                             kind=KIND_ERROR,
@@ -627,6 +728,13 @@ async def stream_response_gateway(
                         usage = UsageSummary.from_gateway_payload(event)
                         cancelled = event.get("reason") == "aborted"
                         model_after = event.get("routed_model") or event.get("model") or None
+                        await _finish_text_delta_stream(
+                            renderer,
+                            stream_deps,
+                            streaming_plane,
+                            source="gateway",
+                            turn_id=session_key,
+                        )
                         _emit_tui_domain_event(
                             stream_deps,
                             kind=KIND_DONE,
@@ -642,6 +750,13 @@ async def stream_response_gateway(
                 stream_deps.cancel_clearer()
                 await client.abort_session(session_key)
                 cancelled = True
+            await _finish_text_delta_stream(
+                renderer,
+                stream_deps,
+                streaming_plane,
+                source="gateway",
+                turn_id=session_key,
+            )
             await renderer_finalize(renderer, usage, cancelled=cancelled)
         finally:
             await renderer_close(renderer)
@@ -714,6 +829,15 @@ async def stream_response_turnrunner(
     )
 
     with stream_deps.renderer_factory(output_handle=tui_output) as renderer:
+        streaming_plane = (
+            StreamingPlane(
+                event_sink=stream_deps.tui_event_sink,
+                source="turn_runner",
+                turn_id=session_key,
+            )
+            if tui_output is not None or stream_deps.tui_event_sink is not None
+            else None
+        )
         try:
             try:
                 stream = turn_runner.run(
@@ -721,10 +845,24 @@ async def stream_response_turnrunner(
                 )
                 async for event in stream_deps.stream_wrapper(stream, svc):
                     if isinstance(event, TextDeltaEvent):
-                        await renderer.aappend_text(event.text)
+                        await _append_text_delta(
+                            renderer,
+                            stream_deps,
+                            streaming_plane,
+                            event.text,
+                            source="turn_runner",
+                            turn_id=session_key,
+                        )
                     elif isinstance(event, RunHeartbeatEvent):
                         renderer.pulse()
                     elif isinstance(event, ToolUseStartEvent):
+                        await _finish_text_delta_stream(
+                            renderer,
+                            stream_deps,
+                            streaming_plane,
+                            source="turn_runner",
+                            turn_id=session_key,
+                        )
                         _emit_tui_domain_event(
                             stream_deps,
                             kind=KIND_TOOL_STARTED,
@@ -743,6 +881,13 @@ async def stream_response_turnrunner(
                             event.tool_use_id,
                         )
                     elif isinstance(event, ToolResultEvent):
+                        await _finish_text_delta_stream(
+                            renderer,
+                            stream_deps,
+                            streaming_plane,
+                            source="turn_runner",
+                            turn_id=session_key,
+                        )
                         await stream_deps.approval_handler(
                             event.result,
                             renderer,
@@ -773,6 +918,13 @@ async def stream_response_turnrunner(
                                 success=success,
                             )
                     elif isinstance(event, ArtifactEvent):
+                        await _finish_text_delta_stream(
+                            renderer,
+                            stream_deps,
+                            streaming_plane,
+                            source="turn_runner",
+                            turn_id=session_key,
+                        )
                         artifact = artifact_event_payload(event)
                         artifacts.append(artifact)
                         status_line = artifact_status_line(artifact)
@@ -789,6 +941,13 @@ async def stream_response_turnrunner(
                             deps=stream_deps,
                         )
                     elif isinstance(event, WarningEvent):
+                        await _finish_text_delta_stream(
+                            renderer,
+                            stream_deps,
+                            streaming_plane,
+                            source="turn_runner",
+                            turn_id=session_key,
+                        )
                         _emit_tui_domain_event(
                             stream_deps,
                             kind=KIND_WARNING,
@@ -804,6 +963,13 @@ async def stream_response_turnrunner(
                         )
                     elif isinstance(event, ErrorEvent):
                         message_text = turn_stream_error_message(event)
+                        await _finish_text_delta_stream(
+                            renderer,
+                            stream_deps,
+                            streaming_plane,
+                            source="turn_runner",
+                            turn_id=session_key,
+                        )
                         _emit_tui_domain_event(
                             stream_deps,
                             kind=KIND_ERROR,
@@ -821,6 +987,13 @@ async def stream_response_turnrunner(
                     elif isinstance(event, DoneEvent):
                         usage = UsageSummary.from_done_event(event)
                         model_after = usage.model or None
+                        await _finish_text_delta_stream(
+                            renderer,
+                            stream_deps,
+                            streaming_plane,
+                            source="turn_runner",
+                            turn_id=session_key,
+                        )
                         _emit_tui_domain_event(
                             stream_deps,
                             kind=KIND_DONE,
@@ -837,8 +1010,22 @@ async def stream_response_turnrunner(
                 cancelled = True
             except TimeoutError as exc:
                 message_text = timeout_exception_message(exc)
+                await _finish_text_delta_stream(
+                    renderer,
+                    stream_deps,
+                    streaming_plane,
+                    source="turn_runner",
+                    turn_id=session_key,
+                )
                 await renderer_error(renderer, message_text)
                 return TurnResult(text=renderer.buffer, error=message_text)
+            await _finish_text_delta_stream(
+                renderer,
+                stream_deps,
+                streaming_plane,
+                source="turn_runner",
+                turn_id=session_key,
+            )
             await renderer_finalize(renderer, usage, cancelled=cancelled)
         finally:
             await renderer_close(renderer)

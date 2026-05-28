@@ -10,4 +10,5 @@ __all__ = [
     "plugins",
     "runtime",
     "state",
+    "streaming",
 ]

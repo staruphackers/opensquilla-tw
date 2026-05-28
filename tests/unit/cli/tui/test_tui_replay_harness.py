@@ -88,6 +88,7 @@ def test_terminal_replay_summary_can_be_written(tmp_path) -> None:
     assert data["text_chars"] == 160_000
     assert data["tool_count"] == 4
     assert data["router_decision_count"] == 1
-    assert data["flush_count"] > 0
-    assert data["max_buffer_chars"] >= 160_000
+    assert 0 < data["flush_count"] < 4_000
+    assert 0 < data["coalescing_ratio"] < 1
+    assert data["max_buffer_chars"] <= 2_048
     assert data["errors"] == []

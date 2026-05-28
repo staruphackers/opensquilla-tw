@@ -38,6 +38,7 @@ TUI_BACKEND_PACKAGE_MODULES = {
     "plugins.py",
     "runtime.py",
     "state.py",
+    "streaming.py",
 }
 TUI_TERMINAL_ADAPTER_MODULES = {
     "approval_adapter.py",
@@ -79,6 +80,7 @@ CHAT_CORE_MODULES = {
 }
 CHAT_CORE_ALLOWED_TUI_IMPORTS = {
     "opensquilla.cli.tui.backend.domain_events",
+    "opensquilla.cli.tui.backend.streaming",
 }
 
 
@@ -249,6 +251,7 @@ def test_tui_domain_event_and_plugin_modules_are_renderer_independent() -> None:
         for path in (
             backend_dir / "domain_events.py",
             backend_dir / "plugins.py",
+            backend_dir / "streaming.py",
         )
         if _imports_tui_presentation_dependency(path)
     )

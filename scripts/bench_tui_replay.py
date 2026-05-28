@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from opensquilla.cli.tui.backend.streaming import StreamingPlane
 from opensquilla.cli.tui.terminal.renderer import TerminalRenderer
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -27,6 +28,7 @@ class ReplaySummary:
     wall_ms: float
     flush_count: int
     max_buffer_chars: int
+    coalescing_ratio: float
     errors: list[str]
 
 
@@ -87,11 +89,27 @@ def _text_chars_for(event: Any) -> int:
     return 0
 
 
-async def _render_event(renderer: TerminalRenderer, event: Any) -> None:
+async def _flush_streaming_plane(
+    renderer: TerminalRenderer,
+    streaming_plane: StreamingPlane,
+) -> None:
+    flush = streaming_plane.finish()
+    if flush is not None:
+        await renderer.aappend_text(flush.text)
+
+
+async def _render_event(
+    renderer: TerminalRenderer,
+    streaming_plane: StreamingPlane,
+    event: Any,
+) -> None:
     payload = event.payload
     if event.kind == "text_delta":
-        await renderer.aappend_text(str(payload.get("text", "")))
+        flush = streaming_plane.append(str(payload.get("text", "")))
+        if flush is not None:
+            await renderer.aappend_text(flush.text)
     elif event.kind == "tool_start":
+        await _flush_streaming_plane(renderer, streaming_plane)
         args = payload.get("args")
         await renderer.atool_start(
             str(payload.get("name", "tool")),
@@ -99,6 +117,7 @@ async def _render_event(renderer: TerminalRenderer, event: Any) -> None:
             str(payload.get("tool_use_id", "")),
         )
     elif event.kind == "tool_finished":
+        await _flush_streaming_plane(renderer, streaming_plane)
         elapsed = payload.get("elapsed")
         await renderer.atool_finished(
             str(payload.get("tool_use_id", "")),
@@ -107,6 +126,7 @@ async def _render_event(renderer: TerminalRenderer, event: Any) -> None:
             error=str(payload["error"]) if "error" in payload else None,
         )
     elif event.kind == "router_decision":
+        await _flush_streaming_plane(renderer, streaming_plane)
         await renderer.astatus(
             "route: "
             f"{payload.get('tier')} -> {payload.get('model')} "
@@ -114,16 +134,19 @@ async def _render_event(renderer: TerminalRenderer, event: Any) -> None:
             style="cyan",
         )
     elif event.kind == "history_message":
+        await _flush_streaming_plane(renderer, streaming_plane)
         await renderer.astatus(
             f"{payload.get('role')}: {str(payload.get('content', ''))[:120]}",
             style="dim",
         )
     elif event.kind == "tool_card":
+        await _flush_streaming_plane(renderer, streaming_plane)
         await renderer.astatus(
             f"tool: {payload.get('name')} {payload.get('summary')}",
             style="magenta",
         )
     elif event.kind == "done":
+        await _flush_streaming_plane(renderer, streaming_plane)
         await renderer.afinalize()
 
 
@@ -138,6 +161,8 @@ async def run_replay(renderer: str, fixture: str, *, repeat: int = 1) -> ReplayS
     text_chars = 0
     tool_count = 0
     router_decision_count = 0
+    text_delta_count = 0
+    streaming_flush_count = 0
     flush_count = 0
     max_buffer_chars = 0
     started_at = time.perf_counter()
@@ -146,26 +171,34 @@ async def run_replay(renderer: str, fixture: str, *, repeat: int = 1) -> ReplayS
         events = _build_events(fixture)
         output_handle = _ReplayOutputHandle()
         terminal_renderer = TerminalRenderer(title="tui-replay", output_handle=output_handle)
+        streaming_plane = StreamingPlane()
         for event in events:
             event_count += 1
             text_chars += _text_chars_for(event)
+            if event.kind == "text_delta":
+                text_delta_count += 1
             if event.kind in {"tool_start", "tool_card"}:
                 tool_count += 1
             if event.kind == "router_decision":
                 router_decision_count += 1
             try:
-                await _render_event(terminal_renderer, event)
+                await _render_event(terminal_renderer, streaming_plane, event)
             except Exception as exc:  # pragma: no cover - summarized for CLI evidence.
                 errors.append(f"{event.kind}: {exc}")
             max_buffer_chars = max(
                 max_buffer_chars,
-                len(terminal_renderer.buffer),
-                output_handle.max_payload_chars,
+                streaming_plane.max_buffer_chars,
             )
         await terminal_renderer.aclose()
+        streaming_flush_count += streaming_plane.flush_count
         flush_count += output_handle.flush_count
 
     wall_ms = (time.perf_counter() - started_at) * 1_000
+    coalescing_ratio = (
+        round(streaming_flush_count / text_delta_count, 6)
+        if text_delta_count > 0
+        else 0.0
+    )
     return ReplaySummary(
         renderer=renderer,
         fixture=fixture,
@@ -176,6 +209,7 @@ async def run_replay(renderer: str, fixture: str, *, repeat: int = 1) -> ReplayS
         wall_ms=round(wall_ms, 3),
         flush_count=flush_count,
         max_buffer_chars=max_buffer_chars,
+        coalescing_ratio=coalescing_ratio,
         errors=errors,
     )
 
