@@ -15,6 +15,17 @@ from typing import Any, Literal, Protocol, cast
 
 from opensquilla.cli.chat.output import ChatOutputHandle
 from opensquilla.cli.chat.turn import TurnResult, UsageSummary
+from opensquilla.cli.tui.backend.domain_events import (
+    KIND_DONE,
+    KIND_ERROR,
+    KIND_STATUS,
+    KIND_TOOL_FINISHED,
+    KIND_TOOL_STARTED,
+    KIND_WARNING,
+    TuiDomainEvent,
+    TuiDomainEventSource,
+    now_ms,
+)
 from opensquilla.execution_status import derive_is_error
 from opensquilla.session.terminal_reply import build_terminal_reply
 
@@ -59,6 +70,7 @@ class TurnStreamDependencies:
     gateway_approval_surface: object | None = None
     standalone_approval_surface: object | None = None
     approval_surface_resolver: ApprovalSurfaceResolver | None = None
+    tui_event_sink: Callable[[TuiDomainEvent], None] | None = None
 
 
 class _BackendFallbackRenderer:
@@ -138,6 +150,7 @@ def default_turn_stream_dependencies(
     gateway_approval_surface: object | None = None,
     standalone_approval_surface: object | None = None,
     approval_surface_resolver: ApprovalSurfaceResolver | None = None,
+    tui_event_sink: Callable[[TuiDomainEvent], None] | None = None,
 ) -> TurnStreamDependencies:
     return TurnStreamDependencies(
         renderer_factory=(
@@ -160,6 +173,7 @@ def default_turn_stream_dependencies(
         gateway_approval_surface=gateway_approval_surface,
         standalone_approval_surface=standalone_approval_surface,
         approval_surface_resolver=approval_surface_resolver,
+        tui_event_sink=tui_event_sink,
     )
 
 
@@ -167,6 +181,27 @@ def _resolve_deps(deps: TurnStreamDependencies | None) -> TurnStreamDependencies
     if deps is not None:
         return deps
     return default_turn_stream_dependencies()
+
+
+def _emit_tui_domain_event(
+    deps: TurnStreamDependencies,
+    *,
+    kind: str,
+    source: TuiDomainEventSource,
+    payload: dict[str, Any],
+    turn_id: str | None,
+) -> None:
+    if deps.tui_event_sink is None:
+        return
+    deps.tui_event_sink(
+        TuiDomainEvent(
+            kind=kind,
+            source=source,
+            payload=payload,
+            turn_id=turn_id,
+            timestamp_ms=now_ms(),
+        )
+    )
 
 
 def _async_renderer_method(method: object) -> Callable[..., Awaitable[None]]:
@@ -476,11 +511,27 @@ async def stream_response_gateway(
                     if event_name == "session.event.text_delta":
                         await renderer.aappend_text(event.get("text", ""))
                     elif event_name == "session.event.tool_use_start":
+                        tool_name = (
+                            event.get("tool_name") or event.get("toolName") or "tool"
+                        )
+                        tool_args = event.get("input") or event.get("arguments")
+                        tool_use_id = event.get("tool_use_id") or event.get("toolUseId")
+                        _emit_tui_domain_event(
+                            stream_deps,
+                            kind=KIND_TOOL_STARTED,
+                            source="gateway",
+                            payload={
+                                "tool_name": tool_name,
+                                "args": tool_args,
+                                "tool_use_id": tool_use_id,
+                            },
+                            turn_id=session_key,
+                        )
                         await renderer_tool_start(
                             renderer,
-                            event.get("tool_name") or event.get("toolName") or "tool",
-                            event.get("input") or event.get("arguments"),
-                            event.get("tool_use_id") or event.get("toolUseId"),
+                            tool_name,
+                            tool_args,
+                            tool_use_id,
                         )
                     elif event_name == "session.event.tool_result":
                         await stream_deps.approval_handler(
@@ -491,33 +542,80 @@ async def stream_response_gateway(
                             surface=approval_surface,
                         )
                         if not is_approval_or_blocked_result(event.get("result")):
-                            await renderer_tool_finished(
-                                renderer,
-                                event.get("tool_use_id") or event.get("toolUseId"),
-                                success=_tool_result_success_from_status(
-                                    event.get("execution_status") or event.get("executionStatus"),
-                                    legacy_is_error=bool(
+                            tool_use_id = event.get("tool_use_id") or event.get("toolUseId")
+                            success = _tool_result_success_from_status(
+                                event.get("execution_status")
+                                or event.get("executionStatus"),
+                                legacy_is_error=bool(
+                                    event.get("is_error") or event.get("isError")
+                                ),
+                            )
+                            _emit_tui_domain_event(
+                                stream_deps,
+                                kind=KIND_TOOL_FINISHED,
+                                source="gateway",
+                                payload={
+                                    "tool_use_id": tool_use_id,
+                                    "success": success,
+                                    "execution_status": event.get("execution_status")
+                                    or event.get("executionStatus"),
+                                    "is_error": bool(
                                         event.get("is_error") or event.get("isError")
                                     ),
-                                ),
+                                },
+                                turn_id=session_key,
+                            )
+                            await renderer_tool_finished(
+                                renderer,
+                                tool_use_id,
+                                success=success,
                             )
                     elif event_name == "session.event.artifact":
                         artifact = artifact_event_payload(event)
                         artifacts.append(artifact)
+                        status_line = artifact_status_line(artifact)
+                        _emit_tui_domain_event(
+                            stream_deps,
+                            kind=KIND_STATUS,
+                            source="gateway",
+                            payload={"message": status_line, "artifact": artifact},
+                            turn_id=session_key,
+                        )
                         await renderer_status(
                             renderer,
-                            artifact_status_line(artifact),
+                            status_line,
                             deps=stream_deps,
                         )
                     elif event_name.startswith("session.event.task_group."):
-                        await arender_gateway_task_group_status(
-                            event_name,
-                            event,
-                            renderer,
-                            deps=stream_deps,
-                        )
+                        status_item = gateway_task_group_status(event_name, event)
+                        if status_item is not None:
+                            message, style = status_item
+                            _emit_tui_domain_event(
+                                stream_deps,
+                                kind=KIND_STATUS,
+                                source="gateway",
+                                payload={
+                                    "message": message,
+                                    "style": style,
+                                    "event": event_name,
+                                },
+                                turn_id=session_key,
+                            )
+                            await renderer_status(
+                                renderer,
+                                message,
+                                style=style,
+                                deps=stream_deps,
+                            )
                     elif event_name == "session.event.error":
                         message_text = event.get("message", "unknown")
+                        _emit_tui_domain_event(
+                            stream_deps,
+                            kind=KIND_ERROR,
+                            source="gateway",
+                            payload={"message": message_text},
+                            turn_id=session_key,
+                        )
                         await renderer_error(renderer, message_text)
                         return TurnResult(
                             text=renderer.buffer,
@@ -529,6 +627,17 @@ async def stream_response_gateway(
                         usage = UsageSummary.from_gateway_payload(event)
                         cancelled = event.get("reason") == "aborted"
                         model_after = event.get("routed_model") or event.get("model") or None
+                        _emit_tui_domain_event(
+                            stream_deps,
+                            kind=KIND_DONE,
+                            source="gateway",
+                            payload={
+                                "model": model_after,
+                                "cancelled": cancelled,
+                                "reason": event.get("reason"),
+                            },
+                            turn_id=session_key,
+                        )
             except (KeyboardInterrupt, asyncio.CancelledError):
                 stream_deps.cancel_clearer()
                 await client.abort_session(session_key)
@@ -616,6 +725,17 @@ async def stream_response_turnrunner(
                     elif isinstance(event, RunHeartbeatEvent):
                         renderer.pulse()
                     elif isinstance(event, ToolUseStartEvent):
+                        _emit_tui_domain_event(
+                            stream_deps,
+                            kind=KIND_TOOL_STARTED,
+                            source="turn_runner",
+                            payload={
+                                "tool_name": event.tool_name,
+                                "tool_use_id": event.tool_use_id,
+                                "synthetic_from_text": event.synthetic_from_text,
+                            },
+                            turn_id=session_key,
+                        )
                         await renderer_tool_start(
                             renderer,
                             event.tool_name,
@@ -630,23 +750,52 @@ async def stream_response_turnrunner(
                             surface=approval_surface,
                         )
                         if not is_approval_or_blocked_result(event.result):
+                            success = _tool_result_success_from_status(
+                                event.execution_status,
+                                legacy_is_error=event.is_error,
+                            )
+                            _emit_tui_domain_event(
+                                stream_deps,
+                                kind=KIND_TOOL_FINISHED,
+                                source="turn_runner",
+                                payload={
+                                    "tool_name": event.tool_name,
+                                    "tool_use_id": event.tool_use_id,
+                                    "success": success,
+                                    "execution_status": event.execution_status,
+                                    "is_error": event.is_error,
+                                },
+                                turn_id=session_key,
+                            )
                             await renderer_tool_finished(
                                 renderer,
                                 event.tool_use_id,
-                                success=_tool_result_success_from_status(
-                                    event.execution_status,
-                                    legacy_is_error=event.is_error,
-                                ),
+                                success=success,
                             )
                     elif isinstance(event, ArtifactEvent):
                         artifact = artifact_event_payload(event)
                         artifacts.append(artifact)
+                        status_line = artifact_status_line(artifact)
+                        _emit_tui_domain_event(
+                            stream_deps,
+                            kind=KIND_STATUS,
+                            source="turn_runner",
+                            payload={"message": status_line, "artifact": artifact},
+                            turn_id=session_key,
+                        )
                         await renderer_status(
                             renderer,
-                            artifact_status_line(artifact),
+                            status_line,
                             deps=stream_deps,
                         )
                     elif isinstance(event, WarningEvent):
+                        _emit_tui_domain_event(
+                            stream_deps,
+                            kind=KIND_WARNING,
+                            source="turn_runner",
+                            payload={"message": event.message},
+                            turn_id=session_key,
+                        )
                         await renderer_status(
                             renderer,
                             event.message,
@@ -655,6 +804,13 @@ async def stream_response_turnrunner(
                         )
                     elif isinstance(event, ErrorEvent):
                         message_text = turn_stream_error_message(event)
+                        _emit_tui_domain_event(
+                            stream_deps,
+                            kind=KIND_ERROR,
+                            source="turn_runner",
+                            payload={"message": message_text},
+                            turn_id=session_key,
+                        )
                         await renderer_error(renderer, message_text)
                         return TurnResult(
                             text=renderer.buffer,
@@ -665,6 +821,17 @@ async def stream_response_turnrunner(
                     elif isinstance(event, DoneEvent):
                         usage = UsageSummary.from_done_event(event)
                         model_after = usage.model or None
+                        _emit_tui_domain_event(
+                            stream_deps,
+                            kind=KIND_DONE,
+                            source="turn_runner",
+                            payload={
+                                "model": model_after,
+                                "cancelled": False,
+                                "stop_reason": getattr(event, "stop_reason", None),
+                            },
+                            turn_id=session_key,
+                        )
             except (KeyboardInterrupt, asyncio.CancelledError):
                 stream_deps.cancel_clearer()
                 cancelled = True

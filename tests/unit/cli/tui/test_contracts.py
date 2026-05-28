@@ -32,8 +32,10 @@ TUI_BACKEND_MODULES = {
 TUI_BACKEND_PACKAGE_MODULES = {
     "__init__.py",
     "contracts.py",
+    "domain_events.py",
     "events.py",
     "output_binding.py",
+    "plugins.py",
     "runtime.py",
     "state.py",
 }
@@ -75,6 +77,9 @@ CHAT_CORE_MODULES = {
     "turn.py",
     "turn_stream.py",
 }
+CHAT_CORE_ALLOWED_TUI_IMPORTS = {
+    "opensquilla.cli.tui.backend.domain_events",
+}
 
 
 def _imports_tui_forbidden_runtime_dependency(path: Path) -> bool:
@@ -101,6 +106,30 @@ def _imports_tui_forbidden_runtime_dependency(path: Path) -> bool:
     return False
 
 
+def _imports_tui_presentation_dependency(path: Path) -> bool:
+    tree = ast.parse(path.read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(
+                alias.name == "rich"
+                or alias.name.startswith("rich.")
+                or alias.name == "prompt_toolkit"
+                or alias.name.startswith("prompt_toolkit.")
+                for alias in node.names
+            ):
+                return True
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if (
+                module == "rich"
+                or module.startswith("rich.")
+                or module == "prompt_toolkit"
+                or module.startswith("prompt_toolkit.")
+            ):
+                return True
+    return False
+
+
 def _imports_chat_core_forbidden_dependency(path: Path) -> bool:
     tree = ast.parse(path.read_text())
     for node in ast.walk(tree):
@@ -111,7 +140,10 @@ def _imports_chat_core_forbidden_dependency(path: Path) -> bool:
                 or alias.name == "opensquilla.cli.repl"
                 or alias.name.startswith("opensquilla.cli.repl.")
                 or alias.name == "opensquilla.cli.tui"
-                or alias.name.startswith("opensquilla.cli.tui.")
+                or (
+                    alias.name.startswith("opensquilla.cli.tui.")
+                    and alias.name not in CHAT_CORE_ALLOWED_TUI_IMPORTS
+                )
                 or alias.name == "opensquilla.engine.commands"
                 or alias.name.startswith("opensquilla.engine.commands.")
                 for alias in node.names
@@ -125,7 +157,10 @@ def _imports_chat_core_forbidden_dependency(path: Path) -> bool:
                 or module == "opensquilla.cli.repl"
                 or module.startswith("opensquilla.cli.repl.")
                 or module == "opensquilla.cli.tui"
-                or module.startswith("opensquilla.cli.tui.")
+                or (
+                    module.startswith("opensquilla.cli.tui.")
+                    and module not in CHAT_CORE_ALLOWED_TUI_IMPORTS
+                )
                 or module == "opensquilla.engine.commands"
                 or module.startswith("opensquilla.engine.commands.")
             ):
@@ -202,6 +237,20 @@ def test_tui_backend_package_does_not_import_terminal_or_chat_adapters() -> None
         if _imports_tui_forbidden_runtime_dependency(path)
         or _imports_from_package_prefix(path, "opensquilla.cli.chat")
         or any(_imports_from_module(path, module) for module in forbidden_modules)
+    )
+
+    assert offenders == []
+
+
+def test_tui_domain_event_and_plugin_modules_are_renderer_independent() -> None:
+    backend_dir = PROJECT_ROOT / "src/opensquilla/cli/tui/backend"
+    offenders = sorted(
+        path.relative_to(PROJECT_ROOT).as_posix()
+        for path in (
+            backend_dir / "domain_events.py",
+            backend_dir / "plugins.py",
+        )
+        if _imports_tui_presentation_dependency(path)
     )
 
     assert offenders == []

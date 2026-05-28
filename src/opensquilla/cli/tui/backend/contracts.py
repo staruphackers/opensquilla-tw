@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
+from opensquilla.cli.tui.backend.domain_events import TuiDomainEvent
+
 
 @runtime_checkable
 class TuiApplication(Protocol):
@@ -93,6 +95,7 @@ def _default_classify_input(_user_input: str) -> TuiInputKind:
 
 
 type TuiDispatch = Callable[[str], Awaitable[bool]]
+type TuiDomainEventSink = Callable[[TuiDomainEvent], None]
 type TuiSurfaceFactory = Callable[
     ...,
     AbstractAsyncContextManager[TuiSurface],

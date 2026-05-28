@@ -9,6 +9,7 @@ import opensquilla.cli.tui.adapters.input_bridge as _input_bridge
 import opensquilla.cli.tui.adapters.terminal_bridge as _terminal_bridge
 from opensquilla.cli.chat import turn_stream as _turn_stream
 from opensquilla.cli.tui.backend.contracts import TuiOutputHandle
+from opensquilla.cli.tui.backend.domain_events import TuiDomainEvent
 from opensquilla.cli.tui.terminal.approval import maybe_handle_approval
 from opensquilla.cli.tui.terminal.renderer import TerminalRenderer
 from opensquilla.cli.ui import console, error_panel
@@ -50,6 +51,7 @@ def default_turn_stream_dependencies(
     | None = None,
     output_console: Any | None = None,
     error_panel_factory: Callable[[str], Any] | None = None,
+    tui_event_sink: Callable[[TuiDomainEvent], None] | None = None,
 ) -> TurnStreamDependencies:
     return _turn_stream.default_turn_stream_dependencies(
         renderer_factory=(
@@ -76,4 +78,5 @@ def default_turn_stream_dependencies(
         gateway_approval_surface=Surface.CLI_GATEWAY,
         standalone_approval_surface=Surface.CLI_STANDALONE,
         approval_surface_resolver=_approval_surface_for_terminal_output,
+        tui_event_sink=tui_event_sink,
     )
