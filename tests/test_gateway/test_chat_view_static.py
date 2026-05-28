@@ -841,6 +841,43 @@ def test_router_fx_history_reuses_settled_strip_for_same_turn_identity() -> None
     assert "routerStrip.dataset.turnIndex = String(_histUserIdx);" in source
 
 
+def test_router_fx_history_reanchors_stranded_strip() -> None:
+    # _appendHistoryElementInOrder re-appends only .msg elements, stranding any
+    # strip already rendered for a turn — including the just-streamed grid,
+    # which the done handler promotes from live to settled (clearing data-live)
+    # BEFORE the history sync runs. So the rebuild must match this turn's
+    # strip(s) by (session, turn index) — NOT by the live flag — keep the one
+    # whose identity matches, drop extras, and re-anchor the survivor beneath
+    # its user message, so the first chat never shows two router grids.
+    source = CHAT_JS.read_text(encoding="utf-8")
+    history_start = source.index("async function _loadHistory() {")
+    history_end = source.index("  /* ── Send Message", history_start)
+    history_body = source[history_start:history_end]
+
+    # Match by (session, turnIndex), independent of the data-live flag.
+    assert (
+        "const ownStrips = Array.from(_thread.querySelectorAll('.router-fx')).filter("
+        in history_body
+    )
+    assert "el.dataset.turnIndex === String(_histUserIdx)" in history_body
+    assert "el.dataset.routerIdentity === routerIdentity" in history_body
+    # Drop duplicates, re-anchor the survivor, promote it out of live state.
+    assert "ownStrips.forEach((el) => { if (el !== keep) el.remove(); });" in history_body
+    assert "_thread.insertBefore(keep, userMsg.nextSibling);" in history_body
+    assert "delete keep.dataset.live;" in history_body
+    # The consolidation must precede the existingStrip probe so the relocated
+    # strip is what the reuse check sees.
+    assert history_body.index("const ownStrips =") < history_body.index(
+        "const placed = userMsg && userMsg.nextSibling;"
+    )
+    # Positional orphan backstop: outside an active stream, any strip not
+    # sitting directly beneath a user message (turn-index skew) is dropped so
+    # a stranded grid can never linger at the top.
+    assert "if (!_isStreaming) {" in history_body
+    assert "const prev = el.previousElementSibling;" in history_body
+    assert "if (!anchored) el.remove();" in history_body
+
+
 def test_router_fx_uses_fixed_model_slots_and_keeps_decoy_seed() -> None:
     source = CHAT_JS.read_text(encoding="utf-8")
     builder_start = source.index("function _routerFxBuildGridCells(realEntries, seedKey) {")
