@@ -48,6 +48,10 @@ def repair_receipt_path(receipt: Any) -> str | None:
     return None
 
 
+def _agent_session_key_prefix(agent_id: str | None) -> str | None:
+    return f"agent:{agent_id}:" if agent_id else None
+
+
 def _summary_to_repair_wire(summary: Any) -> dict[str, Any]:
     return {
         "sourceType": "compaction_preimage",
@@ -260,6 +264,7 @@ async def list_repair_queue(
     due_only: bool = False,
     now_ms: int | None = None,
     path: str | None = None,
+    agent_id: str | None = None,
 ) -> list[MemoryDurableReceipt]:
     limit = max(0, int(limit))
     if limit == 0:
@@ -277,6 +282,11 @@ async def list_repair_queue(
         if path is not None:
             path_clause = "AND (source_path = ? OR target_path = ?)"
             params.extend((path, path))
+        agent_clause = ""
+        agent_prefix = _agent_session_key_prefix(agent_id)
+        if agent_prefix is not None:
+            agent_clause = "AND session_key LIKE ?"
+            params.append(f"{agent_prefix}%")
         params.append(limit)
         async with conn.execute(
             f"""
@@ -284,6 +294,7 @@ async def list_repair_queue(
             WHERE status IN ({placeholders})
             {due_clause}
             {path_clause}
+            {agent_clause}
             ORDER BY
                 next_retry_at_ms IS NOT NULL ASC,
                 next_retry_at_ms ASC,
@@ -309,6 +320,13 @@ async def list_repair_queue(
             for row in receipt_rows
             if getattr(row, "source_path", None) == path
             or getattr(row, "target_path", None) == path
+        ]
+    agent_prefix = _agent_session_key_prefix(agent_id)
+    if agent_prefix is not None:
+        receipt_rows = [
+            row
+            for row in receipt_rows
+            if str(getattr(row, "session_key", "") or "").startswith(agent_prefix)
         ]
     if due_only:
         receipt_rows = [
@@ -412,16 +430,28 @@ async def recover_stale_repair_claims(
     return int(getattr(cursor, "rowcount", 0) or 0)
 
 
-async def _repair_receipt_exists_for_path(storage: Any, path: str) -> bool:
+async def _repair_receipt_exists_for_path(
+    storage: Any,
+    path: str,
+    *,
+    agent_id: str | None = None,
+) -> bool:
+    agent_prefix = _agent_session_key_prefix(agent_id)
     conn = getattr(storage, "conn", None)
     if conn is not None:
+        agent_clause = ""
+        params: list[Any] = [path, path]
+        if agent_prefix is not None:
+            agent_clause = "AND session_key LIKE ?"
+            params.append(f"{agent_prefix}%")
         async with conn.execute(
-            """
+            f"""
             SELECT 1 FROM memory_durable_receipts
-            WHERE source_path = ? OR target_path = ?
+            WHERE (source_path = ? OR target_path = ?)
+            {agent_clause}
             LIMIT 1
             """,
-            (path, path),
+            params,
         ) as cur:
             return await cur.fetchone() is not None
 
@@ -431,8 +461,14 @@ async def _repair_receipt_exists_for_path(storage: Any, path: str) -> bool:
     for status in (*_REPAIR_QUEUE_STATUSES, "repair_done", "repair_abandoned"):
         rows = await list_receipts(status=status, limit=1000)
         if any(
-            getattr(row, "source_path", None) == path
-            or getattr(row, "target_path", None) == path
+            (
+                getattr(row, "source_path", None) == path
+                or getattr(row, "target_path", None) == path
+            )
+            and (
+                agent_prefix is None
+                or str(getattr(row, "session_key", "") or "").startswith(agent_prefix)
+            )
             for row in rows
         ):
             return True
@@ -454,7 +490,7 @@ async def import_legacy_raw_fallback_receipts(
         path = str(row.get("path") or "")
         if not path:
             continue
-        if await _repair_receipt_exists_for_path(storage, path):
+        if await _repair_receipt_exists_for_path(storage, path, agent_id=agent_id):
             continue
         await upsert(
             MemoryDurableReceipt(
@@ -705,6 +741,7 @@ async def run_memory_repair_once(
             limit=scan_limit,
             due_only=True,
             path=selected_path,
+            agent_id=agent_id,
         )
         for receipt in queue_rows:
             if len(results) >= limit:

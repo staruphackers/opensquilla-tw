@@ -826,6 +826,52 @@ async def test_memory_repair_admin_list_path_filter_searches_beyond_page_limit(t
 
 
 @pytest.mark.asyncio
+async def test_memory_repair_admin_list_scopes_durable_queue_by_agent_id(tmp_path):
+    storage = await SessionStorage.open(tmp_path / "sessions.db")
+    try:
+        await storage.upsert_memory_durable_receipt(
+            MemoryDurableReceipt(
+                session_key="agent:main:webchat:s1",
+                session_id="session-main",
+                scope="repair",
+                source_path="memory/.raw_fallbacks/main.md",
+                idempotency_key="repair:main.md",
+                status="repair_pending",
+                reason="parse_failed_archived",
+                created_at=1,
+            )
+        )
+        await storage.upsert_memory_durable_receipt(
+            MemoryDurableReceipt(
+                session_key="agent:ops:webchat:s2",
+                session_id="session-ops",
+                scope="repair",
+                source_path="memory/.raw_fallbacks/ops.md",
+                idempotency_key="repair:ops.md",
+                status="repair_pending",
+                reason="parse_failed_archived",
+                created_at=2,
+            )
+        )
+        session_manager = FakeStorageRepairSessionManager(storage)
+        ctx = _ctx(session_manager=session_manager)
+
+        listed = await get_dispatcher().dispatch(
+            "rr-agent-scope",
+            "memory.repair.list",
+            {"agentId": "ops", "limit": 10},
+            ctx,
+        )
+
+        assert listed.error is None, listed.error
+        assert listed.payload["count"] == 1
+        assert listed.payload["items"][0]["sessionKey"] == "agent:ops:webchat:s2"
+        assert listed.payload["items"][0]["path"] == "memory/.raw_fallbacks/ops.md"
+    finally:
+        await storage.close()
+
+
+@pytest.mark.asyncio
 async def test_doctor_memory_status_deep_surfaces_repair_and_raw_sidecars(tmp_path):
     raw_dir = tmp_path / "memory" / ".raw_fallbacks"
     raw_dir.mkdir(parents=True)

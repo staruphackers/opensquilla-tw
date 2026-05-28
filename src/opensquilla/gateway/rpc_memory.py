@@ -551,7 +551,12 @@ async def _handle_memory_repair_list(
             if "path" in params
             else None
         )
-        rows = await list_repair_queue(storage, limit=limit, path=selected)
+        rows = await list_repair_queue(
+            storage,
+            limit=limit,
+            path=selected,
+            agent_id=agent_id,
+        )
         items = [repair_receipt_to_wire(row) for row in rows[:limit]]
     else:
         rows = await _repair_summaries(manager, agent_id=agent_id, params=params, limit=limit)

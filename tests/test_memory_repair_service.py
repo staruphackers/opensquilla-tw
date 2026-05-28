@@ -324,6 +324,63 @@ async def test_memory_repair_run_imports_legacy_raw_fallback_to_ledger(tmp_path)
 
 
 @pytest.mark.asyncio
+async def test_memory_repair_run_scopes_durable_queue_and_legacy_import_by_agent(
+    tmp_path,
+):
+    from opensquilla.gateway.memory_repair_service import run_memory_repair_once
+
+    main_root = tmp_path / "main"
+    ops_root = tmp_path / "ops"
+    ops_raw_dir = ops_root / "memory" / ".raw_fallbacks"
+    ops_raw_dir.mkdir(parents=True)
+    (ops_raw_dir / "raw.md").write_text(
+        "# Raw flush (timeout)\n\nuser: ops scoped marker\n",
+        encoding="utf-8",
+    )
+    storage = await SessionStorage.open(tmp_path / "sessions.db")
+    flush_service = _FlushService()
+
+    class _SessionManager:
+        def __init__(self) -> None:
+            self.storage = storage
+
+    try:
+        await storage.upsert_memory_durable_receipt(
+            MemoryDurableReceipt(
+                session_key="agent:main:webchat:s1",
+                session_id="session-main",
+                scope="repair",
+                source_path="memory/.raw_fallbacks/raw.md",
+                idempotency_key="repair:main-raw.md",
+                status="repair_pending",
+                reason="timeout",
+            )
+        )
+
+        results = await run_memory_repair_once(
+            session_manager=_SessionManager(),
+            flush_service=flush_service,
+            memory_roots={"main": main_root, "ops": ops_root},
+            agent_id="ops",
+            limit=5,
+        )
+        rows = await storage.list_memory_durable_receipts(limit=10)
+        by_session = {row.session_key: row for row in rows}
+
+        assert [result["status"] for result in results] == ["repaired"]
+        assert len(flush_service.calls) == 1
+        assert flush_service.calls[0][0][0].content == "ops scoped marker"
+        assert by_session["agent:main:webchat:s1"].status == "repair_pending"
+        assert by_session["agent:ops:memory-repair:legacy-raw"].status == "repair_done"
+        assert (
+            by_session["agent:ops:memory-repair:legacy-raw"].source_path
+            == "memory/.raw_fallbacks/raw.md"
+        )
+    finally:
+        await storage.close()
+
+
+@pytest.mark.asyncio
 async def test_memory_repair_run_uses_target_path_for_task7_flush_receipt(tmp_path):
     from opensquilla.gateway.memory_repair_service import run_memory_repair_once
 
