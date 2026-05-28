@@ -86,7 +86,7 @@ class MetaStep:
 class ClarifyField:
     """One field in a user_input step's collection schema.
 
-    See docs/superpowers/specs/2026-05-26-meta-skill-user-input-design.md §6.
+    The user-input schema parser owns the concrete validation contract.
     The validator semantics (min/max for int, max_chars for string, choices
     for enum) are enforced by parser.py and at field-value-collection time;
     this dataclass is the static declaration only.

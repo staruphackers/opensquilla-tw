@@ -234,8 +234,8 @@ def _redact_inputs_json(raw: Mapping[str, Any], *, max_bytes: int) -> str:
 def _serialize_plan(plan: MetaPlan) -> tuple[str, str]:
     """Returns (plan_snapshot_json, meta_skill_digest).
 
-    Thin wrapper over opensquilla.skills.meta.plan_serde — see PR2 of
-    docs/superpowers/specs/2026-05-26-meta-skill-user-input-design.md.
+    Thin wrapper over opensquilla.skills.meta.plan_serde; this preserves the
+    versioned user-input plan snapshot contract.
     The snapshot JSON is the *envelope* (with ``"v": 1``); the digest is
     over the same canonical JSON. Existing rows' digests will change on
     next write — this is a one-time churn at the V013 cut-over.
