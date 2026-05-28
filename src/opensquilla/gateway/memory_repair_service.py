@@ -18,6 +18,7 @@ from opensquilla.session.compaction_lifecycle import (
     flush_receipt_allows_destructive_compaction,
     flush_receipt_to_dict,
 )
+from opensquilla.session.keys import normalize_agent_id
 from opensquilla.session.models import MemoryDurableReceipt
 
 log = structlog.get_logger(__name__)
@@ -49,7 +50,7 @@ def repair_receipt_path(receipt: Any) -> str | None:
 
 
 def _agent_session_key_prefix(agent_id: str | None) -> str | None:
-    return f"agent:{agent_id}:" if agent_id else None
+    return f"agent:{normalize_agent_id(agent_id)}:" if agent_id else None
 
 
 def _summary_to_repair_wire(summary: Any) -> dict[str, Any]:
@@ -562,7 +563,7 @@ def _raw_path_matches(row: Mapping[str, Any], params: Mapping[str, Any]) -> bool
 
 
 def _memory_root(memory_roots: Mapping[str, Path], agent_id: str) -> Path | None:
-    root = memory_roots.get(agent_id)
+    root = memory_roots.get(normalize_agent_id(agent_id))
     return Path(root) if root is not None else None
 
 
@@ -701,6 +702,7 @@ async def run_memory_repair_once(
     scan_limit: int = 200,
 ) -> list[dict[str, Any]]:
     params = params or {}
+    agent_id = normalize_agent_id(agent_id)
     if not callable(getattr(flush_service, "execute", None)):
         raise RuntimeError("Session flush service is not configured")
     results: list[dict[str, Any]] = []
