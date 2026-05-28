@@ -22,7 +22,7 @@ from opensquilla.cli.tui.backend.transcript import (
     build_output_preview,
     project_viewport,
 )
-from opensquilla.cli.tui.terminal.renderer import TerminalRenderer
+from opensquilla.cli.tui.renderers.selection import get_renderer_backend
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_PATH = PROJECT_ROOT / "tests" / "unit" / "cli" / "tui" / "replay_fixtures.py"
@@ -46,6 +46,10 @@ class ReplaySummary:
     visible_items: int
     expanded_tools: int
     projection_wall_ms: float
+    available: bool
+    skip_reason: str | None
+    rendered_text_matches: bool
+    plugin_error_count: int
     errors: list[str]
 
 
@@ -93,6 +97,14 @@ def _build_events(fixture: str) -> list[Any]:
     if fixture == "dense-history":
         return list(fixtures.build_dense_history_events())
     raise ValueError(f"Unsupported fixture: {fixture}")
+
+
+def _expected_stream_text(events: list[Any]) -> str:
+    return "".join(
+        str(event.payload.get("text", ""))
+        for event in events
+        if event.kind == "text_delta"
+    )
 
 
 def _text_chars_for(event: Any) -> int:
@@ -176,7 +188,7 @@ def _append_transcript_event(store: TranscriptStore, event: Any) -> None:
 
 
 async def _flush_streaming_plane(
-    renderer: TerminalRenderer,
+    renderer: Any,
     streaming_plane: StreamingPlane,
 ) -> None:
     flush = streaming_plane.finish()
@@ -185,7 +197,7 @@ async def _flush_streaming_plane(
 
 
 async def _render_event(
-    renderer: TerminalRenderer,
+    renderer: Any,
     streaming_plane: StreamingPlane,
     event: Any,
 ) -> None:
@@ -239,8 +251,30 @@ async def _render_event(
 async def run_replay(renderer: str, fixture: str, *, repeat: int = 1) -> ReplaySummary:
     if repeat < 1:
         raise ValueError("--repeat must be >= 1")
-    if renderer != "terminal":
-        raise ValueError(f"Unsupported renderer: {renderer}")
+    backend = get_renderer_backend(renderer)
+    availability = backend.is_available()
+    if not availability.available:
+        return ReplaySummary(
+            renderer=renderer,
+            fixture=fixture,
+            event_count=0,
+            text_chars=0,
+            tool_count=0,
+            router_decision_count=0,
+            wall_ms=0.0,
+            flush_count=0,
+            max_buffer_chars=0,
+            coalescing_ratio=0.0,
+            transcript_items=0,
+            visible_items=0,
+            expanded_tools=0,
+            projection_wall_ms=0.0,
+            available=False,
+            skip_reason=availability.reason,
+            rendered_text_matches=False,
+            plugin_error_count=0,
+            errors=[],
+        )
 
     errors: list[str] = []
     event_count = 0
@@ -255,16 +289,17 @@ async def run_replay(renderer: str, fixture: str, *, repeat: int = 1) -> ReplayS
     visible_items = 0
     expanded_tools = 0
     projection_wall_ms = 0.0
+    rendered_text_matches = True
     started_at = time.perf_counter()
 
     for _ in range(repeat):
         events = _build_events(fixture)
         output_handle = (
-            _ReplayOutputHandle() if fixture == "long-stream" else None
+            _ReplayOutputHandle() if renderer == "terminal" and fixture == "long-stream" else None
         )
-        terminal_renderer = (
-            TerminalRenderer(title="tui-replay", output_handle=output_handle)
-            if output_handle is not None
+        replay_renderer = (
+            backend.create_renderer(title="tui-replay", output_handle=output_handle)
+            if fixture == "long-stream"
             else None
         )
         streaming_plane = StreamingPlane()
@@ -281,16 +316,19 @@ async def run_replay(renderer: str, fixture: str, *, repeat: int = 1) -> ReplayS
             try:
                 if transcript_store is not None:
                     _append_transcript_event(transcript_store, event)
-                elif terminal_renderer is not None:
-                    await _render_event(terminal_renderer, streaming_plane, event)
+                elif replay_renderer is not None:
+                    await _render_event(replay_renderer, streaming_plane, event)
             except Exception as exc:  # pragma: no cover - summarized for CLI evidence.
                 errors.append(f"{event.kind}: {exc}")
             max_buffer_chars = max(
                 max_buffer_chars,
                 streaming_plane.max_buffer_chars,
             )
-        if terminal_renderer is not None:
-            await terminal_renderer.aclose()
+        if replay_renderer is not None:
+            await replay_renderer.aclose()
+            rendered_text_matches = rendered_text_matches and (
+                getattr(replay_renderer, "buffer", "") == _expected_stream_text(events)
+            )
         if transcript_store is not None:
             snapshot = transcript_store.snapshot()
             projection_started_at = time.perf_counter()
@@ -306,6 +344,8 @@ async def run_replay(renderer: str, fixture: str, *, repeat: int = 1) -> ReplayS
         streaming_flush_count += streaming_plane.flush_count
         if output_handle is not None:
             flush_count += output_handle.flush_count
+        elif replay_renderer is not None:
+            flush_count += int(getattr(replay_renderer, "flush_count", 0))
 
     wall_ms = (time.perf_counter() - started_at) * 1_000
     coalescing_ratio = (
@@ -328,6 +368,10 @@ async def run_replay(renderer: str, fixture: str, *, repeat: int = 1) -> ReplayS
         visible_items=visible_items,
         expanded_tools=expanded_tools,
         projection_wall_ms=round(projection_wall_ms, 3),
+        available=True,
+        skip_reason=None,
+        rendered_text_matches=rendered_text_matches,
+        plugin_error_count=0,
         errors=errors,
     )
 
@@ -339,7 +383,7 @@ def write_summary(summary: ReplaySummary, summary_json: Path) -> None:
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Replay synthetic TUI events.")
-    parser.add_argument("--renderer", choices=("terminal",), required=True)
+    parser.add_argument("--renderer", choices=("terminal", "textual"), required=True)
     parser.add_argument("--fixture", choices=("long-stream", "dense-history"), required=True)
     parser.add_argument("--summary-json", type=Path, required=True)
     parser.add_argument("--repeat", type=int, default=1)

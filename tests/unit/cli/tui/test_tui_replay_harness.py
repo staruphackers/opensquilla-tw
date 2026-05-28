@@ -95,6 +95,10 @@ def test_terminal_replay_summary_can_be_written(tmp_path) -> None:
     assert data["visible_items"] == 0
     assert data["expanded_tools"] == 0
     assert data["projection_wall_ms"] == 0
+    assert data["available"] is True
+    assert data["skip_reason"] is None
+    assert data["rendered_text_matches"] is True
+    assert data["plugin_error_count"] == 0
     assert data["errors"] == []
 
 
@@ -113,3 +117,16 @@ def test_dense_history_replay_uses_bounded_transcript_projection() -> None:
     assert summary.expanded_tools == 20
     assert summary.projection_wall_ms >= 0
     assert summary.errors == []
+
+
+def test_textual_replay_reports_unavailable_without_optional_dependency() -> None:
+    bench = _load_module("bench_tui_replay", BENCH_SCRIPT)
+    summary = asyncio.run(bench.run_replay("textual", "long-stream", repeat=1))
+
+    if summary.available:
+        assert summary.rendered_text_matches is True
+        assert summary.errors == []
+    else:
+        assert summary.skip_reason == "Textual is not installed"
+        assert summary.event_count == 0
+        assert summary.errors == []
