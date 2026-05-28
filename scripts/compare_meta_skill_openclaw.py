@@ -14,10 +14,9 @@ import re
 import time
 import uuid
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-
 
 REPORT_DIR = Path(
     os.environ.get("OPENSQUILLA_COMPARE_REPORT_DIR", ".reports/meta-skill-comparison")
@@ -333,7 +332,7 @@ class OpenSquillaRunner:
             return _error_result("opensquilla", case.case_id, start, exc)
 
     async def _run(self, case: ComparisonCase) -> EndpointResult:
-        from opensquilla.cli.gateway_client import GatewayClient
+        from opensquilla.cli.gateway_client import GatewayClient  # type: ignore[import-untyped]
 
         client = GatewayClient()
         events: list[dict[str, Any]] = []
@@ -507,7 +506,9 @@ def _provider_model_from_events(events: list[dict[str, Any]]) -> tuple[str | Non
     return None, None
 
 
-def _error_result(endpoint: str, case_id: str, start: float, exc: Exception) -> EndpointResult:
+def _error_result(
+    endpoint: str, case_id: str, start: float, exc: BaseException
+) -> EndpointResult:
     return EndpointResult(
         endpoint=endpoint,
         case_id=case_id,
@@ -602,7 +603,7 @@ def compare_results(
 
 def write_reports(rows: list[dict[str, Any]]) -> None:
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     jsonl_path = REPORT_DIR / f"openclaw_vs_opensquilla_meta_skill_{stamp}.jsonl"
     md_path = REPORT_DIR / f"openclaw_vs_opensquilla_meta_skill_{stamp}.md"
     prompts_path = REPORT_DIR / f"openclaw_vs_opensquilla_meta_skill_prompts_{stamp}.md"
