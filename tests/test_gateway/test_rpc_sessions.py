@@ -1293,6 +1293,42 @@ class TestSessionsReset:
         assert manager.applied_intents == [(session.session_key, "reset_same_key")]
 
     @pytest.mark.asyncio
+    async def test_reset_without_flush_service_checkpoint_gate_uses_session_lock(
+        self, dispatcher, session
+    ):
+        manager = FakeSessionManager([session])
+        manager.transcript = [SimpleNamespace(id=1, content="message to preserve")]
+        manager._storage.memory_durable_receipts.append(
+            _checkpoint_receipt(session, turn_id="through-1")
+        )
+        turn_runner = _RecordingTurnRunner()
+        lock = turn_runner._get_session_lock(session.session_key)
+        await lock.acquire()
+        ctx = make_ctx(
+            session_manager=manager,
+            flush_service=None,
+            turn_runner=turn_runner,
+        )
+        reset_task = asyncio.create_task(
+            dispatcher.dispatch(
+                "r1",
+                "sessions.reset",
+                {"key": session.session_key},
+                ctx,
+            )
+        )
+        await asyncio.sleep(0)
+
+        assert manager.applied_intents == []
+        assert reset_task.done() is False
+
+        lock.release()
+        res = await reset_task
+
+        assert res.ok is True
+        assert manager.applied_intents == [(session.session_key, "reset_same_key")]
+
+    @pytest.mark.asyncio
     async def test_reset_not_found(self, dispatcher, ctx_with_sessions):
         res = await dispatcher.dispatch(
             "r1", "sessions.reset", {"key": "nonexistent"}, ctx_with_sessions

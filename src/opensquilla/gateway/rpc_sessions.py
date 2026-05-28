@@ -1410,56 +1410,6 @@ async def _handle_sessions_reset(params: dict | None, ctx: RpcContext) -> dict[s
 
     force = bool((params or {}).get("force", False))
 
-    if ctx.flush_service is None:
-        session = await storage.get_session(key)
-        if session is None:
-            raise KeyError(f"Session not found: {key}")
-        previous_session_id = session.session_id
-
-        # Fail-closed when flush is unavailable: refuse to clear a non-empty
-        # transcript without an explicit admin override. Empty transcripts are
-        # always safe to rotate (nothing to lose).
-        transcript = await ctx.session_manager.get_transcript(key)
-        if transcript and not force:
-            checkpoint_safe = await _durable_receipt_allows_covered_destructive_compaction(
-                storage,
-                key,
-                previous_session_id,
-                transcript,
-            )
-            if not checkpoint_safe:
-                raise RpcHandlerError(
-                    code="flush_unavailable",
-                    message=(
-                        "Reset aborted: flush service is unavailable and the "
-                        "transcript is non-empty. Re-run with force=true (admin) "
-                        "to discard without backup."
-                    ),
-                    details={
-                        "key": key,
-                        "session_id": previous_session_id,
-                        "reason": "flush_service_disabled",
-                        "message_count": len(transcript),
-                    },
-                )
-        if transcript and force and "operator.admin" not in ctx.principal.scopes:
-            raise RpcHandlerError(
-                code="permission_denied",
-                message="force=true on sessions.reset requires operator.admin scope.",
-                details={"key": key, "session_id": previous_session_id},
-            )
-
-        updated, rotated = await ctx.session_manager.apply_intent(key, SessionIntent.RESET_SAME_KEY)
-        new_epoch = await _increment_and_emit_epoch(ctx, storage, key)
-        return {
-            "key": key,
-            "reset": True,
-            "rotated": rotated,
-            "previous_session_id": previous_session_id,
-            "session_id": updated.session_id,
-            "epoch": new_epoch,
-        }
-
     registry = get_agent_task_registry()
     active = registry.get(key)
     if active is not None and not active.done():
@@ -1484,6 +1434,56 @@ async def _handle_sessions_reset(params: dict | None, ctx: RpcContext) -> dict[s
         agent_id = normalize_agent_id(getattr(session, "agent_id", None) or "main")
 
         transcript = await ctx.session_manager.get_transcript(key)
+
+        if ctx.flush_service is None:
+            # Fail-closed when flush is unavailable: refuse to clear a non-empty
+            # transcript without an explicit admin override or a covering
+            # checkpoint receipt. The whole read -> gate -> rotate window stays
+            # under the same per-session lock used by sends.
+            if transcript and not force:
+                checkpoint_safe = (
+                    await _durable_receipt_allows_covered_destructive_compaction(
+                        storage,
+                        key,
+                        previous_session_id,
+                        transcript,
+                    )
+                )
+                if not checkpoint_safe:
+                    raise RpcHandlerError(
+                        code="flush_unavailable",
+                        message=(
+                            "Reset aborted: flush service is unavailable and the "
+                            "transcript is non-empty. Re-run with force=true (admin) "
+                            "to discard without backup."
+                        ),
+                        details={
+                            "key": key,
+                            "session_id": previous_session_id,
+                            "reason": "flush_service_disabled",
+                            "message_count": len(transcript),
+                        },
+                    )
+            if transcript and force and "operator.admin" not in ctx.principal.scopes:
+                raise RpcHandlerError(
+                    code="permission_denied",
+                    message="force=true on sessions.reset requires operator.admin scope.",
+                    details={"key": key, "session_id": previous_session_id},
+                )
+
+            updated, rotated = await ctx.session_manager.apply_intent(
+                key,
+                SessionIntent.RESET_SAME_KEY,
+            )
+            new_epoch = await _increment_and_emit_epoch(ctx, storage, key)
+            return {
+                "key": key,
+                "reset": True,
+                "rotated": rotated,
+                "previous_session_id": previous_session_id,
+                "session_id": updated.session_id,
+                "epoch": new_epoch,
+            }
 
         if not transcript:
             updated, rotated = await ctx.session_manager.apply_intent(
