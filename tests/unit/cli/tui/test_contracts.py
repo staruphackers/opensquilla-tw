@@ -65,6 +65,10 @@ TUI_TERMINAL_ADAPTER_MODULES = {
     "turn_stream_defaults.py",
     "standalone_slash_adapter.py",
 }
+TUI_PLUGIN_PACKAGE_MODULES = {
+    "__init__.py",
+    "router_hud.py",
+}
 CHAT_CORE_MODULES = {
     "__init__.py",
     "commands.py",
@@ -245,8 +249,16 @@ def test_tui_backend_package_does_not_import_terminal_or_chat_adapters() -> None
     assert offenders == []
 
 
+def test_tui_plugin_package_contains_only_plugin_modules() -> None:
+    plugin_dir = PROJECT_ROOT / "src/opensquilla/cli/tui/plugins"
+    modules = sorted(path.name for path in plugin_dir.glob("*.py"))
+
+    assert modules == sorted(TUI_PLUGIN_PACKAGE_MODULES)
+
+
 def test_tui_domain_event_and_plugin_modules_are_renderer_independent() -> None:
     backend_dir = PROJECT_ROOT / "src/opensquilla/cli/tui/backend"
+    plugin_dir = PROJECT_ROOT / "src/opensquilla/cli/tui/plugins"
     offenders = sorted(
         path.relative_to(PROJECT_ROOT).as_posix()
         for path in (
@@ -254,6 +266,7 @@ def test_tui_domain_event_and_plugin_modules_are_renderer_independent() -> None:
             backend_dir / "plugins.py",
             backend_dir / "streaming.py",
             backend_dir / "transcript.py",
+            plugin_dir / "router_hud.py",
         )
         if _imports_tui_presentation_dependency(path)
     )

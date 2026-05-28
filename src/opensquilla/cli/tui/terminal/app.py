@@ -347,7 +347,7 @@ class ChatApplication:
     def surface(self) -> Surface:
         return self._surface
 
-    def set_toolbar(self, key: str, value: str | None) -> None:
+    def set_toolbar(self, key: str, value: object | None) -> None:
         """Mutate the shared toolbar dict in place.
 
         The Application's `bottom_toolbar` callable re-reads this dict on

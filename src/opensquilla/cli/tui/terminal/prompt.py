@@ -59,6 +59,8 @@ _toolbar_context: dict[str, object | None] = {
     # a plain string for ad-hoc callers using ChatApplication.set_toolbar().
     # Cleared (set to None) when the stream starts or the turn ends.
     "status": None,
+    "router_hud": None,
+    "router_hud_style": None,
 }
 
 
@@ -125,6 +127,18 @@ def _html_escape(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
+def set_toolbar_value(key: str, value: object | None) -> None:
+    _toolbar_context[key] = value
+
+
+def _toolbar_style_color(style: object | None) -> str:
+    if style == "warning":
+        return ACCENT
+    if style == "dim":
+        return ACCENT_DIM
+    return ACCENT_DEEP
+
+
 _PROMPT_STYLE = Style.from_dict({
     "completion-menu.completion": "bg:#101010 #f0e8df",
     "completion-menu.completion.current": f"bg:{ACCENT} #101010 bold",
@@ -154,16 +168,21 @@ def _bottom_toolbar() -> HTML:
     session_id = str(_toolbar_context.get("session_id") or "")
     model_short = model.rsplit("/", 1)[-1] if model else ""
     session_short = session_id.rsplit(":", 1)[-1] if session_id else session_id
+    router_hud = str(_toolbar_context.get("router_hud") or "")
+    router_hud_style = _toolbar_context.get("router_hud_style")
 
     parts: list[str] = []
     if model_short:
-        parts.append(_html_escape(model_short))
+        parts.append(f"<style fg='{ACCENT_DEEP}'>{_html_escape(model_short)}</style>")
     if session_short:
-        parts.append(_html_escape(session_short))
+        parts.append(f"<style fg='{ACCENT_DEEP}'>{_html_escape(session_short)}</style>")
+    if router_hud:
+        color = _toolbar_style_color(router_hud_style)
+        parts.append(f"<style fg='{color}'>{_html_escape(router_hud)}</style>")
     if not parts:
         return HTML("")
     body = " · ".join(parts)
-    return HTML(f"<style fg='{ACCENT_DEEP}'>{body}</style>")
+    return HTML(body)
 
 
 def _format_prefix(prefix: str) -> AnyFormattedText:
@@ -416,7 +435,7 @@ class InteractiveSessionHandle:
     async def next_line(self) -> str | None:
         return await self._chat_app.next_line()
 
-    def set_toolbar(self, key: str, value: str | None) -> None:
+    def set_toolbar(self, key: str, value: object | None) -> None:
         self._chat_app.set_toolbar(key, value)
         # Best-effort repaint; safe even when the Application has not yet
         # entered its run loop.

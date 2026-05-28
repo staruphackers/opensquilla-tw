@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol, cast
 
 from opensquilla.cli.chat.output import ChatOutputHandle
@@ -18,6 +18,7 @@ from opensquilla.cli.chat.turn import TurnResult, UsageSummary
 from opensquilla.cli.tui.backend.domain_events import (
     KIND_DONE,
     KIND_ERROR,
+    KIND_ROUTER_DECISION,
     KIND_STATUS,
     KIND_TOOL_FINISHED,
     KIND_TOOL_STARTED,
@@ -36,6 +37,10 @@ _DEFAULT_STREAM_IDLE_TIMEOUT_SECONDS = 600.0
 ApprovalSurfaceResolver = Callable[
     [ChatOutputHandle | None, object | None],
     object | None,
+]
+TuiEventSinkFactory = Callable[
+    [ChatOutputHandle | None],
+    Callable[[TuiDomainEvent], None] | None,
 ]
 
 
@@ -72,6 +77,7 @@ class TurnStreamDependencies:
     standalone_approval_surface: object | None = None
     approval_surface_resolver: ApprovalSurfaceResolver | None = None
     tui_event_sink: Callable[[TuiDomainEvent], None] | None = None
+    tui_event_sink_factory: TuiEventSinkFactory | None = None
 
 
 class _BackendFallbackRenderer:
@@ -152,6 +158,7 @@ def default_turn_stream_dependencies(
     standalone_approval_surface: object | None = None,
     approval_surface_resolver: ApprovalSurfaceResolver | None = None,
     tui_event_sink: Callable[[TuiDomainEvent], None] | None = None,
+    tui_event_sink_factory: TuiEventSinkFactory | None = None,
 ) -> TurnStreamDependencies:
     return TurnStreamDependencies(
         renderer_factory=(
@@ -175,6 +182,7 @@ def default_turn_stream_dependencies(
         standalone_approval_surface=standalone_approval_surface,
         approval_surface_resolver=approval_surface_resolver,
         tui_event_sink=tui_event_sink,
+        tui_event_sink_factory=tui_event_sink_factory,
     )
 
 
@@ -182,6 +190,27 @@ def _resolve_deps(deps: TurnStreamDependencies | None) -> TurnStreamDependencies
     if deps is not None:
         return deps
     return default_turn_stream_dependencies()
+
+
+def _resolve_tui_event_sink_for_output(
+    deps: TurnStreamDependencies,
+    tui_output: ChatOutputHandle | None,
+) -> TurnStreamDependencies:
+    if deps.tui_event_sink_factory is None:
+        return deps
+    output_sink = deps.tui_event_sink_factory(tui_output)
+    if output_sink is None:
+        return deps
+    if deps.tui_event_sink is None:
+        return replace(deps, tui_event_sink=output_sink)
+
+    existing_sink = deps.tui_event_sink
+
+    def _combined_sink(event: TuiDomainEvent) -> None:
+        existing_sink(event)
+        output_sink(event)
+
+    return replace(deps, tui_event_sink=_combined_sink)
 
 
 def _emit_tui_domain_event(
@@ -203,6 +232,74 @@ def _emit_tui_domain_event(
             timestamp_ms=now_ms(),
         )
     )
+
+
+def _string_field(payload: Mapping[str, Any], key: str, default: str = "") -> str:
+    value = payload.get(key, default)
+    if value is None:
+        return default
+    return str(value)
+
+
+def _bool_field(payload: Mapping[str, Any], key: str, default: bool = False) -> bool:
+    value = payload.get(key)
+    if value is None:
+        return default
+    return bool(value)
+
+
+def _float_field(payload: Mapping[str, Any], key: str) -> float | None:
+    value = payload.get(key)
+    if isinstance(value, int | float):
+        return float(value)
+    return None
+
+
+def _int_field(payload: Mapping[str, Any], key: str, default: int) -> int:
+    value = payload.get(key)
+    if isinstance(value, int):
+        return value
+    return default
+
+
+def _float_list_field(payload: Mapping[str, Any], key: str) -> list[float]:
+    value = payload.get(key)
+    if not isinstance(value, list):
+        return []
+    values: list[float] = []
+    for item in value:
+        values.append(float(item) if isinstance(item, int | float) else 0.0)
+    return values
+
+
+def _tier_index_from_tier(tier: str) -> int:
+    if len(tier) >= 2 and tier[0].lower() == "t" and tier[1:].isdigit():
+        return int(tier[1:])
+    return -1
+
+
+def normalize_router_decision_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    tier = _string_field(payload, "tier")
+    source = _string_field(payload, "source", "none")
+    return {
+        "tier": tier,
+        "tier_index": _int_field(
+            payload,
+            "tier_index",
+            _tier_index_from_tier(tier),
+        ),
+        "model": _string_field(payload, "model"),
+        "baseline_model": _string_field(payload, "baseline_model"),
+        "source": source,
+        "confidence": _float_field(payload, "confidence"),
+        "probs": _float_list_field(payload, "probs"),
+        "savings_pct": _float_field(payload, "savings_pct"),
+        "fallback": _bool_field(payload, "fallback", source == "fallback"),
+        "thinking_mode": _string_field(payload, "thinking_mode"),
+        "prompt_policy": _string_field(payload, "prompt_policy"),
+        "routing_applied": _bool_field(payload, "routing_applied", True),
+        "rollout_phase": _string_field(payload, "rollout_phase", "full"),
+    }
 
 
 async def _flush_streaming_text(
@@ -539,6 +636,7 @@ async def stream_response_gateway(
 ) -> TurnResult:
     """Stream a response from the gateway into a renderer."""
     stream_deps = _resolve_deps(deps)
+    stream_deps = _resolve_tui_event_sink_for_output(stream_deps, tui_output)
     elevated = elevated_state["mode"] if elevated_state else None
     usage: UsageSummary | None = None
     cancelled = False
@@ -574,6 +672,21 @@ async def stream_response_gateway(
                             streaming_plane,
                             event.get("text", ""),
                             source="gateway",
+                            turn_id=session_key,
+                        )
+                    elif event_name == "session.event.router_decision":
+                        await _finish_text_delta_stream(
+                            renderer,
+                            stream_deps,
+                            streaming_plane,
+                            source="gateway",
+                            turn_id=session_key,
+                        )
+                        _emit_tui_domain_event(
+                            stream_deps,
+                            kind=KIND_ROUTER_DECISION,
+                            source="gateway",
+                            payload=normalize_router_decision_payload(event),
                             turn_id=session_key,
                         )
                     elif event_name == "session.event.tool_use_start":
@@ -798,6 +911,7 @@ async def stream_response_turnrunner(
         ArtifactEvent,
         DoneEvent,
         ErrorEvent,
+        RouterDecisionEvent,
         RunHeartbeatEvent,
         TextDeltaEvent,
         ToolResultEvent,
@@ -810,6 +924,7 @@ async def stream_response_turnrunner(
     assert isinstance(tool_ctx, ToolContext)
 
     stream_deps = _resolve_deps(deps)
+    stream_deps = _resolve_tui_event_sink_for_output(stream_deps, tui_output)
     session_manager = getattr(svc, "session_manager", None) if svc is not None else None
     if session_manager is not None:
         _persisted = await session_manager.append_message(session_key, role="user", content=message)
@@ -851,6 +966,21 @@ async def stream_response_turnrunner(
                             streaming_plane,
                             event.text,
                             source="turn_runner",
+                            turn_id=session_key,
+                        )
+                    elif isinstance(event, RouterDecisionEvent):
+                        await _finish_text_delta_stream(
+                            renderer,
+                            stream_deps,
+                            streaming_plane,
+                            source="turn_runner",
+                            turn_id=session_key,
+                        )
+                        _emit_tui_domain_event(
+                            stream_deps,
+                            kind=KIND_ROUTER_DECISION,
+                            source="turn_runner",
+                            payload=normalize_router_decision_payload(event.__dict__),
                             turn_id=session_key,
                         )
                     elif isinstance(event, RunHeartbeatEvent):

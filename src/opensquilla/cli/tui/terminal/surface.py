@@ -18,6 +18,10 @@ class _TerminalOutputSource(Protocol):
 
     def stream_output(self) -> AbstractAsyncContextManager[Callable[[str], None]]: ...
 
+    def set_toolbar(self, key: str, value: object | None) -> None: ...
+
+    def invalidate(self) -> None: ...
+
 
 class _TerminalSessionHandle(_TerminalOutputSource, Protocol):
     async def next_line(self) -> str | None: ...
@@ -48,6 +52,12 @@ class TerminalOutputHandle:
 
     def stream_output(self) -> AbstractAsyncContextManager[Callable[[str], None]]:
         return self._source.stream_output()
+
+    def set_toolbar(self, key: str, value: object | None) -> None:
+        self._source.set_toolbar(key, value)
+
+    def invalidate(self) -> None:
+        self._source.invalidate()
 
 
 class TerminalSurface:

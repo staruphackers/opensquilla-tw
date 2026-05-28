@@ -9,7 +9,14 @@ import opensquilla.cli.tui.adapters.input_bridge as _input_bridge
 import opensquilla.cli.tui.adapters.terminal_bridge as _terminal_bridge
 from opensquilla.cli.chat import turn_stream as _turn_stream
 from opensquilla.cli.tui.backend.contracts import TuiOutputHandle
-from opensquilla.cli.tui.backend.domain_events import TuiDomainEvent
+from opensquilla.cli.tui.backend.domain_events import KIND_ROUTER_DECISION, TuiDomainEvent
+from opensquilla.cli.tui.backend.plugins import TuiPluginManager
+from opensquilla.cli.tui.plugins.router_hud import (
+    ROUTER_HUD_SLOT,
+    RouterHudPlugin,
+    RouterHudSnapshot,
+)
+from opensquilla.cli.tui.terminal import prompt as terminal_prompt
 from opensquilla.cli.tui.terminal.approval import maybe_handle_approval
 from opensquilla.cli.tui.terminal.renderer import TerminalRenderer
 from opensquilla.cli.ui import console, error_panel
@@ -39,6 +46,44 @@ def _approval_surface_for_terminal_output(
 
 def image_prompt_and_attachments(command: str) -> tuple[str, list[dict[str, str]]]:
     return _input_bridge.image_prompt_and_attachments(command)
+
+
+def router_hud_event_sink_factory(
+    tui_output: TuiOutputHandle | None,
+) -> Callable[[TuiDomainEvent], None]:
+    manager = TuiPluginManager([RouterHudPlugin()])
+
+    def _sink(event: TuiDomainEvent) -> None:
+        if event.kind != KIND_ROUTER_DECISION:
+            manager.dispatch(event)
+            return
+        manager.dispatch(event)
+        snapshot = manager.snapshot(ROUTER_HUD_SLOT)
+        if not isinstance(snapshot, RouterHudSnapshot):
+            return
+        _set_toolbar_value(tui_output, "router_hud", snapshot.label)
+        _set_toolbar_value(tui_output, "router_hud_style", snapshot.style)
+        _invalidate_output(tui_output)
+
+    return _sink
+
+
+def _set_toolbar_value(
+    tui_output: TuiOutputHandle | None,
+    key: str,
+    value: object | None,
+) -> None:
+    setter = getattr(tui_output, "set_toolbar", None)
+    if callable(setter):
+        setter(key, value)
+        return
+    terminal_prompt.set_toolbar_value(key, value)
+
+
+def _invalidate_output(tui_output: TuiOutputHandle | None) -> None:
+    invalidate = getattr(tui_output, "invalidate", None)
+    if callable(invalidate):
+        invalidate()
 
 
 def default_turn_stream_dependencies(
@@ -79,4 +124,7 @@ def default_turn_stream_dependencies(
         standalone_approval_surface=Surface.CLI_STANDALONE,
         approval_surface_resolver=_approval_surface_for_terminal_output,
         tui_event_sink=tui_event_sink,
+        tui_event_sink_factory=(
+            None if tui_event_sink is not None else router_hud_event_sink_factory
+        ),
     )

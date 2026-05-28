@@ -13,6 +13,7 @@ from opensquilla.cli.chat.turn_stream import (
 from opensquilla.cli.tui.backend.domain_events import (
     KIND_DONE,
     KIND_STATUS,
+    KIND_TEXT_FLUSH,
     KIND_TOOL_FINISHED,
     KIND_TOOL_STARTED,
     TuiDomainEvent,
@@ -159,11 +160,12 @@ async def test_gateway_turn_stream_emits_tool_and_done_domain_events() -> None:
     assert [event.kind for event in events] == [
         KIND_TOOL_STARTED,
         KIND_TOOL_FINISHED,
+        KIND_TEXT_FLUSH,
         KIND_DONE,
     ]
     assert {event.source for event in events} == {"gateway"}
     assert events[0].payload["tool_name"] == "search"
-    assert events[2].payload["model"] == "openrouter/test"
+    assert events[3].payload["model"] == "openrouter/test"
 
 
 @pytest.mark.asyncio
