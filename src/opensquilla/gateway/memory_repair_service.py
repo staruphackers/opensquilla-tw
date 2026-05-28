@@ -476,16 +476,18 @@ async def mark_repair_attempt_failed(
     *,
     reason: str,
     now_ms: int | None = None,
+    attempt_source: Any | None = None,
 ) -> Any:
     update = getattr(storage, "update_memory_durable_receipt", None)
     if not callable(update):
         return receipt
     now_ms = int(time.time() * 1000) if now_ms is None else now_ms
-    previous_attempts = int(getattr(receipt, "attempt_count", 0) or 0)
+    attempt_source = attempt_source or receipt
+    previous_attempts = int(getattr(attempt_source, "attempt_count", 0) or 0)
     if (
         previous_attempts == 1
-        and getattr(receipt, "status", None) == "repair_pending"
-        and getattr(receipt, "next_retry_at_ms", None) is None
+        and getattr(attempt_source, "status", None) == "repair_pending"
+        and getattr(attempt_source, "next_retry_at_ms", None) is None
     ):
         attempt_count = 1
     else:
@@ -647,6 +649,7 @@ async def repair_durable_receipt_source(
             storage,
             claimed,
             reason=str(result.get("reason") or "repair_failed"),
+            attempt_source=receipt,
         )
     return result
 

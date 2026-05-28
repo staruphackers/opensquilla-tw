@@ -377,6 +377,72 @@ async def test_memory_repair_run_uses_target_path_for_task7_flush_receipt(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_memory_repair_failure_after_claim_keeps_task7_first_backoff(tmp_path):
+    from opensquilla.gateway.memory_repair_service import run_memory_repair_once
+
+    raw_dir = tmp_path / "memory" / ".raw_fallbacks"
+    raw_dir.mkdir(parents=True)
+    (raw_dir / "raw.md").write_text(
+        "# Raw flush (parse_failed_archived)\n\nuser: task7 failure marker\n",
+        encoding="utf-8",
+    )
+    storage = await SessionStorage.open(tmp_path / "sessions.db")
+
+    class _FailingFlushService:
+        def __init__(self) -> None:
+            self.calls: list[tuple[list[Any], str, dict[str, Any]]] = []
+
+        async def execute(self, transcript: list[Any], session_key: str, **kwargs: Any) -> Any:
+            self.calls.append((list(transcript), session_key, dict(kwargs)))
+            raise RuntimeError("flush unavailable")
+
+    class _SessionManager:
+        def __init__(self) -> None:
+            self.storage = storage
+
+    flush_service = _FailingFlushService()
+    try:
+        saved = await storage.upsert_memory_durable_receipt(
+            MemoryDurableReceipt(
+                session_key="agent:main:webchat:s1",
+                session_id="session-1",
+                scope="repair",
+                source_path="session:agent:main:webchat:s1:flush:1-1",
+                target_path="memory/.raw_fallbacks/raw.md",
+                idempotency_key="repair:task7-failure-raw.md",
+                status="repair_pending",
+                reason="parse_failed_archived",
+                attempt_count=1,
+                next_retry_at_ms=None,
+            )
+        )
+
+        before_ms = int(time.time() * 1000)
+        results = await run_memory_repair_once(
+            session_manager=_SessionManager(),
+            flush_service=flush_service,
+            memory_roots={"main": tmp_path},
+            agent_id="main",
+            limit=5,
+        )
+        after_ms = int(time.time() * 1000)
+        rows = await storage.list_memory_durable_receipts(
+            idempotency_key=saved.idempotency_key,
+            limit=1,
+        )
+
+        assert results[0]["status"] == "failed_retryable"
+        assert len(flush_service.calls) == 1
+        assert rows[0].status == "repair_pending"
+        assert rows[0].attempt_count == 1
+        assert rows[0].next_retry_at_ms is not None
+        assert before_ms + 5 * 60 * 1000 <= rows[0].next_retry_at_ms
+        assert rows[0].next_retry_at_ms <= after_ms + 5 * 60 * 1000
+    finally:
+        await storage.close()
+
+
+@pytest.mark.asyncio
 async def test_memory_repair_run_skips_future_retry_rows_until_due(tmp_path):
     from opensquilla.gateway.memory_repair_service import run_memory_repair_once
 
