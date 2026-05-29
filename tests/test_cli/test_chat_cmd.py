@@ -1418,7 +1418,7 @@ class _FakeGatewayClient:
         self.closed = False
         type(self).instances.append(self)
 
-    async def connect(self) -> None:
+    async def connect(self, url: str, *, token: str | None = None) -> None:
         self.connected = True
 
     async def create_session(
