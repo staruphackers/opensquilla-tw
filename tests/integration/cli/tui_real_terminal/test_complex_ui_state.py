@@ -16,9 +16,11 @@ def test_complex_ui_state(run_real_terminal_scenario) -> None:
     last_frame = sorted((result.run_dir / "frames").glob("*.txt"))[-1].read_text(
         encoding="utf-8"
     )
+    scrollback = (result.run_dir / "scrollback.txt").read_text(encoding="utf-8")
+    rendered = f"{last_frame}\n{scrollback}"
     if result.backend_id == "textual":
-        router_lines = [line for line in last_frame.splitlines() if "Router:" in line]
-        assert "Router:" in last_frame
-        assert "fake-terminal" in last_frame
-        assert "save 42%" in last_frame
+        router_lines = [line for line in rendered.splitlines() if "Router:" in line]
+        assert "Router:" in rendered
+        assert "fake-terminal" in rendered
+        assert "save 42%" in rendered
         assert any("fake-terminal" in line and "save 42%" in line for line in router_lines)

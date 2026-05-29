@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -23,7 +24,12 @@ from tui_real_terminal.targets import TargetContext, build_tui_target  # noqa: E
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
-    parser.addoption("--tui-backend", action="store", default="terminal")
+    parser.addoption(
+        "--tui-backend",
+        action="store",
+        default="terminal",
+        choices=("terminal", "textual", "live-textual"),
+    )
     parser.addoption(
         "--tui-driver",
         action="store",
@@ -66,6 +72,14 @@ def run_real_terminal_scenario(
     tui_driver: DriverSelection,
 ) -> Callable[[TuiScenario], ScenarioResult]:
     def _run(scenario: TuiScenario) -> ScenarioResult:
+        if tui_backend == "live-textual":
+            if scenario.family != "live_prompt":
+                pytest.skip("live-textual backend only runs live_prompt scenarios")
+            if os.environ.get("OPENSQUILLA_TUI_LIVE_REAL") != "1":
+                pytest.skip(
+                    "set OPENSQUILLA_TUI_LIVE_REAL=1 to run the real CLI/Textual smoke"
+                )
+
         capabilities = probe_terminal_capabilities()
         if capabilities.preferred_driver == "none":
             pytest.skip(capabilities.skip_reason or "real-terminal capabilities unavailable")
@@ -86,6 +100,28 @@ def run_real_terminal_scenario(
         )
         if not target.available:
             pytest.skip(target.skip_reason or f"TUI backend {tui_backend!r} unavailable")
+        if (
+            target.backend_id == "live-textual"
+            and os.environ.get("OPENSQUILLA_TUI_LIVE_REAL") != "1"
+        ):
+            pytest.skip(
+                "set OPENSQUILLA_TUI_LIVE_REAL=1 to run the real CLI/Textual smoke"
+            )
+        if (
+            scenario.required_backend_id is not None
+            and target.backend_id != scenario.required_backend_id
+        ):
+            pytest.skip(
+                f"scenario {scenario.scenario_id!r} requires "
+                f"--tui-backend={scenario.required_backend_id}"
+            )
+        scenario_driver = tui_driver
+        if scenario.requires_tmux:
+            if not capabilities.tmux_available:
+                pytest.skip(f"scenario {scenario.scenario_id!r} requires tmux")
+            if tui_driver == "pty":
+                pytest.skip(f"scenario {scenario.scenario_id!r} requires tmux")
+            scenario_driver = "tmux"
 
         session = open_real_terminal_session(
             command=target.command,
@@ -94,7 +130,7 @@ def run_real_terminal_scenario(
             run_id=build_run_id(scenario.scenario_id),
             size=target.initial_size,
             artifact_dir=evidence.run_dir,
-            driver=tui_driver,
+            driver=scenario_driver,
         )
         return run_scenario(
             scenario=scenario,

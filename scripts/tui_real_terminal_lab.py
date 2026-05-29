@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -34,7 +35,11 @@ def _parser() -> argparse.ArgumentParser:
         choices=[scenario.scenario_id for scenario in all_scenarios()],
         required=True,
     )
-    parser.add_argument("--backend", choices=("terminal", "textual"), default="terminal")
+    parser.add_argument(
+        "--backend",
+        choices=("terminal", "textual", "live-textual"),
+        default="terminal",
+    )
     parser.add_argument("--driver", choices=("auto", "tmux", "pty"), default="auto")
     parser.add_argument(
         "--artifact-root",
@@ -43,8 +48,19 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _assert_live_backend_enabled(backend: str) -> None:
+    if backend != "live-textual":
+        return
+    if os.environ.get("OPENSQUILLA_TUI_LIVE_REAL") == "1":
+        return
+    raise SystemExit(
+        "set OPENSQUILLA_TUI_LIVE_REAL=1 to run the real CLI/Textual smoke"
+    )
+
+
 def main() -> None:
     args = _parser().parse_args()
+    _assert_live_backend_enabled(args.backend)
     scenario = scenario_by_id(args.scenario)
     evidence = EvidenceBundle.create(
         Path(args.artifact_root),
@@ -62,6 +78,14 @@ def main() -> None:
     )
     if not target.available:
         raise SystemExit(target.skip_reason or f"backend {args.backend!r} unavailable")
+    if (
+        scenario.required_backend_id is not None
+        and target.backend_id != scenario.required_backend_id
+    ):
+        raise SystemExit(
+            f"scenario {scenario.scenario_id!r} requires "
+            f"--backend {scenario.required_backend_id}"
+        )
     session = open_real_terminal_session(
         command=target.command,
         cwd=Path.cwd(),
@@ -69,7 +93,7 @@ def main() -> None:
         run_id=build_run_id(scenario.scenario_id),
         size=target.initial_size,
         artifact_dir=evidence.run_dir,
-        driver=args.driver,
+        driver="tmux" if scenario.requires_tmux else args.driver,
     )
     result = run_scenario(
         scenario=scenario,

@@ -39,6 +39,7 @@ def test_all_abcd_scenarios_are_declared() -> None:
         "long_streaming",
         "complex_ui_state",
         "architecture_prompt",
+        "live_architecture_prompt",
         "terminal_changes",
     }
     assert scenarios["launch_input_loop"].family == "launch_and_input_loop"
@@ -46,7 +47,11 @@ def test_all_abcd_scenarios_are_declared() -> None:
     assert scenarios["long_streaming"].family == "long_streaming_output"
     assert scenarios["complex_ui_state"].family == "complex_ui_state"
     assert scenarios["architecture_prompt"].family == "architecture_prompt"
+    assert scenarios["live_architecture_prompt"].family == "live_prompt"
     assert scenarios["terminal_changes"].family == "terminal_changes"
+    assert scenarios["live_architecture_prompt"].requires_tmux is True
+    assert scenarios["live_architecture_prompt"].requires_prompt_ready is False
+    assert scenarios["live_architecture_prompt"].required_backend_id == "live-textual"
 
 
 def test_launch_scenario_serializes_to_json(tmp_path: Path) -> None:

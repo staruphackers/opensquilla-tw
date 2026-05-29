@@ -31,8 +31,23 @@ uv run pytest tests/integration/cli/tui_real_terminal -q --tui-backend terminal
 uv run pytest tests/integration/cli/tui_real_terminal -q --tui-backend textual
 ```
 
-The `textual` backend reports an explicit skip until a live Textual app target
-exists. Production acceptance remains the `terminal` backend.
+The `terminal` and `textual` backends run deterministic fake-provider apps
+through the real terminal harness. A guarded `live-textual` backend exists for
+manual real CLI smoke checks:
+
+```bash
+OPENSQUILLA_TUI_LIVE_REAL=1 uv run pytest \
+  tests/integration/cli/tui_real_terminal/test_live_textual_real_cli.py -q \
+  --tui-backend live-textual --tui-driver tmux
+
+OPENSQUILLA_TUI_LIVE_REAL=1 uv run python scripts/tui_real_terminal_lab.py \
+  --scenario live_architecture_prompt --backend live-textual
+```
+
+The live smoke launches `opensquilla chat --standalone` with
+`OPENSQUILLA_TUI_BACKEND=textual`, drives it through tmux, sends a real prompt,
+and captures text evidence. Use it deliberately because it may hit the
+configured live provider.
 
 ## Evidence
 

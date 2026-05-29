@@ -23,6 +23,7 @@ ScenarioFamily = Literal[
     "long_streaming_output",
     "complex_ui_state",
     "architecture_prompt",
+    "live_prompt",
     "terminal_changes",
 ]
 
@@ -45,6 +46,9 @@ class TuiScenario:
     initial_size: TerminalSize
     steps: tuple[ScenarioStep, ...]
     expected_text: tuple[str, ...]
+    requires_tmux: bool = False
+    requires_prompt_ready: bool = True
+    required_backend_id: str | None = None
 
     def to_json_dict(self) -> dict[str, Any]:
         return {
@@ -56,6 +60,9 @@ class TuiScenario:
             },
             "steps": [step.__dict__ for step in self.steps],
             "expected_text": list(self.expected_text),
+            "requires_tmux": self.requires_tmux,
+            "requires_prompt_ready": self.requires_prompt_ready,
+            "required_backend_id": self.required_backend_id,
         }
 
 
@@ -197,6 +204,31 @@ def all_scenarios() -> tuple[TuiScenario, ...]:
             ),
             expected_text=("you",),
         ),
+        TuiScenario(
+            scenario_id="live_architecture_prompt",
+            family="live_prompt",
+            initial_size=TerminalSize(cols=112, rows=34),
+            steps=(
+                ScenarioStep("wait-ready", "wait_text", "OPEN_SQUILLA_TUI_READY", "ready"),
+                ScenarioStep(
+                    "send-message",
+                    "send_text",
+                    "帮我分析这个代码长的架构 /Users/cwan0785/opensquilla",
+                    "after-input",
+                ),
+                ScenarioStep(
+                    "wait-assistant",
+                    "wait_text",
+                    "◢ squilla",
+                    "after-assistant",
+                    timeout_s=60.0,
+                ),
+            ),
+            expected_text=("◢ squilla",),
+            requires_tmux=True,
+            requires_prompt_ready=False,
+            required_backend_id="live-textual",
+        ),
     )
 
 
@@ -234,7 +266,8 @@ def run_scenario(
                 raise AssertionError(f"{step.step_id}: terminal process exited unexpectedly")
         for expected in scenario.expected_text:
             assertions.assert_visible_text(last_frame, expected)
-        assertions.assert_prompt_ready(last_frame)
+        if scenario.requires_prompt_ready:
+            assertions.assert_prompt_ready(last_frame)
         evidence.write_scrollback(session.capture_scrollback_text("scrollback"))
         result = ScenarioResult(
             scenario_id=scenario.scenario_id,

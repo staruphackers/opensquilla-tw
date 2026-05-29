@@ -8,7 +8,7 @@ from typing import Literal
 
 from tui_real_terminal.driver import TerminalSize
 
-TuiBackendId = Literal["terminal", "textual"]
+TuiBackendId = Literal["terminal", "textual", "live-textual"]
 
 
 @dataclass(frozen=True)
@@ -37,6 +37,8 @@ def build_tui_target(backend_id: str, context: TargetContext) -> TuiTarget:
         return _terminal_target(context)
     if backend_id == "textual":
         return _textual_target(context)
+    if backend_id == "live-textual":
+        return _live_textual_target(context)
     raise ValueError(f"unknown TUI backend target: {backend_id}")
 
 
@@ -93,4 +95,37 @@ def _textual_target(context: TargetContext) -> TuiTarget:
         readiness_markers=("OPEN_SQUILLA_TUI_READY",),
         log_paths=(app_log,),
         capability_requirements=("real-terminal", "fake-provider", "live-textual-app"),
+    )
+
+
+def _live_textual_target(context: TargetContext) -> TuiTarget:
+    env = _base_env(context)
+    env.update(
+        {
+            "OPENSQUILLA_TUI_BACKEND": "textual",
+            "OPENSQUILLA_TUI_READY_MARKER": "OPEN_SQUILLA_TUI_READY",
+            "OPENSQUILLA_MEMORY_DREAM_DISABLED": "1",
+            "OPENSQUILLA_OPENROUTER_LIVE_PRICING": "0",
+        }
+    )
+    return TuiTarget(
+        backend_id="live-textual",
+        command=[
+            sys.executable,
+            "-u",
+            "-m",
+            "opensquilla.cli.main",
+            "chat",
+            "--standalone",
+            "--workspace",
+            str(context.project_root),
+            "--workspace-strict",
+            "--timeout",
+            "120",
+        ],
+        env=env,
+        initial_size=context.size,
+        readiness_markers=("OPEN_SQUILLA_TUI_READY",),
+        log_paths=(context.artifact_dir / "logs",),
+        capability_requirements=("real-terminal", "real-cli", "live-textual-app", "tmux"),
     )

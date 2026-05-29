@@ -49,3 +49,26 @@ def test_textual_target_builds_fake_live_app_command(tmp_path: Path) -> None:
     assert target.log_paths == (tmp_path / "textual-app.log",)
     assert "live-textual-app" in target.capability_requirements
     assert "missing-live-app" not in target.capability_requirements
+
+
+def test_live_textual_target_builds_real_cli_command(tmp_path: Path) -> None:
+    context = TargetContext(
+        project_root=Path.cwd(),
+        artifact_dir=tmp_path,
+        scenario_id="live_architecture_prompt",
+        size=TerminalSize(cols=112, rows=34),
+    )
+
+    target = build_tui_target("live-textual", context)
+
+    assert target.backend_id == "live-textual"
+    assert target.command[:3] == [sys.executable, "-u", "-m"]
+    assert target.command[3:6] == ["opensquilla.cli.main", "chat", "--standalone"]
+    assert "--workspace" in target.command
+    assert str(Path.cwd()) in target.command
+    assert "--workspace-strict" in target.command
+    assert target.env["OPENSQUILLA_TUI_BACKEND"] == "textual"
+    assert target.env["OPENSQUILLA_TUI_READY_MARKER"] == "OPEN_SQUILLA_TUI_READY"
+    assert "real-cli" in target.capability_requirements
+    assert "tmux" in target.capability_requirements
+    assert "fake-provider" not in target.capability_requirements
