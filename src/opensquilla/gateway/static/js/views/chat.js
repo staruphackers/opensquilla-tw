@@ -3927,10 +3927,42 @@ const ChatView = (() => {
               // by the cleanup above and needs to be re-inserted
               // with the seed-cached layout.
               const userMsg = _routerFxUserMessageForAssistant(div);
+              const routerIdentity = _routerFxUsageIdentity(savedUsage);
+              // The message-reorder pass above (_appendHistoryElementInOrder)
+              // moves only .msg elements, so any strip already rendered for
+              // this turn is left stranded — usually at the top of the thread.
+              // This includes the just-streamed grid: the done handler promotes
+              // it from live to settled (clearing data-live) BEFORE this sync
+              // runs, so it can no longer be found by a data-live probe and the
+              // old nextSibling check missed it, building a duplicate while the
+              // orphan survived cleanup — the two grids seen in the first chat.
+              // Match this turn's strip(s) by (session, turn index) instead:
+              // keep the one whose routing identity matches, drop any extras
+              // (duplicates accumulated across earlier syncs), and re-anchor the
+              // survivor beneath its user message so the reuse check below sees
+              // it. A turn-index skew that matches nothing here is caught by the
+              // positional backstop near the end of the rebuild.
+              if (userMsg && userMsg.parentNode === _thread) {
+                const ownStrips = Array.from(_thread.querySelectorAll('.router-fx')).filter(
+                  (el) => el.dataset.sessionKey === (_sessionKey || '')
+                    && el.dataset.turnIndex === String(_histUserIdx),
+                );
+                const keep = ownStrips.find(
+                  (el) => el.dataset.routerIdentity === routerIdentity,
+                ) || null;
+                ownStrips.forEach((el) => { if (el !== keep) el.remove(); });
+                if (keep) {
+                  if (userMsg.nextSibling !== keep) {
+                    _thread.insertBefore(keep, userMsg.nextSibling);
+                  }
+                  // Persisted now — drop the live flag (mirrors the done
+                  // handler) so later syncs never re-treat it as in-flight.
+                  delete keep.dataset.live;
+                }
+              }
               const placed = userMsg && userMsg.nextSibling;
               const existingStrip = (placed && placed.classList
                   && placed.classList.contains('router-fx')) ? placed : null;
-              const routerIdentity = _routerFxUsageIdentity(savedUsage);
               const alreadyInPlace = existingStrip
                 && existingStrip.dataset.routerIdentity === routerIdentity;
               if (!alreadyInPlace) {
@@ -3968,6 +4000,23 @@ const ChatView = (() => {
               || prev.getAttribute('data-history-role') === 'user');
         if (!isAnchored) el.remove();
       });
+      // Orphan backstop: the reorder can strand a strip that the per-turn
+      // re-anchor above did not match (e.g. a turn-index skew between the live
+      // DOM user-count and the transcript ordinal). Outside an active stream
+      // every kept strip must sit immediately beneath its user message; drop
+      // any that do not so a stranded grid can never linger at the top of the
+      // thread. Guarded by _isStreaming so an in-flight strip — which the
+      // reorder also strands but whose turn is not yet persisted — is never
+      // removed mid-turn.
+      if (!_isStreaming) {
+        _thread.querySelectorAll('.router-fx').forEach((el) => {
+          const prev = el.previousElementSibling;
+          const anchored = !!prev && !!prev.classList && prev.classList.contains('msg')
+            && (prev.classList.contains('user')
+              || prev.getAttribute('data-history-role') === 'user');
+          if (!anchored) el.remove();
+        });
+      }
       _lastSavingsPopupIdentity = historySavingsIdentity;
       _scrollToBottom();
     } catch {
