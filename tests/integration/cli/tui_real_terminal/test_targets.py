@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from tui_real_terminal.driver import TerminalSize
 from tui_real_terminal.targets import TargetContext, build_tui_target
+
+if TYPE_CHECKING:
+    import pytest
 
 
 def test_terminal_target_builds_fake_app_command(tmp_path: Path) -> None:
@@ -72,3 +76,30 @@ def test_live_textual_target_builds_real_cli_command(tmp_path: Path) -> None:
     assert "real-cli" in target.capability_requirements
     assert "tmux" in target.capability_requirements
     assert "fake-provider" not in target.capability_requirements
+
+
+def test_live_textual_target_preserves_user_config_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    user_config = home / ".opensquilla" / "config.toml"
+    user_config.parent.mkdir(parents=True)
+    user_config.write_text("[llm]\nprovider = 'openrouter'\n", encoding="utf-8")
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    artifact_dir = tmp_path / "artifacts"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("OPENSQUILLA_GATEWAY_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("OPENSQUILLA_STATE_DIR", raising=False)
+    context = TargetContext(
+        project_root=project_root,
+        artifact_dir=artifact_dir,
+        scenario_id="live_architecture_prompt",
+        size=TerminalSize(cols=112, rows=34),
+    )
+
+    target = build_tui_target("live-textual", context)
+
+    assert "OPENSQUILLA_STATE_DIR" not in target.env
+    assert target.env["OPENSQUILLA_GATEWAY_CONFIG_PATH"] == str(user_config)

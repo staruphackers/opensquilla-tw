@@ -160,6 +160,7 @@ class TuiRuntimeConfig:
 
     task_name: str
     queue_max_size: int = 8
+    concurrent_input_during_turn: bool = True
     classify_input: Callable[[str], TuiInputKind] = _default_classify_input
     install_signal_handlers: TuiSignalInstaller = _noop_install_signal_handlers
     event_sink: Any | None = None

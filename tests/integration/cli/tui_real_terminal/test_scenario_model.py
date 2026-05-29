@@ -52,6 +52,8 @@ def test_all_abcd_scenarios_are_declared() -> None:
     assert scenarios["live_architecture_prompt"].requires_tmux is True
     assert scenarios["live_architecture_prompt"].requires_prompt_ready is False
     assert scenarios["live_architecture_prompt"].required_backend_id == "live-textual"
+    assert scenarios["live_architecture_prompt"].steps[-1].value == " in / "
+    assert scenarios["live_architecture_prompt"].steps[-1].timeout_s >= 120
 
 
 def test_launch_scenario_serializes_to_json(tmp_path: Path) -> None:

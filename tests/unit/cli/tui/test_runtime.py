@@ -7,17 +7,24 @@ from typing import Any
 
 import pytest
 
-from opensquilla.cli.tui.contracts import (
+from opensquilla.cli.tui.backend.contracts import (
     TuiInputKind,
     TuiRuntimeConfig,
     TuiRuntimeHooks,
 )
-from opensquilla.cli.tui.runtime import run_tui_runtime
+from opensquilla.cli.tui.backend.runtime import run_tui_runtime
 
 
 class _FakeSurface:
-    def __init__(self, inputs: asyncio.Queue[str | None]) -> None:
+    def __init__(
+        self,
+        inputs: asyncio.Queue[str | None],
+        *,
+        on_next_line: Callable[[], None] | None = None,
+    ) -> None:
         self._inputs = inputs
+        self._on_next_line = on_next_line
+        self.next_line_calls = 0
         self.cancel_callbacks: list[Any] = []
         self.shutdown_callbacks: list[Any] = []
         self.writes: list[str] = []
@@ -25,6 +32,9 @@ class _FakeSurface:
         self.redraw_count = 0
 
     async def next_line(self) -> str | None:
+        self.next_line_calls += 1
+        if self._on_next_line is not None:
+            self._on_next_line()
         return await self._inputs.get()
 
     def set_cancel_callback(self, cb) -> None:  # noqa: ANN001
@@ -56,11 +66,11 @@ def _surface_factory(surface: _FakeSurface):
     return _factory
 
 
-async def _noop_echo(surface: _FakeSurface, text: str) -> None:
+async def _noop_echo(surface: Any, text: str) -> None:
     await surface.write_through(f"echo:{text}")
 
 
-async def _queued_echo(surface: _FakeSurface) -> None:
+async def _queued_echo(surface: Any) -> None:
     await surface.write_through("queued")
 
 
@@ -141,6 +151,44 @@ async def test_runtime_queues_pending_input_and_promotes_fifo() -> None:
 
     assert executed == ["first", "second", "third"]
     assert surface.writes.count("queued") == 2
+
+
+@pytest.mark.asyncio
+async def test_runtime_can_defer_next_input_until_turn_finishes() -> None:
+    inputs: asyncio.Queue[str | None] = asyncio.Queue()
+    surface = _FakeSurface(inputs)
+    executed: list[str] = []
+    first_started = asyncio.Event()
+    finish_first = asyncio.Event()
+
+    async def _dispatch(user_input: str) -> bool:
+        executed.append(user_input)
+        first_started.set()
+        await finish_first.wait()
+        return True
+
+    task = asyncio.create_task(
+        run_tui_runtime(
+            dispatch=_dispatch,
+            surface_factory=_surface_factory(surface),
+            config=_runtime_config(concurrent_input_during_turn=False),
+            hooks=_runtime_hooks(),
+        )
+    )
+
+    await inputs.put("first")
+    await asyncio.wait_for(first_started.wait(), timeout=2.0)
+    for _ in range(20):
+        await asyncio.sleep(0)
+
+    assert surface.next_line_calls == 1
+
+    finish_first.set()
+    await inputs.put(None)
+    await asyncio.wait_for(task, timeout=2.0)
+
+    assert executed == ["first"]
+    assert surface.next_line_calls == 2
 
 
 @pytest.mark.asyncio

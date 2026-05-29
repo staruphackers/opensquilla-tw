@@ -130,15 +130,24 @@ async def run_tui_runtime(
 
         try:
             while True:
-                if next_line_task is None:
+                can_read_input = (
+                    config.concurrent_input_during_turn
+                    or turn_task is None
+                    or turn_task.done()
+                )
+                if next_line_task is None and can_read_input:
                     next_line_task = asyncio.create_task(
                         tui_surface.next_line(),
                         name=f"chat-input-{task_name}",
                     )
 
-                waitables: set[asyncio.Task[Any]] = {next_line_task}
+                waitables: set[asyncio.Task[Any]] = set()
+                if next_line_task is not None:
+                    waitables.add(next_line_task)
                 if turn_task is not None and not turn_task.done():
                     waitables.add(turn_task)
+                if not waitables:
+                    continue
                 await asyncio.wait(waitables, return_when=asyncio.FIRST_COMPLETED)
 
                 if turn_task is not None and turn_task.done():
@@ -155,10 +164,10 @@ async def run_tui_runtime(
                         )
                         turn_task = asyncio.create_task(_run_dispatch(queued), name=task_name)
                         continue
-                    if not next_line_task.done():
+                    if next_line_task is None or not next_line_task.done():
                         continue
 
-                if not next_line_task.done():
+                if next_line_task is None or not next_line_task.done():
                     continue
                 user_input = next_line_task.result()
                 next_line_task = None

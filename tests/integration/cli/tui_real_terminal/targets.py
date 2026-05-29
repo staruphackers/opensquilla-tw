@@ -42,15 +42,31 @@ def build_tui_target(backend_id: str, context: TargetContext) -> TuiTarget:
     raise ValueError(f"unknown TUI backend target: {backend_id}")
 
 
-def _base_env(context: TargetContext) -> dict[str, str]:
+def _base_env(context: TargetContext, *, isolate_state: bool = True) -> dict[str, str]:
     env = os.environ.copy()
     src_path = str(context.project_root / "src")
     env["PYTHONPATH"] = src_path + os.pathsep + env.get("PYTHONPATH", "")
-    env["OPENSQUILLA_STATE_DIR"] = str(context.artifact_dir / "state")
+    if isolate_state:
+        env["OPENSQUILLA_STATE_DIR"] = str(context.artifact_dir / "state")
     env["OPENSQUILLA_LOG_DIR"] = str(context.artifact_dir / "logs")
     env["OPENSQUILLA_TURN_CALL_LOG"] = "0"
     env.setdefault("TERM", "xterm-256color")
     return env
+
+
+def _host_gateway_config_path(project_root: Path) -> str:
+    explicit = os.environ.get("OPENSQUILLA_GATEWAY_CONFIG_PATH", "").strip()
+    if explicit:
+        return explicit
+
+    cwd_config = project_root / "opensquilla.toml"
+    if cwd_config.is_file():
+        return str(cwd_config)
+
+    from opensquilla.paths import default_opensquilla_home  # type: ignore[import-untyped]
+
+    user_config = default_opensquilla_home() / "config.toml"
+    return str(user_config) if user_config.is_file() else ""
 
 
 def _terminal_target(context: TargetContext) -> TuiTarget:
@@ -99,7 +115,7 @@ def _textual_target(context: TargetContext) -> TuiTarget:
 
 
 def _live_textual_target(context: TargetContext) -> TuiTarget:
-    env = _base_env(context)
+    env = _base_env(context, isolate_state=False)
     env.update(
         {
             "OPENSQUILLA_TUI_BACKEND": "textual",
@@ -108,6 +124,9 @@ def _live_textual_target(context: TargetContext) -> TuiTarget:
             "OPENSQUILLA_OPENROUTER_LIVE_PRICING": "0",
         }
     )
+    config_path = _host_gateway_config_path(context.project_root)
+    if config_path:
+        env["OPENSQUILLA_GATEWAY_CONFIG_PATH"] = config_path
     return TuiTarget(
         backend_id="live-textual",
         command=[

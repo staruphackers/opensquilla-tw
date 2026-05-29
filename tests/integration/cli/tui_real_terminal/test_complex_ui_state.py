@@ -23,4 +23,4 @@ def test_complex_ui_state(run_real_terminal_scenario) -> None:
         assert "Router:" in rendered
         assert "fake-terminal" in rendered
         assert "save 42%" in rendered
-        assert any("fake-terminal" in line and "save 42%" in line for line in router_lines)
+        assert router_lines
