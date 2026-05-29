@@ -74,10 +74,14 @@ async def test_textual_output_handle_writes_and_streams_to_transcript() -> None:
     await output.write_through("one-shot payload")
     async with output.stream_output() as write:
         write("chunk-a")
+        assert "chunk-a" in app.transcript_text
+        assert app.active_stream_text == "chunk-a"
         write("chunk-b")
+        assert app.active_stream_text == "chunk-achunk-b"
 
     assert "one-shot payload" in app.transcript_text
     assert "chunk-achunk-b" in app.transcript_text
+    assert app.active_stream_text == ""
 
 
 def test_textual_output_toolbar_invalidates_status() -> None:

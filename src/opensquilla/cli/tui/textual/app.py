@@ -47,8 +47,10 @@ class TextualChatApp(App[None]):
         self._shutdown_callback: Callable[[], None] | None = None
         self._status_text = self._initial_status()
         self._transcript_text = ""
+        self._active_stream_text = ""
         self._status_widget: Static | None = None
         self._transcript_log: RichLog | None = None
+        self._active_stream_widget: Static | None = None
         self._input: Input | None = None
 
     @property
@@ -59,12 +61,18 @@ class TextualChatApp(App[None]):
     def transcript_text(self) -> str:
         return self._transcript_text
 
+    @property
+    def active_stream_text(self) -> str:
+        return self._active_stream_text
+
     def compose(self) -> ComposeResult:
         yield Header()
         self._status_widget = Static(self._status_text, id="status")
         yield self._status_widget
         self._transcript_log = RichLog(id="transcript", wrap=True)
         yield self._transcript_log
+        self._active_stream_widget = Static("", id="active-stream")
+        yield self._active_stream_widget
         self._input = Input(placeholder="you", id="input")
         yield self._input
         yield Footer()
@@ -115,6 +123,23 @@ class TextualChatApp(App[None]):
         self._transcript_text += payload
         if self._transcript_log is not None:
             self._transcript_log.write(payload)
+
+    def append_stream_output(self, payload: str) -> None:
+        self._transcript_text += payload
+        self._active_stream_text += payload
+        if self._active_stream_widget is not None:
+            self._active_stream_widget.update(self._active_stream_text)
+        self.refresh()
+
+    def flush_stream_output(self) -> None:
+        if not self._active_stream_text:
+            return
+        if self._transcript_log is not None:
+            self._transcript_log.write(self._active_stream_text)
+        self._active_stream_text = ""
+        if self._active_stream_widget is not None:
+            self._active_stream_widget.update("")
+        self.refresh()
 
     def set_status(self, status: str | None = None) -> None:
         self._status_text = status if status is not None else self._initial_status()

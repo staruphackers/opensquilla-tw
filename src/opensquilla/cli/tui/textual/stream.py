@@ -12,13 +12,11 @@ from opensquilla.cli.tui.textual.app import TextualChatApp
 async def textual_stream_output(
     app: TextualChatApp,
 ) -> AsyncIterator[Callable[[str], None]]:
-    chunks: list[str] = []
-
     def write(payload: str) -> None:
-        chunks.append(payload)
+        if payload:
+            app.append_stream_output(payload)
 
     try:
         yield write
     finally:
-        if chunks:
-            app.append_output("".join(chunks))
+        app.flush_stream_output()
