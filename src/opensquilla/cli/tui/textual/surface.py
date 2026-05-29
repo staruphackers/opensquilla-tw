@@ -38,10 +38,11 @@ class TextualOutputHandle:
 
     def invalidate(self) -> None:
         router_hud = self._toolbar.get("router_hud")
-        if router_hud is not None:
-            self._app.set_status(str(router_hud))
-            return
-        self._app.refresh_ui()
+        router_hud_style = self._toolbar.get("router_hud_style")
+        self._app.set_router_hud(
+            str(router_hud) if router_hud is not None else None,
+            style=str(router_hud_style) if router_hud_style is not None else None,
+        )
 
 
 class TextualSurface:

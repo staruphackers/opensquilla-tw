@@ -35,11 +35,13 @@ def test_all_abcd_scenarios_are_declared() -> None:
 
     assert set(scenarios) == {
         "launch_input_loop",
+        "cjk_input_loop",
         "long_streaming",
         "complex_ui_state",
         "terminal_changes",
     }
     assert scenarios["launch_input_loop"].family == "launch_and_input_loop"
+    assert scenarios["cjk_input_loop"].family == "launch_and_input_loop"
     assert scenarios["long_streaming"].family == "long_streaming_output"
     assert scenarios["complex_ui_state"].family == "complex_ui_state"
     assert scenarios["terminal_changes"].family == "terminal_changes"

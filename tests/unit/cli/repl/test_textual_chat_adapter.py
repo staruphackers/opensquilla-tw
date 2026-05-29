@@ -128,6 +128,7 @@ async def test_textual_chat_runtime_uses_textual_native_echo_hooks(
     async def fake_run_tui_runtime(**kwargs: Any):
         hooks = kwargs["hooks"]
         await hooks.on_user_input_echo(fake_surface, "hello textual")
+        await hooks.on_user_input_echo(fake_surface, "中文输入 CJK混合ASCII")
         await hooks.on_queued_turn_start(fake_surface)
         return object()
 
@@ -145,8 +146,9 @@ async def test_textual_chat_runtime_uses_textual_native_echo_hooks(
     )
 
     joined_writes = "".join(fake_surface.writes)
-    assert "you" in joined_writes
+    assert "你 / you" in joined_writes
     assert "hello textual" in joined_writes
+    assert "中文输入 CJK混合ASCII" in joined_writes
     assert "running queued input" in joined_writes
 
 

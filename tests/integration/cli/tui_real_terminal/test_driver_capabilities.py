@@ -215,7 +215,7 @@ def test_tmux_session_uses_owned_session_commands(
     ]
     paste_call = next(call for call in calls if call[0][:3] == ["tmux", "load-buffer", "-b"])
     assert paste_call[1]["input"] == "line 1\nline 2"
-    assert ["tmux", "resize-pane", "-t", "opensquilla-tui-owned-1", "-x", "120", "-y", "40"] in [
+    assert ["tmux", "resize-window", "-t", "opensquilla-tui-owned-1", "-x", "120", "-y", "40"] in [
         call for call, _ in calls
     ]
     assert frame.text == "ready screen"

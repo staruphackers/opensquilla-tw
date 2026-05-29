@@ -180,14 +180,17 @@ class TmuxTerminalSession(_BaseTerminalSession):
             input=text,
             text=True,
         )
-        subprocess.run(["tmux", "paste-buffer", "-t", self.run_id, "-b", self.run_id], check=True)
+        subprocess.run(
+            ["tmux", "paste-buffer", "-p", "-t", self.run_id, "-b", self.run_id],
+            check=True,
+        )
 
     def resize(self, size: TerminalSize) -> None:
         self.size = size
         subprocess.run(
             [
                 "tmux",
-                "resize-pane",
+                "resize-window",
                 "-t",
                 self.run_id,
                 "-x",
@@ -293,7 +296,8 @@ class PtyTerminalSession(_BaseTerminalSession):
         self._write(sequences.get(key, key.encode("utf-8")))
 
     def paste(self, text: str) -> None:
-        self._write(text.encode("utf-8"))
+        payload = f"\x1b[200~{text}\x1b[201~"
+        self._write(payload.encode("utf-8"))
 
     def resize(self, size: TerminalSize) -> None:
         self.size = size

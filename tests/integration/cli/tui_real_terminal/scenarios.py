@@ -77,6 +77,27 @@ def all_scenarios() -> tuple[TuiScenario, ...]:
             expected_text=("fake-response:hello harness", "you"),
         ),
         TuiScenario(
+            scenario_id="cjk_input_loop",
+            family="launch_and_input_loop",
+            initial_size=TerminalSize(cols=100, rows=30),
+            steps=(
+                ScenarioStep("wait-ready", "wait_text", "OPEN_SQUILLA_TUI_READY", "ready"),
+                ScenarioStep(
+                    "send-message",
+                    "send_text",
+                    "中文输入 CJK混合ASCII",
+                    "after-input",
+                ),
+                ScenarioStep(
+                    "wait-response",
+                    "wait_text",
+                    "fake-response:中文输入 CJK混合ASCII",
+                    "after-response",
+                ),
+            ),
+            expected_text=("fake-response:中文输入 CJK混合ASCII", "CJK混合ASCII", "you"),
+        ),
+        TuiScenario(
             scenario_id="long_streaming",
             family="long_streaming_output",
             initial_size=TerminalSize(cols=100, rows=30),
@@ -248,6 +269,7 @@ def _run_step(session: RealTerminalSession, step: ScenarioStep) -> TerminalFrame
     if step.action == "resize":
         cols, rows = step.value.split("x", 1)
         session.resize(TerminalSize(cols=int(cols), rows=int(rows)))
+        time.sleep(0.1)
         return session.capture_text(checkpoint)
     if step.action == "capture":
         return session.capture_text(checkpoint)

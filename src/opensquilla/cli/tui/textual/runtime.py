@@ -25,6 +25,7 @@ from opensquilla.cli.tui.backend.contracts import (
 from opensquilla.cli.tui.backend.output_binding import TuiOutputBinding
 from opensquilla.cli.tui.backend.plugins import TuiPluginManager
 from opensquilla.cli.tui.backend.runtime import run_tui_runtime
+from opensquilla.cli.tui.textual.app import USER_ECHO_LABEL
 from opensquilla.cli.tui.textual.surface import open_textual_surface
 from opensquilla.engine.commands import Surface
 
@@ -97,7 +98,7 @@ async def echo_textual_user_input(tui_surface: TuiSurface, text: str) -> None:
     """Echo accepted user input without using the terminal Rich console."""
     if not text.strip():
         return
-    await tui_surface.write_through(f"\nyou\n{text}\n")
+    await tui_surface.write_through(f"\n{USER_ECHO_LABEL}\n{text}\n")
 
 
 async def echo_textual_queued_turn_start(tui_surface: TuiSurface) -> None:
