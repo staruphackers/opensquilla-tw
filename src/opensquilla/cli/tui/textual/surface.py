@@ -218,6 +218,9 @@ class InlineTextualSurface:
     def append_output(self, payload: str) -> None:
         payload = normalize_textual_output_payload(payload)
         self._transcript_text += payload
+        app = self._current_app
+        if app is not None and app.write_above_inline_chrome(payload):
+            return
         if not write_inline_terminal_payload(payload):
             print(payload, end="", flush=True)
 

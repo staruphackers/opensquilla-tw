@@ -9,7 +9,9 @@ from textual.widgets import Static
 from opensquilla.cli.tui.backend.contracts import TuiOutputHandle, TuiSurface
 from opensquilla.cli.tui.textual import (
     CHAT_INPUT_PLACEHOLDER,
+    COMPLETED_OUTPUT_PREFIX,
     ROUTER_HUD_DEFAULT,
+    RUNNING_OUTPUT_PREFIX,
     USER_ECHO_LABEL,
     ChatInput,
     TextualChatApp,
@@ -23,6 +25,7 @@ from opensquilla.cli.tui.textual import (
     render_textual_output_line,
     render_textual_output_payload,
 )
+from opensquilla.cli.tui.textual.surface import InlineTextualSurface
 from opensquilla.engine.commands import Surface
 
 
@@ -96,6 +99,37 @@ async def test_textual_output_handle_writes_and_streams_to_transcript() -> None:
     assert "one-shot payload" in app.transcript_text
     assert "chunk-a\nchunk-b" in app.transcript_text
     assert app.active_stream_text == ""
+
+
+def test_inline_textual_surface_prints_through_active_app_chrome(monkeypatch) -> None:
+    surface = InlineTextualSurface(
+        surface=Surface.CLI_GATEWAY,
+        model="fake-model",
+        session_id="fake-session",
+        ready_marker=None,
+        print_ready_marker=False,
+        inline=True,
+        inline_no_clear=True,
+    )
+    app = TextualChatApp(
+        model="fake-model",
+        session_id="fake-session",
+        ready_marker=None,
+        print_ready_marker=False,
+    )
+    writes: list[str] = []
+
+    def fake_write_above_inline_chrome(payload: str) -> bool:
+        writes.append(payload)
+        return True
+
+    monkeypatch.setattr(app, "write_above_inline_chrome", fake_write_above_inline_chrome)
+    surface._current_app = app
+
+    surface.append_output("hello from turn\n")
+
+    assert writes == ["hello from turn\n"]
+    assert "hello from turn" in surface.transcript_text
 
 
 @pytest.mark.asyncio
@@ -186,6 +220,28 @@ def test_textual_output_line_styles_distinguish_tool_thinking_and_error_content(
     assert "#ef6461" in str(render_textual_output_line("error: denied").style)
 
 
+def test_textual_output_lines_prefix_running_and_completed_work() -> None:
+    tool_call = render_textual_output_line("▸ read_file /tmp/example.py")
+    tool_result = render_textual_output_line("✓ read_file 12 lines")
+    assistant_start = render_textual_output_line("◢ squilla")
+
+    assert tool_call.plain.startswith(f"{RUNNING_OUTPUT_PREFIX} ")
+    assert assistant_start.plain.startswith(f"{RUNNING_OUTPUT_PREFIX} ")
+    assert tool_result.plain.startswith(f"{COMPLETED_OUTPUT_PREFIX} ")
+    assert "#38bdf8" in str(tool_call.style)
+    assert "#7d8794" in str(tool_result.style)
+
+
+def test_textual_payload_rendering_strips_rich_ansi_before_classifying() -> None:
+    rendered = render_textual_output_payload(
+        "\x1b[38;2;245;102;0m▸\x1b[0m \x1b[2mread_file fixture.py\x1b[0m\n"
+        "\x1b[2m│       #router-hud { border: round #365b48; }\x1b[0m"
+    )
+
+    assert rendered[0].plain == f"{RUNNING_OUTPUT_PREFIX} read_file fixture.py"
+    assert rendered[1].plain == "│       #router-hud { border: round #365b48; }"
+
+
 def test_textual_tool_payload_rendering_keeps_compact_tool_rows_readable() -> None:
     rendered = render_textual_output_payload(
         "\n".join(
@@ -199,9 +255,11 @@ def test_textual_tool_payload_rendering_keeps_compact_tool_rows_readable() -> No
     )
     styles = {line.plain: str(line.style) for line in rendered if line.plain}
 
-    assert "#c9964b" in styles["router route standard -> fake-terminal 99% save 42%"]
+    assert "#c9964b" in styles[
+        f"{RUNNING_OUTPUT_PREFIX} router route standard -> fake-terminal 99% save 42%"
+    ]
     assert "#38bdf8" in styles[
-        "▸ read_file /Users/cwan0785/opensquilla/src/opensquilla"
+        f"{RUNNING_OUTPUT_PREFIX} read_file /Users/cwan0785/opensquilla/src/opensquilla"
     ]
     assert "#7d8794" in styles["tool_output read_file 312 lines omitted"]
     assert "#ef6461" in styles["✗ exec_command: denied"]
@@ -223,22 +281,23 @@ def test_textual_payload_rendering_keeps_user_text_visually_distinct() -> None:
 
 
 def test_textual_layout_uses_custom_bilingual_chat_surface() -> None:
-    assert "输入消息" in CHAT_INPUT_PLACEHOLDER
-    assert USER_ECHO_LABEL == "你 / you"
+    assert CHAT_INPUT_PLACEHOLDER == "send a massage"
+    assert USER_ECHO_LABEL != "你 / you"
     assert "#shell" in TextualChatApp.CSS
-    assert "#workspace" in TextualChatApp.CSS
     assert "#composer" in TextualChatApp.CSS
+    assert "#input-label" not in TextualChatApp.CSS
     assert "#router-hud" in TextualChatApp.CSS
     assert "#status" in TextualChatApp.CSS
 
 
-def test_textual_layout_uses_terminal_scrollback_scrollbars_and_round_borders() -> None:
+def test_textual_layout_lets_terminal_own_scrollback_and_uses_plain_input() -> None:
     css = TextualChatApp.CSS
 
-    assert "overflow-y: auto" in css
-    assert "scrollbar-visibility: visible" in css
     assert "border: round" in css
-    assert "border: solid" not in css
+    assert "scrollbar" not in css
+    assert "overflow-y" not in css
+    assert "background: transparent" in css
+    assert "#input-label" not in css
 
 
 @pytest.mark.asyncio

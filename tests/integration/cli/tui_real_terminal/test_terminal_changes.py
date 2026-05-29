@@ -35,7 +35,9 @@ def test_textual_cjk_paste_is_visible_and_submitted(
         line for line in after_narrow.read_text().splitlines() if "Router:" in line
     ]
     assert router_lines
-    assert all(line.count("│") >= 4 for line in router_lines)
+    assert all("send a massage" in line for line in router_lines)
+    assert all("│" not in line for line in router_lines)
+    assert all("你 / you" not in line for line in router_lines)
 
     after_paste = result.run_dir / "frames" / "003-after-paste.txt"
     assert "CJK混合ASCII" in after_paste.read_text()

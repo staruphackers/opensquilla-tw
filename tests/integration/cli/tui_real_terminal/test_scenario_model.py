@@ -11,6 +11,7 @@ if str(HARNESS_PARENT) not in sys.path:
     sys.path.insert(0, str(HARNESS_PARENT))
 
 from tui_real_terminal.assertions import (  # noqa: E402
+    assert_no_inline_prompt_chrome_collision,
     assert_no_raw_ansi_leakage,
     assert_prompt_ready,
     assert_visible_text,
@@ -52,8 +53,13 @@ def test_all_abcd_scenarios_are_declared() -> None:
     assert scenarios["live_architecture_prompt"].requires_tmux is True
     assert scenarios["live_architecture_prompt"].requires_prompt_ready is False
     assert scenarios["live_architecture_prompt"].required_backend_id == "live-textual"
-    assert scenarios["live_architecture_prompt"].steps[-1].value == " in / "
-    assert scenarios["live_architecture_prompt"].steps[-1].timeout_s >= 120
+    assert scenarios["live_architecture_prompt"].steps[-2].action == "wait_any_text"
+    assert " · " in scenarios["live_architecture_prompt"].steps[-2].value
+    assert "timed out" in scenarios["live_architecture_prompt"].steps[-2].value
+    assert scenarios["live_architecture_prompt"].steps[-2].timeout_s >= 120
+    assert scenarios["live_architecture_prompt"].steps[-1].action == "capture"
+    assert scenarios["live_architecture_prompt"].steps[-1].timeout_s >= 0.1
+    assert "send a massage" in scenarios["live_architecture_prompt"].expected_text
 
 
 def test_launch_scenario_serializes_to_json(tmp_path: Path) -> None:
@@ -83,6 +89,19 @@ def test_prompt_ready_accepts_visible_you_prompt() -> None:
     frame = TerminalFrame("ready", "◢ you  ", 1, TerminalSize())
 
     assert_prompt_ready(frame)
+
+
+def test_inline_prompt_chrome_collision_rejects_partial_prompt_redraw() -> None:
+    frame = TerminalFrame("after-turn", " │ s### heading\nbody", 1, TerminalSize())
+
+    with pytest.raises(AssertionError, match="inline prompt chrome overlapped"):
+        assert_no_inline_prompt_chrome_collision(frame)
+
+
+def test_inline_prompt_chrome_collision_accepts_placeholder_row() -> None:
+    frame = TerminalFrame("ready", " │ send a massage │", 1, TerminalSize())
+
+    assert_no_inline_prompt_chrome_collision(frame)
 
 
 def test_ansi_leakage_assertion_rejects_raw_escape() -> None:

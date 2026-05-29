@@ -71,6 +71,7 @@ class TuiRenderer(Protocol):
         success: bool,
         elapsed: float | None = None,
         error: str | None = None,
+        result: object | None = None,
     ) -> None: ...
 
     async def astatus(self, message: str, *, style: str = "dim") -> None: ...

@@ -100,12 +100,14 @@ class TerminalRenderer:
         success: bool,
         elapsed: float | None = None,
         error: str | None = None,
+        result: object | None = None,
     ) -> None:
         self._renderer.tool_finished(
             tool_use_id,
             success=success,
             elapsed=elapsed,
             error=error,
+            result=result,
         )
 
     async def atool_finished(
@@ -115,6 +117,7 @@ class TerminalRenderer:
         success: bool,
         elapsed: float | None = None,
         error: str | None = None,
+        result: object | None = None,
     ) -> None:
         await self._call_async_or_sync(
             "atool_finished",
@@ -123,6 +126,7 @@ class TerminalRenderer:
             success=success,
             elapsed=elapsed,
             error=error,
+            result=result,
         )
 
     def status(self, message: str, *, style: str = "dim") -> None:

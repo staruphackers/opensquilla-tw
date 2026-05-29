@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from collections.abc import Iterator
@@ -21,6 +22,7 @@ __all__ = [
     "UsageSummary",
     "WaitingIndicator",
     "_summarize_args",
+    "_summarize_result",
 ]
 
 # ESC-introduced terminal sequences: CSI (cursor / SGR / mode), OSC (title,
@@ -146,6 +148,37 @@ def _summarize_args(name: str, args: dict | None) -> str:
     return ""
 
 
+def _summarize_result(result: Any | None, *, max_chars: int = 220) -> str:
+    """Return a compact, terminal-safe tool result preview."""
+    if result is None:
+        return ""
+    if isinstance(result, str):
+        text = result
+    else:
+        try:
+            text = json.dumps(result, ensure_ascii=False, sort_keys=True)
+        except TypeError:
+            text = str(result)
+    text = _sanitize_stream_text(text).strip()
+    if not text:
+        return ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    preview = " / ".join(lines[:3])
+    if len(lines) > 3:
+        preview += f" / ... {len(lines) - 3} more lines"
+    if len(preview) > max_chars:
+        preview = f"{preview[: max_chars - 1].rstrip()}…"
+    return preview
+
+
+def _start_on_fresh_line(payload: str) -> str:
+    if payload and not payload.startswith(("\n", "\r")):
+        return f"\n{payload}"
+    return payload
+
+
 class _ToolCallStrip:
     """Coalesces repeated tool calls of the same name into a summary line.
 
@@ -159,7 +192,7 @@ class _ToolCallStrip:
     """
 
     def __init__(self) -> None:
-        self._pending: dict[str, tuple[str, str, float]] = {}  # id → (name, summary, start_ts)
+        self._pending: dict[str, tuple[str, str, float, int]] = {}
         self._run_name: str | None = None
         self._run_count: int = 0
         self._run_start: float = 0.0
@@ -177,14 +210,14 @@ class _ToolCallStrip:
         if self._run_name is not None and self._run_count > 3:
             elapsed = time.monotonic() - self._run_start
             payload += _capture_console_print(
-                f"[{ACCENT}]▸[/] [dim]{self._run_name} "
+                f"[{ACCENT}]✓[/] [dim]{self._run_name} "
                 f"×{self._run_count} total {elapsed:.1f}s[/dim]"
             )
         self._run_name = None
         self._run_count = 0
         self._run_start = 0.0
         self._coalesced = False
-        return payload
+        return _start_on_fresh_line(payload)
 
     def _flush_run(self) -> None:
         self._write_payload(self._flush_run_payload())
@@ -198,8 +231,6 @@ class _ToolCallStrip:
         payload = ""
         ts = time.monotonic()
         tid = tool_use_id or f"_anon_{ts}"
-        self._pending[tid] = (name, summary, ts)
-
         if self._run_name != name:
             payload += self._flush_run_payload()
             self._run_name = name
@@ -207,6 +238,7 @@ class _ToolCallStrip:
             self._run_start = ts
 
         self._run_count += 1
+        self._pending[tid] = (name, summary, ts, self._run_count)
 
         if self._run_count <= 2:
             suffix = f" {summary}" if summary else ""
@@ -215,7 +247,7 @@ class _ToolCallStrip:
             self._coalesced = True
             payload += _capture_console_print(f"[{ACCENT}]▸[/] [dim]{name} ×3[/dim]")
         # count > 3 and already coalesced: suppress output, keep counting
-        return payload
+        return _start_on_fresh_line(payload)
 
     def record_start(self, name: str, summary: str, tool_use_id: str | None) -> None:
         self._write_payload(self.record_start_payload(name, summary, tool_use_id))
@@ -227,6 +259,7 @@ class _ToolCallStrip:
         success: bool,
         elapsed: float | None = None,
         error: str | None = None,
+        result: Any | None = None,
     ) -> str:
         payload = ""
         entry = self._pending.pop(tool_use_id or "", None)
@@ -236,7 +269,14 @@ class _ToolCallStrip:
                 payload += self._flush_run_payload()
             name = entry[0] if entry else (tool_use_id or "tool")
             payload += _capture_console_print(f"[red]✗[/] [dim]{name}: {error}[/dim]")
-        return payload
+        elif success and entry is not None and entry[3] <= 2:
+            name = entry[0]
+            elapsed_suffix = f" {elapsed:.1f}s" if elapsed is not None else ""
+            payload += _capture_console_print(f"[{ACCENT}]✓[/] [dim]{name}{elapsed_suffix}[/dim]")
+            result_summary = _summarize_result(result)
+            if result_summary:
+                payload += _capture_console_print(f"[dim]  {result_summary}[/dim]")
+        return _start_on_fresh_line(payload)
 
     def record_finish(
         self,
@@ -245,6 +285,7 @@ class _ToolCallStrip:
         success: bool,
         elapsed: float | None = None,
         error: str | None = None,
+        result: Any | None = None,
     ) -> None:
         self._write_payload(
             self.record_finish_payload(
@@ -252,6 +293,7 @@ class _ToolCallStrip:
                 success=success,
                 elapsed=elapsed,
                 error=error,
+                result=result,
             )
         )
 
@@ -580,12 +622,14 @@ class StreamingRenderer:
         success: bool,
         elapsed: float | None = None,
         error: str | None = None,
+        result: Any | None = None,
     ) -> None:
         self._strip.record_finish(
             tool_use_id,
             success=success,
             elapsed=elapsed,
             error=error,
+            result=result,
         )
 
     async def atool_finished(
@@ -595,12 +639,14 @@ class StreamingRenderer:
         success: bool,
         elapsed: float | None = None,
         error: str | None = None,
+        result: Any | None = None,
     ) -> None:
         payload = self._strip.record_finish_payload(
             tool_use_id,
             success=success,
             elapsed=elapsed,
             error=error,
+            result=result,
         )
         await self._awrite_payload(payload)
 
@@ -647,15 +693,13 @@ class StreamingRenderer:
             payload += _capture_console_print("[yellow]turn cancelled[/yellow]")
         if not self._visible_output and not self.buffer:
             return payload
-        # Two-line footer: meta on the first line (model · elapsed), usage
-        # on the second (tokens · cost). Splitting keeps the metadata
-        # block from wrapping into 3-4 display lines on 80-100 column CJK
-        # terminals where every Chinese character occupies two columns.
         meta_line = self._footer_meta_line(usage, elapsed)
         usage_line = self._footer_usage_line(usage)
-        if meta_line:
+        if meta_line and usage_line:
+            payload += _capture_console_print(f"[dim]{meta_line} · {usage_line}[/dim]")
+        elif meta_line:
             payload += _capture_console_print(f"[dim]{meta_line}[/dim]")
-        if usage_line:
+        elif usage_line:
             payload += _capture_console_print(f"[dim]{usage_line}[/dim]")
         return payload
 

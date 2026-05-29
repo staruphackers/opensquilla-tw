@@ -173,3 +173,33 @@ def test_error_on_finish_prints_error_row() -> None:
 
     lines = [line for line in buf.getvalue().splitlines() if line.strip()]
     assert any("permission denied" in line for line in lines)
+
+
+def test_success_on_finish_prints_subtle_result_detail() -> None:
+    buf = StringIO()
+    capture = Console(file=buf, highlight=False, force_terminal=False, no_color=True)
+
+    from opensquilla.cli.repl import stream as stream_mod
+
+    original = stream_mod.console
+    stream_mod.console = capture  # type: ignore[assignment]
+    try:
+        renderer = StreamingRenderer()
+        renderer.tool_start(
+            "exec_command",
+            {"command": "git status --short"},
+            "id-1",
+        )
+        renderer.tool_finished(
+            "id-1",
+            success=True,
+            elapsed=0.42,
+            result="M src/opensquilla/cli/tui/textual/app.py\n",
+        )
+    finally:
+        stream_mod.console = original
+
+    lines = [line for line in buf.getvalue().splitlines() if line.strip()]
+    assert any("exec_command" in line and "git status --short" in line for line in lines)
+    assert any("✓" in line and "exec_command" in line and "0.4s" in line for line in lines)
+    assert any("M src/opensquilla/cli/tui/textual/app.py" in line for line in lines)

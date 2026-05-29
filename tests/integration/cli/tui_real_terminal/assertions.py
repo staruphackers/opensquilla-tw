@@ -23,8 +23,21 @@ def assert_visible_text(frame: TerminalFrame, expected: str) -> None:
 
 
 def assert_prompt_ready(frame: TerminalFrame) -> None:
-    if "you" not in frame.text:
+    if "you" not in frame.text and "send a massage" not in frame.text:
         raise AssertionError(f"{frame.checkpoint}: prompt is not visibly ready:\n{frame.text}")
+
+
+def assert_no_inline_prompt_chrome_collision(frame: TerminalFrame) -> None:
+    for line in frame.text.splitlines():
+        if re.match(r"^\s*│\s+s(?:[#|*⠋✓✗]|[\u4e00-\u9fff])", line):
+            raise AssertionError(
+                f"{frame.checkpoint}: inline prompt chrome overlapped output:\n{frame.text}"
+            )
+        resize_checkpoint = "narrow" in frame.checkpoint or "wide" in frame.checkpoint
+        if line.count("send a massage") > 1 and not resize_checkpoint:
+            raise AssertionError(
+                f"{frame.checkpoint}: inline prompt chrome was duplicated:\n{frame.text}"
+            )
 
 
 def assert_no_traceback(frame: TerminalFrame) -> None:

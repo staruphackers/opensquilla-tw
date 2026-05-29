@@ -138,7 +138,7 @@ async def run_textual_chat_runtime(
         config=TuiRuntimeConfig(
             task_name=surface_task_name(surface),
             queue_max_size=queue_max_size,
-            concurrent_input_during_turn=False,
+            concurrent_input_during_turn=True,
             classify_input=classify_chat_input,
         ),
         hooks=TuiRuntimeHooks(

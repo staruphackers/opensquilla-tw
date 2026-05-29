@@ -668,7 +668,7 @@ class _RecordingRenderer:
         self.finalized = False
         self.statuses: list[str] = []
         self.tool_starts: list[tuple[str, object, str | None]] = []
-        self.tool_finishes: list[tuple[str | None, bool]] = []
+        self.tool_finishes: list[tuple[str | None, bool, object | None]] = []
         _RecordingRenderer.instances.append(self)
 
     def __enter__(self) -> _RecordingRenderer:
@@ -702,8 +702,9 @@ class _RecordingRenderer:
         success: bool,
         elapsed: float | None = None,
         error: str | None = None,
+        result: object | None = None,
     ) -> None:
-        self.tool_finishes.append((tool_use_id, success))
+        self.tool_finishes.append((tool_use_id, success, result))
 
     def status(self, message: str, **_kwargs) -> None:
         self.statuses.append(message)
@@ -1076,9 +1077,9 @@ async def test_standalone_turnrunner_wires_tool_strip(monkeypatch) -> None:
         ("execute_code", None, "call-3"),
     ]
     assert renderer.tool_finishes == [
-        ("call-1", True),
-        ("call-2", False),
-        ("call-3", False),
+        ("call-1", True, "2"),
+        ("call-2", False, "boom"),
+        ("call-3", False, "approval pending"),
     ]
 
 

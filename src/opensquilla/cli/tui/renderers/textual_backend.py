@@ -61,8 +61,9 @@ class TextualReplayRenderer:
         success: bool,
         elapsed: float | None = None,
         error: str | None = None,
+        result: object | None = None,
     ) -> None:
-        del elapsed, error
+        del elapsed, error, result
         status = "done" if success else "error"
         self.tool_events.append((status, tool_use_id))
 

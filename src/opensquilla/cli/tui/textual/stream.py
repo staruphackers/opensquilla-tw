@@ -27,7 +27,7 @@ async def textual_stream_output(
                 line, buffered = buffered.split("\n", 1)
                 app.append_stream_output(f"{line}\n")
             if len(buffered) >= 96:
-                app.append_stream_output(f"{buffered.rstrip()}\n")
+                app.append_stream_output(buffered)
                 buffered = ""
 
     try:

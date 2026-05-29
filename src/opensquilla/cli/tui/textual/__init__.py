@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from opensquilla.cli.tui.textual.app import (
     CHAT_INPUT_PLACEHOLDER,
+    COMPLETED_OUTPUT_PREFIX,
     ROUTER_HUD_DEFAULT,
+    RUNNING_OUTPUT_PREFIX,
     USER_ECHO_LABEL,
     ChatInput,
     TextualChatApp,
@@ -23,7 +25,9 @@ from opensquilla.cli.tui.textual.surface import (
 
 __all__ = [
     "CHAT_INPUT_PLACEHOLDER",
+    "COMPLETED_OUTPUT_PREFIX",
     "ROUTER_HUD_DEFAULT",
+    "RUNNING_OUTPUT_PREFIX",
     "USER_ECHO_LABEL",
     "ChatInput",
     "TextualChatApp",

@@ -192,6 +192,85 @@ async def test_runtime_can_defer_next_input_until_turn_finishes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_runtime_can_keep_bottom_input_live_during_turn() -> None:
+    inputs: asyncio.Queue[str | None] = asyncio.Queue()
+    second_input_started = asyncio.Event()
+    surface = _FakeSurface(
+        inputs,
+        on_next_line=lambda: second_input_started.set()
+        if surface.next_line_calls >= 2
+        else None,
+    )
+    first_started = asyncio.Event()
+    finish_first = asyncio.Event()
+    executed: list[str] = []
+
+    async def _dispatch(user_input: str) -> bool:
+        executed.append(user_input)
+        first_started.set()
+        await finish_first.wait()
+        return True
+
+    task = asyncio.create_task(
+        run_tui_runtime(
+            dispatch=_dispatch,
+            surface_factory=_surface_factory(surface),
+            config=_runtime_config(concurrent_input_during_turn=True),
+            hooks=_runtime_hooks(),
+        )
+    )
+
+    await inputs.put("first")
+    await asyncio.wait_for(first_started.wait(), timeout=2.0)
+    await asyncio.wait_for(second_input_started.wait(), timeout=2.0)
+
+    assert surface.next_line_calls >= 2
+
+    await inputs.put(None)
+    finish_first.set()
+    await asyncio.wait_for(task, timeout=2.0)
+
+    assert executed == ["first"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_starts_next_input_before_dispatch_when_concurrent() -> None:
+    inputs: asyncio.Queue[str | None] = asyncio.Queue()
+    events: list[str] = []
+
+    def _record_next_line() -> None:
+        events.append(f"input-{surface.next_line_calls}")
+
+    surface = _FakeSurface(inputs, on_next_line=_record_next_line)
+    dispatch_started = asyncio.Event()
+    finish_dispatch = asyncio.Event()
+
+    async def _dispatch(user_input: str) -> bool:
+        events.append(f"dispatch-{user_input}")
+        dispatch_started.set()
+        await finish_dispatch.wait()
+        return True
+
+    task = asyncio.create_task(
+        run_tui_runtime(
+            dispatch=_dispatch,
+            surface_factory=_surface_factory(surface),
+            config=_runtime_config(concurrent_input_during_turn=True),
+            hooks=_runtime_hooks(),
+        )
+    )
+
+    await inputs.put("first")
+    await asyncio.wait_for(dispatch_started.wait(), timeout=2.0)
+
+    assert events.index("input-2") < events.index("dispatch-first")
+
+    await inputs.put(None)
+    finish_dispatch.set()
+    await asyncio.wait_for(task, timeout=2.0)
+
+
+@pytest.mark.asyncio
 async def test_runtime_destructive_slash_cancels_active_turn_and_purges_queue() -> None:
     inputs: asyncio.Queue[str | None] = asyncio.Queue()
     surface = _FakeSurface(inputs)

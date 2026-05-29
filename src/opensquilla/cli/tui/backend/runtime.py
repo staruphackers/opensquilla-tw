@@ -116,6 +116,16 @@ async def run_tui_runtime(
 
         next_line_task: asyncio.Task[str | None] | None = None
 
+        async def _ensure_next_line_task() -> None:
+            nonlocal next_line_task
+            if next_line_task is not None:
+                return
+            next_line_task = asyncio.create_task(
+                tui_surface.next_line(),
+                name=f"chat-input-{task_name}",
+            )
+            await asyncio.sleep(0)
+
         async def _drop_next_line() -> None:
             nonlocal next_line_task
             if next_line_task is None:
@@ -136,10 +146,7 @@ async def run_tui_runtime(
                     or turn_task.done()
                 )
                 if next_line_task is None and can_read_input:
-                    next_line_task = asyncio.create_task(
-                        tui_surface.next_line(),
-                        name=f"chat-input-{task_name}",
-                    )
+                    await _ensure_next_line_task()
 
                 waitables: set[asyncio.Task[Any]] = set()
                 if next_line_task is not None:
@@ -232,6 +239,8 @@ async def run_tui_runtime(
                     runtime_state.enqueue(user_input)
                     continue
 
+                if config.concurrent_input_during_turn:
+                    await _ensure_next_line_task()
                 turn_task = asyncio.create_task(_run_dispatch(user_input), name=task_name)
         finally:
             if hooks.clear_exposed_surface is not None:

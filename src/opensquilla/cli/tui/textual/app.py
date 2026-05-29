@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import shutil
 from collections.abc import Callable
 from contextlib import suppress
 from typing import Literal
@@ -17,9 +18,11 @@ from textual.events import Paste
 from textual.geometry import Region
 from textual.widgets import Input, RichLog, Static
 
-CHAT_INPUT_PLACEHOLDER = "输入消息 / Type a message"
+CHAT_INPUT_PLACEHOLDER = "send a massage"
 ROUTER_HUD_DEFAULT = "Router: pending"
-USER_ECHO_LABEL = "你 / you"
+USER_ECHO_LABEL = "›"
+RUNNING_OUTPUT_PREFIX = "⠋"
+COMPLETED_OUTPUT_PREFIX = "✓"
 
 TextualOutputKind = Literal[
     "empty",
@@ -52,11 +55,12 @@ _OUTPUT_STYLE: dict[TextualOutputKind, str] = {
 _ERROR_RE = re.compile(r"(?:^|[\s:])(error|failed|exception|traceback|denied)\b|✗", re.I)
 _THINKING_RE = re.compile(r"\b(thinking|reasoning|analy[sz]ing|plan|router|route)\b", re.I)
 _TOOL_CALL_RE = re.compile(
-    r"^\s*▸|(?:^|\s)(?:tool_call|tool call|function_call|fake_tool|approval requested)\b",
+    r"^\s*▸|(?:^|\s)(?:tool_call|function_call|fake_tool|approval requested)\b",
     re.I,
 )
 _TOOL_DETAIL_RE = re.compile(
-    r"\b(tool_output|tool output|stdout|stderr)\b|\b\d+\s+lines?\b|^[│|]",
+    r"^\s*[✓✔]|"
+    r"\b(tool_output|tool output|stdout|stderr)\b|\b\d+\s+lines?\b|^\s*[│|]",
     re.I,
 )
 _USAGE_RE = re.compile(
@@ -68,6 +72,14 @@ _USAGE_RE = re.compile(
 _ROUTER_MODEL_RE = re.compile(r"->\s*(?P<model>[^\s|]+)")
 _ROUTER_SAVE_RE = re.compile(r"\bsave\s+(?P<save>\d+(?:\.\d+)?%)", re.I)
 _PERCENT_RE = re.compile(r"(?P<percent>\d+(?:\.\d+)?%)")
+_TEXTUAL_ANSI_RE = re.compile(
+    r"\x1b(?:"
+    r"\[[0-?]*[ -/]*[@-~]"
+    r"|\][^\x07\x1b]*(?:\x07|\x1b\\)"
+    r"|P[^\x1b]*\x1b\\"
+    r"|[@-Z\\-_]"
+    r")"
+)
 
 
 def normalize_pasted_chat_text(text: str) -> str:
@@ -78,6 +90,7 @@ def normalize_pasted_chat_text(text: str) -> str:
 
 def normalize_textual_output_payload(payload: str) -> str:
     """Trim Rich console right-padding before writing into Textual panels."""
+    payload = _TEXTUAL_ANSI_RE.sub("", payload)
     cleaned: list[str] = []
     for line in payload.splitlines(keepends=True):
         if line.endswith("\r\n"):
@@ -102,12 +115,12 @@ def classify_textual_output_line(line: str) -> TextualOutputKind:
         return "assistant_label"
     if _ERROR_RE.search(stripped):
         return "error"
-    if _THINKING_RE.search(stripped):
-        return "thinking"
     if _TOOL_CALL_RE.search(stripped):
         return "tool_call"
     if _TOOL_DETAIL_RE.search(stripped):
         return "tool_detail"
+    if _THINKING_RE.search(stripped):
+        return "thinking"
     if _USAGE_RE.search(stripped):
         return "usage"
     return "assistant_text"
@@ -116,7 +129,21 @@ def classify_textual_output_line(line: str) -> TextualOutputKind:
 def render_textual_output_line(line: str, *, kind: TextualOutputKind | None = None) -> Text:
     """Render one transcript row with semantic color rather than raw Rich markup."""
     output_kind = kind or classify_textual_output_line(line)
-    return Text(line.rstrip(), style=_OUTPUT_STYLE[output_kind])
+    display_line = _with_status_prefix(line.rstrip(), output_kind)
+    return Text(display_line, style=_OUTPUT_STYLE[output_kind])
+
+
+def _with_status_prefix(line: str, output_kind: TextualOutputKind) -> str:
+    stripped = line.strip()
+    if not stripped:
+        return line
+    if output_kind in {"assistant_label", "thinking", "tool_call"}:
+        body = stripped.removeprefix("◢").removeprefix("▸").strip()
+        return f"{RUNNING_OUTPUT_PREFIX} {body}"
+    if output_kind == "tool_detail" and stripped.startswith(("✓", "✔")):
+        body = stripped[1:].strip()
+        return f"{COMPLETED_OUTPUT_PREFIX} {body}"
+    return line
 
 
 def render_textual_output_payload(payload: str) -> list[Text]:
@@ -152,8 +179,73 @@ def write_inline_terminal_payload(payload: str) -> bool:
                 color_system="truecolor",
                 highlight=False,
             )
-            for line in render_textual_output_payload(payload):
-                terminal.print(line, overflow="fold")
+            active_block: Literal["none", "user", "assistant"] = "none"
+            for raw_line in payload.splitlines(keepends=True):
+                line, end = _split_payload_line_end(raw_line)
+                output_kind = classify_textual_output_line(line)
+                if output_kind == "user_label":
+                    active_block = "user"
+                elif output_kind == "assistant_label":
+                    active_block = "assistant"
+                elif output_kind == "empty":
+                    active_block = "none"
+                elif active_block == "user":
+                    output_kind = "user_text"
+                rendered = render_textual_output_line(line, kind=output_kind)
+                terminal.print(rendered, overflow="fold", end=end)
+            if payload and not payload.splitlines():
+                terminal.print(render_textual_output_line(payload), overflow="fold", end="")
+            terminal.file.flush()
+            return True
+    return False
+
+
+def _split_payload_line_end(raw_line: str) -> tuple[str, str]:
+    if raw_line.endswith("\r\n"):
+        return raw_line[:-2], "\n"
+    if raw_line.endswith("\n"):
+        return raw_line[:-1], "\n"
+    if raw_line.endswith("\r"):
+        return raw_line[:-1], "\n"
+    return raw_line, ""
+
+
+def clear_inline_terminal_region() -> bool:
+    """Clear inline chrome from the cursor row before appending scrollback output."""
+    with suppress(OSError):
+        with open("/dev/tty", "w", encoding="utf-8", buffering=1) as tty:
+            tty.write("\r\x1b[J")
+            tty.flush()
+            return True
+    return False
+
+
+def write_inline_chrome_line(
+    left: str,
+    right: str,
+    *,
+    width: int | None = None,
+    advance: bool = False,
+) -> bool:
+    """Draw the one-line inline composer snapshot at the current cursor row."""
+    terminal_width = width or shutil.get_terminal_size((80, 24)).columns
+    # Leave one column free so terminal auto-wrap does not join a later Textual
+    # repaint onto this prompt row in tmux captures.
+    terminal_width = max(1, terminal_width - 1)
+    left_text = f" {left}" if left else ""
+    right_text = f" {right}" if right else ""
+    available_left = terminal_width - len(right_text)
+    if right_text and available_left > 1:
+        left_text = left_text[:available_left]
+        gap = " " * max(1, terminal_width - len(left_text) - len(right_text))
+        line = f"{left_text}{gap}{right_text}"
+    else:
+        line = (left_text or right_text)[:terminal_width]
+    with suppress(OSError):
+        with open("/dev/tty", "w", encoding="utf-8", buffering=1) as tty:
+            prefix = "\n\r" if advance else "\r"
+            tty.write(f"{prefix}\x1b[J{line}\x1b[K\r")
+            tty.flush()
             return True
     return False
 
@@ -225,7 +317,7 @@ class TextualChatApp(App[None]):
     }
 
     Screen:inline {
-        height: 4;
+        height: 1;
         border: none;
         background: #0b0f14;
     }
@@ -268,13 +360,6 @@ class TextualChatApp(App[None]):
         border: none;
         background: #0b0f14;
         color: #e7edf4;
-        overflow-y: auto;
-        scrollbar-size-vertical: 1;
-        scrollbar-visibility: visible;
-        scrollbar-color: #435466;
-        scrollbar-background: #0b0f14;
-        scrollbar-color-active: #8fa0b2;
-        scrollbar-background-active: #10161d;
     }
 
     #active-stream {
@@ -289,7 +374,12 @@ class TextualChatApp(App[None]):
     #bottom-row {
         height: 3;
         padding: 0 1;
-        background: #0b0f14;
+        background: transparent;
+    }
+
+    #bottom-row:inline {
+        height: 1;
+        padding: 0 1;
     }
 
     #composer {
@@ -297,14 +387,13 @@ class TextualChatApp(App[None]):
         height: 3;
         padding: 0 1;
         border: round #293641;
-        background: #10161d;
+        background: transparent;
     }
 
-    #input-label {
-        width: 9;
-        content-align: left middle;
-        color: #ff8a4c;
-        text-style: bold;
+    #composer:inline {
+        height: 1;
+        padding: 0;
+        border: none;
     }
 
     #input {
@@ -312,12 +401,12 @@ class TextualChatApp(App[None]):
         height: 1;
         margin: 0;
         border: none;
-        background: #10161d;
+        background: transparent;
         color: #f4f7fb;
     }
 
     #input:focus {
-        background: #10161d;
+        background: transparent;
         color: #ffffff;
     }
 
@@ -344,11 +433,34 @@ class TextualChatApp(App[None]):
         color: #fbbf24;
     }
 
+    #router-hud:inline,
+    #router-hud.dim:inline,
+    #router-hud.normal:inline,
+    #router-hud.warning:inline {
+        height: 1;
+        border: none;
+        background: transparent;
+        color: #8fa0b2;
+    }
+
+    #router-hud.normal:inline {
+        color: #86efac;
+    }
+
+    #router-hud.warning:inline {
+        color: #fbbf24;
+    }
+
     #status {
         height: 1;
         padding: 0 2;
         background: #080b0f;
         color: #8fa0b2;
+    }
+
+    #status:inline {
+        display: none;
+        height: 0;
     }
     """
 
@@ -417,7 +529,6 @@ class TextualChatApp(App[None]):
                 yield self._active_stream_widget
             with Horizontal(id="bottom-row"):
                 with Horizontal(id="composer"):
-                    yield Static(USER_ECHO_LABEL, id="input-label", markup=False)
                     self._input = ChatInput(
                         placeholder=CHAT_INPUT_PLACEHOLDER,
                         id="input",
@@ -439,7 +550,12 @@ class TextualChatApp(App[None]):
         if self._input is not None:
             self._input.focus()
         if self.ready_marker:
-            self.append_output(self.ready_marker)
+            if self.is_inline and not self.is_headless:
+                self._transcript_text += self.ready_marker
+                self._write_inline_terminal_payload(f"{self.ready_marker}\n")
+                self._refresh_inline_chrome_soon()
+            else:
+                self.append_output(self.ready_marker)
             if self.print_ready_marker and not self.is_inline:
                 print(self.ready_marker, flush=True)
 
@@ -505,6 +621,8 @@ class TextualChatApp(App[None]):
         self.refresh_ui()
 
     def refresh_ui(self) -> None:
+        if self.is_inline and not self.is_headless:
+            clear_inline_terminal_region()
         if self._status_widget is not None:
             self._status_widget.update(self._status_text)
         if self._router_hud_widget is not None:
@@ -523,13 +641,42 @@ class TextualChatApp(App[None]):
             self._transcript_log.write(line)
 
     def _display_payload(self, payload: str) -> None:
-        if self.is_inline and not self.is_headless and self._write_inline_terminal_payload(payload):
+        if self.write_above_inline_chrome(payload):
             self._refresh_inline_chrome_soon()
             return
         self._write_transcript_payload(payload)
 
+    def write_above_inline_chrome(self, payload: str) -> bool:
+        """Print output above the inline composer without corrupting its redraw."""
+        if not self.is_inline or self.is_headless or self._driver is None:
+            return False
+        driver = self._driver
+        try:
+            driver.stop_application_mode()
+            clear_inline_terminal_region()
+            return self._write_inline_terminal_payload(payload)
+        except Exception:  # noqa: BLE001 - fall back if terminal mode switching fails.
+            return False
+        finally:
+            with suppress(Exception):
+                driver.start_application_mode()
+            self.refresh(layout=True)
+            self._write_inline_chrome_snapshot(advance=True)
+
     def _write_inline_terminal_payload(self, payload: str) -> bool:
         return write_inline_terminal_payload(payload)
+
+    def _write_inline_chrome_snapshot(self, *, advance: bool = False) -> bool:
+        if not self.is_inline or self.is_headless:
+            return False
+        input_value = self._input.value if self._input is not None else ""
+        left = input_value or CHAT_INPUT_PLACEHOLDER
+        return write_inline_chrome_line(
+            left,
+            self._router_hud_text,
+            width=self.size.width,
+            advance=advance,
+        )
 
     def _refresh_inline_chrome_soon(self) -> None:
         self.refresh(layout=True)

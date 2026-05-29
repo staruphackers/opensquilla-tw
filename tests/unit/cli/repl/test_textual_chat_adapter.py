@@ -97,6 +97,7 @@ async def test_textual_chat_runtime_exposes_tui_output_and_reuses_runtime(
         "session_id": "session-a",
     }
     assert captured["runtime_kwargs"]["dispatch"] is fake_dispatch
+    assert captured["runtime_kwargs"]["config"].concurrent_input_during_turn is True
     assert textual_runtime.get_tui_output(scope) is None
     assert getattr(captured["output"], "_output_handle", None) is fake_surface.output_handle
     assert captured["manager"] is not None
@@ -146,7 +147,7 @@ async def test_textual_chat_runtime_uses_textual_native_echo_hooks(
     )
 
     joined_writes = "".join(fake_surface.writes)
-    assert "你 / you" in joined_writes
+    assert "你 / you" not in joined_writes
     assert "hello textual" in joined_writes
     assert "中文输入 CJK混合ASCII" in joined_writes
     assert "running queued input" in joined_writes

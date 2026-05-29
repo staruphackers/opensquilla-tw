@@ -554,12 +554,23 @@ async def renderer_tool_finished(
     tool_use_id: str | None,
     *,
     success: bool,
+    result: object | None = None,
 ) -> None:
     atool_finished = getattr(renderer, "atool_finished", None)
     if callable(atool_finished):
-        await _async_renderer_method(atool_finished)(tool_use_id, success=success)
+        try:
+            await _async_renderer_method(atool_finished)(
+                tool_use_id,
+                success=success,
+                result=result,
+            )
+        except TypeError:
+            await _async_renderer_method(atool_finished)(tool_use_id, success=success)
         return
-    renderer.tool_finished(tool_use_id, success=success)
+    try:
+        renderer.tool_finished(tool_use_id, success=success, result=result)
+    except TypeError:
+        renderer.tool_finished(tool_use_id, success=success)
 
 
 async def renderer_error(renderer: Any, message: str) -> None:
@@ -762,6 +773,7 @@ async def stream_response_gateway(
                                 renderer,
                                 tool_use_id,
                                 success=success,
+                                result=event.get("result"),
                             )
                     elif event_name == "session.event.artifact":
                         await _finish_text_delta_stream(
@@ -1055,6 +1067,7 @@ async def stream_response_turnrunner(
                                 renderer,
                                 event.tool_use_id,
                                 success=success,
+                                result=event.result,
                             )
                     elif isinstance(event, ArtifactEvent):
                         await _finish_text_delta_stream(
