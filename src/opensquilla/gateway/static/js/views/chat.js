@@ -2871,6 +2871,13 @@ const ChatView = (() => {
     wrap.dataset.state = 'idle';
     wrap.dataset.tier = decision.tier || '';
     wrap.dataset.source = decision.source || 'none';
+    const observeMode = decision && decision.routing_applied === false;
+    if (observeMode) {
+      wrap.dataset.observe = 'true';
+      wrap.dataset.rolloutPhase = typeof decision.rollout_phase === 'string'
+        ? decision.rollout_phase
+        : 'observe';
+    }
 
     const header = document.createElement('div');
     header.className = 'router-fx-header';
@@ -3232,6 +3239,8 @@ const ChatView = (() => {
       source: usage.routing_source || 'none',
       confidence: typeof usage.routing_confidence === 'number' ? usage.routing_confidence : 0,
       fallback: usage.routing_source === 'fallback',
+      routing_applied: usage.routing_applied !== false,
+      rollout_phase: usage.rollout_phase || 'full',
     };
     if (decision.model) _routerFxModels[tier.toLowerCase()] = decision.model;
     // The cached seed from _routerFxResolveSeed already encodes
@@ -3265,6 +3274,7 @@ const ChatView = (() => {
     // will appear and sweeps the selector onto the routed tier.
     _unsubs.push(_rpc.on('session.event.router_decision', (payload) => {
       if (_isStaleEpoch(payload)) return;
+      if (!_acceptStreamSeq(payload)) return;
       _handleRouterDecision(payload);
     }));
 
@@ -3560,6 +3570,8 @@ const ChatView = (() => {
             routed_model: u.routed_model || null,
             routed_tier: u.routed_tier || null,
             routing_source: u.routing_source || 'none',
+            routing_applied: u.routing_applied !== false,
+            rollout_phase: u.rollout_phase || 'full',
             total_savings_pct: u.total_savings_pct || 0,
             __savings_ui_suppressed: !!u.__savings_ui_suppressed,
           });

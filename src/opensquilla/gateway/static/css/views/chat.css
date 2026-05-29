@@ -2677,12 +2677,12 @@
   }
 }
 
-/* Mobile: collapse to 3 columns × 3 rows + smaller type. The hammer
+/* Mobile: collapse to 3 columns x 4 rows + smaller type. The hammer
  * still hops; the grid just gets denser. */
 @media (max-width: 640px) {
   .router-fx-grid {
     grid-template-columns: repeat(3, 1fr);
-    grid-template-rows: repeat(3, 28px);
+    grid-template-rows: repeat(4, 28px);
     padding: 6px;
     gap: 3px;
   }
@@ -2692,7 +2692,7 @@
 @media (max-width: 380px) {
   .router-fx-grid {
     grid-template-columns: repeat(2, 1fr);
-    grid-template-rows: repeat(4, 26px);
+    grid-template-rows: repeat(6, 26px);
   }
   .router-fx-cell { font-size: 9.5px; }
 }
