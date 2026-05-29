@@ -74,14 +74,23 @@ def _terminal_target(context: TargetContext) -> TuiTarget:
 
 
 def _textual_target(context: TargetContext) -> TuiTarget:
+    app_path = Path(__file__).with_name("fake_textual_app.py")
+    app_log = context.artifact_dir / "textual-app.log"
+    env = _base_env(context)
+    env.update(
+        {
+            "OPENSQUILLA_TUI_FAKE_SCENARIO": context.scenario_id,
+            "OPENSQUILLA_TUI_FAKE_APP_LOG": str(app_log),
+            "OPENSQUILLA_TUI_READY_MARKER": "OPEN_SQUILLA_TUI_READY",
+            "OPENSQUILLA_TUI_BACKEND": "textual",
+        }
+    )
     return TuiTarget(
         backend_id="textual",
-        command=[],
-        env=_base_env(context),
+        command=[sys.executable, "-u", str(app_path)],
+        env=env,
         initial_size=context.size,
-        readiness_markers=(),
-        log_paths=(),
-        capability_requirements=("live-textual-app",),
-        available=False,
-        skip_reason="live Textual TUI target is not implemented",
+        readiness_markers=("OPEN_SQUILLA_TUI_READY",),
+        log_paths=(app_log,),
+        capability_requirements=("real-terminal", "fake-provider", "live-textual-app"),
     )

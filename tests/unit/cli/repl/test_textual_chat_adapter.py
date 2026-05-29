@@ -27,6 +27,9 @@ class _FakeOutputHandle:
 class _FakeTextualSurface:
     output_handle = _FakeOutputHandle()
 
+    def __init__(self) -> None:
+        self.writes: list[str] = []
+
     async def next_line(self) -> str | None:
         return None
 
@@ -40,7 +43,7 @@ class _FakeTextualSurface:
         return None
 
     async def write_through(self, payload: str) -> None:
-        return None
+        self.writes.append(payload)
 
     @property
     def redraw_callback(self) -> Callable[[], None]:
@@ -97,6 +100,54 @@ async def test_textual_chat_runtime_exposes_tui_output_and_reuses_runtime(
     assert textual_runtime.get_tui_output(scope) is None
     assert getattr(captured["output"], "_output_handle", None) is fake_surface.output_handle
     assert captured["manager"] is not None
+
+
+@pytest.mark.asyncio
+async def test_textual_chat_runtime_uses_textual_native_echo_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from opensquilla.cli.tui.adapters import terminal_chat_adapter
+    from opensquilla.cli.tui.textual import runtime as textual_runtime
+
+    def fail_user_echo(_text: str) -> str:
+        raise AssertionError("Textual echo must not call terminal Rich echo payloads")
+
+    def fail_queued_echo() -> str:
+        raise AssertionError("Textual queue echo must not call terminal Rich echo payloads")
+
+    monkeypatch.setattr(terminal_chat_adapter, "user_input_echo_payload", fail_user_echo)
+    monkeypatch.setattr(terminal_chat_adapter, "queued_input_start_payload", fail_queued_echo)
+
+    scope: dict[str, Any] = {"model": "model-a", "session_key": "session-a"}
+    fake_surface = _FakeTextualSurface()
+
+    @asynccontextmanager
+    async def fake_open_textual_surface(**_kwargs: Any):
+        yield fake_surface
+
+    async def fake_run_tui_runtime(**kwargs: Any):
+        hooks = kwargs["hooks"]
+        await hooks.on_user_input_echo(fake_surface, "hello textual")
+        await hooks.on_queued_turn_start(fake_surface)
+        return object()
+
+    monkeypatch.setattr(textual_runtime, "open_textual_surface", fake_open_textual_surface)
+    monkeypatch.setattr(textual_runtime, "run_tui_runtime", fake_run_tui_runtime)
+
+    async def fake_dispatch(_value: str) -> bool:
+        return True
+
+    await textual_runtime.run_textual_chat_runtime(
+        surface=Surface.CLI_GATEWAY,
+        scope=scope,
+        dispatch=fake_dispatch,
+        queue_max_size=8,
+    )
+
+    joined_writes = "".join(fake_surface.writes)
+    assert "you" in joined_writes
+    assert "hello textual" in joined_writes
+    assert "running queued input" in joined_writes
 
 
 @pytest.mark.asyncio

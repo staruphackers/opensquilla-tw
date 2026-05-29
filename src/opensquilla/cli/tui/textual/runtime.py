@@ -14,8 +14,6 @@ from opensquilla.cli.tui.adapters.terminal_chat_adapter import (
     classify_chat_input,
     clear_current_cancel,
     default_tui_plugin_manager,
-    echo_queued_turn_start,
-    echo_user_input,
     surface_task_name,
 )
 from opensquilla.cli.tui.backend.contracts import (
@@ -95,6 +93,18 @@ def textual_notice(scope: MutableMapping[str, Any], payload: str) -> None:
     loop.create_task(_write())
 
 
+async def echo_textual_user_input(tui_surface: TuiSurface, text: str) -> None:
+    """Echo accepted user input without using the terminal Rich console."""
+    if not text.strip():
+        return
+    await tui_surface.write_through(f"\nyou\n{text}\n")
+
+
+async def echo_textual_queued_turn_start(tui_surface: TuiSurface) -> None:
+    """Render a queue marker through the Textual surface."""
+    await tui_surface.write_through("\nsquilla\nrunning queued input\n")
+
+
 async def run_textual_chat_runtime(
     *,
     surface: Surface,
@@ -130,8 +140,8 @@ async def run_textual_chat_runtime(
             classify_input=classify_chat_input,
         ),
         hooks=TuiRuntimeHooks(
-            on_user_input_echo=echo_user_input,
-            on_queued_turn_start=echo_queued_turn_start,
+            on_user_input_echo=echo_textual_user_input,
+            on_queued_turn_start=echo_textual_queued_turn_start,
             clear_current_cancel=clear_current_cancel,
             notice=_notice,
             on_cancel_active_turn=context.abort_turn,
