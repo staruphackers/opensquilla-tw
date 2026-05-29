@@ -54,18 +54,18 @@ def test_terminal_frame_records_checkpoint_text_time_and_size() -> None:
 
 
 def test_build_run_id_is_tmux_safe(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(driver, "_now_ms", lambda: 123456789)
+    monkeypatch.setattr(driver, "_run_id_suffix", lambda: "123456789-777-0")
 
     run_id = build_run_id(" Launch input/loop!? ")
 
-    assert run_id == "opensquilla-tui-launch-input-loop-123456789"
+    assert run_id == "opensquilla-tui-launch-input-loop-123456789-777-0"
     assert all(ch.isalnum() or ch in "-_" for ch in run_id)
 
 
 def test_build_run_id_uses_scenario_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(driver, "_now_ms", lambda: 42)
+    monkeypatch.setattr(driver, "_run_id_suffix", lambda: "42-777-0")
 
-    assert build_run_id(" !!! ") == "opensquilla-tui-scenario-42"
+    assert build_run_id(" !!! ") == "opensquilla-tui-scenario-42-777-0"
 
 
 def test_capability_probe_prefers_tmux_when_available(

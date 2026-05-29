@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from itertools import count
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -19,6 +20,7 @@ except ImportError:  # pragma: no cover - exercised only on platforms without pt
 
 DriverKind = Literal["tmux", "pty"]
 DriverSelection = Literal["auto", "tmux", "pty"]
+_RUN_ID_COUNTER = count()
 
 
 @dataclass(frozen=True)
@@ -66,6 +68,8 @@ class RealTerminalSession(Protocol):
 
     def capture_text(self, checkpoint: str) -> TerminalFrame: ...
 
+    def capture_scrollback_text(self, checkpoint: str) -> TerminalFrame: ...
+
     def wait_for_text(
         self,
         needle: str,
@@ -94,9 +98,13 @@ def _now_ms() -> int:
     return time.time_ns() // 1_000_000
 
 
+def _run_id_suffix() -> str:
+    return f"{time.time_ns()}-{os.getpid()}-{next(_RUN_ID_COUNTER)}"
+
+
 def build_run_id(scenario_id: str) -> str:
     safe = _SAFE_ID_RE.sub("-", scenario_id.strip().lower()).strip("-") or "scenario"
-    return f"opensquilla-tui-{safe}-{_now_ms()}"
+    return f"opensquilla-tui-{safe}-{_run_id_suffix()}"
 
 
 def _strip_ansi(text: str) -> str:
@@ -212,6 +220,17 @@ class TmuxTerminalSession(_BaseTerminalSession):
         self._append_log(f"\n--- {checkpoint} ---\n{frame.text}")
         return frame
 
+    def capture_scrollback_text(self, checkpoint: str) -> TerminalFrame:
+        result = subprocess.run(
+            ["tmux", "capture-pane", "-t", self.run_id, "-S", "-", "-p", "-J"],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+        )
+        frame = TerminalFrame(checkpoint, result.stdout, _now_ms(), self.size)
+        self._append_log(f"\n--- {checkpoint} scrollback ---\n{frame.text}")
+        return frame
+
     def wait_for_text(
         self,
         needle: str,
@@ -310,6 +329,9 @@ class PtyTerminalSession(_BaseTerminalSession):
         frame = TerminalFrame(checkpoint, text, _now_ms(), self.size)
         self._append_log(f"\n--- {checkpoint} ---\n{frame.text}")
         return frame
+
+    def capture_scrollback_text(self, checkpoint: str) -> TerminalFrame:
+        return self.capture_text(checkpoint)
 
     def wait_for_text(
         self,

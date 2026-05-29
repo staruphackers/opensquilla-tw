@@ -40,6 +40,7 @@ class EvidenceBundle:
         self.frames_dir = run_dir / "frames"
         self.screenshots_dir = run_dir / "screenshots"
         self.transcript_path = run_dir / "transcript.txt"
+        self.scrollback_path = run_dir / "scrollback.txt"
         self.terminal_log_path = run_dir / "terminal.log"
         self.app_log_path = run_dir / "app.log"
 
@@ -55,6 +56,7 @@ class EvidenceBundle:
             bundle.terminal_log_path,
             bundle.app_log_path,
             bundle.transcript_path,
+            bundle.scrollback_path,
         ):
             file_path.touch()
         return bundle
@@ -70,6 +72,10 @@ class EvidenceBundle:
         with self.transcript_path.open("a", encoding="utf-8") as fh:
             fh.write(f"\n--- {frame.checkpoint} ---\n{frame.text}\n")
         return frame_path
+
+    def write_scrollback(self, frame: TerminalFrame) -> Path:
+        self.scrollback_path.write_text(frame.text, encoding="utf-8")
+        return self.scrollback_path
 
     def write_visual_verdict(self, payload: dict[str, Any]) -> Path:
         return self._write_json("visual-verdict.json", payload)

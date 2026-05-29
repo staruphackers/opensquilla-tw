@@ -1,0 +1,128 @@
+{
+  "fixture_id": "architecture_prompt",
+  "source_prompt": "帮我分析这个代码长的架构 /Users/cwan0785/opensquilla",
+  "description": "Saved deterministic event stream for rendering the architecture-analysis TUI state without calling a model.",
+  "events": [
+    {
+      "kind": "toolbar",
+      "payload": {
+        "router_hud": "route standard -> fake-terminal 96% save 38%",
+        "router_hud_style": "normal"
+      }
+    },
+    {
+      "kind": "status",
+      "payload": {
+        "message": "router route standard -> fake-terminal 96% save 38%",
+        "detail": [
+          "│ router.reason: architecture-analysis prompt with local path context",
+          "│ router.baseline: frontier-baseline",
+          "│ router.selected: fake-terminal",
+          "│ router.savings: 38%"
+        ]
+      }
+    },
+    {
+      "kind": "tool_start",
+      "payload": {
+        "name": "list_dir",
+        "args": {
+          "path": "/Users/cwan0785/opensquilla"
+        },
+        "tool_use_id": "tool-list"
+      }
+    },
+    {
+      "kind": "tool_finished",
+      "payload": {
+        "tool_use_id": "tool-list",
+        "success": true,
+        "elapsed": 0.01
+      }
+    },
+    {
+      "kind": "tool_output",
+      "payload": {
+        "tool_use_id": "tool-list",
+        "name": "list_dir",
+        "line_count": 18,
+        "truncated": true,
+        "summary": "top-level repository layout",
+        "stdout": [
+          "AGENTS.md",
+          "pyproject.toml",
+          "src/opensquilla",
+          "tests/integration/cli/tui_real_terminal",
+          "tests/unit/cli/tui",
+          "docs/superpowers"
+        ],
+        "stderr": []
+      }
+    },
+    {
+      "kind": "tool_start",
+      "payload": {
+        "name": "read_file",
+        "args": {
+          "path": "/Users/cwan0785/opensquilla/src/opensquilla/cli/tui/textual/app.py"
+        },
+        "tool_use_id": "tool-read"
+      }
+    },
+    {
+      "kind": "tool_finished",
+      "payload": {
+        "tool_use_id": "tool-read",
+        "success": true,
+        "elapsed": 0.01
+      }
+    },
+    {
+      "kind": "tool_output",
+      "payload": {
+        "tool_use_id": "tool-read",
+        "name": "read_file",
+        "line_count": 312,
+        "truncated": true,
+        "summary": "Textual app owns input chrome, semantic line classification, router HUD, and append-only transcript output",
+        "stdout": [
+          "class TextualChatApp(App[None]):",
+          "    CSS = \"\"\"",
+          "    #transcript { overflow-y: auto; scrollbar-visibility: visible; }",
+          "    #composer { border: round #293641; }",
+          "    #router-hud { border: round #365b48; }",
+          "    def append_stream_output(self, payload: str) -> None:",
+          "        self._display_payload(payload)"
+        ],
+        "stderr": []
+      }
+    },
+    {
+      "kind": "status",
+      "payload": {
+        "message": "thinking: mapping runtime boundary -> surface adapter -> renderer output path",
+        "detail": [
+          "│ runtime: run_textual_chat_runtime wires backend hooks and exposes output handle",
+          "│ surface: open_textual_surface selects inline Textual prompt sessions",
+          "│ renderer: StreamingRenderer emits status, tool rows, text deltas, and usage footer"
+        ]
+      }
+    },
+    {
+      "kind": "text_delta",
+      "payload": {
+        "text": "架构分析: /Users/cwan0785/opensquilla uses a runtime adapter, Textual surface, and streaming renderer. 工具调用显示概要，同时保留灰色 detail block，包括参数、stdout/stderr 摘要、截断原因和行数。 architecture-analysis-complete"
+      }
+    },
+    {
+      "kind": "done",
+      "payload": {
+        "usage": {
+          "model": "fake-terminal",
+          "input_tokens": 1,
+          "output_tokens": 2
+        }
+      }
+    }
+  ]
+}

@@ -19,6 +19,7 @@ from opensquilla.cli.tui.textual import (
     format_router_hud_label,
     normalize_pasted_chat_text,
     normalize_textual_output_payload,
+    open_textual_surface,
     render_textual_output_line,
     render_textual_output_payload,
 )
@@ -85,19 +86,20 @@ async def test_textual_output_handle_writes_and_streams_to_transcript() -> None:
 
     await output.write_through("one-shot payload")
     async with output.stream_output() as write:
-        write("chunk-a")
+        write("chunk-a\n")
         assert "chunk-a" in app.transcript_text
-        assert app.active_stream_text == "chunk-a"
+        assert app.active_stream_text == ""
         write("chunk-b")
-        assert app.active_stream_text == "chunk-achunk-b"
+        assert app.active_stream_text == ""
+        assert "chunk-b" not in app.transcript_text
 
     assert "one-shot payload" in app.transcript_text
-    assert "chunk-achunk-b" in app.transcript_text
+    assert "chunk-a\nchunk-b" in app.transcript_text
     assert app.active_stream_text == ""
 
 
 @pytest.mark.asyncio
-async def test_textual_stream_region_hides_after_stream_flush() -> None:
+async def test_textual_streaming_appends_without_repainting_active_region() -> None:
     app = TextualChatApp(
         model="fake-model",
         session_id="fake-session",
@@ -112,8 +114,9 @@ async def test_textual_stream_region_hides_after_stream_flush() -> None:
         app.append_stream_output("terminal-change-response CJK混合ASCII")
         await pilot.pause()
 
-        assert stream_widget.display is True
-        assert app.active_stream_text == "terminal-change-response CJK混合ASCII"
+        assert "terminal-change-response CJK混合ASCII" in app.transcript_text
+        assert stream_widget.display is False
+        assert app.active_stream_text == ""
 
         app.flush_stream_output()
         await pilot.pause()
@@ -183,6 +186,27 @@ def test_textual_output_line_styles_distinguish_tool_thinking_and_error_content(
     assert "#ef6461" in str(render_textual_output_line("error: denied").style)
 
 
+def test_textual_tool_payload_rendering_keeps_compact_tool_rows_readable() -> None:
+    rendered = render_textual_output_payload(
+        "\n".join(
+            (
+                "router route standard -> fake-terminal 99% save 42%",
+                "▸ read_file /Users/cwan0785/opensquilla/src/opensquilla",
+                "tool_output read_file 312 lines omitted",
+                "✗ exec_command: denied",
+            )
+        )
+    )
+    styles = {line.plain: str(line.style) for line in rendered if line.plain}
+
+    assert "#c9964b" in styles["router route standard -> fake-terminal 99% save 42%"]
+    assert "#38bdf8" in styles[
+        "▸ read_file /Users/cwan0785/opensquilla/src/opensquilla"
+    ]
+    assert "#7d8794" in styles["tool_output read_file 312 lines omitted"]
+    assert "#ef6461" in styles["✗ exec_command: denied"]
+
+
 def test_textual_payload_rendering_keeps_user_text_visually_distinct() -> None:
     rendered = [
         item
@@ -206,6 +230,44 @@ def test_textual_layout_uses_custom_bilingual_chat_surface() -> None:
     assert "#composer" in TextualChatApp.CSS
     assert "#router-hud" in TextualChatApp.CSS
     assert "#status" in TextualChatApp.CSS
+
+
+def test_textual_layout_uses_terminal_scrollback_scrollbars_and_round_borders() -> None:
+    css = TextualChatApp.CSS
+
+    assert "overflow-y: auto" in css
+    assert "scrollbar-visibility: visible" in css
+    assert "border: round" in css
+    assert "border: solid" not in css
+
+
+@pytest.mark.asyncio
+async def test_open_textual_surface_runs_inline_for_shell_scrollback(monkeypatch) -> None:
+    captured_kwargs: dict[str, object] = {}
+    exited = asyncio.Event()
+
+    async def fake_run_async(self: TextualChatApp, **kwargs: object) -> None:
+        captured_kwargs.update(kwargs)
+        self.submit_text("hello inline")
+        await exited.wait()
+
+    def fake_exit(self: TextualChatApp) -> None:
+        exited.set()
+
+    monkeypatch.setattr(TextualChatApp, "run_async", fake_run_async)
+    monkeypatch.setattr(TextualChatApp, "exit", fake_exit)
+
+    async with open_textual_surface(
+        surface=Surface.CLI_GATEWAY,
+        model="fake-model",
+        session_id="fake-session",
+        ready_marker=None,
+        print_ready_marker=False,
+    ) as surface:
+        assert await surface.next_line() == "hello inline"
+
+    assert captured_kwargs["inline"] is True
+    assert captured_kwargs["inline_no_clear"] is True
 
 
 def test_textual_paste_normalizes_multiline_cjk_without_truncation() -> None:

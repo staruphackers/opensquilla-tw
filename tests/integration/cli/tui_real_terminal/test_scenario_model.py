@@ -38,12 +38,14 @@ def test_all_abcd_scenarios_are_declared() -> None:
         "cjk_input_loop",
         "long_streaming",
         "complex_ui_state",
+        "architecture_prompt",
         "terminal_changes",
     }
     assert scenarios["launch_input_loop"].family == "launch_and_input_loop"
     assert scenarios["cjk_input_loop"].family == "launch_and_input_loop"
     assert scenarios["long_streaming"].family == "long_streaming_output"
     assert scenarios["complex_ui_state"].family == "complex_ui_state"
+    assert scenarios["architecture_prompt"].family == "architecture_prompt"
     assert scenarios["terminal_changes"].family == "terminal_changes"
 
 
@@ -116,6 +118,7 @@ def test_evidence_bundle_writes_required_artifacts(tmp_path: Path) -> None:
     assert (bundle.run_dir / "terminal.log").exists()
     assert (bundle.run_dir / "app.log").exists()
     assert (bundle.run_dir / "transcript.txt").exists()
+    assert (bundle.run_dir / "scrollback.txt").exists()
     assert frame_path == bundle.run_dir / "frames" / "000-ready.txt"
     assert frame_path.exists()
     assert (bundle.run_dir / "screenshots").is_dir()

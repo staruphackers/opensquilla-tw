@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Callable
+from contextlib import suppress
 from typing import Literal
 
+from rich.console import Console
 from rich.text import Text
 from textual import on
 from textual.app import App, ComposeResult
@@ -139,6 +141,23 @@ def render_textual_output_payload(payload: str) -> list[Text]:
     return rendered
 
 
+def write_inline_terminal_payload(payload: str) -> bool:
+    """Write styled transcript rows to the real terminal scrollback."""
+    payload = normalize_textual_output_payload(payload)
+    with suppress(OSError):
+        with open("/dev/tty", "w", encoding="utf-8", buffering=1) as tty:
+            terminal = Console(
+                file=tty,
+                force_terminal=True,
+                color_system="truecolor",
+                highlight=False,
+            )
+            for line in render_textual_output_payload(payload):
+                terminal.print(line, overflow="fold")
+            return True
+    return False
+
+
 def format_router_hud_label(label: str | None) -> str:
     """Compact router labels for the lower-right HUD capsule."""
     compact = " ".join(str(label or "").split())
@@ -195,11 +214,20 @@ class TextualChatApp(App[None]):
         ("ctrl+d", "request_shutdown", "Exit"),
     ]
     TITLE = "OpenSquilla"
+    INLINE_PADDING = 0
 
     CSS = """
     Screen {
+        height: 100%;
+        border: none;
         background: #0b0f14;
         color: #e7edf4;
+    }
+
+    Screen:inline {
+        height: 4;
+        border: none;
+        background: #0b0f14;
     }
 
     #shell {
@@ -217,10 +245,21 @@ class TextualChatApp(App[None]):
         text-style: bold;
     }
 
+    #brand:inline {
+        display: none;
+        height: 0;
+    }
+
     #workspace {
         height: 1fr;
         padding: 0 1;
         background: #0b0f14;
+    }
+
+    #workspace:inline {
+        display: none;
+        height: 0;
+        padding: 0;
     }
 
     #transcript {
@@ -229,14 +268,20 @@ class TextualChatApp(App[None]):
         border: none;
         background: #0b0f14;
         color: #e7edf4;
-        scrollbar-visibility: hidden;
+        overflow-y: auto;
+        scrollbar-size-vertical: 1;
+        scrollbar-visibility: visible;
+        scrollbar-color: #435466;
+        scrollbar-background: #0b0f14;
+        scrollbar-color-active: #8fa0b2;
+        scrollbar-background-active: #10161d;
     }
 
     #active-stream {
         height: auto;
         margin: 0;
         padding: 0 1;
-        border: solid #f56600;
+        border: round #f56600;
         background: #17110d;
         color: #ffd3b8;
     }
@@ -251,7 +296,7 @@ class TextualChatApp(App[None]):
         width: 1fr;
         height: 3;
         padding: 0 1;
-        border: solid #293641;
+        border: round #293641;
         background: #10161d;
     }
 
@@ -281,20 +326,20 @@ class TextualChatApp(App[None]):
         height: 3;
         margin-left: 1;
         padding: 0 1;
-        border: solid #365b48;
+        border: round #365b48;
         background: #0d1712;
         color: #86efac;
         content-align: left middle;
     }
 
     #router-hud.dim {
-        border: solid #293641;
+        border: round #293641;
         background: #10161d;
         color: #8fa0b2;
     }
 
     #router-hud.warning {
-        border: solid #7c5f1c;
+        border: round #7c5f1c;
         background: #17130a;
         color: #fbbf24;
     }
@@ -395,7 +440,7 @@ class TextualChatApp(App[None]):
             self._input.focus()
         if self.ready_marker:
             self.append_output(self.ready_marker)
-            if self.print_ready_marker:
+            if self.print_ready_marker and not self.is_inline:
                 print(self.ready_marker, flush=True)
 
     @on(Input.Submitted)
@@ -403,6 +448,8 @@ class TextualChatApp(App[None]):
         submitted_text = event.value
         event.input.clear()
         self.submit_text(submitted_text)
+        if self.is_inline:
+            self.exit()
 
     def submit_text(self, text: str) -> None:
         self._submitted_lines.put_nowait(text)
@@ -435,28 +482,18 @@ class TextualChatApp(App[None]):
     def append_output(self, payload: str) -> None:
         payload = normalize_textual_output_payload(payload)
         self._transcript_text += payload
-        self._write_transcript_payload(payload)
+        self._display_payload(payload)
 
     def append_stream_output(self, payload: str) -> None:
         payload = normalize_textual_output_payload(payload)
         self._transcript_text += payload
-        self._active_stream_text += payload
-        if self._active_stream_widget is not None:
-            self._active_stream_widget.display = True
-            self._active_stream_widget.update(self._active_stream_text)
-            self._active_stream_widget.refresh(layout=True)
-        self.refresh(layout=True)
+        self._display_payload(payload)
 
     def flush_stream_output(self) -> None:
-        if not self._active_stream_text:
-            return
-        self._write_transcript_payload(self._active_stream_text)
         self._active_stream_text = ""
         if self._active_stream_widget is not None:
             self._active_stream_widget.update("")
             self._active_stream_widget.display = False
-            self._active_stream_widget.refresh(layout=True)
-        self.refresh(layout=True)
 
     def set_status(self, status: str | None = None) -> None:
         self._status_text = status if status is not None else self._initial_status()
@@ -484,6 +521,19 @@ class TextualChatApp(App[None]):
             return
         for line in render_textual_output_payload(payload):
             self._transcript_log.write(line)
+
+    def _display_payload(self, payload: str) -> None:
+        if self.is_inline and not self.is_headless and self._write_inline_terminal_payload(payload):
+            self._refresh_inline_chrome_soon()
+            return
+        self._write_transcript_payload(payload)
+
+    def _write_inline_terminal_payload(self, payload: str) -> bool:
+        return write_inline_terminal_payload(payload)
+
+    def _refresh_inline_chrome_soon(self) -> None:
+        self.refresh(layout=True)
+        self.set_timer(0.01, lambda: self.refresh(layout=True))
 
     def _initial_status(self) -> str:
         model = self.model or "default model"

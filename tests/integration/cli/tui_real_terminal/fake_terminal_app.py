@@ -4,7 +4,12 @@ import asyncio
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from tui_real_terminal.replay import replay_architecture_prompt
+else:
+    from replay import replay_architecture_prompt
 
 from opensquilla.cli.chat.turn import UsageSummary  # type: ignore[import-untyped]
 from opensquilla.cli.tui.adapters.terminal_chat_adapter import (  # type: ignore[import-untyped]
@@ -40,6 +45,7 @@ async def _render_response(
         raise RuntimeError("terminal output handle was not exposed")
 
     renderer = StreamingRenderer(title="squilla", output_handle=output)
+    usage = UsageSummary(model="fake-terminal", input_tokens=1, output_tokens=2)
     _write_log("dispatch", {"input": user_input, "scenario_id": scenario_id})
     if scenario_id == "long_streaming":
         for index in range(80):
@@ -55,6 +61,8 @@ async def _render_response(
         await renderer.atool_finished("tool-1", success=True, elapsed=0.01)
         await renderer.astatus("approval requested: allow fake_tool fixture.txt")
         await renderer.aappend_text("complex-state-complete tool-card history projection")
+    elif scenario_id == "architecture_prompt":
+        usage = await replay_architecture_prompt(renderer, output)
     elif scenario_id == "terminal_changes":
         await renderer.aappend_text(
             "terminal-change-response CJK混合ASCII multiline-paste ctrl-c-recovery "
@@ -62,9 +70,7 @@ async def _render_response(
         )
     else:
         await renderer.aappend_text(f"fake-response:{user_input}")
-    await renderer.afinalize(
-        UsageSummary(model="fake-terminal", input_tokens=1, output_tokens=2)
-    )
+    await renderer.afinalize(usage)
     _write_log("turn_complete", {"input": user_input})
     return True
 
