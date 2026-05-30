@@ -13,9 +13,9 @@ from typing import Any, Protocol
 
 from rich.panel import Panel
 
+import opensquilla.cli.tui.adapters.opentui_bridge as _opentui_bridge
 import opensquilla.cli.tui.adapters.terminal_bridge as _terminal_bridge
 import opensquilla.cli.tui.adapters.textual_bridge as _textual_bridge
-import opensquilla.cli.tui.adapters.opentui_bridge as _opentui_bridge
 from opensquilla.cli.chat import gateway_runtime as _gateway_runtime
 from opensquilla.cli.chat.session_context import (
     GatewayRuntimeScope,
@@ -88,7 +88,8 @@ async def run_concurrent_repl(
 def get_tui_output(
     scope: GatewayRuntimeScope | StandaloneRuntimeScope,
 ) -> TuiOutputHandle | None:
-    return _runtime_bridge_for_selected_backend().get_tui_output(scope)
+    output = _runtime_bridge_for_selected_backend().get_tui_output(scope)
+    return output if isinstance(output, TuiOutputHandle) else None
 
 
 def clear_current_cancel() -> None:

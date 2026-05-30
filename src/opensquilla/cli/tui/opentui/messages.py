@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, is_dataclass
 import json
-from typing import Any, TypeAlias
+from dataclasses import asdict, dataclass, is_dataclass
+from typing import Any
 
 
 class HostToPythonMessageError(ValueError):
@@ -72,7 +72,7 @@ class HostError:
     detail: str | None = None
 
 
-HostToPythonMessage: TypeAlias = (
+type HostToPythonMessage = (
     HostReady
     | HostInputSubmit
     | HostInputCancel

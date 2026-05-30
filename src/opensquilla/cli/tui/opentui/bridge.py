@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
+import signal
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
-import os
 from pathlib import Path
-import shutil
-import signal
 from typing import Any
 
 from opensquilla.cli.tui.backend.transcript import ViewportProjection
