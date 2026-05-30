@@ -272,7 +272,9 @@ class TurnView {
   constructor(id) {
     this.id = id;
     this.toolNodes = new Map();
+    this.runningNodes = new Set();   // this turn's nodes still in toolPulseNodes
     this.sawAnswer = false;
+    this.ended = false;
     this._seq = 0;
     this.box = new BoxRenderable(renderer, {
       id: `turn-${id}`,
@@ -308,6 +310,7 @@ class TurnView {
     node._toolTail = tail;
     this.toolNodes.set(toolId, node);
     toolPulseNodes.add(node);
+    this.runningNodes.add(node);
     renderer.requestRender?.();
   }
 
@@ -323,6 +326,7 @@ class TurnView {
       node.content = `${glyph} ${finalName}${tail}`;
       node.fg = fg;
       toolPulseNodes.delete(node);
+      this.runningNodes.delete(node);
     } else {
       this._line(`tool-${toolId}`, `${glyph} ${finalName}${tail}`, fg);
     }
@@ -368,6 +372,11 @@ class TurnView {
   }
 
   finishAnswer(cancelled) {
+    // Purge any tools that never reported a finish (e.g. cancellation mid-tool)
+    // from the global pulse set so refreshToolPulse stops mutating dead nodes.
+    for (const node of this.runningNodes) toolPulseNodes.delete(node);
+    this.runningNodes.clear();
+    this.ended = true;
     if (cancelled) this._line("a-cancel", "│ turn cancelled", OPENTUI_DAILY_THEME.muted);
     if (this.answerMd) this.answerMd.streaming = false;
     if (this.sawAnswer) this._line("a-bot", "╰─────", OPENTUI_DAILY_THEME.frame);
@@ -419,10 +428,18 @@ function handlePythonMessage(message) {
       rerenderInputRegion();
       return;
     case "turn.begin":
-      activeTurn = new TurnView(String(message.id ?? scrollbackSeq++));
+      // prompt.echo arrives BEFORE turn.begin (it is emitted by the input-echo
+      // hook, before the renderer's _ensure_begin). If prompt.echo already
+      // started this turn's view, reuse it; otherwise start a fresh one.
+      if (!activeTurn || activeTurn.ended) {
+        activeTurn = new TurnView(String(message.id ?? scrollbackSeq++));
+      }
       return;
     case "prompt.echo":
-      activeTurn?.setPrompt(String(message.text ?? ""));
+      if (!activeTurn || activeTurn.ended) {
+        activeTurn = new TurnView(String(message.id ?? scrollbackSeq++));
+      }
+      activeTurn.setPrompt(String(message.text ?? ""));
       return;
     case "model.text":
       activeTurn?.appendModelText(String(message.text ?? ""));
