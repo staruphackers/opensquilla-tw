@@ -132,6 +132,9 @@ class OpenTuiSurface:
     async def write_through(self, payload: str) -> None:
         await self._output_handle.write_through(payload)
 
+    async def send_message(self, message_type: str, payload: dict[str, object]) -> None:
+        await self._output_handle.send_message(message_type, payload)
+
 
 @asynccontextmanager
 async def _opentui_stream_output(

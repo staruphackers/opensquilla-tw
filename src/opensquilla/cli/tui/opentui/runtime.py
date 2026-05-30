@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, MutableMapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from opensquilla.cli.tui.adapters.terminal_chat_adapter import (
@@ -25,6 +25,7 @@ from opensquilla.cli.tui.backend.contracts import (
 from opensquilla.cli.tui.backend.output_binding import TuiOutputBinding
 from opensquilla.cli.tui.backend.plugins import TuiPluginManager
 from opensquilla.cli.tui.backend.runtime import run_tui_runtime
+from opensquilla.cli.tui.opentui.messages import ModelText, PromptEcho
 from opensquilla.cli.tui.opentui.surface import open_opentui_surface
 from opensquilla.engine.commands import Surface
 
@@ -94,15 +95,19 @@ def opentui_notice(scope: MutableMapping[str, Any], payload: str) -> None:
 
 
 async def echo_opentui_user_input(tui_surface: TuiSurface, text: str) -> None:
-    """Echo accepted user input above the OpenTUI footer."""
+    """Echo accepted user input as a structured prompt block."""
     if not text.strip():
         return
-    await tui_surface.write_through(f"\n╭─ prompt\n│ {text}\n╰\n")
+    send = getattr(tui_surface, "send_message", None)
+    if send is not None:
+        await send("prompt.echo", asdict(PromptEcho(text=text)))
 
 
 async def echo_opentui_queued_turn_start(tui_surface: TuiSurface) -> None:
-    """Render a queue marker through the OpenTUI scrollback surface."""
-    await tui_surface.write_through("\n╭─ squilla\n│ running queued input\n╰\n")
+    """Render a queue marker as a model.text line."""
+    send = getattr(tui_surface, "send_message", None)
+    if send is not None:
+        await send("model.text", asdict(ModelText(text="running queued input")))
 
 
 async def run_opentui_chat_runtime(

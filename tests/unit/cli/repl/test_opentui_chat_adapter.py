@@ -16,6 +16,9 @@ class _FakeOutputHandle:
     async def write_through(self, payload: str) -> None:
         return None
 
+    async def send_message(self, message_type: str, payload: dict) -> None:
+        return None
+
     def stream_output(self):
         @asynccontextmanager
         async def _cm() -> AsyncIterator[Callable[[str], None]]:
@@ -44,6 +47,9 @@ class _FakeOpenTuiSurface:
 
     async def write_through(self, payload: str) -> None:
         self.writes.append(payload)
+
+    async def send_message(self, message_type: str, payload: dict) -> None:
+        self.writes.append(f"{message_type}:{payload.get('text', '')}")
 
     @property
     def redraw_callback(self) -> Callable[[], None]:
@@ -148,10 +154,7 @@ async def test_opentui_chat_runtime_uses_footer_native_echo_hooks(
 
     joined_writes = "".join(fake_surface.writes)
     assert "你 / you" not in joined_writes
-    assert "╭─ prompt" in joined_writes
-    assert "╭─ squilla" in joined_writes
-    assert "│ hello opentui" in joined_writes
-    assert "hello opentui" in joined_writes
+    assert "prompt.echo:hello opentui" in joined_writes
     assert "中文输入 CJK混合ASCII" in joined_writes
     assert "running queued input" in joined_writes
 
