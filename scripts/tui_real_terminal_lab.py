@@ -37,7 +37,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--backend",
-        choices=("terminal", "textual", "live-textual"),
+        choices=("terminal", "textual", "opentui", "live-textual"),
         default="terminal",
     )
     parser.add_argument("--driver", choices=("auto", "tmux", "pty"), default="auto")

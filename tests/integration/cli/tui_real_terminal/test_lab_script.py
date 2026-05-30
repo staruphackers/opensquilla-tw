@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+from argparse import Namespace
 from pathlib import Path
 from types import ModuleType
 
@@ -8,9 +9,7 @@ import pytest
 
 
 def _load_lab_script() -> ModuleType:
-    script_path = (
-        Path(__file__).resolve().parents[4] / "scripts" / "tui_real_terminal_lab.py"
-    )
+    script_path = Path(__file__).resolve().parents[4] / "scripts" / "tui_real_terminal_lab.py"
     spec = importlib.util.spec_from_file_location("tui_real_terminal_lab", script_path)
     assert spec is not None
     assert spec.loader is not None
@@ -29,3 +28,14 @@ def test_live_textual_lab_requires_explicit_live_env(monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("OPENSQUILLA_TUI_LIVE_REAL", "1")
     lab._assert_live_backend_enabled("live-textual")
     lab._assert_live_backend_enabled("textual")
+    lab._assert_live_backend_enabled("opentui")
+
+
+def test_lab_script_accepts_opentui_backend_for_manual_render_runs() -> None:
+    module = _load_lab_script()
+
+    args: Namespace = module._parser().parse_args(  # noqa: SLF001
+        ["--scenario", "architecture_prompt", "--backend", "opentui"]
+    )
+
+    assert args.backend == "opentui"

@@ -77,5 +77,9 @@ def test_architecture_prompt_renders_tools_and_chinese_output(
     assert "router.reason" in rendered_output
     assert "架构" in rendered_output
     assert "architecture-analysis-complete" in rendered_output
+    if result.backend_id == "opentui":
+        assert "standard 96%" in rendered_output
+        assert "standardm|n96%" not in rendered_output
+        assert "routenpending" not in rendered_output
     assert "Traceback" not in rendered_output
     assert "\x1b[" not in rendered_output

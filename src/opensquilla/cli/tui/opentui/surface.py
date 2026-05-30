@@ -208,7 +208,7 @@ def _router_plugin_state_from_toolbar(toolbar: dict[str, object]) -> RouterPlugi
         confidence = match.group("confidence")
         return RouterPluginState(
             model=match.group("model"),
-            route=f"{tier} | {confidence}" if confidence else tier,
+            route=f"{tier} {confidence}" if confidence else tier,
             saving=match.group("saving") or "-",
             context="-",
             style=_normalize_router_style(style),

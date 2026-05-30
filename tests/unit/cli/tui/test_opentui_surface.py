@@ -87,7 +87,7 @@ def test_opentui_output_toolbar_invalidates_router_plugin() -> None:
             asdict(
                 RouterPluginState(
                     model="fake-terminal",
-                    route="standard | 99%",
+                    route="standard 99%",
                     saving="42%",
                     context="-",
                     style="normal",

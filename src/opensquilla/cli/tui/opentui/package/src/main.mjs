@@ -37,10 +37,10 @@ const composer = {
 };
 
 const routerState = {
-  model: "routing...",
-  route: "route pending",
-  saving: "saving pending",
-  context: "ctx pending",
+  model: "pending",
+  route: "pending",
+  saving: "pending",
+  context: "pending",
   style: "dim",
 };
 
@@ -76,6 +76,20 @@ function statusIcon() {
   if (turnStatus.phase === "tool") return "◌";
   if (turnStatus.phase === "output") return "◇";
   return "∙";
+}
+
+function fixedRouterRow(label, value) {
+  const safeValue = String(value).replace(/\s+/gu, " ").trim() || "-";
+  const maxValueCells = 18;
+  let clipped = "";
+  let cells = 0;
+  for (const char of Array.from(safeValue)) {
+    const nextCells = cells + cellWidth(char);
+    if (nextCells > maxValueCells) break;
+    clipped += char;
+    cells = nextCells;
+  }
+  return `${label.padEnd(5)} ${clipped.padEnd(maxValueCells + clipped.length - cells)}`;
 }
 
 function renderFooterTree() {
@@ -131,10 +145,9 @@ function renderFooterTree() {
     Box(
       {
         id: "router-plugin",
-        width: 27,
-        height: 5,
+        width: 31,
+        height: FOOTER_HEIGHT,
         marginRight: 1,
-        marginTop: 1,
         borderStyle: "rounded",
         borderColor: routerColor,
         paddingLeft: 1,
@@ -142,10 +155,10 @@ function renderFooterTree() {
         flexDirection: "column",
         backgroundColor: "#10161F",
       },
-      Text({ id: "router-model", content: `model  ${routerState.model}`, fg: "#E6EDF3" }),
-      Text({ id: "router-route", content: `route  ${routerState.route}`, fg: "#C4B5FD" }),
-      Text({ id: "router-saving", content: `save   ${routerState.saving}`, fg: "#8BD5CA" }),
-      Text({ id: "router-context", content: `ctx    ${routerState.context}`, fg: "#F6C177" }),
+      Text({ id: "router-model", content: fixedRouterRow("model", routerState.model), fg: "#E6EDF3" }),
+      Text({ id: "router-route", content: fixedRouterRow("route", routerState.route), fg: "#C4B5FD" }),
+      Text({ id: "router-saving", content: fixedRouterRow("save", routerState.saving), fg: "#8BD5CA" }),
+      Text({ id: "router-context", content: fixedRouterRow("ctx", routerState.context), fg: "#F6C177" }),
     ),
   );
 }
