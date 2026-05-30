@@ -2,18 +2,36 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 import shutil
+import signal
 from typing import Any
 
 from opensquilla.cli.tui.backend.transcript import ViewportProjection
+from opensquilla.cli.tui.opentui.messages import (
+    HostError,
+    HostReady,
+    HostToPythonMessage,
+    ScrollbackWrite,
+    host_message_from_json,
+    python_message_to_json,
+)
 from opensquilla.cli.tui.renderers.selection import (
     RendererBackendAvailability,
     RendererBackendUnavailableError,
 )
 
 DEFAULT_HOST_PACKAGE_DIR = Path(__file__).resolve().parent / "package"
+DEFAULT_READY_TIMEOUT_SECONDS = 5.0
+
+
+class OpenTuiBridgeError(RuntimeError):
+    """Raised when the OpenTUI host process cannot be used."""
 
 
 @dataclass(frozen=True)
@@ -32,7 +50,7 @@ def check_opentui_host_available(
     runtime_bin: str | None = None,
     node_bin: str | None = None,
 ) -> RendererBackendAvailability:
-    """Check whether the local Node/OpenTUI host can be launched."""
+    """Check whether the local Bun/OpenTUI host can be launched."""
 
     resolved_runtime = runtime_bin or node_bin or shutil.which("bun")
     if not resolved_runtime:
@@ -56,6 +74,125 @@ def check_opentui_host_available(
             reason=f"OpenTUI host entrypoint is missing: {paths.main_script}",
         )
     return RendererBackendAvailability(available=True)
+
+
+class OpenTuiBridge:
+    """fd-based JSON-line IPC bridge to the Bun/OpenTUI footer host."""
+
+    def __init__(
+        self,
+        *,
+        runtime_bin: str | None = None,
+        package_dir: Path = DEFAULT_HOST_PACKAGE_DIR,
+        env: Mapping[str, str] | None = None,
+        ready_timeout: float = DEFAULT_READY_TIMEOUT_SECONDS,
+    ) -> None:
+        self.runtime_bin = runtime_bin or shutil.which("bun") or "bun"
+        self.paths = OpenTuiHostPaths(package_dir=package_dir)
+        self.env = dict(env or {})
+        self.ready_timeout = ready_timeout
+        self._process: asyncio.subprocess.Process | None = None
+        self._to_host_file: Any | None = None
+        self._from_host_file: Any | None = None
+
+    async def start(self) -> None:
+        availability = check_opentui_host_available(
+            package_dir=self.paths.package_dir,
+            runtime_bin=self.runtime_bin,
+        )
+        if not availability.available:
+            raise OpenTuiBridgeError(availability.reason or "OpenTUI host unavailable")
+
+        to_host_read, to_host_write = os.pipe()
+        from_host_read, from_host_write = os.pipe()
+        for fd in (to_host_read, from_host_write):
+            os.set_inheritable(fd, True)
+        for fd in (to_host_write, from_host_read):
+            os.set_inheritable(fd, False)
+
+        env = os.environ.copy()
+        env.update(self.env)
+        env["OPENSQUILLA_OPENTUI_FROM_PYTHON_FD"] = str(to_host_read)
+        env["OPENSQUILLA_OPENTUI_TO_PYTHON_FD"] = str(from_host_write)
+
+        try:
+            self._process = await asyncio.create_subprocess_exec(
+                self.runtime_bin,
+                str(self.paths.main_script),
+                cwd=str(self.paths.package_dir),
+                env=env,
+                pass_fds=(to_host_read, from_host_write),
+            )
+        except Exception:
+            _close_fds(to_host_read, to_host_write, from_host_read, from_host_write)
+            raise
+
+        os.close(to_host_read)
+        os.close(from_host_write)
+        self._to_host_file = os.fdopen(to_host_write, "w", encoding="utf-8", buffering=1)
+        self._from_host_file = os.fdopen(from_host_read, "r", encoding="utf-8")
+
+        message = await asyncio.wait_for(self.next_message(), timeout=self.ready_timeout)
+        if isinstance(message, HostReady):
+            return
+        await self.close()
+        if isinstance(message, HostError):
+            raise OpenTuiBridgeError(message.message)
+        raise OpenTuiBridgeError(f"OpenTUI host did not become ready: {message!r}")
+
+    async def send(self, message_type: str, payload: object | None = None) -> None:
+        self.send_nowait(message_type, payload)
+
+    def send_nowait(self, message_type: str, payload: object | None = None) -> None:
+        if self._to_host_file is None:
+            raise OpenTuiBridgeError("OpenTUI bridge is not started")
+        try:
+            self._to_host_file.write(python_message_to_json(message_type, payload))
+            self._to_host_file.flush()
+        except OSError as exc:
+            raise OpenTuiBridgeError("OpenTUI host IPC write failed") from exc
+
+    async def next_message(self) -> HostToPythonMessage | None:
+        if self._from_host_file is None:
+            raise OpenTuiBridgeError("OpenTUI bridge is not started")
+        while True:
+            line = await asyncio.to_thread(self._from_host_file.readline)
+            if line == "":
+                return None
+            if not line.strip():
+                continue
+            return host_message_from_json(line)
+
+    async def close(self) -> None:
+        process = self._process
+        if self._to_host_file is not None:
+            with suppress(Exception):
+                self.send_nowait("shutdown")
+            with suppress(Exception):
+                self._to_host_file.close()
+            self._to_host_file = None
+        if self._from_host_file is not None:
+            with suppress(Exception):
+                self._from_host_file.close()
+            self._from_host_file = None
+        if process is not None and process.returncode is None:
+            with suppress(ProcessLookupError):
+                process.send_signal(signal.SIGTERM)
+            with suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(process.wait(), timeout=1.0)
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+        self._process = None
+
+    async def write_scrollback(self, payload: str) -> None:
+        await self.send("scrollback.write", ScrollbackWrite(text=payload))
+
+
+def _close_fds(*fds: int) -> None:
+    for fd in fds:
+        with suppress(OSError):
+            os.close(fd)
 
 
 @dataclass

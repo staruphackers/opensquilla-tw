@@ -18,8 +18,8 @@ if (process.argv.includes("--help") || process.argv.includes("-h")) {
   process.exit(0);
 }
 
-const FROM_PYTHON_FD = 3;
-const TO_PYTHON_FD = 4;
+const FROM_PYTHON_FD = Number(process.env.OPENSQUILLA_OPENTUI_FROM_PYTHON_FD ?? "3");
+const TO_PYTHON_FD = Number(process.env.OPENSQUILLA_OPENTUI_TO_PYTHON_FD ?? "4");
 const FOOTER_HEIGHT = 6;
 
 let renderer;
