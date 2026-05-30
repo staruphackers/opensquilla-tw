@@ -341,9 +341,17 @@ function padLinesForScrollback(text) {
     .join("\n");
 }
 
+// When a content line wraps, continuation rows keep the same left gutter
+// (e.g. "│ " or "    │ ") so the rail stays aligned down the left edge.
+function continuationPrefixForLine(line) {
+  const match = line.match(/^(\s*│\s+)/u);
+  return match ? match[1] : "";
+}
+
 function wrapText(text, width) {
   const rows = [];
   for (const line of text.split("\n")) {
+    const continuationPrefix = continuationPrefixForLine(line);
     let current = "";
     let cells = 0;
     for (const token of line.split(/(\s+)/u)) {
@@ -363,6 +371,7 @@ function wrapText(text, width) {
           cells,
           token,
           width,
+          continuationPrefix,
         );
         current = result.current;
         cells = result.cells;
@@ -370,8 +379,8 @@ function wrapText(text, width) {
       }
       if (current && cells + tokenCells > width) {
         rows.push(current.trimEnd());
-        current = token;
-        cells = tokenCells;
+        current = `${continuationPrefix}${token}`;
+        cells = textWidth(continuationPrefix) + tokenCells;
         continue;
       }
       current += token;
