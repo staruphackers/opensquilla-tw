@@ -33,13 +33,26 @@ def test_opentui_host_locks_recommended_daily_visual_preset() -> None:
 
     assert "OPENTUI_DAILY_THEME" in source
     assert 'preset: "daily"' in source
-    assert 'frame: "card"' in source
+    assert 'frameStyle: "card"' in source
+    assert 'frame: "#5a6b7a"' in source
     assert "#77B7FF" in source
+    assert "class TurnView" in source
     assert "conversationBox.add" in source
     assert "TextRenderable(renderer" in source
-    assert "`tmp-${scrollbackSeq++}`" in source
     assert "`sb-${scrollbackSeq++}`" in source
     assert "STATUS_PULSE_FRAMES" in source
+
+
+def test_opentui_host_has_turnview_with_inplace_tool_nodes() -> None:
+    source = HOST_SOURCE.read_text(encoding="utf-8")
+
+    assert "class TurnView" in source
+    assert "addTool" in source
+    assert "finishTool" in source
+    assert "appendAnswer" in source
+    assert "setUsage" in source
+    assert "STATUS_PULSE_FRAMES" in source
+    assert "✓" in source and "✗" in source
 
 
 def test_opentui_host_uses_lines_not_backgrounds_for_visual_separation() -> None:

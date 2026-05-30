@@ -23,13 +23,14 @@ const TO_PYTHON_FD = Number(process.env.OPENSQUILLA_OPENTUI_TO_PYTHON_FD ?? "4")
 const FOOTER_HEIGHT = 6;
 const OPENTUI_DAILY_THEME = Object.freeze({
   preset: "daily",
-  frame: "card",
+  frameStyle: "card",
   detailMode: "inline",
   answerMode: "panel",
   motion: "pulse",
   text: "#F4F7FB",
   muted: "#667385",
   faint: "#3E4A57",
+  frame: "#5a6b7a",
   composerBorder: "#77B7FF",
   composerDisabledBorder: "#354453",
   routerNormal: "#73D0A7",
@@ -59,6 +60,8 @@ let inputText = "";
 let pulseFrame = 0;
 let pulseTimer;
 let scrollbackSeq = 0;
+let activeTurn = null;
+const toolPulseNodes = new Set();
 // Input history (newest last). historyIndex === history.length means "current
 // draft" (not browsing history); 0..length-1 selects a recalled entry.
 const inputHistory = [];
@@ -133,7 +136,9 @@ function syncPulseTimer() {
   if (turnStatus.active && !pulseTimer) {
     pulseTimer = setInterval(() => {
       pulseFrame += 1;
+      activeTurn?.refreshToolPulse();
       rerenderInputRegion();
+      renderer.requestRender?.();
     }, 180);
     pulseTimer.unref?.();
     return;
@@ -260,6 +265,115 @@ function cellWidth(char) {
     : 1;
 }
 
+class TurnView {
+  constructor(id) {
+    this.id = id;
+    this.toolNodes = new Map();
+    this.sawAnswer = false;
+    this._seq = 0;
+    this.box = new BoxRenderable(renderer, {
+      id: `turn-${id}`,
+      flexDirection: "column",
+      paddingLeft: 1,
+      paddingRight: 1,
+    });
+    conversationBox.add(this.box);
+  }
+
+  _line(suffix, content, fg) {
+    const node = new TextRenderable(renderer, { id: `turn-${this.id}-${suffix}`, content, fg });
+    this.box.add(node);
+    return node;
+  }
+
+  setPrompt(text) {
+    this._line("p-top", "╭─ prompt ─────", OPENTUI_DAILY_THEME.promptAccent);
+    stripTerminalControls(String(text)).split("\n").forEach((line, index) => {
+      this._line(`p-${index}`, `│ ${line}`, OPENTUI_DAILY_THEME.promptAccent);
+    });
+    this._line("p-bot", "╰─────", OPENTUI_DAILY_THEME.promptAccent);
+    this._line("rail-top", "│", OPENTUI_DAILY_THEME.faint);
+    renderer.requestRender?.();
+  }
+
+  addTool(toolId, name, summary) {
+    const cleanName = stripTerminalControls(String(name));
+    const cleanSummary = stripTerminalControls(String(summary));
+    const tail = cleanSummary ? ` ${cleanSummary}` : "";
+    const node = this._line(`tool-${toolId}`, `${STATUS_PULSE_FRAMES.tool[0]} ${cleanName}${tail}`, OPENTUI_DAILY_THEME.toolAccent);
+    node._toolName = cleanName;
+    node._toolTail = tail;
+    this.toolNodes.set(toolId, node);
+    toolPulseNodes.add(node);
+    renderer.requestRender?.();
+  }
+
+  finishTool(toolId, status, name, summary) {
+    const node = this.toolNodes.get(toolId);
+    const glyph = status === "error" ? "✗" : "✓";
+    const fg = status === "error" ? OPENTUI_DAILY_THEME.routerError : OPENTUI_DAILY_THEME.answerAccent;
+    const cleanName = stripTerminalControls(String(name));
+    const cleanSummary = stripTerminalControls(String(summary));
+    const finalName = cleanName || node?._toolName || "";
+    const tail = cleanSummary ? ` ${cleanSummary}` : (node?._toolTail ?? "");
+    if (node) {
+      node.content = `${glyph} ${finalName}${tail}`;
+      node.fg = fg;
+      toolPulseNodes.delete(node);
+    } else {
+      this._line(`tool-${toolId}`, `${glyph} ${finalName}${tail}`, fg);
+    }
+    renderer.requestRender?.();
+  }
+
+  addToolDetail(text) {
+    const lines = stripTerminalControls(String(text)).split("\n");
+    const max = 3;
+    lines.slice(0, max).forEach((line, index) => {
+      this._line(`detail-${this._seq}-${index}`, `│   ${line}`, OPENTUI_DAILY_THEME.detailText);
+    });
+    if (lines.length > max) this._line(`detail-more-${this._seq}`, `│   … ${lines.length - max} more lines`, OPENTUI_DAILY_THEME.detailText);
+    this._seq += 1;
+    renderer.requestRender?.();
+  }
+
+  appendModelText(text) {
+    this._line(`model-${this._seq++}`, stripTerminalControls(String(text)), OPENTUI_DAILY_THEME.answerAccent);
+    renderer.requestRender?.();
+  }
+
+  appendAnswer(delta) {
+    if (!this.sawAnswer) {
+      this.sawAnswer = true;
+      this._line("a-top", "╭─ answer ─ squilla ─────", OPENTUI_DAILY_THEME.frame);
+      this.answerNode = this._line("a-body", "", OPENTUI_DAILY_THEME.text);
+      this._answerText = "";
+    }
+    this._answerText += stripTerminalControls(String(delta));
+    this.answerNode.content = this._answerText.split("\n").map((line) => `│ ${line}`).join("\n");
+    renderer.requestRender?.();
+  }
+
+  finishAnswer(cancelled) {
+    if (cancelled) this._line("a-cancel", "│ turn cancelled", OPENTUI_DAILY_THEME.muted);
+    if (this.sawAnswer) this._line("a-bot", "╰─────", OPENTUI_DAILY_THEME.frame);
+    renderer.requestRender?.();
+  }
+
+  setUsage(text) {
+    this._line("usage", `  · ${stripTerminalControls(String(text))}`, OPENTUI_DAILY_THEME.muted);
+    renderer.requestRender?.();
+  }
+
+  refreshToolPulse() {
+    const frames = STATUS_PULSE_FRAMES.tool;
+    const glyph = frames[pulseFrame % frames.length];
+    for (const node of toolPulseNodes) {
+      node.content = `${glyph} ${node._toolName}${node._toolTail}`;
+    }
+  }
+}
+
 function handlePythonMessage(message) {
   switch (message.type) {
     case "router.update":
@@ -291,56 +405,33 @@ function handlePythonMessage(message) {
       rerenderInputRegion();
       return;
     case "turn.begin":
+      activeTurn = new TurnView(String(message.id ?? scrollbackSeq++));
       return;
     case "prompt.echo":
-      conversationBox.add(new TextRenderable(renderer, {
-        id: `tmp-${scrollbackSeq++}`,
-        content: `prompt: ${stripTerminalControls(String(message.text ?? ""))}`,
-        fg: OPENTUI_DAILY_THEME.text,
-      }));
-      renderer.requestRender?.();
+      activeTurn?.setPrompt(String(message.text ?? ""));
       return;
     case "model.text":
-      conversationBox.add(new TextRenderable(renderer, {
-        id: `tmp-${scrollbackSeq++}`,
-        content: stripTerminalControls(String(message.text ?? "")),
-        fg: OPENTUI_DAILY_THEME.text,
-      }));
-      renderer.requestRender?.();
+      activeTurn?.appendModelText(String(message.text ?? ""));
       return;
     case "tool.call":
-      conversationBox.add(new TextRenderable(renderer, {
-        id: `tmp-${scrollbackSeq++}`,
-        content: `tool: ${stripTerminalControls(String(message.name ?? ""))} ${stripTerminalControls(String(message.summary ?? ""))}`,
-        fg: OPENTUI_DAILY_THEME.text,
-      }));
-      renderer.requestRender?.();
+      {
+        const toolId = String(message.id ?? "");
+        const status = String(message.status ?? "running");
+        if (status === "running") activeTurn?.addTool(toolId, String(message.name ?? ""), String(message.summary ?? ""));
+        else activeTurn?.finishTool(toolId, status, String(message.name ?? ""), String(message.summary ?? ""));
+      }
       return;
     case "tool.detail":
-      conversationBox.add(new TextRenderable(renderer, {
-        id: `tmp-${scrollbackSeq++}`,
-        content: `detail: ${stripTerminalControls(String(message.text ?? ""))}`,
-        fg: OPENTUI_DAILY_THEME.text,
-      }));
-      renderer.requestRender?.();
+      activeTurn?.addToolDetail(String(message.text ?? ""));
       return;
     case "answer.text":
-      conversationBox.add(new TextRenderable(renderer, {
-        id: `tmp-${scrollbackSeq++}`,
-        content: stripTerminalControls(String(message.text ?? "")),
-        fg: OPENTUI_DAILY_THEME.text,
-      }));
-      renderer.requestRender?.();
+      activeTurn?.appendAnswer(String(message.text ?? ""));
       return;
     case "turn.end":
+      activeTurn?.finishAnswer(Boolean(message.cancelled ?? false));
       return;
     case "usage":
-      conversationBox.add(new TextRenderable(renderer, {
-        id: `tmp-${scrollbackSeq++}`,
-        content: `usage: ${stripTerminalControls(String(message.text ?? ""))}`,
-        fg: OPENTUI_DAILY_THEME.text,
-      }));
-      renderer.requestRender?.();
+      activeTurn?.setUsage(String(message.text ?? ""));
       return;
     case "scrollback.write":
       {
