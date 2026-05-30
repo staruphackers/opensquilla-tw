@@ -50,7 +50,13 @@ def test_architecture_prompt_renders_tools_and_chinese_output(
     transcript = (result.run_dir / "transcript.txt").read_text(encoding="utf-8")
     scrollback = (result.run_dir / "scrollback.txt").read_text(encoding="utf-8")
     rendered_output = f"{transcript}\n{scrollback}"
-    app_log_name = "textual-app.log" if result.backend_id == "textual" else "app.log"
+    app_log_name = (
+        "textual-app.log"
+        if result.backend_id == "textual"
+        else "opentui-app.log"
+        if result.backend_id == "opentui"
+        else "app.log"
+    )
     app_events = [
         json.loads(line)
         for line in (result.run_dir / app_log_name).read_text(encoding="utf-8").splitlines()

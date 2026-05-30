@@ -117,11 +117,6 @@ function renderFooterTree() {
           backgroundColor: "#0B0F14",
         },
         Text({
-          id: "composer-placeholder",
-          content: "send a message",
-          fg: "#7D8590",
-        }),
-        Text({
           id: "composer-text",
           content: visibleComposer,
           fg: composerColor,
@@ -167,24 +162,103 @@ function rerenderFooter() {
 
 function writePlainScrollback(text) {
   renderer.writeToScrollback((ctx) => {
+    const plain = stripTerminalControls(text);
+    const width = Math.max(1, ctx.width - 1);
+    const wrapped = padLinesForScrollback(wrapText(plain, Math.max(1, width - 1)));
+    const height = Math.max(1, wrapped.split("\n").length);
     const root = new TextRenderable(ctx.renderContext, {
       id: `scrollback-${Date.now()}`,
       position: "absolute",
       left: 0,
       top: 0,
-      width: ctx.width,
-      height: Math.max(1, text.split("\n").length),
-      content: text,
+      width,
+      height,
+      content: wrapped,
       fg: "#E6EDF3",
     });
     return {
       root,
-      width: ctx.width,
-      height: Math.max(1, text.split("\n").length),
+      width,
+      height,
       startOnNewLine: false,
       trailingNewline: false,
     };
   });
+}
+
+function stripTerminalControls(text) {
+  return text
+    .replace(/\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|P[^\x1b]*\x1b\\|[@-Z\\-_])/g, "")
+    .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
+}
+
+function padLinesForScrollback(text) {
+  return text
+    .split("\n")
+    .map((line) => ` ${line}`)
+    .join("\n");
+}
+
+function wrapText(text, width) {
+  const rows = [];
+  for (const line of text.split("\n")) {
+    let current = "";
+    let cells = 0;
+    for (const token of line.split(/(\s+)/u)) {
+      if (!token) continue;
+      const tokenCells = textWidth(token);
+      if (/^\s+$/u.test(token)) {
+        if (current && cells + tokenCells <= width) {
+          current += token;
+          cells += tokenCells;
+        }
+        continue;
+      }
+      if (tokenCells > width) {
+        const result = appendHardWrappedToken(rows, current, cells, token, width);
+        current = result.current;
+        cells = result.cells;
+        continue;
+      }
+      if (current && cells + tokenCells > width) {
+        rows.push(current.trimEnd());
+        current = token;
+        cells = tokenCells;
+        continue;
+      }
+      current += token;
+      cells += tokenCells;
+    }
+    rows.push(current);
+  }
+  return rows.join("\n");
+}
+
+function appendHardWrappedToken(rows, current, cells, token, width) {
+  for (const char of Array.from(token)) {
+    const charCells = cellWidth(char);
+    if (current && cells + charCells > width) {
+      rows.push(current.trimEnd());
+      current = char;
+      cells = charCells;
+    } else {
+      current += char;
+      cells += charCells;
+    }
+  }
+  return { current, cells };
+}
+
+function textWidth(text) {
+  let width = 0;
+  for (const char of Array.from(text)) width += cellWidth(char);
+  return width;
+}
+
+function cellWidth(char) {
+  return /[\u1100-\u115f\u2329\u232a\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe10-\ufe19\ufe30-\ufe6f\uff00-\uff60\uffe0-\uffe6]/u.test(char)
+    ? 2
+    : 1;
 }
 
 function handlePythonMessage(message) {

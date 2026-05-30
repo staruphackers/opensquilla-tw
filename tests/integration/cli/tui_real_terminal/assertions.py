@@ -12,6 +12,7 @@ _ANSI_RE = re.compile(
     r"|[@-Z\\-_]"
     r")"
 )
+_PROMPT_PLACEHOLDERS = ("send a message", "send a massage")
 
 
 def assert_visible_text(frame: TerminalFrame, expected: str) -> None:
@@ -23,7 +24,9 @@ def assert_visible_text(frame: TerminalFrame, expected: str) -> None:
 
 
 def assert_prompt_ready(frame: TerminalFrame) -> None:
-    if "you" not in frame.text and "send a massage" not in frame.text:
+    if "you" not in frame.text and not any(
+        placeholder in frame.text for placeholder in _PROMPT_PLACEHOLDERS
+    ):
         raise AssertionError(f"{frame.checkpoint}: prompt is not visibly ready:\n{frame.text}")
 
 
@@ -34,7 +37,10 @@ def assert_no_inline_prompt_chrome_collision(frame: TerminalFrame) -> None:
                 f"{frame.checkpoint}: inline prompt chrome overlapped output:\n{frame.text}"
             )
         resize_checkpoint = "narrow" in frame.checkpoint or "wide" in frame.checkpoint
-        if line.count("send a massage") > 1 and not resize_checkpoint:
+        if (
+            sum(line.count(placeholder) for placeholder in _PROMPT_PLACEHOLDERS) > 1
+            and not resize_checkpoint
+        ):
             raise AssertionError(
                 f"{frame.checkpoint}: inline prompt chrome was duplicated:\n{frame.text}"
             )
