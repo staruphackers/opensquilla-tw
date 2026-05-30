@@ -79,3 +79,20 @@ def test_opentui_footer_revives_status_and_composer_and_router_color() -> None:
     assert "composerDisabledBorder" in source
     assert "colorForStyle(routerState.style)" in source
     assert "backgroundColor" not in source
+
+
+def test_opentui_answer_uses_markdown_renderable() -> None:
+    source = HOST_SOURCE.read_text(encoding="utf-8")
+
+    assert "MarkdownRenderable" in source
+    assert "SyntaxStyle" in source
+    assert "streaming" in source
+
+
+def test_opentui_input_region_and_scroll_routing() -> None:
+    source = HOST_SOURCE.read_text(encoding="utf-8")
+
+    assert "inputHistory" in source
+    assert "cursorVisible" in source
+    assert "scrollBy" in source
+    assert 'name === "pageup"' in source or 'name === "pagedown"' in source

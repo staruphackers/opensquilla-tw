@@ -53,6 +53,9 @@ let renderer;
 let BoxRenderable;
 let TextRenderable;
 let ScrollBoxRenderable;
+let MarkdownRenderable;
+let SyntaxStyle;
+let syntaxStyle;
 let createCliRenderer;
 let conversationBox;
 let inputBox;
@@ -346,16 +349,27 @@ class TurnView {
     if (!this.sawAnswer) {
       this.sawAnswer = true;
       this._line("a-top", "╭─ answer ─ squilla ─────", OPENTUI_DAILY_THEME.frame);
-      this.answerNode = this._line("a-body", "", OPENTUI_DAILY_THEME.text);
+      this.answerMd = new MarkdownRenderable(renderer, {
+        id: `turn-${this.id}-md`,
+        content: "",
+        streaming: true,
+        conceal: true,
+        syntaxStyle,
+        fg: OPENTUI_DAILY_THEME.text,
+        tableOptions: { style: "columns" },
+        paddingLeft: 1,
+      });
+      this.box.add(this.answerMd);
       this._answerText = "";
     }
-    this._answerText += stripTerminalControls(String(delta));
-    this.answerNode.content = this._answerText.split("\n").map((line) => `│ ${line}`).join("\n");
+    this._answerText += String(delta);
+    this.answerMd.content = this._answerText;
     renderer.requestRender?.();
   }
 
   finishAnswer(cancelled) {
     if (cancelled) this._line("a-cancel", "│ turn cancelled", OPENTUI_DAILY_THEME.muted);
+    if (this.answerMd) this.answerMd.streaming = false;
     if (this.sawAnswer) this._line("a-bot", "╰─────", OPENTUI_DAILY_THEME.frame);
     renderer.requestRender?.();
   }
@@ -506,6 +520,16 @@ function installKeyboardHandlers() {
       recallHistory(1);
       return;
     }
+    if (key.name === "pageup") {
+      conversationBox?.scrollBy({ x: 0, y: -10 });
+      renderer.requestRender?.();
+      return;
+    }
+    if (key.name === "pagedown") {
+      conversationBox?.scrollBy({ x: 0, y: 10 });
+      renderer.requestRender?.();
+      return;
+    }
     if (key.name === "backspace") {
       inputText = Array.from(inputText).slice(0, -1).join("");
       wakeCursor();
@@ -536,12 +560,14 @@ function installKeyboardHandlers() {
 }
 
 async function main() {
-  ({ BoxRenderable, TextRenderable, ScrollBoxRenderable, createCliRenderer } = await import("@opentui/core"));
+  ({ BoxRenderable, TextRenderable, ScrollBoxRenderable, MarkdownRenderable, SyntaxStyle, createCliRenderer } = await import("@opentui/core"));
 
   renderer = await createCliRenderer({
     screenMode: "alternate-screen",
     exitOnCtrlC: false,
   });
+
+  syntaxStyle = SyntaxStyle.create();
 
   buildLayout();
   installKeyboardHandlers();
