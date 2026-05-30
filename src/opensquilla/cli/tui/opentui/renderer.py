@@ -22,7 +22,7 @@ from opensquilla.cli.tui.opentui.messages import (
     TurnStatusState,
     Usage,
 )
-from opensquilla.cli.tui.terminal.stream import _summarize_args
+from opensquilla.cli.tui.terminal.stream import _summarize_args, _summarize_result
 
 _turn_ids = count(1)
 
@@ -146,7 +146,10 @@ class OpenTuiStreamRenderer:
                 id=tool_use_id,
             ),
         )
-        detail = error if (not success and error) else (str(result) if result else "")
+        if not success and error:
+            detail = _summarize_result(error)
+        else:
+            detail = _summarize_result(result)
         if detail:
             await self._emit("tool.detail", ToolDetail(text=detail))
 
@@ -157,8 +160,10 @@ class OpenTuiStreamRenderer:
     async def afinalize(self, usage: Any | None = None, *, cancelled: bool = False) -> None:
         await self._ensure_begin()
         await self._flush_answer()
-        await self._emit("usage", Usage(text=_format_usage(usage)))
+        # turn.end closes the answer card (JS draws the bottom border) BEFORE
+        # the usage line, so usage renders outside/below the card frame.
         await self._emit("turn.end", TurnEnd(id=self._turn_id, cancelled=cancelled))
+        await self._emit("usage", Usage(text=_format_usage(usage)))
         await self._emit(
             "turn.status", TurnStatusState(phase="idle", label="ready", active=False)
         )

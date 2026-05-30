@@ -211,12 +211,19 @@ function rerenderFooter() {
   renderer.requestRender?.();
 }
 
-function writeScrollbackBlock(lines, fg, { startOnNewLine = true } = {}) {
+function writeScrollbackBlock(lines, fg, { startOnNewLine = true, topTitle, bottomRule } = {}) {
   if (!renderer) return;
   renderer.writeToScrollback((ctx) => {
     const width = Math.max(1, ctx.width - 1);
-    const plain = lines.map((line) => stripTerminalControls(line)).join("\n");
-    const wrapped = padLinesForScrollback(wrapText(plain, Math.max(1, width - 1)));
+    // Rules must match the wrap width (width - 1) so they fill exactly one row
+    // and are never folded onto a second line.
+    const ruleWidth = Math.max(1, width - 1);
+    const framed = [];
+    if (topTitle !== undefined) framed.push(cardTopRule(topTitle, ruleWidth));
+    for (const line of lines) framed.push(line);
+    if (bottomRule) framed.push(cardBottomRule(ruleWidth));
+    const plain = framed.map((line) => stripTerminalControls(line)).join("\n");
+    const wrapped = padLinesForScrollback(wrapText(plain, ruleWidth));
     const height = Math.max(1, wrapped.split("\n").length);
     const node = new TextRenderable(ctx.renderContext, {
       id: `scrollback-${scrollbackSeq++}`,
@@ -232,11 +239,25 @@ function writeScrollbackBlock(lines, fg, { startOnNewLine = true } = {}) {
   });
 }
 
+// Build "╭─ <title> ──────────╮" sized to the available width.
+function cardTopRule(title, width) {
+  const head = title ? `╭─ ${title} ` : "╭─";
+  const rest = Math.max(0, width - textWidth(head) - 1);
+  return `${head}${"─".repeat(rest)}╮`;
+}
+
+// Build "╰────────────────────╯" sized to the available width.
+function cardBottomRule(width) {
+  const rest = Math.max(0, width - 2);
+  return `╰${"─".repeat(rest)}╯`;
+}
+
 function renderPromptBlock(text) {
-  const lines = ["╭─ prompt"];
-  for (const line of String(text).split("\n")) lines.push(`│ ${line}`);
-  lines.push("╰");
-  writeScrollbackBlock(lines, OPENTUI_DAILY_THEME.promptAccent);
+  const lines = String(text).split("\n").map((line) => `│ ${line}`);
+  writeScrollbackBlock(lines, OPENTUI_DAILY_THEME.promptAccent, {
+    topTitle: "prompt",
+    bottomRule: true,
+  });
 }
 
 function renderModelText(text) {
@@ -251,27 +272,31 @@ function renderToolCall(name, summary, status) {
 }
 
 function renderToolDetail(text) {
-  const lines = String(text).split("\n").map((line) => `    │ ${line}`);
-  writeScrollbackBlock(lines, OPENTUI_DAILY_THEME.detailText);
+  const all = String(text).split("\n");
+  const max = 3;
+  const shown = all.slice(0, max).map((line) => `    │ ${line}`);
+  if (all.length > max) shown.push(`    │ … ${all.length - max} more lines`);
+  writeScrollbackBlock(shown, OPENTUI_DAILY_THEME.detailText);
 }
 
 function renderAnswerText(text) {
-  const lines = [];
-  if (!currentTurn.sawAnswer) {
-    lines.push("╭─ answer ─ squilla");
+  const firstChunk = !currentTurn.sawAnswer;
+  const lines = String(text).split("\n").map((line) => `│ ${line}`);
+  if (firstChunk) {
     currentTurn.sawAnswer = true;
+    writeScrollbackBlock(lines, OPENTUI_DAILY_THEME.text, { topTitle: "answer ─ squilla" });
+    return;
   }
-  for (const line of String(text).split("\n")) lines.push(`│ ${line}`);
   writeScrollbackBlock(lines, OPENTUI_DAILY_THEME.text);
 }
 
 function renderAnswerClose(cancelled) {
   if (cancelled) {
-    writeScrollbackBlock(["╰─ turn cancelled"], OPENTUI_DAILY_THEME.muted);
+    writeScrollbackBlock(["│ turn cancelled"], OPENTUI_DAILY_THEME.muted, { bottomRule: true });
     return;
   }
   if (currentTurn.sawAnswer) {
-    writeScrollbackBlock(["╰"], OPENTUI_DAILY_THEME.text);
+    writeScrollbackBlock([], OPENTUI_DAILY_THEME.text, { bottomRule: true });
   }
 }
 
@@ -488,6 +513,10 @@ async function main() {
     screenMode: "split-footer",
     footerHeight: FOOTER_HEIGHT,
     externalOutputMode: "capture-stdout",
+    // Leave mouse tracking off so the terminal emulator keeps native
+    // scrollback control (wheel / Cmd+Up-Down) instead of OpenTUI eating
+    // the scroll events and pinning the view to the bottom.
+    useMouse: false,
     exitOnCtrlC: false,
   });
 
