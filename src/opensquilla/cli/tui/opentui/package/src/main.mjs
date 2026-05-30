@@ -96,7 +96,6 @@ function renderFooterTree() {
   const composerLine = inputText || composer.text;
   const visibleComposer = composerLine || composer.placeholder;
   const composerColor = composerLine ? "#E6EDF3" : "#7D8590";
-  const statusColor = colorForStyle(turnStatus.style);
   const routerColor = colorForStyle(routerState.style);
 
   return Box(
@@ -104,56 +103,50 @@ function renderFooterTree() {
       id: "opentui-footer-root",
       width: "100%",
       height: "100%",
-      flexDirection: "row",
-      backgroundColor: "#0B0F14",
+      position: "relative",
+      shouldFill: false,
     },
     Box(
       {
-        id: "composer-wrap",
-        flexGrow: 1,
-        height: "100%",
+        id: "composer-box",
+        position: "absolute",
+        left: 1,
+        right: 34,
+        bottom: 1,
+        height: 4,
+        borderStyle: "rounded",
+        borderColor: composer.disabled ? "#3A3F47" : "#7AA2F7",
+        bottomTitle: `${statusIcon()} ${turnStatus.label}`,
+        bottomTitleAlignment: "left",
         paddingLeft: 1,
         paddingRight: 1,
         flexDirection: "column",
         justifyContent: "center",
+        shouldFill: false,
       },
-      Box(
-        {
-          id: "composer-box",
-          width: "100%",
-          height: 4,
-          borderStyle: "rounded",
-          borderColor: composer.disabled ? "#3A3F47" : "#7AA2F7",
-          paddingLeft: 1,
-          paddingRight: 1,
-          flexDirection: "column",
-          justifyContent: "center",
-          backgroundColor: "#0B0F14",
-        },
-        Text({
-          id: "composer-text",
-          content: visibleComposer,
-          fg: composerColor,
-        }),
-      ),
       Text({
-        id: "turn-status",
-        content: `${statusIcon()} ${turnStatus.label}`,
-        fg: statusColor,
+        id: "composer-text",
+        content: visibleComposer,
+        fg: composerColor,
       }),
     ),
     Box(
       {
         id: "router-plugin",
+        position: "absolute",
+        right: 1,
+        bottom: 0,
         width: 31,
         height: FOOTER_HEIGHT,
-        marginRight: 1,
         borderStyle: "rounded",
         borderColor: routerColor,
+        title: " router ",
+        titleAlignment: "left",
         paddingLeft: 1,
         paddingRight: 1,
         flexDirection: "column",
-        backgroundColor: "#10161F",
+        shouldFill: true,
+        backgroundColor: "#0E151C",
       },
       Text({ id: "router-model", content: fixedRouterRow("model", routerState.model), fg: "#E6EDF3" }),
       Text({ id: "router-route", content: fixedRouterRow("route", routerState.route), fg: "#C4B5FD" }),
