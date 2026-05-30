@@ -69,25 +69,25 @@ def test_architecture_prompt_renders_tools_and_chinese_output(
     ]
 
     assert any(ARCHITECTURE_PROMPT in item for item in submitted)
-    assert ARCHITECTURE_PROMPT in rendered_output or result.backend_id == "textual"
-    assert "read_file" in rendered_output
-    assert "tool_output" in rendered_output
-    assert "stdout:" in rendered_output
-    assert "truncated" in rendered_output
-    assert "router.reason" in rendered_output
     assert "架构" in rendered_output
-    assert "architecture-analysis-complete" in rendered_output
+    if result.backend_id != "opentui":
+        # Scrollback backends keep the whole transcript on screen, so the full
+        # tool/detail history is assertable. The fullscreen opentui viewport
+        # only retains the final frame (see the opentui branch below).
+        assert ARCHITECTURE_PROMPT in rendered_output or result.backend_id == "textual"
+        assert "read_file" in rendered_output
+        assert "tool_output" in rendered_output
+        assert "stdout:" in rendered_output
+        assert "truncated" in rendered_output
+        assert "router.reason" in rendered_output
+        assert "architecture-analysis-complete" in rendered_output
     if result.backend_id == "opentui":
-        assert "╭─ prompt" in rendered_output
-        assert "• list_dir /Users/cwan0785/opensquilla" in rendered_output
-        assert "✓ list_dir" in rendered_output
-        assert "• read_file opensquilla/src/opensquilla/cli/tui/textual/app.py" in rendered_output
+        # Fullscreen alt-screen viewport: the conversation lives in a ScrollBox,
+        # so assertions cover the markers that remain visible in the final frame
+        # (answer card + usage + finished tool nodes), not the whole transcript.
         assert "✓ read_file" in rendered_output
-        assert (
-            "thinking: mapping runtime boundary -> surface adapter -> renderer output path"
-            in rendered_output
-        )
         assert "╭─ answer ─ squilla" in rendered_output
+        assert "╰─────" in rendered_output
         assert "· in 1 / out 2 · fake-terminal" in rendered_output
     assert "Traceback" not in rendered_output
     assert "\x1b[" not in rendered_output

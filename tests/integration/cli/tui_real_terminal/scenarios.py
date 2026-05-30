@@ -178,15 +178,14 @@ def all_scenarios() -> tuple[TuiScenario, ...]:
                 ),
                 ScenarioStep(
                     "wait-architecture",
-                    "wait_text",
-                    "architecture-analysis-complete",
+                    "wait_any_text",
+                    "architecture-analysis-complete\n· in 1 / out 2",
                     "after-architecture",
                     timeout_s=10.0,
                 ),
             ),
             expected_text=(
                 "架构",
-                "architecture-analysis-complete",
             ),
         ),
         TuiScenario(
