@@ -58,6 +58,14 @@ let inputText = "";
 let pulseFrame = 0;
 let pulseTimer;
 let scrollbackSeq = 0;
+// Input history (newest last). historyIndex === history.length means "current
+// draft" (not browsing history); 0..length-1 selects a recalled entry.
+const inputHistory = [];
+let historyIndex = 0;
+let draftBeforeHistory = "";
+// Cursor blink state for the composer.
+let cursorVisible = true;
+let cursorTimer;
 const currentTurn = { id: null, sawAnswer: false };
 
 const composer = {
@@ -106,6 +114,21 @@ function statusIcon() {
   return frames[pulseFrame % frames.length];
 }
 
+function startCursorBlink() {
+  if (cursorTimer) return;
+  cursorTimer = setInterval(() => {
+    cursorVisible = !cursorVisible;
+    rerenderFooter();
+  }, 530);
+  cursorTimer.unref?.();
+}
+
+// Reset the cursor to solid-on after a keystroke so typing feels responsive
+// instead of landing on a blink-off frame.
+function wakeCursor() {
+  cursorVisible = true;
+}
+
 function syncPulseTimer() {
   if (turnStatus.active && !pulseTimer) {
     pulseTimer = setInterval(() => {
@@ -139,7 +162,8 @@ function fixedRouterRow(label, value) {
 
 function renderFooterTree() {
   const composerLine = inputText || composer.text;
-  const visibleComposer = composerLine || composer.placeholder;
+  const cursor = !composer.disabled && cursorVisible ? "▏" : " ";
+  const visibleComposer = composerLine ? `${composerLine}${cursor}` : composer.placeholder;
   const composerColor = composerLine ? OPENTUI_DAILY_THEME.text : OPENTUI_DAILY_THEME.muted;
 
   return Box(
@@ -215,13 +239,11 @@ function writeScrollbackBlock(lines, fg, { startOnNewLine = true, topTitle, bott
   if (!renderer) return;
   renderer.writeToScrollback((ctx) => {
     const width = Math.max(1, ctx.width - 1);
-    // Rules must match the wrap width (width - 1) so they fill exactly one row
-    // and are never folded onto a second line.
     const ruleWidth = Math.max(1, width - 1);
     const framed = [];
-    if (topTitle !== undefined) framed.push(cardTopRule(topTitle, ruleWidth));
+    if (topTitle !== undefined) framed.push(cardTopRule(topTitle));
     for (const line of lines) framed.push(line);
-    if (bottomRule) framed.push(cardBottomRule(ruleWidth));
+    if (bottomRule) framed.push(cardBottomRule());
     const plain = framed.map((line) => stripTerminalControls(line)).join("\n");
     const wrapped = padLinesForScrollback(wrapText(plain, ruleWidth));
     const height = Math.max(1, wrapped.split("\n").length);
@@ -239,17 +261,15 @@ function writeScrollbackBlock(lines, fg, { startOnNewLine = true, topTitle, bott
   });
 }
 
-// Build "╭─ <title> ──────────╮" sized to the available width.
-function cardTopRule(title, width) {
-  const head = title ? `╭─ ${title} ` : "╭─";
-  const rest = Math.max(0, width - textWidth(head) - 1);
-  return `${head}${"─".repeat(rest)}╮`;
+// Left-only card frame: terminal width and content length keep changing, so a
+// right border / corner would misalign and wrap. Keep just the left rail with
+// a short title rule on top and a short closing rule on the bottom.
+function cardTopRule(title) {
+  return title ? `╭─ ${title} ─────` : "╭───────";
 }
 
-// Build "╰────────────────────╯" sized to the available width.
-function cardBottomRule(width) {
-  const rest = Math.max(0, width - 2);
-  return `╰${"─".repeat(rest)}╯`;
+function cardBottomRule() {
+  return "╰───────";
 }
 
 function renderPromptBlock(text) {
@@ -454,6 +474,7 @@ function handlePythonMessage(message) {
       return;
     case "shutdown":
       if (pulseTimer) clearInterval(pulseTimer);
+      if (cursorTimer) clearInterval(cursorTimer);
       renderer.destroy();
       process.exit(0);
       return;
@@ -464,9 +485,30 @@ function handlePythonMessage(message) {
 
 function submitInput() {
   const text = inputText;
+  if (text.trim() && inputHistory[inputHistory.length - 1] !== text) {
+    inputHistory.push(text);
+  }
+  historyIndex = inputHistory.length;
+  draftBeforeHistory = "";
   inputText = "";
   composer.text = "";
   sendHostMessage({ type: "input.submit", text });
+  rerenderFooter();
+}
+
+// Up/Down arrows walk the input history. The slot past the end (index ===
+// length) holds the in-progress draft so Down returns to what was typed.
+function recallHistory(direction) {
+  if (inputHistory.length === 0) return;
+  if (historyIndex === inputHistory.length) {
+    draftBeforeHistory = inputText;
+  }
+  const next = historyIndex + direction;
+  if (next < 0 || next > inputHistory.length) return;
+  historyIndex = next;
+  inputText = next === inputHistory.length ? draftBeforeHistory : inputHistory[next];
+  composer.text = inputText;
+  wakeCursor();
   rerenderFooter();
 }
 
@@ -484,17 +526,30 @@ function installKeyboardHandlers() {
       submitInput();
       return;
     }
+    if (key.name === "up") {
+      recallHistory(-1);
+      return;
+    }
+    if (key.name === "down") {
+      recallHistory(1);
+      return;
+    }
     if (key.name === "backspace") {
-      inputText = inputText.slice(0, -1);
+      inputText = Array.from(inputText).slice(0, -1).join("");
+      wakeCursor();
       rerenderFooter();
       return;
     }
     const printable = key.sequence ?? key.name ?? "";
     if (printable.length > 0 && !key.ctrl && !key.meta && key.name !== "space") {
       inputText += printable;
+      historyIndex = inputHistory.length;
+      wakeCursor();
       rerenderFooter();
     } else if (key.name === "space") {
       inputText += " ";
+      historyIndex = inputHistory.length;
+      wakeCursor();
       rerenderFooter();
     }
   });
@@ -502,6 +557,8 @@ function installKeyboardHandlers() {
   const decoder = new TextDecoder();
   renderer.keyInput.on("paste", (event) => {
     inputText += decoder.decode(event.bytes);
+    historyIndex = inputHistory.length;
+    wakeCursor();
     rerenderFooter();
   });
 }
@@ -522,6 +579,7 @@ async function main() {
 
   rerenderFooter();
   installKeyboardHandlers();
+  startCursorBlink();
   sendHostMessage({ type: "ready" });
 
   const input = fs.createReadStream(null, {
