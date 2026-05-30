@@ -55,10 +55,12 @@ class TerminalRendererBackend:
 
 
 def renderer_backends() -> dict[str, TuiRendererBackend]:
+    from opensquilla.cli.tui.opentui.bridge import OpenTuiRendererBackend
     from opensquilla.cli.tui.renderers.textual_backend import TextualRendererBackend
 
     backends: list[TuiRendererBackend] = [
         TerminalRendererBackend(),
+        OpenTuiRendererBackend(),
         TextualRendererBackend(),
     ]
     return {backend.backend_id: backend for backend in backends}

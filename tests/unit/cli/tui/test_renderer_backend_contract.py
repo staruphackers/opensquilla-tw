@@ -57,6 +57,7 @@ def test_backend_selection_rejects_unknown_env_values_clearly() -> None:
     assert "Unknown TUI backend 'bogus'" in str(exc_info.value)
     assert "terminal" in str(exc_info.value)
     assert "textual" in str(exc_info.value)
+    assert "opentui" in str(exc_info.value)
 
 
 def test_backend_selection_reports_unavailable_explicit_backend() -> None:
@@ -76,6 +77,14 @@ def test_textual_backend_imports_textual_only_when_selected() -> None:
 
     assert backend.backend_id == "textual"
     assert "textual.app" not in sys.modules
+
+
+def test_opentui_backend_is_registered_without_importing_node_runtime() -> None:
+    backend = get_renderer_backend("opentui")
+
+    assert backend.backend_id == "opentui"
+    assert backend.supports_structured_ui is True
+    assert backend.supports_streaming_fast_path is True
 
 
 def test_textual_backend_reports_unavailable_without_required_dependency() -> None:
