@@ -38,6 +38,7 @@ class OpenTuiStreamRenderer:
         self._began = False
         self._saw_output = False
         self._tool_names: dict[str, str] = {}
+        self._answer_buf = ""
 
     async def _emit(self, message_type: str, payload: Any) -> None:
         handle = self.output_handle
@@ -83,7 +84,18 @@ class OpenTuiStreamRenderer:
                 "turn.status", TurnStatusState(phase="output", label="output", active=True)
             )
         self.buffer += delta
-        await self._emit("answer.text", AnswerText(text=delta))
+        # Streaming deltas are arbitrary token fragments. Buffer them and emit
+        # one answer.text per completed line so the JS host renders whole lines
+        # (preserving markdown and ASCII layout) instead of one block per token.
+        self._answer_buf += delta
+        while "\n" in self._answer_buf:
+            line, self._answer_buf = self._answer_buf.split("\n", 1)
+            await self._emit("answer.text", AnswerText(text=line))
+
+    async def _flush_answer(self) -> None:
+        if self._answer_buf:
+            line, self._answer_buf = self._answer_buf, ""
+            await self._emit("answer.text", AnswerText(text=line))
 
     async def astatus(self, message: str, *, style: str = "dim") -> None:
         await self._ensure_begin()
@@ -140,6 +152,7 @@ class OpenTuiStreamRenderer:
 
     async def afinalize(self, usage: Any | None = None, *, cancelled: bool = False) -> None:
         await self._ensure_begin()
+        await self._flush_answer()
         await self._emit("usage", Usage(text=_format_usage(usage)))
         await self._emit("turn.end", TurnEnd(id=self._turn_id, cancelled=cancelled))
         await self._emit(

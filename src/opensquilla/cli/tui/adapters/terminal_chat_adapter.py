@@ -52,6 +52,11 @@ class TuiPluginOutputHandle:
     async def write_through(self, payload: str) -> None:
         await self._output_handle.write_through(payload)
 
+    async def send_message(self, message_type: str, payload: dict[str, object]) -> None:
+        send = getattr(self._output_handle, "send_message", None)
+        if send is not None:
+            await send(message_type, payload)
+
     def stream_output(self) -> AbstractAsyncContextManager[Callable[[str], None]]:
         return self._output_handle.stream_output()
 
