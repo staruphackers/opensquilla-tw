@@ -12,11 +12,13 @@ else:
     from replay import replay_architecture_prompt
 
 from opensquilla.cli.chat.turn import UsageSummary  # type: ignore[import-untyped]
+from opensquilla.cli.tui.opentui.renderer import (
+    OpenTuiStreamRenderer,  # type: ignore[import-untyped]
+)
 from opensquilla.cli.tui.opentui.runtime import (  # type: ignore[import-untyped]
     get_tui_output,
     run_opentui_chat_runtime,
 )
-from opensquilla.cli.tui.terminal.stream import StreamingRenderer  # type: ignore[import-untyped]
 from opensquilla.engine.commands import Surface  # type: ignore[import-untyped]
 
 
@@ -44,7 +46,7 @@ async def _render_response(
     if output is None:
         raise RuntimeError("opentui output handle was not exposed")
 
-    renderer = StreamingRenderer(title="squilla", output_handle=output)
+    renderer = OpenTuiStreamRenderer(title="squilla", output_handle=output)
     usage = UsageSummary(model="fake-terminal", input_tokens=1, output_tokens=2)
     _write_log("dispatch", {"input": user_input, "scenario_id": scenario_id})
     if scenario_id == "long_streaming":

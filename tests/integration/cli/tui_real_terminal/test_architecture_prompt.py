@@ -78,17 +78,16 @@ def test_architecture_prompt_renders_tools_and_chinese_output(
     assert "架构" in rendered_output
     assert "architecture-analysis-complete" in rendered_output
     if result.backend_id == "opentui":
-        assert "╭─ router" in rendered_output
-        assert "╰─✓ ready" in rendered_output
-        assert "standard 96%" in rendered_output
         assert "╭─ prompt" in rendered_output
-        assert "╭─ tool" in rendered_output
-        assert "│ detail" in rendered_output
-        assert "\n classification, router" not in rendered_output
-        assert "\n HUD, and append-only" not in rendered_output
-        assert "╭─ answer" in rendered_output
-        assert "╰─ usage" in rendered_output
-        assert "standardm|n96%" not in rendered_output
-        assert "routenpending" not in rendered_output
+        assert "• list_dir /Users/cwan0785/opensquilla" in rendered_output
+        assert "✓ list_dir" in rendered_output
+        assert "• read_file opensquilla/src/opensquilla/cli/tui/textual/app.py" in rendered_output
+        assert "✓ read_file" in rendered_output
+        assert (
+            "thinking: mapping runtime boundary -> surface adapter -> renderer output path"
+            in rendered_output
+        )
+        assert "╭─ answer ─ squilla" in rendered_output
+        assert "· in 1 / out 2 · fake-terminal" in rendered_output
     assert "Traceback" not in rendered_output
     assert "\x1b[" not in rendered_output
