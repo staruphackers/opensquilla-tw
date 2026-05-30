@@ -247,6 +247,38 @@ def all_scenarios() -> tuple[TuiScenario, ...]:
             requires_prompt_ready=False,
             required_backend_id="live-textual",
         ),
+        TuiScenario(
+            scenario_id="live_opentui_architecture_prompt",
+            family="live_prompt",
+            initial_size=TerminalSize(cols=112, rows=34),
+            steps=(
+                ScenarioStep("wait-ready", "wait_text", "OPEN_SQUILLA_TUI_READY", "ready"),
+                ScenarioStep(
+                    "send-message",
+                    "send_text",
+                    "帮我分析这个代码长的架构 /Users/cwan0785/opensquilla",
+                    "after-input",
+                ),
+                ScenarioStep(
+                    "wait-turn-complete",
+                    "wait_any_text",
+                    " · \nThe task timed out before it could finish.",
+                    "after-turn-complete",
+                    timeout_s=180.0,
+                ),
+                ScenarioStep(
+                    "capture-final",
+                    "capture",
+                    "",
+                    "after-final",
+                    timeout_s=0.2,
+                ),
+            ),
+            expected_text=(),
+            requires_tmux=True,
+            requires_prompt_ready=False,
+            required_backend_id="live-opentui",
+        ),
     )
 
 

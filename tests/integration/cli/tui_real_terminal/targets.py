@@ -8,7 +8,7 @@ from typing import Literal
 
 from tui_real_terminal.driver import TerminalSize
 
-TuiBackendId = Literal["terminal", "textual", "opentui", "live-textual"]
+TuiBackendId = Literal["terminal", "textual", "opentui", "live-textual", "live-opentui"]
 
 
 @dataclass(frozen=True)
@@ -41,6 +41,8 @@ def build_tui_target(backend_id: str, context: TargetContext) -> TuiTarget:
         return _opentui_target(context)
     if backend_id == "live-textual":
         return _live_textual_target(context)
+    if backend_id == "live-opentui":
+        return _live_opentui_target(context)
     raise ValueError(f"unknown TUI backend target: {backend_id}")
 
 
@@ -172,4 +174,40 @@ def _live_textual_target(context: TargetContext) -> TuiTarget:
         readiness_markers=("OPEN_SQUILLA_TUI_READY",),
         log_paths=(context.artifact_dir / "logs",),
         capability_requirements=("real-terminal", "real-cli", "live-textual-app", "tmux"),
+    )
+
+
+def _live_opentui_target(context: TargetContext) -> TuiTarget:
+    env = _base_env(context, isolate_state=False)
+    env.update(
+        {
+            "OPENSQUILLA_TUI_BACKEND": "opentui",
+            "OPENSQUILLA_TUI_READY_MARKER": "OPEN_SQUILLA_TUI_READY",
+            "OPENSQUILLA_MEMORY_DREAM_DISABLED": "1",
+            "OPENSQUILLA_OPENROUTER_LIVE_PRICING": "0",
+        }
+    )
+    config_path = _host_gateway_config_path(context.project_root)
+    if config_path:
+        env["OPENSQUILLA_GATEWAY_CONFIG_PATH"] = config_path
+    return TuiTarget(
+        backend_id="live-opentui",
+        command=[
+            sys.executable,
+            "-u",
+            "-m",
+            "opensquilla.cli.main",
+            "chat",
+            "--standalone",
+            "--workspace",
+            str(context.project_root),
+            "--workspace-strict",
+            "--timeout",
+            "120",
+        ],
+        env=env,
+        initial_size=context.size,
+        readiness_markers=("OPEN_SQUILLA_TUI_READY",),
+        log_paths=(context.artifact_dir / "logs",),
+        capability_requirements=("real-terminal", "real-cli", "opentui-footer", "tmux"),
     )
