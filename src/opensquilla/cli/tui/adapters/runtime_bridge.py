@@ -220,6 +220,7 @@ def _gateway_runtime_notifier(
                     "input. Ctrl+D exits. /help lists commands.[/dim]",
                     title="Gateway",
                     border_style=ACCENT,
+                    expand=False,
                 )
             )
             return

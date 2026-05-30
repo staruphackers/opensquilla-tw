@@ -584,6 +584,19 @@ async function main() {
   rerenderFooter();
   installKeyboardHandlers();
   startCursorBlink();
+
+  // Redraw the footer on terminal resize so the absolutely-positioned composer
+  // and router boxes re-flow to the new size instead of leaving a gap between
+  // the footer and the scrollback above it.
+  renderer.on?.("resize", () => {
+    rerenderFooter();
+    const width = renderer.terminalWidth ?? 0;
+    const height = renderer.terminalHeight ?? 0;
+    if (width && height) {
+      sendHostMessage({ type: "resize", width, height });
+    }
+  });
+
   sendHostMessage({ type: "ready" });
 
   const input = fs.createReadStream(null, {

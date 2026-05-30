@@ -172,6 +172,7 @@ def launch_chat(
                 "Ctrl+D exits. /help lists commands.[/dim]",
                 title="OpenSquilla",
                 border_style=ACCENT,
+                expand=False,
             )
         )
         if model:
