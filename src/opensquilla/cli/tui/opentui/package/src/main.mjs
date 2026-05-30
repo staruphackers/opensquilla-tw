@@ -21,6 +21,30 @@ if (process.argv.includes("--help") || process.argv.includes("-h")) {
 const FROM_PYTHON_FD = Number(process.env.OPENSQUILLA_OPENTUI_FROM_PYTHON_FD ?? "3");
 const TO_PYTHON_FD = Number(process.env.OPENSQUILLA_OPENTUI_TO_PYTHON_FD ?? "4");
 const FOOTER_HEIGHT = 6;
+const OPENTUI_DAILY_THEME = Object.freeze({
+  preset: "daily",
+  frame: "card",
+  detailMode: "inline",
+  answerMode: "panel",
+  motion: "pulse",
+  text: "#F4F7FB",
+  muted: "#667385",
+  faint: "#3E4A57",
+  composerBorder: "#77B7FF",
+  composerDisabledBorder: "#354453",
+  routerNormal: "#73D0A7",
+  routerWarning: "#F6C177",
+  routerError: "#FF7B8A",
+  toolAccent: "#69D2E7",
+  detailText: "#8A96A6",
+  answerAccent: "#9AD18B",
+  promptAccent: "#FFB86C",
+});
+const STATUS_PULSE_FRAMES = Object.freeze({
+  thinking: ["∙", "•", "●", "•"],
+  tool: ["◌", "◔", "◑", "◕"],
+  output: ["◇", "◆", "◇", "◆"],
+});
 
 let renderer;
 let root;
@@ -29,6 +53,8 @@ let Text;
 let TextRenderable;
 let createCliRenderer;
 let inputText = "";
+let pulseFrame = 0;
+let pulseTimer;
 
 const composer = {
   placeholder: "send a message",
@@ -65,17 +91,32 @@ function writeError(error) {
 }
 
 function colorForStyle(style) {
-  if (style === "warning") return "#F6C177";
-  if (style === "error") return "#EB6F92";
-  if (style === "dim") return "#6E7581";
-  return "#9CCFD8";
+  if (style === "warning") return OPENTUI_DAILY_THEME.routerWarning;
+  if (style === "error") return OPENTUI_DAILY_THEME.routerError;
+  if (style === "dim") return OPENTUI_DAILY_THEME.muted;
+  return OPENTUI_DAILY_THEME.routerNormal;
 }
 
 function statusIcon() {
   if (!turnStatus.active) return "✓";
-  if (turnStatus.phase === "tool") return "◌";
-  if (turnStatus.phase === "output") return "◇";
-  return "∙";
+  const frames = STATUS_PULSE_FRAMES[turnStatus.phase] ?? STATUS_PULSE_FRAMES.thinking;
+  return frames[pulseFrame % frames.length];
+}
+
+function syncPulseTimer() {
+  if (turnStatus.active && !pulseTimer) {
+    pulseTimer = setInterval(() => {
+      pulseFrame += 1;
+      rerenderFooter();
+    }, 180);
+    pulseTimer.unref?.();
+    return;
+  }
+  if (!turnStatus.active && pulseTimer) {
+    clearInterval(pulseTimer);
+    pulseTimer = undefined;
+    pulseFrame = 0;
+  }
 }
 
 function fixedRouterRow(label, value) {
@@ -95,7 +136,7 @@ function fixedRouterRow(label, value) {
 function renderFooterTree() {
   const composerLine = inputText || composer.text;
   const visibleComposer = composerLine || composer.placeholder;
-  const composerColor = composerLine ? "#E6EDF3" : "#7D8590";
+  const composerColor = composerLine ? OPENTUI_DAILY_THEME.text : OPENTUI_DAILY_THEME.muted;
   const routerColor = colorForStyle(routerState.style);
 
   return Box(
@@ -115,7 +156,9 @@ function renderFooterTree() {
         bottom: 1,
         height: 4,
         borderStyle: "rounded",
-        borderColor: composer.disabled ? "#3A3F47" : "#7AA2F7",
+        borderColor: composer.disabled
+          ? OPENTUI_DAILY_THEME.composerDisabledBorder
+          : OPENTUI_DAILY_THEME.composerBorder,
         bottomTitle: `${statusIcon()} ${turnStatus.label}`,
         bottomTitleAlignment: "left",
         paddingLeft: 1,
@@ -146,12 +189,11 @@ function renderFooterTree() {
         paddingRight: 1,
         flexDirection: "column",
         shouldFill: true,
-        backgroundColor: "#0E151C",
       },
-      Text({ id: "router-model", content: fixedRouterRow("model", routerState.model), fg: "#E6EDF3" }),
+      Text({ id: "router-model", content: fixedRouterRow("model", routerState.model), fg: OPENTUI_DAILY_THEME.text }),
       Text({ id: "router-route", content: fixedRouterRow("route", routerState.route), fg: "#C4B5FD" }),
       Text({ id: "router-saving", content: fixedRouterRow("save", routerState.saving), fg: "#8BD5CA" }),
-      Text({ id: "router-context", content: fixedRouterRow("ctx", routerState.context), fg: "#F6C177" }),
+      Text({ id: "router-context", content: fixedRouterRow("ctx", routerState.context), fg: OPENTUI_DAILY_THEME.routerWarning }),
     ),
   );
 }
@@ -168,7 +210,8 @@ function rerenderFooter() {
 
 function writePlainScrollback(text) {
   renderer.writeToScrollback((ctx) => {
-    const plain = stripTerminalControls(text);
+    const plain = decorateDailyTimelineScrollback(text);
+    const semantic = isDailySemanticScrollback(plain);
     const width = Math.max(1, ctx.width - 1);
     const wrapped = padLinesForScrollback(wrapText(plain, Math.max(1, width - 1)));
     const height = Math.max(1, wrapped.split("\n").length);
@@ -180,16 +223,126 @@ function writePlainScrollback(text) {
       width,
       height,
       content: wrapped,
-      fg: "#E6EDF3",
+      fg: colorForDailyScrollback(plain),
     });
     return {
       root,
       width,
       height,
-      startOnNewLine: false,
-      trailingNewline: false,
+      startOnNewLine: semantic,
+      trailingNewline: semantic,
     };
   });
+}
+
+function decorateDailyTimelineScrollback(text) {
+  const plain = stripTerminalControls(text);
+  const lines = plain.split("\n");
+  let currentBlock = "";
+  let changed = false;
+  const decorated = lines.map((line) => {
+    const trimmed = line.trim();
+    if (currentBlock === "prompt" && /^│\s+/u.test(trimmed)) {
+      return line;
+    }
+    const kind = classifyDailyTimelineLine(line);
+    if (kind === "prompt") {
+      currentBlock = trimmed === "╰" ? "" : "prompt";
+      return line;
+    }
+    if (kind === "answer") {
+      currentBlock = "answer";
+      changed = true;
+      return `╭─ answer ${line.replace(/^◢\s*/u, "").trim() || "squilla"}`;
+    }
+    if (kind === "tool") {
+      currentBlock = "tool";
+      changed = true;
+      return decorateDailyToolLine(line);
+    }
+    if (kind === "detail") {
+      currentBlock = "detail";
+      changed = true;
+      return decorateDailyDetailLine(line);
+    }
+    if (kind === "status") {
+      currentBlock = "status";
+      changed = true;
+      return `│ step ${line.trim()}`;
+    }
+    if (kind === "usage") {
+      currentBlock = "";
+      changed = true;
+      return `╰─ usage ${line.trim()}`;
+    }
+    if (currentBlock === "answer" && line.trim()) {
+      changed = true;
+      return `│ answer ${line}`;
+    }
+    if (currentBlock === "detail" && line.trim()) {
+      changed = true;
+      return decorateDailyDetailLine(line);
+    }
+    return line;
+  });
+  return changed ? trimDailySemanticBlankEdges(decorated).join("\n") : plain;
+}
+
+function classifyDailyTimelineLine(line) {
+  const trimmed = line.trim();
+  if (!trimmed) return "empty";
+  if (/^(╭─ prompt|╭─ squilla|╰$)/u.test(trimmed)) return "prompt";
+  if (/^◢\s+/u.test(trimmed)) return "answer";
+  if (/^[▸✓✗]\s+/u.test(trimmed)) return "tool";
+  if (/^tool_output\b/u.test(trimmed)) return "detail";
+  if (/^│\s+/u.test(trimmed)) return "detail";
+  if (/^(router route|thinking:|approval requested:)/u.test(trimmed)) return "status";
+  if (/(\bin\s*\/\s*\d+.*\bout\b|cached|think|\$[0-9]|aggregate)/u.test(trimmed)) return "usage";
+  if (/^turn cancelled$/u.test(trimmed)) return "usage";
+  return "body";
+}
+
+function decorateDailyToolLine(line) {
+  const trimmed = line.trim();
+  if (trimmed.startsWith("▸ ")) return `╭─ tool ${trimmed}`;
+  if (trimmed.startsWith("✓ ")) return `╰─ tool ${trimmed}`;
+  if (trimmed.startsWith("✗ ")) return `╰─ tool ${trimmed}`;
+  return `╭─ tool ${trimmed}`;
+}
+
+function decorateDailyDetailLine(line) {
+  const detail = line.replace(/^│\s*/u, "").trim();
+  return `│ detail ${detail}`;
+}
+
+function colorForDailyScrollback(text) {
+  if (text.includes("╭─ answer") || text.includes("│ answer")) {
+    return OPENTUI_DAILY_THEME.text;
+  }
+  if (text.includes("╭─ tool") || text.includes("╰─ tool")) {
+    return OPENTUI_DAILY_THEME.toolAccent;
+  }
+  if (text.includes("│ detail")) {
+    return OPENTUI_DAILY_THEME.detailText;
+  }
+  if (text.includes("╭─ prompt")) {
+    return OPENTUI_DAILY_THEME.promptAccent;
+  }
+  if (text.includes("╰─ usage")) {
+    return OPENTUI_DAILY_THEME.muted;
+  }
+  return OPENTUI_DAILY_THEME.text;
+}
+
+function isDailySemanticScrollback(text) {
+  return /(^|\n)(╭─|╰─|│ (answer|detail|step))/u.test(text);
+}
+
+function trimDailySemanticBlankEdges(lines) {
+  const trimmed = [...lines];
+  while (trimmed.length > 0 && trimmed[0] === "") trimmed.shift();
+  while (trimmed.length > 0 && trimmed[trimmed.length - 1] === "") trimmed.pop();
+  return trimmed;
 }
 
 function stripTerminalControls(text) {
@@ -208,28 +361,37 @@ function padLinesForScrollback(text) {
 function wrapText(text, width) {
   const rows = [];
   for (const line of text.split("\n")) {
+    const continuationPrefix = continuationPrefixForLine(line);
+    const lineWidth = wrapWidthForDailyLine(line, width);
     let current = "";
     let cells = 0;
     for (const token of line.split(/(\s+)/u)) {
       if (!token) continue;
       const tokenCells = textWidth(token);
       if (/^\s+$/u.test(token)) {
-        if (current && cells + tokenCells <= width) {
+        if (current && cells + tokenCells <= lineWidth) {
           current += token;
           cells += tokenCells;
         }
         continue;
       }
-      if (tokenCells > width) {
-        const result = appendHardWrappedToken(rows, current, cells, token, width);
+      if (tokenCells > lineWidth) {
+        const result = appendHardWrappedToken(
+          rows,
+          current,
+          cells,
+          token,
+          lineWidth,
+          continuationPrefix,
+        );
         current = result.current;
         cells = result.cells;
         continue;
       }
-      if (current && cells + tokenCells > width) {
+      if (current && cells + tokenCells > lineWidth) {
         rows.push(current.trimEnd());
-        current = token;
-        cells = tokenCells;
+        current = `${continuationPrefix}${token}`;
+        cells = textWidth(continuationPrefix) + tokenCells;
         continue;
       }
       current += token;
@@ -240,13 +402,29 @@ function wrapText(text, width) {
   return rows.join("\n");
 }
 
-function appendHardWrappedToken(rows, current, cells, token, width) {
+function wrapWidthForDailyLine(line, width) {
+  if (line.startsWith("│ detail ")) return Math.min(width, 56);
+  if (line.startsWith("│ answer ")) return Math.min(width, 86);
+  if (line.startsWith("│ step ")) return Math.min(width, 86);
+  return width;
+}
+
+function continuationPrefixForLine(line) {
+  if (line.startsWith("│ detail ")) return "│ detail ";
+  if (line.startsWith("│ answer ")) return "│ answer ";
+  if (line.startsWith("│ step ")) return "│ step ";
+  if (line.startsWith("╭─ tool ")) return "│ tool ";
+  return "";
+}
+
+function appendHardWrappedToken(rows, current, cells, token, width, continuationPrefix = "") {
+  const continuationCells = textWidth(continuationPrefix);
   for (const char of Array.from(token)) {
     const charCells = cellWidth(char);
     if (current && cells + charCells > width) {
       rows.push(current.trimEnd());
-      current = char;
-      cells = charCells;
+      current = `${continuationPrefix}${char}`;
+      cells = continuationCells + charCells;
     } else {
       current += char;
       cells += charCells;
@@ -295,12 +473,14 @@ function handlePythonMessage(message) {
         active: Boolean(message.active ?? turnStatus.active),
         style: String(message.style ?? turnStatus.style),
       });
+      syncPulseTimer();
       rerenderFooter();
       return;
     case "scrollback.write":
       writePlainScrollback(String(message.text ?? ""));
       return;
     case "shutdown":
+      if (pulseTimer) clearInterval(pulseTimer);
       renderer.destroy();
       process.exit(0);
       return;

@@ -81,6 +81,13 @@ def test_architecture_prompt_renders_tools_and_chinese_output(
         assert "╭─ router" in rendered_output
         assert "╰─✓ ready" in rendered_output
         assert "standard 96%" in rendered_output
+        assert "╭─ prompt" in rendered_output
+        assert "╭─ tool" in rendered_output
+        assert "│ detail" in rendered_output
+        assert "\n classification, router" not in rendered_output
+        assert "\n HUD, and append-only" not in rendered_output
+        assert "╭─ answer" in rendered_output
+        assert "╰─ usage" in rendered_output
         assert "standardm|n96%" not in rendered_output
         assert "routenpending" not in rendered_output
     assert "Traceback" not in rendered_output

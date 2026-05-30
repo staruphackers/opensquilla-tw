@@ -28,8 +28,6 @@ from opensquilla.cli.tui.backend.runtime import run_tui_runtime
 from opensquilla.cli.tui.opentui.surface import open_opentui_surface
 from opensquilla.engine.commands import Surface
 
-USER_ECHO_LABEL = "›"
-
 
 async def _noop_abort_turn() -> None:
     return None
@@ -99,12 +97,12 @@ async def echo_opentui_user_input(tui_surface: TuiSurface, text: str) -> None:
     """Echo accepted user input above the OpenTUI footer."""
     if not text.strip():
         return
-    await tui_surface.write_through(f"\n{USER_ECHO_LABEL}\n{text}\n")
+    await tui_surface.write_through(f"\n╭─ prompt\n│ {text}\n╰\n")
 
 
 async def echo_opentui_queued_turn_start(tui_surface: TuiSurface) -> None:
     """Render a queue marker through the OpenTUI scrollback surface."""
-    await tui_surface.write_through("\n◢ squilla\nrunning queued input\n")
+    await tui_surface.write_through("\n╭─ squilla\n│ running queued input\n╰\n")
 
 
 async def run_opentui_chat_runtime(
