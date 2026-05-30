@@ -7,7 +7,7 @@ def test_missing_opentui_host_dependencies_report_install_command(tmp_path) -> N
     package_dir = tmp_path / "package"
     package_dir.mkdir()
 
-    availability = check_opentui_host_available(package_dir=package_dir, node_bin="node")
+    availability = check_opentui_host_available(package_dir=package_dir, runtime_bin="bun")
 
     assert availability.available is False
     assert availability.reason is not None

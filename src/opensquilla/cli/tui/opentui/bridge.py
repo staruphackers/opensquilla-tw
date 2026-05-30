@@ -29,15 +29,16 @@ class OpenTuiHostPaths:
 def check_opentui_host_available(
     *,
     package_dir: Path = DEFAULT_HOST_PACKAGE_DIR,
+    runtime_bin: str | None = None,
     node_bin: str | None = None,
 ) -> RendererBackendAvailability:
     """Check whether the local Node/OpenTUI host can be launched."""
 
-    resolved_node = node_bin if node_bin is not None else shutil.which("node")
-    if not resolved_node:
+    resolved_runtime = runtime_bin or node_bin or shutil.which("bun")
+    if not resolved_runtime:
         return RendererBackendAvailability(
             available=False,
-            reason="Node.js is not installed or is not on PATH",
+            reason="Bun is not installed or is not on PATH",
         )
 
     paths = OpenTuiHostPaths(package_dir=package_dir)
