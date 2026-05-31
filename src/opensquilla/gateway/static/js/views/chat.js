@@ -1230,28 +1230,10 @@ const ChatView = (() => {
                     </div>
                   </div>
                   <div class="chat-toolbar-row">
-                    <span class="chat-toolbar-row-label">Router animation</span>
-                    <div class="toggle-switch-wrap" id="pill-router-fx-group" title="Show the AI model router animation">
-                      <label class="toggle-switch" aria-label="Router animation">
+                    <span class="chat-toolbar-row-label">Visual effects</span>
+                    <div class="toggle-switch-wrap" id="pill-router-fx-group" title="Show router and savings effects">
+                      <label class="toggle-switch" aria-label="Visual effects">
                         <input type="checkbox" id="toggle-router-fx" />
-                        <span class="toggle-track"><span class="toggle-thumb"></span></span>
-                      </label>
-                    </div>
-                  </div>
-                  <div class="chat-toolbar-row">
-                    <span class="chat-toolbar-row-label">Cloud view</span>
-                    <div class="toggle-switch-wrap" id="pill-router-cloud-group" title="Render the router as a focal-depth model nebula instead of the grid">
-                      <label class="toggle-switch" aria-label="Cloud view">
-                        <input type="checkbox" id="toggle-router-cloud" />
-                        <span class="toggle-track"><span class="toggle-thumb"></span></span>
-                      </label>
-                    </div>
-                  </div>
-                  <div class="chat-toolbar-row">
-                    <span class="chat-toolbar-row-label">Savings FX</span>
-                    <div class="toggle-switch-wrap" id="pill-savings-fx-group" title="Show a subtle accent pulse on routed / cache-saved turns">
-                      <label class="toggle-switch" aria-label="Savings FX">
-                        <input type="checkbox" id="toggle-savings-fx" />
                         <span class="toggle-track"><span class="toggle-thumb"></span></span>
                       </label>
                     </div>
@@ -1402,33 +1384,8 @@ const ChatView = (() => {
           // immediately instead of preserving a separate live-strip path.
           _thread.querySelectorAll('.router-fx').forEach((n) => _routerFxRemoveStrip(n));
         }
-        UI.toast('Router animation: ' + (_routerFx.enabled ? 'ON' : 'OFF'), 'info');
-      });
-    }
-
-    // Router-fx style variant: grid (default) vs the focal-depth cloud.
-    // Purely client-side, persisted with the on/off pref.
-    const routerCloudToggle = _el.querySelector('#toggle-router-cloud');
-    if (routerCloudToggle) {
-      routerCloudToggle.addEventListener('change', () => {
-        _routerFx.variant = routerCloudToggle.checked ? 'cloud' : 'default';
-        _routerFxSavePref();
-        // Re-render strips in the chosen variant through the normal rebuild path.
-        if (_thread) {
-          _thread.querySelectorAll('.router-fx').forEach((n) => _routerFxRemoveStrip(n));
-        }
-        _scheduleHistorySync();
-        UI.toast('Router view: ' + (_routerFx.variant === 'cloud' ? 'cloud' : 'grid'), 'info');
-      });
-    }
-
-    // Savings FX toggle — client-side preference (persisted in SavingsFX).
-    // Controls the subtle accent pulse on routed / cache-saved turns.
-    const savingsFxToggle = _el.querySelector('#toggle-savings-fx');
-    if (savingsFxToggle && window.SavingsFX) {
-      savingsFxToggle.addEventListener('change', () => {
-        window.SavingsFX.setEnabled(savingsFxToggle.checked);
-        UI.toast('Savings FX: ' + (savingsFxToggle.checked ? 'ON' : 'OFF'), 'info');
+        if (window.SavingsFX) window.SavingsFX.setEnabled(_routerFx.enabled);
+        UI.toast('Visual effects: ' + (_routerFx.enabled ? 'ON' : 'OFF'), 'info');
       });
     }
 
@@ -1477,10 +1434,7 @@ const ChatView = (() => {
       _routerFxLoadPref();
       const routerFxToggle = _el?.querySelector('#toggle-router-fx');
       if (routerFxToggle) routerFxToggle.checked = _routerFx.enabled;
-      const routerCloudToggle = _el?.querySelector('#toggle-router-cloud');
-      if (routerCloudToggle) routerCloudToggle.checked = _routerFx.variant === 'cloud';
-      const savingsFxToggle = _el?.querySelector('#toggle-savings-fx');
-      if (savingsFxToggle && window.SavingsFX) savingsFxToggle.checked = window.SavingsFX.isEnabled();
+      if (window.SavingsFX) window.SavingsFX.setEnabled(_routerFx.enabled);
       _globalElevatedMode = _normalizeElevatedMode(cfg?.permissions?.default_mode);
       _toolbarState.bypass = _isApprovalBypassMode(_effectiveElevatedMode());
       _updateElevatedPill();
@@ -3476,13 +3430,13 @@ const ChatView = (() => {
   function _routerFxLoadPref() {
     // Defaults stand (enabled ON, default variant) unless a stored pref
     // overrides them. localStorage may throw (private mode / quota) — swallow.
+    _routerFx.variant = 'default';
     try {
       const raw = localStorage.getItem(_ROUTER_FX_PREF_KEY);
       if (!raw) return;
       const saved = JSON.parse(raw);
       if (saved && typeof saved === 'object') {
         if (typeof saved.enabled === 'boolean') _routerFx.enabled = saved.enabled;
-        if (typeof saved.variant === 'string' && saved.variant) _routerFx.variant = saved.variant;
       }
     } catch { /* keep defaults */ }
   }
@@ -3490,7 +3444,6 @@ const ChatView = (() => {
     try {
       localStorage.setItem(_ROUTER_FX_PREF_KEY, JSON.stringify({
         enabled: _routerFx.enabled,
-        variant: _routerFx.variant,
       }));
     } catch { /* preference is best-effort */ }
   }
@@ -4026,7 +3979,7 @@ const ChatView = (() => {
     _routerFxClearAnimationTimers(wrap);
 
     // The router panel is an explicitly toggled decorative effect — the in-app
-    // "Router animation" switch IS the motion opt-in — so it plays regardless
+    // "Visual effects" switch IS the motion opt-in — so it plays regardless
     // of the OS prefers-reduced-motion setting, which otherwise blanket-
     // suppresses it in environments that force reduce-motion (some remote
     // desktops / VMs do). Turn the switch off to stop it.

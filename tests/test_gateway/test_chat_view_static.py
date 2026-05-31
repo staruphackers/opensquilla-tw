@@ -1742,17 +1742,16 @@ def test_router_fx_cloud_css_rack_focus_states() -> None:
     assert "deliberately does NOT honour prefers-reduced-motion" in css
 
 
-def test_router_fx_cloud_view_toggle_selects_variant() -> None:
+def test_router_fx_cloud_view_toggle_is_not_exposed() -> None:
     source = CHAT_JS.read_text(encoding="utf-8")
     popover_start = source.index('id="chat-toolbar-popover"')
     popover_end = source.index("chat-input-wrap", popover_start)
     popover = source[popover_start:popover_end]
 
-    assert 'id="toggle-router-cloud"' in popover
-    assert "Cloud view" in popover
-    # Handler flips the persisted variant client-side and re-renders.
-    assert "_routerFx.variant = routerCloudToggle.checked ? 'cloud' : 'default';" in source
-    assert "routerCloudToggle.checked = _routerFx.variant === 'cloud';" in source
+    assert 'id="toggle-router-cloud"' not in popover
+    assert "Cloud view" not in popover
+    assert "const routerCloudToggle = _el.querySelector('#toggle-router-cloud');" not in source
+    assert "routerCloudToggle.checked = _routerFx.variant === 'cloud';" not in source
 
 
 def test_router_fx_grid_labels_shrink_to_fit() -> None:
@@ -2159,11 +2158,8 @@ def test_router_fx_visualisation_pref_is_client_side_localstorage() -> None:
     load_body = source[load_start:load_end]
     assert "const saved = JSON.parse(raw);" in load_body
     assert "if (typeof saved.enabled === 'boolean') _routerFx.enabled = saved.enabled;" in load_body
-    variant_apply = (
-        "if (typeof saved.variant === 'string' && saved.variant) "
-        "_routerFx.variant = saved.variant;"
-    )
-    assert variant_apply in load_body
+    assert "saved.variant" not in load_body
+    assert "_routerFx.variant = 'default';" in load_body
     assert "} catch { /* keep defaults */ }" in load_body
 
     # Save path: serialize the live pref and swallow quota/availability throws.
@@ -2172,7 +2168,7 @@ def test_router_fx_visualisation_pref_is_client_side_localstorage() -> None:
     save_body = source[save_start:save_end]
     assert "localStorage.setItem(_ROUTER_FX_PREF_KEY, JSON.stringify({" in save_body
     assert "enabled: _routerFx.enabled," in save_body
-    assert "variant: _routerFx.variant," in save_body
+    assert "variant:" not in save_body
     assert "} catch { /* preference is best-effort */ }" in save_body
 
     # The toggle handler is client-side: it saves the pref and does NOT write
@@ -2185,7 +2181,27 @@ def test_router_fx_visualisation_pref_is_client_side_localstorage() -> None:
     assert "_routerFxSavePref();" in fx_body
     assert "config.patch.safe" not in fx_body
     assert "_scheduleHistorySync();" in fx_body
-    assert "UI.toast('Router animation: '" in fx_body
+    assert "if (window.SavingsFX) window.SavingsFX.setEnabled(_routerFx.enabled);" in fx_body
+    assert "UI.toast('Visual effects: '" in fx_body
+
+
+def test_router_effects_default_on_and_cloud_choice_hidden() -> None:
+    chat_source = CHAT_JS.read_text(encoding="utf-8")
+    savings_source = (
+        Path("src/opensquilla/gateway/static/js/components/savings-fx.js")
+        .read_text(encoding="utf-8")
+    )
+
+    assert "const _routerFx = { enabled: true, variant: 'default' };" in chat_source
+    assert "try { return window.localStorage.getItem(_PREF_KEY) !== '0'; } catch { return true; }" in savings_source
+    assert "if (window.SavingsFX) window.SavingsFX.setEnabled(_routerFx.enabled);" in chat_source
+    assert 'id="toggle-savings-fx"' not in chat_source
+    assert "Savings FX" not in chat_source
+    assert "Visual effects" in chat_source
+    assert "Show router and savings effects" in chat_source
+    assert "Router effects" not in chat_source
+    assert "Router animation" not in chat_source
+    assert "Cloud view" not in chat_source
 
 
 def test_router_fx_render_gated_in_both_live_and_history_paths() -> None:
@@ -2274,7 +2290,11 @@ def test_router_fx_visualisation_toggle_markup_reuses_switch() -> None:
     popover = source[popover_start:popover_end]
 
     assert 'id="toggle-router-fx"' in popover
-    assert "Router animation" in popover
+    assert "Visual effects" in popover
+    assert "Show router and savings effects" in popover
+    assert "Router effects" not in popover
+    assert 'id="toggle-savings-fx"' not in popover
+    assert "Savings FX" not in popover
     assert 'class="toggle-switch"' in popover
     assert popover.count('class="toggle-track"') >= 2
 
