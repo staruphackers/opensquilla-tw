@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, cast
+from urllib.parse import quote
 
 import structlog
 
@@ -144,8 +145,36 @@ def _session_summary_to_chat_payload(summary: object) -> dict[str, Any]:
         "coverage_status": getattr(summary, "coverage_status", "") or "",
         "removed_count": getattr(summary, "removed_count", None),
         "kept_count": getattr(summary, "kept_count", None),
+        "covered_through_id": getattr(summary, "covered_through_id", None),
         "created_at": getattr(summary, "created_at", None),
     }
+
+
+def _annotate_transcript_attachment_downloads(
+    messages: list[dict[str, Any]],
+    *,
+    session_key: str,
+) -> list[dict[str, Any]]:
+    session_qs = quote(session_key, safe="")
+    for msg in messages:
+        attachments = msg.get("attachments")
+        if not isinstance(attachments, list):
+            continue
+        for attachment in attachments:
+            if not isinstance(attachment, dict):
+                continue
+            sha = attachment.get("sha256_ref")
+            if not isinstance(sha, str) or not sha:
+                continue
+            if attachment.get("download_url"):
+                continue
+            name = str(attachment.get("name") or "attachment")
+            mime = str(attachment.get("mime") or attachment.get("type") or "")
+            attachment["download_url"] = (
+                f"/api/v1/attachments/{quote(sha, safe='')}?sessionKey={session_qs}"
+                f"&name={quote(name, safe='')}&mime={quote(mime, safe='')}"
+            )
+    return messages
 
 
 async def _chat_history_transcript(
@@ -463,8 +492,12 @@ async def _handle_chat_history(params: dict | None, ctx: RpcContext) -> dict:
     else:
         history_scope = "complete"
 
+    messages = transcript_entries_to_chat_messages(page_entries, limit=None)
     return {
-        "messages": transcript_entries_to_chat_messages(page_entries, limit=None),
+        "messages": _annotate_transcript_attachment_downloads(
+            messages,
+            session_key=session_key,
+        ),
         "has_more": has_more,
         "oldest_cursor": _chat_history_cursor(page_entries[0]) if page_entries else None,
         "newest_cursor": _chat_history_cursor(page_entries[-1]) if page_entries else None,

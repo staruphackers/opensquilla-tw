@@ -72,6 +72,17 @@ def test_chat_pending_attachment_preview_is_composer_width_capped() -> None:
     assert "overflow-x: auto;" in block
 
 
+def test_chat_day_separator_stays_on_centered_chat_axis() -> None:
+    css = CHAT_CSS.read_text(encoding="utf-8")
+    start = css.index(".chat-day-sep {")
+    end = css.index(".chat-day-sep::before", start)
+    block = css[start:end]
+
+    assert "width: 100%;" in block
+    assert "max-width: var(--chat-measure);" in block
+    assert "margin: var(--sp-2) auto;" in block
+
+
 def test_chat_sent_attachment_images_render_as_separate_thumbnail_attachments() -> None:
     css = CHAT_CSS.read_text(encoding="utf-8")
     body_start = css.index(".msg.user .msg-body.msg-body--has-attachments {")
@@ -81,15 +92,21 @@ def test_chat_sent_attachment_images_render_as_separate_thumbnail_attachments() 
     text_end = css.index(".msg.user .msg-body--has-attachments .msg-attachments", text_start)
     text_block = css[text_start:text_end]
     attachments_start = css.index(".msg.user .msg-body--has-attachments .msg-attachments {")
-    attachments_end = css.index(".msg.user .msg-body--has-attachments .msg-thumb", attachments_start)
+    attachments_end = css.index(
+        ".msg.user .msg-body--has-attachments .msg-thumb",
+        attachments_start,
+    )
     attachments_block = css[attachments_start:attachments_end]
     thumb_start = css.index(".msg.user .msg-body--has-attachments .msg-thumb {")
     thumb_end = css.index("/* ─── Pending Queue", thumb_start)
     thumb_block = css[thumb_start:thumb_end]
 
     assert "max-width: min(360px, 78%);" in body_block
+    assert "border: 0;" in body_block
+    assert "background: transparent;" in body_block
     assert "max-width: min(360px, 100%);" in text_block
     assert "max-width: 100%;" in attachments_block
+    assert "user-select: text;" in attachments_block
     assert "width: min(260px, 42vw);" in thumb_block
     assert "height: auto;" in thumb_block
     assert "min-height:" not in thumb_block
@@ -98,6 +115,38 @@ def test_chat_sent_attachment_images_render_as_separate_thumbnail_attachments() 
     assert "border-color: color-mix(in srgb, var(--border) 65%, transparent);" in thumb_block
     assert "box-shadow: none;" in thumb_block
     assert "var(--accent)" not in thumb_block
+
+
+def test_chat_non_image_message_attachments_render_download_links_when_data_exists() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+    render_start = source.index("function _renderMessageAttachmentHtml(att)")
+    render_end = source.index("function _renderAttachmentPreview()", render_start)
+    render_body = source[render_start:render_end]
+
+    assert "function _escAttr(s)" in source
+    assert "function _attachmentDownloadHref(att, mime)" in source
+    assert "function _attachmentDownloadName(att)" in source
+    assert '<a class="msg-file-chip msg-file-chip--download"' in render_body
+    assert 'download="${_escAttr(downloadName)}"' in render_body
+    assert 'href="${_escAttr(downloadHref)}"' in render_body
+    assert '<span class="msg-file-chip msg-file-chip--disabled"' in render_body
+
+
+def test_chat_file_attachment_download_links_keep_chip_styling() -> None:
+    css = CHAT_CSS.read_text(encoding="utf-8")
+    chip_start = css.index(".msg-file-chip {")
+    chip_end = css.index(".msg-file-chip__icon", chip_start)
+    chip_block = css[chip_start:chip_end]
+    download_start = css.index(".msg-file-chip--download {")
+    download_end = css.index(".msg-file-chip--download:hover", download_start)
+    download_block = css[download_start:download_end]
+
+    assert "text-decoration: none;" in chip_block
+    assert "cursor: default;" in chip_block
+    assert "cursor: pointer;" in download_block
+    assert ".msg-file-chip--download:hover" in css
+    assert ".msg-file-chip--download:focus-visible" in css
+    assert ".msg-file-chip--disabled" in css
 
 
 def test_chat_tool_display_map_does_not_reference_removed_wrapper_tools() -> None:
@@ -550,7 +599,10 @@ def test_chat_image_paste_prevents_default_only_after_attachment_acceptance() ->
 def test_chat_add_attachment_reports_acceptance_for_paste_handler() -> None:
     source = CHAT_JS.read_text(encoding="utf-8")
     add_start = source.index("function _addAttachment(file)")
-    add_end = source.index("  async function _uploadAttachmentStaged(file, mime, localId)", add_start)
+    add_end = source.index(
+        "  async function _uploadAttachmentStaged(file, mime, localId)",
+        add_start,
+    )
     add_body = source[add_start:add_end]
 
     assert "return false;" in add_body[
@@ -753,6 +805,25 @@ def test_chat_stream_handlers_drop_replayed_duplicate_frames() -> None:
     assert "_noteStreamSeq(payload);" not in body
 
 
+def test_chat_replayed_wait_events_do_not_bootstrap_live_thinking() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+    start = source.index("function _subscribeRpcEvents() {")
+    end = source.index("  /* ── Chat History", start)
+    body = source[start:end]
+
+    assert "function _dropReplayedLiveWaitEvent(meta, payload, eventName)" in source
+    assert "_rpc.on('session.event.state_change', (payload, meta = {}) =>" in body
+    assert "_rpc.on('session.event.run_heartbeat', (payload, meta = {}) =>" in body
+    assert "_dropReplayedLiveWaitEvent(meta, payload, 'event.state_change')" in body
+    assert "_dropReplayedLiveWaitEvent(meta, payload, 'event.run_heartbeat')" in body
+
+    subscribe_start = source.index("async function _subscribeSession() {")
+    subscribe_end = source.index("  async function _unsubscribeSession()", subscribe_start)
+    subscribe_body = source[subscribe_start:subscribe_end]
+    assert "const subscribedState = _sessionRunStatus(res);" in subscribe_body
+    assert "_runStatusIsActive(subscribedState.status)" in subscribe_body
+
+
 def test_chat_stream_seq_cursor_is_scoped_per_session() -> None:
     source = CHAT_JS.read_text(encoding="utf-8")
     start = source.index("function _acceptStreamSeq(payload)")
@@ -804,12 +875,17 @@ def test_chat_empty_history_preserves_live_stream_bubble() -> None:
     end = source.index("    const existingByStableIdentity = new Map();", start)
     body = source[start:end]
 
-    live_guard = (
-        "if (_isStreaming && (_isCurrentSessionStreamBubble(_streamBubble) || "
-        "liveRouterStrips.length > 0 || liveUserAnchor))"
-    )
+    live_guard = "if (_isStreaming && ("
     assert "const liveUserAnchor = _currentSessionLiveUserAnchor(_sessionKey || '');" in body
+    assert (
+        "const liveThinking = _isCurrentSessionThinkingIndicator(_thinkingEl) "
+        "? _thinkingEl : null;"
+    ) in body
     assert live_guard in body
+    assert "_isCurrentSessionStreamBubble(_streamBubble)" in body
+    assert "|| liveRouterStrips.length > 0" in body
+    assert "|| liveUserAnchor" in body
+    assert "|| liveThinking" in body
     assert (
         "if (liveUserAnchor && !liveUserAnchor.isConnected) "
         "_thread.appendChild(liveUserAnchor);"
@@ -897,9 +973,11 @@ def test_chat_empty_history_keeps_live_router_only_running_view() -> None:
         "const liveUserAnchor = _currentSessionLiveUserAnchor(_sessionKey || '');"
     ) in history_body
     assert (
-        "_isCurrentSessionStreamBubble(_streamBubble) || "
-        "liveRouterStrips.length > 0 || liveUserAnchor"
+        "_isCurrentSessionStreamBubble(_streamBubble)"
     ) in history_body
+    assert "|| liveRouterStrips.length > 0" in history_body
+    assert "|| liveUserAnchor" in history_body
+    assert "|| liveThinking" in history_body
     assert "_chatDiag('history.empty.keep_live_stream_view'" in history_body
 
 
@@ -1019,9 +1097,9 @@ def test_chat_surfaces_compaction_lifecycle_status_and_exception_toasts() -> Non
 
     assert "function _showCompactionToast(payload, meta = {})" in source
     assert "_setCompactInFlight(true, compactKey);" in compact_block
-    assert "_syncCompactionRail(" in compact_block
-    assert "Compacting context" in source
-    assert "_compactionStatusMessage(payload || {}, source, status)" in source
+    assert "_syncCompactionSeparator(" in compact_block
+    assert "context compacting" in source
+    assert "_compactionStatusLabel(payload || {}, source, status)" in source
     assert "Already within context budget; no compact was applied." in source
     assert "Context compaction could not be applied" in source
     assert "No compactable chat history yet." in source
@@ -1036,14 +1114,12 @@ def test_chat_surfaces_compaction_lifecycle_status_and_exception_toasts() -> Non
     assert "Continuing with temporary context compaction" in source
     assert "Continuing with temporary context compaction for this turn" in body
     assert "Compact cancelled" in source
-    assert "Auto compact before send" in source
-    assert "Auto compact during provider retry" in source
     assert "function _compactionUserVisible(payload, source, status)" in source
     assert "!_compactionUserVisible(payload || {}, source, status)" in source
     assert "structured content noop" not in source.lower()
 
 
-def test_chat_compaction_uses_single_in_thread_rail_surface() -> None:
+def test_chat_compaction_uses_single_in_thread_separator_surface() -> None:
     source = CHAT_JS.read_text(encoding="utf-8")
     css = CHAT_CSS.read_text(encoding="utf-8")
     start = source.index("function _showCompactionToast(payload, meta = {})")
@@ -1051,23 +1127,25 @@ def test_chat_compaction_uses_single_in_thread_rail_surface() -> None:
     body = source[start:end]
 
     # The composer pill (#chat-compact-status) is gone; the in-thread context
-    # rail is the single compaction surface for every lifecycle state.
+    # separator is the single compaction surface for every lifecycle state.
     assert 'id="chat-compact-status"' not in source
     assert "_compactStatusEl" not in source
     assert "function _setCompactStatus(" not in source
     assert "function _hideCompactStatus(" not in source
 
-    # Rail state + renderer remain; the renderer takes an optional copy override
-    # used for the failure-recovery and semantic-memory notices.
-    assert "let _compactionRailEl = null;" in source
-    assert "let _compactionRailTimer = null;" in source
-    assert "function _syncCompactionRail(payload, status, source, overrides = {})" in source
-    assert "function _compactionLifecycleSteps(payload, status)" in source
-    assert "function _hideCompactionRail()" in source
+    # Lightweight separator state + renderer remain; no metrics, phase cards,
+    # lifecycle chips, or rail panel are constructed.
+    assert "let _compactionSeparatorEl = null;" in source
+    assert "let _compactionSeparatorTimer = null;" in source
+    assert "function _syncCompactionSeparator(payload, status, source, overrides = {})" in source
+    assert "function _hideCompactionSeparator()" in source
+    assert "chat-context-rail__panel" not in source
+    assert "function _compactionLifecycleSteps(" not in source
+    assert "function _compactionMetricItems(" not in source
 
     # Every lifecycle event renders through the one rail call; the branches below
     # only drive non-UI side effects + the corner toasts.
-    assert "_syncCompactionRail(payload || {}, status, source);" in body
+    assert "_syncCompactionSeparator(payload || {}, status, source);" in body
     assert "function _compactionSkipMessage(payload, source)" in source
     assert "if (_INTERNAL_COMPACTION_SKIP_REASONS.has(reason)) return '';" in source
     assert "Request-scoped; session history was not rewritten" in source
@@ -1075,55 +1153,63 @@ def test_chat_compaction_uses_single_in_thread_rail_surface() -> None:
     assert "status === 'emergency_ephemeral'" in body
     assert "status === 'observed'" in body
 
-    # destroy() tears down the rail (the only surface) — no pill teardown remains.
-    assert "_hideCompactionRail();" in source[source.index("function destroy()") :]
+    # destroy() tears down the separator (the only surface) — no pill teardown remains.
+    assert "_hideCompactionSeparator();" in source[source.index("function destroy()") :]
     assert "_hideCompactStatus(" not in source
 
-    # Pill CSS removed; rail CSS (lifecycle steps + the settle record) remains.
+    # Pill/rail CSS removed; separator CSS is the only compaction thread surface.
     assert ".chat-compact-status" not in css
-    assert ".chat-context-rail" in css
-    assert ".chat-context-rail__steps" in css
-    assert ".chat-context-rail.is-settled" in css
-    assert "contextRailEnter" in css
+    assert ".chat-context-rail" not in css
+    assert ".chat-context-separator" in css
+    assert ".chat-context-separator::before" in css
+    assert ".chat-context-separator::after" in css
+    assert ".chat-context-separator--live span" in css
+    assert "contextSeparatorShimmer 2.2s linear infinite" in css
+    assert "@keyframes contextSeparatorShimmer" in css
+    assert "prefers-reduced-motion: reduce" in css
+    assert "contextPulse" not in css
 
 
-def test_chat_compaction_terminal_rail_stays_anchored_after_history_sync() -> None:
+def test_chat_compaction_summary_separator_anchors_to_transcript_ids() -> None:
     source = CHAT_JS.read_text(encoding="utf-8")
-    place_start = source.index("function _placeCompactionRail()")
-    place_end = source.index("function _ensureCompactionRail()", place_start)
-    place_body = source[place_start:place_end]
-    sync_start = source.index("function _syncCompactionRail(payload, status, source, overrides = {})")
+    sync_start = source.index(
+        "function _syncCompactionSeparator(payload, status, source, overrides = {})"
+    )
     sync_end = source.index("function _compactFailureBlocksPending", sync_start)
     sync_body = source[sync_start:sync_end]
     history_start = source.index("async function _loadHistory() {")
     history_end = source.index("_chatDiag('history.done'", history_start)
     history_body = source[history_start:history_end]
 
-    assert "function _compactionRailTerminalStatus(status)" in source
-    assert "rail.dataset.terminal = _compactionRailTerminalStatus(status) ? 'true' : 'false';" in sync_body
-    assert "_compactionRailEl.dataset.terminal === 'true'" in place_body
-    assert "_compactionRailEl.parentNode === _thread" in place_body
-    assert "_placeCompactionRail();" in history_body
+    assert "function _renderCompactionSummarySeparators(messages)" in source
+    assert "function _clearCompactionSummarySeparators()" in source
+    assert "if (inserted > 0) _hideCompactionSeparator();" in sync_body
+    assert "covered_through_id" in source
+    assert "transcript_id" in source
+    assert "_renderCompactionSummarySeparators(messages);" in history_body
+    assert "history.scroll.compaction_summary_anchor" not in history_body
+    assert "_scrollHistoryAnchorIntoView(" not in history_body
+    assert "_placeCompactionRail(" not in history_body
+    assert "function _scheduleCompactionSeparatorRemoval(delayMs = 4500)" in source
+    assert "_scheduleCompactionSeparatorRemoval();" in sync_body
+    assert "status === 'skipped'" in sync_body
 
 
-def test_chat_compaction_token_details_are_success_only() -> None:
+def test_chat_compaction_separator_does_not_render_token_details() -> None:
     source = CHAT_JS.read_text(encoding="utf-8")
-    # Token figures now surface only through the rail's metric chips, which are
-    # gated on real before/after counts — so skips (no tokens) show none. The dead
-    # pill helper (_compactionTokenStats) is gone.
+    # The in-thread separator is intentionally terse; token/debug details stay
+    # out of the chat transcript visual surface.
     assert "function _compactionTokenStats(" not in source
-    metrics_start = source.index("function _compactionMetricItems(payload, status)")
-    metrics_end = source.index("function _compactionLifecycleSteps(", metrics_start)
-    metrics_body = source[metrics_start:metrics_end]
-    assert "payload.tokens_before" in metrics_body
-    assert "payload.tokens_after" in metrics_body
-    assert "label: 'window'" in metrics_body
-    assert "label: 'saved'" in metrics_body
-    # A skip rewrote nothing: it must not surface compaction-implying token
-    # metrics (window/saved/remaining) — at most a neutral current-size count.
-    assert "const skipped = status === 'skipped'" in metrics_body
-    assert "if (skipped) {" in metrics_body
-    assert "if (!skipped && Number.isFinite(remaining)" in metrics_body
+    assert "function _compactionMetricItems(" not in source
+    assert "function _compactionLifecycleSteps(" not in source
+    sync_start = source.index(
+        "function _syncCompactionSeparator(payload, status, source, overrides = {})"
+    )
+    sync_end = source.index("function _compactFailureBlocksPending", sync_start)
+    sync_body = source[sync_start:sync_end]
+    assert "tokens_before" not in sync_body
+    assert "tokens_after" not in sync_body
+    assert "remaining_budget_tokens" not in sync_body
 
     start = source.index("function _showCompactionToast(payload, meta = {})")
     end = source.index("  /* ── RPC Event Subscriptions", start)
@@ -1135,6 +1221,7 @@ def test_chat_compaction_token_details_are_success_only() -> None:
     assert "_compactionTokenStats" not in skipped_block
     assert "tokens_after" not in skipped_block
     assert "UI.toast(" not in skipped_block
+    assert "_scheduleCompactionSeparatorRemoval();" in skipped_block
 
 
 def test_chat_semantic_memory_degraded_is_non_blocking_and_path_safe() -> None:
@@ -1146,8 +1233,8 @@ def test_chat_semantic_memory_degraded_is_non_blocking_and_path_safe() -> None:
     assert "function _compactSemanticMemoryNotice(payload)" in source
     assert "payload.semanticMemory || payload.semantic_memory" in source
     assert "Memory saved; organizing" in source
-    assert "_syncCompactionRail(payload || {}, 'completed', source, {" in body
-    assert "detail: semanticNotice + '.'," in body
+    assert "_syncCompactionSeparator(payload || {}, 'completed', source, {" in body
+    assert "label: 'context compacted'," in body
     assert "UI.toast(semanticNotice" not in body
     assert body.index("const semanticNotice = _compactSemanticMemoryNotice") < body.index(
         "if (status === 'failed' || status === 'error')"
@@ -1489,18 +1576,24 @@ def test_chat_diag_is_opt_in_by_default() -> None:
     assert "window.localStorage.setItem(_CHAT_DIAG_ENABLED_KEY, '1');" in source
 
 
-def test_chat_history_requests_canonical_paginated_metadata() -> None:
+def test_chat_history_requests_active_paginated_metadata() -> None:
     source = CHAT_JS.read_text(encoding="utf-8")
     history_start = source.index("async function _loadHistory() {")
     history_end = source.index("async function _loadEarlierHistory()", history_start)
     history_body = source[history_start:history_end]
+    earlier_start = source.index("async function _loadEarlierHistory() {")
+    earlier_end = source.index("function _renderHistoryMessages(", earlier_start)
+    earlier_body = source[earlier_start:earlier_end]
 
     assert "const CHAT_HISTORY_PAGE_SIZE = 50;" in source
     assert "const requestSessionKey = _sessionKey;" in history_body
     assert "const requestSeq = ++_historyRequestSeq;" in history_body
     assert "sessionKey: requestSessionKey" in history_body
     assert "limit: CHAT_HISTORY_PAGE_SIZE" in history_body
-    assert "includeCanonical: true" in history_body
+    assert "includeCanonical: false" in history_body
+    assert "includeCanonical: false" in earlier_body
+    assert "includeCanonical: true" not in history_body
+    assert "includeCanonical: true" not in earlier_body
     assert "includeSummaries: true" in history_body
     assert "requestSessionKey !== _sessionKey || requestSeq !== _historyRequestSeq" in history_body
     assert "_chatDiag('history.stale_response.drop'" in history_body
@@ -1863,10 +1956,10 @@ def test_router_fx_watching_indicator_deferred_until_panel_settles() -> None:
 
 
 def test_router_fx_scan_to_lock_fills_the_wait() -> None:
-    # The routing visualisation renders on SEND and animates continuously
-    # (JS-driven, ~170ms class/position swaps) until the decision locks it onto
-    # the winner — so the routing animation leads instead of trailing, and it
-    # shows regardless of CSS-animation suppression in the environment.
+    # The routing visualisation starts shortly after SEND and animates
+    # continuously (JS-driven, ~170ms class/position swaps) until the decision
+    # locks it onto the winner. The small delay lets request-time compaction
+    # suppress the panel before a competing router flash appears.
     source = CHAT_JS.read_text(encoding="utf-8")
     css = CHAT_CSS.read_text(encoding="utf-8")
 
@@ -1880,9 +1973,9 @@ def test_router_fx_scan_to_lock_fills_the_wait() -> None:
     assert "if (!_thread || !_routerFx.enabled || !_routerFeatureEnabled) {" in begin
     assert "_chatDiag('router_scan.skip'" in begin
     assert "return false;" in begin
-    # Started from the send path.
+    # Scheduled from the send path.
     assert (
-        "const routerScanStarted = _routerFxBeginScan("
+        "const routerScanStarted = _scheduleRouterFxBeginScan("
         "userDiv, _routerFxResolveLayoutSeed(_sessionKey));"
     ) in source
     # The scan runs for a FIXED, hard-capped window (≤1s), then locks — not
@@ -1912,6 +2005,9 @@ def test_chat_compaction_suppresses_current_turn_router_wait_panel() -> None:
 
     assert "let _compactSuppressedRouterTurnIndex = '';" in source
     assert "function _suppressRouterFxForCompaction(payload = {})" in source
+    assert "const _ROUTER_FX_START_DELAY_MS = 280;" in source
+    assert "function _scheduleRouterFxBeginScan(anchorDiv, seedKey)" in source
+    assert "function _cancelPendingRouterFxScan(reason = '')" in source
 
     toast_start = source.index("function _showCompactionToast(payload, meta = {})")
     started_start = source.index("if (status === 'started') {", toast_start)
@@ -1924,6 +2020,20 @@ def test_chat_compaction_suppresses_current_turn_router_wait_panel() -> None:
     observed_body = source[observed_start:observed_end]
     assert "_suppressRouterFxForCompaction(payload || {});" in observed_body
 
+    suppress_start = source.index("function _suppressRouterFxForCompaction(payload = {})")
+    suppress_end = source.index("function _showCompactionToast(payload, meta = {})", suppress_start)
+    suppress_body = source[suppress_start:suppress_end]
+    assert "_cancelPendingRouterFxScan('compaction');" in suppress_body
+
+    send_start = source.index("async function _onSend()")
+    send_end = source.index("    // Send", send_start)
+    send_body = source[send_start:send_end]
+    assert (
+        "_scheduleRouterFxBeginScan(userDiv, _routerFxResolveLayoutSeed(_sessionKey))"
+        in send_body
+    )
+    assert "_routerFxBeginScan(userDiv, _routerFxResolveLayoutSeed(_sessionKey))" not in send_body
+
     begin_start = source.index("function _routerFxBeginScan(")
     begin_end = source.index("function _routerFxScanRoam(", begin_start)
     begin_body = source[begin_start:begin_end]
@@ -1934,6 +2044,56 @@ def test_chat_compaction_suppresses_current_turn_router_wait_panel() -> None:
     handler_body = source[handler_start:handler_end]
     assert "_routerFxIsSuppressedForCompactionTurn(turnIndex)" in handler_body
     assert "router_decision.skip.compaction_suppressed" in handler_body
+
+
+def test_chat_compaction_suppresses_current_turn_thinking_indicator() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+
+    show_start = source.index("function _showThinkingIndicatorNow() {")
+    show_end = source.index("function _hideThinkingIndicator", show_start)
+    show_body = source[show_start:show_end]
+    assert "thinking.defer.compaction_in_flight" in show_body
+    assert "_isCompactInFlightForCurrentSession()" in show_body
+
+    toast_start = source.index("function _showCompactionToast(payload, meta = {})")
+    started_start = source.index("if (status === 'started') {", toast_start)
+    started_end = source.index("if (status === 'observed') {", started_start)
+    started_body = source[started_start:started_end]
+    assert "_hideThinkingIndicator();" in started_body
+
+    observed_start = source.index("if (status === 'observed') {", toast_start)
+    observed_end = source.index("if (status === 'emergency_ephemeral') {", observed_start)
+    observed_body = source[observed_start:observed_end]
+    assert "_hideThinkingIndicator();" in observed_body
+
+    settle_start = source.index("function _settleCompactInFlight(payload = {}, options = {})")
+    settle_end = source.index("  // Programmatic textarea write", settle_start)
+    settle_body = source[settle_start:settle_end]
+    assert "if (_isStreaming && !_streamBubble) _showThinkingIndicator();" in settle_body
+
+
+def test_chat_history_refresh_preserves_active_thinking_indicator() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+
+    assert "function _isCurrentSessionThinkingIndicator(el)" in source
+    assert "_thinkingEl.dataset.sessionKey = _streamSessionKey || _sessionKey || '';" in source
+
+    render_start = source.index("function _renderHistoryMessages(messages, opts = {})")
+    render_end = source.index("function _appendHistoryDaySeparator", render_start)
+    render_body = source[render_start:render_end]
+    assert (
+        "const liveThinking = _isCurrentSessionThinkingIndicator(_thinkingEl) "
+        "? _thinkingEl : null;"
+    ) in render_body
+    assert (
+        "if (el !== _streamBubble && el !== liveUserAnchor && el !== liveThinking) "
+        "el.remove();"
+    ) in render_body
+    assert (
+        "if (liveThinking && !liveThinking.isConnected) "
+        "_thread.appendChild(liveThinking);"
+    ) in render_body
+    assert "if (_isStreaming && _isCurrentSessionThinkingIndicator(el)) return;" in render_body
 
 
 def test_router_fx_strip_survives_multistep_turn() -> None:
@@ -2258,7 +2418,10 @@ def test_router_effects_default_on_and_cloud_choice_hidden() -> None:
     )
 
     assert "const _routerFx = { enabled: true, variant: 'default' };" in chat_source
-    assert "try { return window.localStorage.getItem(_PREF_KEY) !== '0'; } catch { return true; }" in savings_source
+    assert (
+        "try { return window.localStorage.getItem(_PREF_KEY) !== '0'; } catch { return true; }"
+        in savings_source
+    )
     assert "if (window.SavingsFX) window.SavingsFX.setEnabled(_routerFx.enabled);" in chat_source
     assert 'id="toggle-savings-fx"' not in chat_source
     assert "Savings FX" not in chat_source
@@ -2488,15 +2651,36 @@ def test_chat_approval_pending_has_distinct_run_status() -> None:
     assert "active_task: { status: 'approval_pending'" in approval_body
 
 
-def test_chat_ignores_replayed_compaction_toasts() -> None:
+def test_chat_replayed_compaction_terminal_restores_separator_without_toast() -> None:
     source = CHAT_JS.read_text(encoding="utf-8")
     start = source.index("function _showCompactionToast(payload, meta = {})")
     end = source.index("  /* ── RPC Event Subscriptions", start)
     body = source[start:end]
 
     assert "function _showCompactionToast(payload, meta = {})" in source
-    assert "if (meta && meta.replayed) return;" in body
-    assert body.index("meta.replayed") < body.index("'Compact failed'")
+    assert "function _compactionTerminalStatus(status)" in source
+    assert "const isReplay = !!(meta && meta.replayed);" in body
+    assert "if (isReplay && !_compactionTerminalStatus(status)) return;" in body
+    assert "if (meta && meta.replayed) return;" not in body
+    assert "if (!isReplay) UI.toast('Compact failed'" in body
+    assert "if (!isReplay) {\n        UI.toast(\n          'Compact cancelled'" in body
+
+
+def test_chat_manual_terminal_compaction_separator_persists_only_when_completed() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+    sync_start = source.index(
+        "function _syncCompactionSeparator(payload, status, source, overrides = {})"
+    )
+    sync_end = source.index("function _clearCompactionSummarySeparators", sync_start)
+    sync_body = source[sync_start:sync_end]
+
+    assert "function _compactionSeparatorAnimated(status, overrides = {})" in source
+    assert "function _shouldPersistCompactionSeparator(status, source, overrides = {})" in source
+    assert "return source === 'manual' && status === 'completed';" in source
+    assert "const liveClass = _compactionSeparatorAnimated(status, overrides)" in sync_body
+    assert "filter(Boolean)" in sync_body
+    assert "if (_shouldPersistCompactionSeparator(status, source, overrides)) return;" in sync_body
+    assert "_scheduleCompactionSeparatorRemoval();" in sync_body
 
 
 def test_rpc_client_passes_event_meta_without_polluting_payload() -> None:
@@ -2523,7 +2707,10 @@ def test_chat_history_reconciles_by_message_identity_without_clear_replace() -> 
     assert "const existingByFallbackIdentity = new Map();" in body
     assert "const consumedHistoryElements = new Set();" in body
     assert "data-message-id" in source
-    assert "_stampHistoryElement(div, stableIdentity, msg.role, displayText);" in body
+    assert (
+        "_stampHistoryElement(div, stableIdentity, msg.role, displayText, "
+        "_messageTranscriptId(msg));"
+    ) in body
     assert "let div = stableIdentity ? existingByStableIdentity.get(stableIdentity) : null;" in body
     assert "consumedHistoryElements," in body
     assert "consumedHistoryElements.add(div);" in body
@@ -2549,7 +2736,10 @@ def test_chat_history_reorders_reused_nodes_to_match_transcript_order() -> None:
     ) in source
     assert "_thread.insertBefore(div, _streamBubble);" in source
     assert "_thread.appendChild(div);" in source
-    stamp_idx = body.index("_stampHistoryElement(div, stableIdentity, msg.role, displayText);")
+    stamp_idx = body.index(
+        "_stampHistoryElement(div, stableIdentity, msg.role, displayText, "
+        "_messageTranscriptId(msg));"
+    )
     reorder_idx = body.index("_appendHistoryElementInOrder(div);")
     assert stamp_idx < reorder_idx
 

@@ -85,19 +85,27 @@ async def _context_status(
     model: str | None,
     allow_transcript_estimate: bool = False,
 ) -> dict[str, Any] | None:
-    context_tokens = _positive_int(
+    persisted_context_tokens = _positive_int(
         _first_field(source, "context_tokens", "current_context_tokens")
     )
+    compaction_count = _positive_int(_field(source, "compaction_count")) or 0
+    context_tokens = persisted_context_tokens
     token_source = "session_context_tokens" if context_tokens is not None else "unavailable"
-    if context_tokens is None and allow_transcript_estimate and ctx.session_manager is not None:
+    should_estimate_transcript = (
+        allow_transcript_estimate
+        and ctx.session_manager is not None
+        and (context_tokens is None or compaction_count > 0)
+    )
+    if should_estimate_transcript:
         get_transcript = getattr(ctx.session_manager, "get_transcript", None)
         if callable(get_transcript):
             try:
                 transcript = await get_transcript(session_key)
             except (KeyError, AttributeError, NotImplementedError):
-                transcript = []
-            context_tokens = sum(_transcript_entry_tokens(entry) for entry in transcript)
-            token_source = "transcript_estimate"
+                transcript = None
+            if transcript is not None:
+                context_tokens = sum(_transcript_entry_tokens(entry) for entry in transcript)
+                token_source = "transcript_estimate"
     if context_tokens is None:
         return None
 
@@ -107,7 +115,6 @@ async def _context_status(
 
     threshold = int(context_window * _CONTEXT_WARNING_RATIO)
     pressure = min(1.0, context_tokens / context_window) if context_window > 0 else 0.0
-    compaction_count = _positive_int(_field(source, "compaction_count")) or 0
     return {
         "contextTokens": context_tokens,
         "contextWindowTokens": context_window,

@@ -55,6 +55,8 @@ const ChatView = (() => {
   let _pendingFinalizedAssistantBubble = null;
   let _pendingFinalizedAssistantFallbackId = '';
   const _pendingRouterDecisions = new Map();
+  let _routerFxScanDelayTimer = null;
+  let _routerFxScanPending = null;
   const _CHAT_DIAG_KEY = 'opensquilla.chat.debugLog';
   const _CHAT_DIAG_ENABLED_KEY = 'opensquilla.chat.debug.enabled';
   const _CHAT_DIAG_MAX = 300;
@@ -334,8 +336,8 @@ const ChatView = (() => {
   let _compactSuppressedRouterTurnIndex = '';
   let _lastCompactionToastSig = '';
   let _lastCompactionToastAt = 0;
-  let _compactionRailEl = null;
-  let _compactionRailTimer = null;
+  let _compactionSeparatorEl = null;
+  let _compactionSeparatorTimer = null;
   let _stopRequestedByUser = false;
   let _pendingArea = null;
   let _stopBtn = null;
@@ -641,6 +643,10 @@ const ChatView = (() => {
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
+  }
+
+  function _escAttr(s) {
+    return _esc(s);
   }
 
   function _displayRoleLabel(role) {
@@ -1561,6 +1567,10 @@ const ChatView = (() => {
     return { status, label: _runStatusLabel(status), task };
   }
 
+  function _runStatusIsActive(status) {
+    return ['queued', 'running', 'approval_pending'].includes(_normalizeRunStatus(status));
+  }
+
   function _taskGroupId(payload) {
     const id = payload && payload.group_id;
     return (typeof id === 'string' && id) ? id : '';
@@ -1664,6 +1674,13 @@ const ChatView = (() => {
     return true;
   }
 
+  function _dropReplayedLiveWaitEvent(meta, payload, eventName) {
+    if (!(meta && meta.replayed)) return false;
+    if (_isStreaming || _streamBubble) return false;
+    _chatDiag(`${eventName}.drop.replayed_without_live_stream`, _chatDiagSummarizePayload(payload));
+    return true;
+  }
+
   function _activeTaskGroupRunState(payload = {}) {
     return {
       run_status: 'running',
@@ -1739,6 +1756,7 @@ const ChatView = (() => {
   function _switchToSession(key) {
     if (!key || key === _sessionKey) return;
     _unsubscribeSession();
+    _cancelPendingRouterFxScan('session_switch');
     _parkCurrentSessionStreamState('session_switch');
     _updateSessionChip(key);
     _persistSession(key);
@@ -1746,7 +1764,7 @@ const ChatView = (() => {
     _pendingSessionIntent = null;
     _clearPendingDrainAfterTerminalTimer();
     _setCompactInFlight(false);
-    _hideCompactionRail();
+    _hideCompactionSeparator();
     _pendingQueue = []; if (_pendingArea) _renderPendingQueue();
     _applySessionRunState({ run_status: 'idle' });
     _clearContextStatus();
@@ -2283,7 +2301,7 @@ const ChatView = (() => {
       _persistSession(key);
       _clearPendingDrainAfterTerminalTimer();
       _setCompactInFlight(false);
-      _hideCompactionRail();
+      _hideCompactionSeparator();
       _pendingSessionIntent = 'new_chat'; _pendingQueue = []; if (_pendingArea) _renderPendingQueue();
       _messages = [];
       _clearContextStatus();
@@ -2611,7 +2629,7 @@ const ChatView = (() => {
         _persistSession(key);
         _clearPendingDrainAfterTerminalTimer();
         _setCompactInFlight(false);
-        _hideCompactionRail();
+        _hideCompactionSeparator();
         _pendingSessionIntent = 'new_chat'; _pendingQueue = []; if (_pendingArea) _renderPendingQueue();
         _messages = [];
         _clearContextStatus();
@@ -2638,7 +2656,7 @@ const ChatView = (() => {
             _messages = [];
             _clearPendingDrainAfterTerminalTimer();
             _setCompactInFlight(false);
-            _hideCompactionRail();
+            _hideCompactionSeparator();
             _pendingQueue = [];
             if (_pendingArea) _renderPendingQueue();
             _clearContextStatus();
@@ -2653,7 +2671,7 @@ const ChatView = (() => {
       case '/compact': {
         const compactKey = _sessionKey;
         _setCompactInFlight(true, compactKey);
-        _syncCompactionRail(
+        _syncCompactionSeparator(
           { key: compactKey, source: 'manual', status: 'started', phase: 'manual' },
           'started',
           'manual',
@@ -2730,6 +2748,11 @@ const ChatView = (() => {
       if (subscribeKey !== _sessionKey) return;
       if (res && res.subscribed === false) throw new Error('No subscription manager available');
       _applySessionRunState(res);
+      const subscribedState = _sessionRunStatus(res);
+      if (!_isStreaming && _runStatusIsActive(subscribedState.status)) {
+        _startStreaming();
+        _showThinkingIndicator();
+      }
       if (res && res.replay_complete === false) {
         if (typeof res.current_stream_seq === 'number') {
           _setSessionStreamSeq(subscribeKey, res.current_stream_seq);
@@ -2778,136 +2801,112 @@ const ChatView = (() => {
     return false;
   }
 
-  function _clearCompactionRailTimer() {
-    if (_compactionRailTimer) {
-      clearTimeout(_compactionRailTimer);
-      _compactionRailTimer = null;
+  function _clearCompactionSeparatorTimer() {
+    if (_compactionSeparatorTimer) {
+      clearTimeout(_compactionSeparatorTimer);
+      _compactionSeparatorTimer = null;
     }
   }
 
-  function _hideCompactionRail() {
-    _clearCompactionRailTimer();
-    if (_compactionRailEl && _compactionRailEl.parentNode) {
-      _compactionRailEl.remove();
+  function _hideCompactionSeparator() {
+    _clearCompactionSeparatorTimer();
+    if (_compactionSeparatorEl && _compactionSeparatorEl.parentNode) {
+      _compactionSeparatorEl.remove();
     }
-    _compactionRailEl = null;
+    _compactionSeparatorEl = null;
   }
 
-  function _compactionRailTerminalStatus(status) {
-    return ['completed', 'skipped', 'failed', 'error', 'cancelled', 'emergency_ephemeral']
-      .includes(String(status || '').toLowerCase());
-  }
-
-  function _placeCompactionRail() {
-    if (!_thread || !_compactionRailEl) return;
-    if (_compactionRailEl.dataset.terminal === 'true'
-        && _compactionRailEl.parentNode === _thread) {
-      return;
-    }
+  function _placeCompactionSeparator() {
+    if (!_thread || !_compactionSeparatorEl) return;
     const empty = _thread.querySelector('.chat-empty');
     if (empty) empty.remove();
     if (_isStreaming && _isCurrentSessionStreamBubble(_streamBubble)) {
-      if (_compactionRailEl.nextSibling !== _streamBubble) {
-        _thread.insertBefore(_compactionRailEl, _streamBubble);
+      if (_compactionSeparatorEl.nextSibling !== _streamBubble) {
+        _thread.insertBefore(_compactionSeparatorEl, _streamBubble);
       }
       return;
     }
-    if (_compactionRailEl.parentNode !== _thread || _thread.lastElementChild !== _compactionRailEl) {
-      _thread.appendChild(_compactionRailEl);
+    if (_compactionSeparatorEl.parentNode !== _thread
+        || _thread.lastElementChild !== _compactionSeparatorEl) {
+      _thread.appendChild(_compactionSeparatorEl);
     }
   }
 
-  function _ensureCompactionRail() {
+  function _ensureCompactionSeparator() {
     if (!_thread) return null;
-    if (!_compactionRailEl || !_compactionRailEl.isConnected) {
-      _compactionRailEl = document.createElement('div');
-      _compactionRailEl.className = 'chat-context-rail chat-context-rail--info';
-      _compactionRailEl.setAttribute('role', 'status');
-      _compactionRailEl.setAttribute('aria-live', 'polite');
+    if (!_compactionSeparatorEl || !_compactionSeparatorEl.isConnected) {
+      _compactionSeparatorEl = document.createElement('div');
+      _compactionSeparatorEl.className = 'chat-context-separator chat-context-separator--info';
+      _compactionSeparatorEl.setAttribute('role', 'status');
+      _compactionSeparatorEl.setAttribute('aria-live', 'polite');
     }
-    _placeCompactionRail();
-    return _compactionRailEl;
+    _placeCompactionSeparator();
+    return _compactionSeparatorEl;
   }
 
-  function _compactNumber(value) {
-    const number = Number(value);
-    if (!Number.isFinite(number)) return '';
-    return Math.round(number).toLocaleString();
+  function _scheduleCompactionSeparatorRemoval(delayMs = 4500) {
+    _clearCompactionSeparatorTimer();
+    const separator = _compactionSeparatorEl;
+    if (!separator) return;
+    _compactionSeparatorTimer = setTimeout(() => {
+      if (_compactionSeparatorEl === separator) _hideCompactionSeparator();
+    }, delayMs);
   }
 
-  function _compactRatioPercent(before, after) {
-    const b = Number(before);
-    const a = Number(after);
-    if (!Number.isFinite(b) || !Number.isFinite(a) || b <= 0 || a < 0 || a >= b) return '';
-    return Math.round((1 - (a / b)) * 100) + '% smaller';
+  function _buildCompactionSeparator(label, tone = 'info', extraClass = '') {
+    const el = document.createElement('div');
+    el.className = ['chat-context-separator', extraClass, `chat-context-separator--${tone}`]
+      .filter(Boolean)
+      .join(' ');
+    el.innerHTML = `<span>${_esc(label)}</span>`;
+    return el;
   }
 
-  function _compactionPhaseLabel(payload, source) {
-    const phase = String(payload && payload.phase || '').toLowerCase();
-    if (source === 'manual') return 'Manual compact';
-    if (phase === 'gateway_auto_summarize') return 'Auto compact before send';
-    if (phase === 'preflight') return 'Auto compact before turn';
-    if (phase === 't3_upgrade') return 'Auto compact before model upgrade';
-    if (phase === 'agent_inline_overflow') return 'Auto compact during provider retry';
-    if (phase) return phase.replace(/_/g, ' ');
-    return 'Automatic compact';
+  const _COMPACTION_TERMINAL_STATUSES = new Set([
+    'completed',
+    'skipped',
+    'failed',
+    'error',
+    'cancelled',
+    'emergency_ephemeral',
+  ]);
+
+  function _compactionTerminalStatus(status) {
+    return _COMPACTION_TERMINAL_STATUSES.has(String(status || '').toLowerCase());
   }
 
-  // Rail title: a short status label (<=~20 chars so it never ellipsizes). The
-  // descriptive sentence + recovery info lives in _compactionRailDetail; the phase
-  // (manual/auto + when) lives in the kicker (_compactionPhaseLabel).
-  function _compactionStatusMessage(payload, source, status) {
-    if (status === 'started') return 'Compacting context';
-    if (status === 'observed') return _compactionProgressMessage(payload || {});
-    if (status === 'emergency_ephemeral') return 'Temporary compaction';
+  function _compactionSeparatorAnimated(status, overrides = {}) {
+    if (overrides && Object.prototype.hasOwnProperty.call(overrides, 'animated')) {
+      return !!overrides.animated;
+    }
+    return status === 'started' || status === 'observed';
+  }
+
+  function _shouldPersistCompactionSeparator(status, source, overrides = {}) {
+    if (overrides && Object.prototype.hasOwnProperty.call(overrides, 'persist')) {
+      return !!overrides.persist;
+    }
+    if (!_compactionTerminalStatus(status)) return false;
+    return source === 'manual' && status === 'completed';
+  }
+
+  function _compactionStatusLabel(payload, source, status) {
+    if (status === 'started') return 'context compacting';
+    if (status === 'observed') return 'context compacting';
+    if (status === 'emergency_ephemeral') return 'temporary compaction';
     if (status === 'skipped') {
       const reason = _compactionReason(payload);
       return (!reason || _INTERNAL_COMPACTION_SKIP_REASONS.has(reason))
-        ? 'No compaction needed'
-        : 'Compaction skipped';
+        ? 'no compaction needed'
+        : 'compaction skipped';
     }
-    if (status === 'failed' || status === 'error') return 'Compaction failed';
-    if (status === 'cancelled') return 'Compaction cancelled';
-    if (status === 'completed') return 'Context compacted';
-    return 'Context maintenance';
+    if (status === 'failed' || status === 'error') return 'compaction failed';
+    if (status === 'cancelled') return 'compaction cancelled';
+    if (status === 'completed') return 'context compacted';
+    return source === 'manual' ? 'manual compact' : 'context maintenance';
   }
 
-  // Rail detail: the descriptive sentence + recovery info (was sr-only; now the
-  // single surface's second line). Skipped detail keeps the existing skip-message
-  // copy; the failed branch's detail is overridden with the live recovery outcome
-  // in _showCompactionToast.
-  function _compactionRailDetail(payload, source, status) {
-    const event = String(payload && payload.event || '').toLowerCase();
-    if (status === 'started') {
-      return source === 'manual'
-        ? 'Rewriting older turns after safety checks.'
-        : 'Preserving the current task while older turns are summarized.';
-    }
-    if (status === 'observed') {
-      return event === 'compaction.summary_verified'
-        ? 'Carry-forward details checked before the window is rewritten.'
-        : 'Distilling older turns into a compact carry-forward summary.';
-    }
-    if (status === 'completed') {
-      if (event === 'compaction.replayed') return 'Replayed into the request window — continuing the turn.';
-      return source === 'manual'
-        ? 'Older turns summarized and persisted.'
-        : 'Persisted for this session — continuing the turn.';
-    }
-    if (status === 'emergency_ephemeral') {
-      return 'Request-scoped fallback; session history was not rewritten.';
-    }
-    if (status === 'skipped') return _compactionSkipMessage(payload || {}, source);
-    if (status === 'failed' || status === 'error') {
-      return _compactSafeMessageDetail(payload || {})
-        || _compactionStatusDetail(payload || {}, source, status)
-        || 'Pending input is protected while compaction recovers.';
-    }
-    if (status === 'cancelled') return 'Pending input recovered so the next turn can continue safely.';
-    return _compactionStatusDetail(payload || {}, source, status);
-  }
-
-  function _compactionRailTone(status, payload = {}) {
+  function _compactionSeparatorTone(status, payload = {}) {
     if (status === 'completed') return 'ok';
     if (status === 'failed' || status === 'error') return 'err';
     if (status === 'cancelled' || status === 'emergency_ephemeral') return 'warn';
@@ -2915,135 +2914,117 @@ const ChatView = (() => {
     return 'info';
   }
 
-  function _compactionMetricItems(payload, status) {
-    const items = [];
-    const before = Number(payload && payload.tokens_before);
-    const after = Number(payload && payload.tokens_after);
-    const remaining = Number(payload && payload.remaining_budget_tokens);
-    const skipped = status === 'skipped';
-    const shrink = _compactRatioPercent(before, after);
-    if (Number.isFinite(before) && before > 0 && Number.isFinite(after) && after >= 0) {
-      if (skipped) {
-        // Nothing was rewritten on a skip — show the current size, never a
-        // compaction "window"/"saved"/"remaining" that implies a reduction.
-        items.push({ label: 'tokens', value: `${_compactNumber(before)} tokens` });
-      } else {
-        items.push({
-          label: 'window',
-          value: `${_compactNumber(before)} -> ${_compactNumber(after)}`,
-        });
-        if (shrink) items.push({ label: 'saved', value: shrink });
-      }
-    } else if (!skipped && Number(payload && payload.summary_len) > 0) {
-      items.push({ label: 'summary', value: `${_compactNumber(payload.summary_len)} chars` });
-    }
-    if (!skipped && Number.isFinite(remaining) && remaining > 0) {
-      items.push({ label: 'remaining', value: _compactNumber(remaining) });
-    }
-    const flush = String(payload && payload.flush_receipt_status || '');
-    if (flush && flush !== 'not_required') items.push({ label: 'memory', value: flush.replace(/_/g, ' ') });
-    const source = String(payload && payload.summary_source || '');
-    if (source && source !== 'unknown') items.push({ label: 'summary', value: source.replace(/_/g, ' ') });
-    const durability = String(payload && payload.durability || '');
-    if (durability && status !== 'started') items.push({ label: 'durability', value: durability.replace(/_/g, ' ') });
-    return items.slice(0, 4);
-  }
-
-  function _compactionLifecycleSteps(payload, status) {
-    const chain = new Set(Array.isArray(payload && payload.event_chain) ? payload.event_chain : []);
-    const event = String(payload && payload.event || '').toLowerCase();
-    const completed = status === 'completed';
-    const failed = status === 'failed' || status === 'error';
-    const skipped = status === 'skipped';
-    const ephemeral = status === 'emergency_ephemeral';
-    const steps = [
-      ['triggered', 'pressure'],
-      ['chunk_summarized', 'summarize'],
-      ['summary_verified', 'verify'],
-      ['persisted', event === 'compaction.replayed' || chain.has('compaction.replayed') ? 'replay' : 'persist'],
-    ];
-    return steps.map(([key, label], index) => {
-      const eventName = `compaction.${key}`;
-      let state = '';
-      if (completed) state = 'is-complete';
-      else if (ephemeral && index <= 1) state = 'is-complete';
-      else if (failed && index === 0) state = 'is-active';
-      else if (skipped && index === 0) state = 'is-muted';
-      else if (chain.has(eventName)) state = 'is-complete';
-      else if (event === eventName || (!event && status === 'started' && index === 0)) state = 'is-active';
-      return { label, state };
-    });
-  }
-
-  function _compactionProgressPercent(payload, status) {
-    if (status === 'completed') return 100;
-    if (status === 'emergency_ephemeral') return 58;
-    if (status === 'failed' || status === 'error' || status === 'cancelled') return 100;
-    if (status === 'skipped') return 20;
-    const event = String(payload && payload.event || '').toLowerCase();
-    if (event === 'compaction.summary_verified') return 72;
-    if (event === 'compaction.chunk_summarized') return 46;
-    if (status === 'observed') return 52;
-    return 24;
-  }
-
-  function _syncCompactionRail(payload, status, source, overrides = {}) {
+  function _syncCompactionSeparator(payload, status, source, overrides = {}) {
     if (payload && Object.prototype.hasOwnProperty.call(payload, 'user_visible')
         && payload.user_visible === false) {
-      _hideCompactionRail();
+      _hideCompactionSeparator();
       return;
     }
     if (status === 'skipped' && !_compactionUserVisible(payload || {}, source, status)) {
-      _hideCompactionRail();
+      _hideCompactionSeparator();
       return;
     }
-    const rail = _ensureCompactionRail();
-    if (!rail) return;
-    _clearCompactionRailTimer();
-    const tone = overrides.tone || _compactionRailTone(status, payload || {});
-    const title = overrides.title != null
-      ? overrides.title
-      : _compactionStatusMessage(payload || {}, source, status);
-    const detail = overrides.detail != null
-      ? overrides.detail
-      : _compactionRailDetail(payload || {}, source, status);
-    const phase = _compactionPhaseLabel(payload || {}, source);
-    const metrics = _compactionMetricItems(payload || {}, status);
-    const steps = _compactionLifecycleSteps(payload || {}, status);
-    const progress = _compactionProgressPercent(payload || {}, status);
-    rail.className = `chat-context-rail chat-context-rail--${tone} chat-context-rail--${status || 'unknown'}`;
-    rail.style.setProperty('--compact-progress', `${progress}%`);
-    rail.dataset.status = status || '';
-    rail.dataset.source = source || '';
-    rail.dataset.terminal = _compactionRailTerminalStatus(status) ? 'true' : 'false';
-    rail.innerHTML = ''
-      + '<div class="chat-context-rail__rule" aria-hidden="true"><span></span></div>'
-      + '<div class="chat-context-rail__panel">'
-      + '  <div class="chat-context-rail__pulse" aria-hidden="true"></div>'
-      + '  <div class="chat-context-rail__copy">'
-      + `    <div class="chat-context-rail__kicker">${_esc(phase)}</div>`
-      + `    <div class="chat-context-rail__title">${_esc(title)}</div>`
-      + (detail ? `    <div class="chat-context-rail__detail">${_esc(detail)}</div>` : '')
-      + '  </div>'
-      + (metrics.length
-        ? '  <div class="chat-context-rail__metrics">'
-          + metrics.map((item) => (
-            `<span><b>${_esc(item.label)}</b>${_esc(item.value)}</span>`
-          )).join('')
-          + '  </div>'
-        : '')
-      + '  <div class="chat-context-rail__steps" aria-hidden="true">'
-      + steps.map((step) => (
-        `<span class="${_esc(step.state)}"><i></i>${_esc(step.label)}</span>`
-      )).join('')
-      + '  </div>'
-      + '</div>';
-    _placeCompactionRail();
-    if (['completed', 'skipped', 'failed', 'error', 'cancelled', 'emergency_ephemeral'].includes(status)) {
-      _compactionRailTimer = setTimeout(() => {
-        if (_compactionRailEl === rail) rail.classList.add('is-settled');
-      }, 4500);
+    const separator = _ensureCompactionSeparator();
+    if (!separator) return;
+    _clearCompactionSeparatorTimer();
+    const tone = overrides.tone || _compactionSeparatorTone(status, payload || {});
+    const label = overrides.label != null
+      ? overrides.label
+      : _compactionStatusLabel(payload || {}, source, status);
+    const liveClass = _compactionSeparatorAnimated(status, overrides)
+      ? 'chat-context-separator--live'
+      : '';
+    separator.className = [
+      'chat-context-separator',
+      liveClass,
+      `chat-context-separator--${tone}`,
+      `chat-context-separator--${status || 'unknown'}`,
+    ].filter(Boolean).join(' ');
+    separator.dataset.status = status || '';
+    separator.dataset.source = source || '';
+    separator.innerHTML = `<span>${_esc(label)}</span>`;
+    _placeCompactionSeparator();
+    if (_compactionTerminalStatus(status)) {
+      if (_shouldPersistCompactionSeparator(status, source, overrides)) return;
+      _scheduleCompactionSeparatorRemoval();
     }
+  }
+
+  function _clearCompactionSummarySeparators() {
+    if (!_thread) return;
+    _thread.querySelectorAll('.chat-compaction-separator').forEach((el) => el.remove());
+  }
+
+  function _messageTranscriptId(msg) {
+    const raw = msg && msg.transcript_id;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : null;
+  }
+
+  function _summaryCoveredThroughId(summary) {
+    const raw = summary && summary.covered_through_id;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : null;
+  }
+
+  function _messageElementTranscriptId(el) {
+    const value = Number(el && el.dataset ? el.dataset.transcriptId : NaN);
+    return Number.isFinite(value) ? value : null;
+  }
+
+  function _insertCompactionSummarySeparator(marker, target, mode) {
+    if (!target || target.parentNode !== _thread) return false;
+    if (mode === 'after') {
+      let anchor = target;
+      while (anchor.nextElementSibling
+          && anchor.nextElementSibling.classList
+          && anchor.nextElementSibling.classList.contains('router-fx')) {
+        anchor = anchor.nextElementSibling;
+      }
+      _thread.insertBefore(marker, anchor.nextSibling);
+      return true;
+    }
+    _thread.insertBefore(marker, target);
+    return true;
+  }
+
+  function _renderCompactionSummarySeparators(messages) {
+    _clearCompactionSummarySeparators();
+    if (!_thread || !_historyCompactionSummaries.length || !Array.isArray(messages)) return null;
+    const visibleMessages = Array.from(_thread.querySelectorAll('.msg'));
+    if (!visibleMessages.length) return null;
+    const visibleIds = visibleMessages
+      .map((el) => ({ el, id: _messageElementTranscriptId(el) }))
+      .filter((item) => item.id != null);
+    if (!visibleIds.length) return null;
+
+    const seen = new Set();
+    let inserted = 0;
+    let firstMarker = null;
+    _historyCompactionSummaries.forEach((summary) => {
+      const coveredId = _summaryCoveredThroughId(summary);
+      if (coveredId == null || seen.has(coveredId)) return;
+      seen.add(coveredId);
+      let target = visibleIds.find((item) => item.id === coveredId);
+      let mode = 'after';
+      if (!target) {
+        target = visibleIds.find((item) => item.id > coveredId);
+        mode = 'before';
+      }
+      if (!target) return;
+      const marker = _buildCompactionSeparator(
+        'context compacted',
+        'info',
+        'chat-compaction-separator chat-context-separator--history',
+      );
+      marker.dataset.coveredThroughId = String(coveredId);
+      if (_insertCompactionSummarySeparator(marker, target.el, mode)) {
+        inserted++;
+        if (!firstMarker) firstMarker = marker;
+      }
+    });
+    if (inserted > 0) _hideCompactionSeparator();
+    return firstMarker;
   }
 
   function _compactFailureBlocksPending(payload) {
@@ -3086,13 +3067,6 @@ const ChatView = (() => {
       /(?:[A-Za-z]:[\\/][^\s'"<>]*checkpoint[^\s'"<>]*|\/[^\s'"<>]*checkpoint[^\s'"<>]*|memory\/\.raw_fallbacks\/[^\s'"<>]+|[^\s'"<>]*checkpoint[^\s'"<>]*)/gi,
       '[memory checkpoint]',
     );
-  }
-
-  function _compactionProgressMessage(payload) {
-    const event = String(payload && payload.event || '').toLowerCase();
-    if (event === 'compaction.chunk_summarized') return 'Summarizing context';
-    if (event === 'compaction.summary_verified') return 'Verifying summary';
-    return 'Compacting context';
   }
 
   const _INTERNAL_COMPACTION_SKIP_REASONS = new Set([
@@ -3165,6 +3139,7 @@ const ChatView = (() => {
   }
 
   function _suppressRouterFxForCompaction(payload = {}) {
+    _cancelPendingRouterFxScan('compaction');
     if (!_thread) return;
     const turnIndex = String(_routerFxCountUserMessages());
     if (!turnIndex || turnIndex === '0') return;
@@ -3180,44 +3155,50 @@ const ChatView = (() => {
   }
 
   function _showCompactionToast(payload, meta = {}) {
-    if (meta && meta.replayed) return;
     let status = String(payload && payload.status || '').toLowerCase();
     if (!status && payload && Object.prototype.hasOwnProperty.call(payload, 'compacted')) {
       status = payload.compacted ? 'completed' : 'skipped';
     }
     const source = String(payload && payload.source || '').toLowerCase();
+    const isReplay = !!(meta && meta.replayed);
+    if (isReplay && !_compactionTerminalStatus(status)) return;
     if (_suppressDuplicateCompactionToast(payload || {}, status, source)) return;
-    // Single surface: the in-thread context rail renders every lifecycle state
-    // (and hides itself for not-user-visible skips). The branches below only drive
-    // non-UI side effects — in-flight tracking, router-fx suppression, pending
-    // recovery — plus the corner toast for states that warrant a transient notice.
-    _syncCompactionRail(payload || {}, status, source);
+    // Single surface: the in-thread context separator renders every lifecycle
+    // state (and hides itself for not-user-visible skips). The branches below
+    // only drive non-UI side effects — in-flight tracking, router-fx
+    // suppression, pending recovery — plus corner toasts when warranted.
+    _syncCompactionSeparator(payload || {}, status, source);
     if (status === 'started') {
       _setCompactInFlight(true, payload && payload.key || _sessionKey);
+      _hideThinkingIndicator();
       _suppressRouterFxForCompaction(payload || {});
       return;
     }
     if (status === 'observed') {
+      _hideThinkingIndicator();
       _suppressRouterFxForCompaction(payload || {});
       return;
     }
     if (status === 'emergency_ephemeral') {
       _settleCompactInFlight(payload || {});
-      UI.toast('Continuing with temporary context compaction for this turn', 'info', 4500);
+      if (!isReplay) {
+        UI.toast('Continuing with temporary context compaction for this turn', 'info', 4500);
+      }
       return;
     }
     if (status === 'skipped') {
       _settleCompactInFlight(payload || {});
+      _scheduleCompactionSeparatorRemoval();
       return;
     }
     const semanticNotice = _compactSemanticMemoryNotice(payload || {});
     if (semanticNotice) {
       _settleCompactInFlight(payload || {});
-      _syncCompactionRail(payload || {}, 'completed', source, {
+      _syncCompactionSeparator(payload || {}, 'completed', source, {
         tone: 'ok',
-        title: 'Context compacted',
-        detail: semanticNotice + '.',
+        label: 'context compacted',
       });
+      _scheduleHistorySync();
       return;
     }
     if (status === 'failed' || status === 'error') {
@@ -3232,29 +3213,24 @@ const ChatView = (() => {
       const pendingSuffix = keepPendingQueued
         ? '; pending message preserved'
         : (recovered ? '; pending message recovered to input' : '');
-      // Backend failure messages may already end in a period; strip trailing
-      // sentence punctuation so the suffix doesn't produce a doubled period.
-      const railBase = (safe
-        || _compactionStatusDetail(payload || {}, source, status)
-        || 'Compaction could not be applied').replace(/[.!?]\s*$/, '');
-      const railSuffix = keepPendingQueued
-        ? ' — pending message preserved.'
-        : (recovered ? ' — pending message recovered to input.' : '.');
-      _syncCompactionRail(payload || {}, status, source, { detail: railBase + railSuffix });
-      UI.toast('Compact failed' + msg + pendingSuffix, 'err', 5000);
+      _syncCompactionSeparator(payload || {}, status, source, { label: 'compaction failed' });
+      if (!isReplay) UI.toast('Compact failed' + msg + pendingSuffix, 'err', 5000);
       return;
     }
     if (status === 'cancelled') {
       const recovered = _settleCompactInFlight(payload || {}, { recoverPending: true });
-      UI.toast(
-        'Compact cancelled' + (recovered ? '; pending message recovered to input' : ''),
-        'info',
-        4500,
-      );
+      if (!isReplay) {
+        UI.toast(
+          'Compact cancelled' + (recovered ? '; pending message recovered to input' : ''),
+          'info',
+          4500,
+        );
+      }
       return;
     }
     if (status !== 'completed') return;
     _settleCompactInFlight(payload || {});
+    _scheduleHistorySync();
   }
 
   /* ── Router slider — arcade-brutalist whac-a-mole grid ─────────────
@@ -3349,6 +3325,7 @@ const ChatView = (() => {
   // Fixed scan-animation window. The panel locks + settles by this point, so
   // the whole animation (scan + ~360ms settle transition) stays under ~1s.
   const _ROUTER_FX_SCAN_MS = 600;
+  const _ROUTER_FX_START_DELAY_MS = 280;
   const _routerFx = { enabled: true, variant: 'default' };
   function _routerFxLoadPref() {
     // Defaults stand (enabled ON, default variant) unless a stored pref
@@ -4074,8 +4051,98 @@ const ChatView = (() => {
   }
 
   // ── Scan → lock ─────────────────────────────────────────────────────────
-  // Render the routing visualisation the MOMENT the user sends, animating
-  // CONTINUOUSLY until the router_decision arrives and locks it onto the
+  function _pendingRouterFxScanMatchesCurrentTurn() {
+    if (!_routerFxScanPending) return false;
+    return _routerFxScanPending.sessionKey === (_sessionKey || '')
+      && _routerFxScanPending.turnIndex === String(_routerFxCountUserMessages());
+  }
+
+  function _cancelPendingRouterFxScan(reason = '') {
+    const pending = _routerFxScanPending;
+    if (_routerFxScanDelayTimer) {
+      clearTimeout(_routerFxScanDelayTimer);
+      _routerFxScanDelayTimer = null;
+    }
+    _routerFxScanPending = null;
+    if (pending) {
+      _chatDiag('router_scan.pending.cancelled', {
+        reason: reason || '',
+        sessionKey: pending.sessionKey || '',
+        turnIndex: pending.turnIndex || '',
+      });
+    }
+  }
+
+  function _finishPendingRouterFxScan() {
+    const pending = _routerFxScanPending;
+    _routerFxScanDelayTimer = null;
+    _routerFxScanPending = null;
+    if (!pending) return;
+    if (pending.sessionKey !== (_sessionKey || '')) {
+      _chatDiag('router_scan.pending.drop.session_changed', {
+        pendingSessionKey: pending.sessionKey || '',
+        sessionKey: _sessionKey || '',
+      });
+      return;
+    }
+    if (_isCompactInFlightForCurrentSession()
+        || _routerFxIsSuppressedForCompactionTurn(pending.turnIndex)) {
+      _chatDiag('router_scan.pending.drop.compaction_suppressed', {
+        sessionKey: pending.sessionKey || '',
+        turnIndex: pending.turnIndex || '',
+      });
+      return;
+    }
+    const started = _routerFxBeginScan(pending.anchorDiv, pending.seedKey);
+    if (!started || !pending.decision || !_thread) return;
+    const liveStrip = _thread.querySelector('.router-fx[data-live="true"]');
+    if (!liveStrip || liveStrip.dataset.turnIndex !== String(pending.turnIndex)) return;
+    liveStrip._fxDecision = pending.decision;
+    _chatDiag('router_decision.cached_on_delayed_live_strip', {
+      payload: _chatDiagSummarizePayload(pending.decision),
+      liveStrip: _chatDiagDescribeElement(liveStrip),
+    });
+    if (liveStrip._fxFinished) {
+      _routerFxLock(liveStrip, pending.decision);
+      _scrollToBottom();
+    }
+  }
+
+  function _scheduleRouterFxBeginScan(anchorDiv, seedKey) {
+    _cancelPendingRouterFxScan('reschedule');
+    if (_routerFxIsSuppressedForCompactionTurn(_routerFxCountUserMessages())) {
+      _chatDiag('router_scan.schedule.skip.compaction_suppressed', {
+        turnIndex: String(_routerFxCountUserMessages()),
+      });
+      return false;
+    }
+    if (!_thread || !_routerFx.enabled || !_routerFeatureEnabled) {
+      _chatDiag('router_scan.schedule.skip', {
+        hasThread: !!_thread,
+        routerFxEnabled: !!_routerFx.enabled,
+        routerFeatureEnabled: !!_routerFeatureEnabled,
+      });
+      return false;
+    }
+    _routerFxScanPending = {
+      anchorDiv,
+      seedKey,
+      sessionKey: _sessionKey || '',
+      turnIndex: String(_routerFxCountUserMessages()),
+      decision: null,
+    };
+    _routerFxScanDelayTimer = setTimeout(_finishPendingRouterFxScan, _ROUTER_FX_START_DELAY_MS);
+    _chatDiag('router_scan.scheduled', {
+      seedKey,
+      delayMs: _ROUTER_FX_START_DELAY_MS,
+      turnIndex: _routerFxScanPending.turnIndex,
+      anchor: _chatDiagDescribeElement(anchorDiv),
+    });
+    return true;
+  }
+
+  // Render the routing visualisation after a short grace period, animating
+  // continuously until the router_decision arrives and locks it onto the
   // winner. The scan is JS-driven (discrete class/position changes every
   // ~170ms), so it renders regardless of any CSS-animation quirk — and it
   // fills the wait instead of trailing it, replacing the "Watching" placeholder.
@@ -4455,7 +4522,15 @@ const ChatView = (() => {
       _chatDiag('router_decision.skip.no_thread_pre_config', _chatDiagSummarizePayload(payload));
       return;
     }
-    // A strip for this turn was rendered the moment the user sent. CACHE the
+    if (_pendingRouterFxScanMatchesCurrentTurn()) {
+      _routerFxScanPending.decision = payload;
+      _chatDiag('router_decision.cached_on_pending_scan', {
+        payload: _chatDiagSummarizePayload(payload),
+        turnIndex: _routerFxScanPending.turnIndex || '',
+      });
+      return;
+    }
+    // A strip for this turn was rendered when the delayed scan began. CACHE the
     // decision on it; the fixed-window scan (_routerFxFinishScan) locks onto it
     // when the window closes — so the animation runs for a consistent ≤1s
     // rather than however long the WS event took. If the window has ALREADY
@@ -4732,7 +4807,7 @@ const ChatView = (() => {
     }));
 
     // Agent state transitions (thinking → streaming → tool_calling → done)
-    _unsubs.push(_rpc.on('session.event.state_change', (payload) => {
+    _unsubs.push(_rpc.on('session.event.state_change', (payload, meta = {}) => {
       if (_dropForeignSessionPayload('event.state_change', payload)) return;
       if (_isStaleEpoch(payload)) {
         _chatDiag('event.state_change.drop.stale_epoch', _chatDiagSummarizePayload(payload));
@@ -4746,6 +4821,7 @@ const ChatView = (() => {
         _chatDiag('event.state_change.drop.stream_seq', _chatDiagSummarizePayload(payload));
         return;
       }
+      if (_dropReplayedLiveWaitEvent(meta, payload, 'event.state_change')) return;
       _chatDiag('event.state_change', _chatDiagSummarizePayload(payload));
       _resetStreamIdleTimer();
       const to = payload.to_state || payload.toState || '';
@@ -4759,7 +4835,7 @@ const ChatView = (() => {
         }
     }));
 
-    _unsubs.push(_rpc.on('session.event.run_heartbeat', (payload) => {
+    _unsubs.push(_rpc.on('session.event.run_heartbeat', (payload, meta = {}) => {
       if (_dropForeignSessionPayload('event.run_heartbeat', payload)) return;
       if (_isStaleEpoch(payload)) {
         _chatDiag('event.run_heartbeat.drop.stale_epoch', _chatDiagSummarizePayload(payload));
@@ -4773,6 +4849,7 @@ const ChatView = (() => {
         _chatDiag('event.run_heartbeat.drop.stream_seq', _chatDiagSummarizePayload(payload));
         return;
       }
+      if (_dropReplayedLiveWaitEvent(meta, payload, 'event.run_heartbeat')) return;
       _chatDiag('event.run_heartbeat', _chatDiagSummarizePayload(payload));
       if (!_isStreaming) _startStreaming();
       _resetStreamIdleTimer();
@@ -5228,6 +5305,7 @@ const ChatView = (() => {
     _historyCompactionSummaries = [];
     _historyRequestSeq++;
     _removeHistoryScopeRows();
+    _clearCompactionSummarySeparators();
   }
 
   function _historyResponseMetadata(data) {
@@ -5361,7 +5439,7 @@ const ChatView = (() => {
       const data = await _rpc.call('chat.history', {
         sessionKey: requestSessionKey,
         limit: CHAT_HISTORY_PAGE_SIZE,
-        includeCanonical: true,
+        includeCanonical: false,
         includeSummaries: true,
       });
       if (requestSessionKey !== _sessionKey || requestSeq !== _historyRequestSeq) {
@@ -5412,7 +5490,7 @@ const ChatView = (() => {
         sessionKey: requestSessionKey,
         limit: CHAT_HISTORY_PAGE_SIZE,
         before: _historyOldestCursor,
-        includeCanonical: true,
+        includeCanonical: false,
         includeSummaries: true,
       });
       if (requestSessionKey !== _sessionKey || requestSeq !== _historyRequestSeq) {
@@ -5457,13 +5535,20 @@ const ChatView = (() => {
     if (messages.length === 0) {
       const liveRouterStrips = _currentSessionLiveRouterStrips(_sessionKey || '');
       const liveUserAnchor = _currentSessionLiveUserAnchor(_sessionKey || '');
-      if (_isStreaming && (_isCurrentSessionStreamBubble(_streamBubble) || liveRouterStrips.length > 0 || liveUserAnchor)) {
+      const liveThinking = _isCurrentSessionThinkingIndicator(_thinkingEl) ? _thinkingEl : null;
+      if (_isStreaming && (
+        _isCurrentSessionStreamBubble(_streamBubble)
+        || liveRouterStrips.length > 0
+        || liveUserAnchor
+        || liveThinking
+      )) {
         _thread.querySelectorAll('.msg').forEach((el) => {
-          if (el !== _streamBubble && el !== liveUserAnchor) el.remove();
+          if (el !== _streamBubble && el !== liveUserAnchor && el !== liveThinking) el.remove();
         });
         _thread.querySelectorAll('.chat-day-sep, .chat-empty').forEach((el) => el.remove());
         if (liveUserAnchor && !liveUserAnchor.isConnected) _thread.appendChild(liveUserAnchor);
         if (_streamBubble && !_streamBubble.isConnected) _thread.appendChild(_streamBubble);
+        if (liveThinking && !liveThinking.isConnected) _thread.appendChild(liveThinking);
         liveRouterStrips.forEach((el) => {
           if (!el.isConnected) _insertLiveRouterStripForAnchor(el, liveUserAnchor, _streamBubble);
         });
@@ -5561,7 +5646,7 @@ const ChatView = (() => {
           );
           consumedHistoryElements.add(div);
         }
-        _stampHistoryElement(div, stableIdentity, msg.role, displayText);
+        _stampHistoryElement(div, stableIdentity, msg.role, displayText, _messageTranscriptId(msg));
         _appendHistoryElementInOrder(div);
         if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
           _reconstructToolCalls(div, msg.tool_calls);
@@ -5670,6 +5755,7 @@ const ChatView = (() => {
       const liveUserAnchor = _currentSessionLiveUserAnchor(_sessionKey || '');
       _thread.querySelectorAll('.msg').forEach((el) => {
         if (_isStreaming && _isCurrentSessionStreamBubble(el)) return;
+        if (_isStreaming && _isCurrentSessionThinkingIndicator(el)) return;
         if (_isStreaming && el === liveUserAnchor) return;
         if (_isPendingFinalizedAssistantBubble(el) && _historyStillWaitingForAssistant(messages)) return;
         if (!consumedHistoryElements.has(el)) el.remove();
@@ -5705,7 +5791,7 @@ const ChatView = (() => {
       }
 	      _lastSavingsPopupIdentity = historySavingsIdentity;
 	      _renderHistoryScopeRow();
-	      _placeCompactionRail();
+	      _renderCompactionSummarySeparators(messages);
 	      if (opts.preserveScroll) {
 	        const oldHeight = Number(opts.previousScrollHeight || 0);
 	        const oldTop = Number(opts.previousScrollTop || 0);
@@ -5867,6 +5953,14 @@ const ChatView = (() => {
       && (!el.dataset.streamSessionKey || el.dataset.streamSessionKey === currentKey);
   }
 
+  function _isCurrentSessionThinkingIndicator(el) {
+    if (!el || el !== _thinkingEl) return false;
+    const currentKey = _streamSessionKey || _sessionKey || '';
+    if (!currentKey) return false;
+    const thinkingKey = el.dataset ? (el.dataset.sessionKey || currentKey) : currentKey;
+    return thinkingKey === currentKey;
+  }
+
   function _historyStillWaitingForAssistant(messages) {
     if (!Array.isArray(messages) || messages.length === 0) return true;
     const last = messages[messages.length - 1] || {};
@@ -5915,11 +6009,16 @@ const ChatView = (() => {
     _thread.appendChild(strip);
   }
 
-  function _stampHistoryElement(div, stableIdentity, role, text) {
+  function _stampHistoryElement(div, stableIdentity, role, text, transcriptId = null) {
     if (stableIdentity) div.setAttribute('data-message-id', stableIdentity);
     div.setAttribute('data-history-role', role || '');
     div.setAttribute('data-history-raw-text', text || '');
     div.setAttribute('data-history-fallback-id', _historyFallbackMessageIdentity(role, text));
+    if (transcriptId != null) {
+      div.dataset.transcriptId = String(transcriptId);
+    } else {
+      delete div.dataset.transcriptId;
+    }
   }
 
   function _replaceHistoryMessage(div, role, text, options = {}) {
@@ -6085,11 +6184,10 @@ const ChatView = (() => {
     _pendingAttachments = [];
     _renderAttachmentPreview();
 
-    // Start streaming UI. Begin the routing scan immediately so the routing
-    // animation fills the wait (and stands in for the thinking placeholder);
-    // it locks onto the winner when the router_decision arrives.
+    // Start streaming UI. Delay the routing scan briefly so request-time
+    // compaction can claim the turn without a competing one-frame router flash.
     _startStreaming();
-    const routerScanStarted = _routerFxBeginScan(userDiv, _routerFxResolveLayoutSeed(_sessionKey));
+    const routerScanStarted = _scheduleRouterFxBeginScan(userDiv, _routerFxResolveLayoutSeed(_sessionKey));
     _chatDiag('send.start', {
       textLen: providerText.length,
       attachments: params.attachments ? params.attachments.length : 0,
@@ -6291,6 +6389,10 @@ const ChatView = (() => {
     // Already scheduled or visible — keep the original timer/element to avoid
     // hide-then-rebuild flicker when send + state_change both fire.
     if (_thinkingEl || _thinkingDelayTimer) return;
+    if (_isCompactInFlightForCurrentSession()) {
+      _chatDiag('thinking.skip.compaction_in_flight', {});
+      return;
+    }
     // Timer starts at send so "Watching · N.Ns" reads total wait. The indicator
     // is RETAINED — but _showThinkingIndicatorNow defers it until the router
     // panel has settled, so routing animates first and "Watching…" only appears
@@ -6306,6 +6408,11 @@ const ChatView = (() => {
     if (_streamBubble) {
       _chatDiag('thinking.skip.stream_bubble', {});
       return; // content already arrived, skip
+    }
+    if (_isCompactInFlightForCurrentSession()) {
+      _chatDiag('thinking.defer.compaction_in_flight', {});
+      _thinkingDelayTimer = setTimeout(_showThinkingIndicatorNow, 150);
+      return;
     }
     // Defer while the router panel is still animating to its final state — the
     // "Watching…" indicator belongs AFTER routing settles, not during the scan.
@@ -6324,6 +6431,7 @@ const ChatView = (() => {
     _thinkingEl.className = 'msg assistant thinking';
     _thinkingEl.setAttribute('role', 'status');
     _thinkingEl.setAttribute('aria-live', 'polite');
+    _thinkingEl.dataset.sessionKey = _streamSessionKey || _sessionKey || '';
 
     // Show header only on speaker change (thinking indicator is transient;
     // it will be removed before the real bubble is inserted, so don't update
@@ -6590,6 +6698,7 @@ const ChatView = (() => {
       streamRawLen: _streamRaw.length,
     });
     _hideThinkingIndicator();
+    _cancelPendingRouterFxScan('stream_end');
     _clearAwaitingModelHint();
     _lastVisibleStreamEvent = '';
     if (_historySyncTimer) { clearTimeout(_historySyncTimer); _historySyncTimer = null; }
@@ -6832,6 +6941,7 @@ const ChatView = (() => {
     const hadPendingFinalized = !!_pendingFinalizedAssistantBubble;
     const routerStrips = _currentSessionLiveRouterStrips(_streamSessionKey || _sessionKey || '');
     _hideThinkingIndicator();
+    _cancelPendingRouterFxScan(reason || 'clear_view_state');
     if (_historySyncTimer) { clearTimeout(_historySyncTimer); _historySyncTimer = null; }
     if (_renderRafId) { cancelAnimationFrame(_renderRafId); _renderRafId = null; }
     _renderDirty = false;
@@ -8193,6 +8303,25 @@ const ChatView = (() => {
     _renderAttachmentPreview();
   }
 
+  function _attachmentDownloadName(att) {
+    const raw = String(att && att.name || 'attachment').trim();
+    return raw || 'attachment';
+  }
+
+  function _attachmentDownloadHref(att, mime) {
+    if (!att) return '';
+    if (att.dataUrl) {
+      const dataUrl = String(att.dataUrl).trim();
+      return /^javascript:/i.test(dataUrl) ? '' : dataUrl;
+    }
+    if (att.data) {
+      return `data:${_escAttr(mime || 'application/octet-stream')};base64,${String(att.data)}`;
+    }
+    const url = String(att.url || att.download_url || att.downloadUrl || '').trim();
+    if (url && !/^javascript:/i.test(url)) return url;
+    return '';
+  }
+
   function _renderMessageAttachmentHtml(att) {
     const mime = att.type || att.mime || '';
     const name = att.name || 'attachment';
@@ -8200,11 +8329,16 @@ const ChatView = (() => {
       const src = att.dataUrl || `data:${_esc(mime || 'image/png')};base64,${att.data}`;
       return `<img class="msg-thumb" src="${src}" alt="${_esc(name)}">`;
     }
-    return `<span class="msg-file-chip" title="${_esc(name)}">
+    const downloadName = _attachmentDownloadName(att);
+    const downloadHref = _attachmentDownloadHref(att, mime);
+    const inner = `
       <span class="msg-file-chip__icon" aria-hidden="true">file</span>
       <span class="msg-file-chip__name">${_esc(name)}</span>
-      <span class="msg-file-chip__meta">${_esc(mime || 'attachment')}</span>
-    </span>`;
+      <span class="msg-file-chip__meta">${_esc(mime || 'attachment')}</span>`;
+    if (downloadHref) {
+      return `<a class="msg-file-chip msg-file-chip--download" title="${_escAttr(name)}" href="${_escAttr(downloadHref)}" download="${_escAttr(downloadName)}">${inner}</a>`;
+    }
+    return `<span class="msg-file-chip msg-file-chip--disabled" title="${_escAttr(name)}">${inner}</span>`;
   }
 
   function _renderAttachmentPreview() {
@@ -8548,6 +8682,7 @@ const ChatView = (() => {
     } else if (options && options.recoverPending) {
       recovered = _popAllPendingIntoComposer();
     }
+    if (_isStreaming && !_streamBubble) _showThinkingIndicator();
     return recovered;
   }
 
@@ -8649,12 +8784,13 @@ const ChatView = (() => {
     document.documentElement.style.removeProperty('--composer-h');
     if (_isStreaming) _endStreaming();
     _hideThinkingIndicator();
+    _cancelPendingRouterFxScan('destroy');
     if (_renderRafId) { cancelAnimationFrame(_renderRafId); _renderRafId = null; }
     _renderDirty = false;
     _closeSlashMenu();
     _clearPendingDrainAfterTerminalTimer();
     _setCompactInFlight(false);
-    _hideCompactionRail();
+    _hideCompactionSeparator();
     _pendingAttachments = [];
     _pendingQueue = [];
     _stopRequestedByUser = false;

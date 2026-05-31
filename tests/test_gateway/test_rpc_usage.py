@@ -236,6 +236,37 @@ def test_usage_status_only_estimates_transcript_context_for_requested_session() 
     assert context_status["contextTokens"] >= 1_500
 
 
+def test_usage_status_requested_compacted_session_prefers_active_transcript_context() -> None:
+    session = SimpleNamespace(
+        session_key="agent:webchat:compact",
+        status="finished",
+        input_tokens=1_296_184,
+        output_tokens=1_000,
+        context_tokens=1_296_184,
+        compaction_count=1,
+        model="deepseek-v4-flash",
+    )
+    sm = _FakeTranscriptSessionManager(
+        [session],
+        [
+            SimpleNamespace(token_count=36_000),
+            SimpleNamespace(token_count=184),
+        ],
+    )
+    ctx = _ctx(session_manager=sm, usage_tracker=UsageTracker())
+
+    unrequested = asyncio.run(_handle_usage_status(None, ctx))
+    assert sm.transcript_calls == 0
+    assert unrequested["sessions"][0]["contextStatus"]["contextTokens"] == 1_296_184
+
+    requested = asyncio.run(_handle_usage_status({"sessionKey": "agent:webchat:compact"}, ctx))
+    assert sm.transcript_calls == 1
+    context_status = requested["sessions"][0]["contextStatus"]
+    assert context_status["tokenSource"] == "transcript_estimate"
+    assert context_status["contextTokens"] == 36_184
+    assert context_status["pressure"] < 0.1
+
+
 def test_usage_status_exposes_session_timestamp_aliases() -> None:
     session = SimpleNamespace(
         session_key="agent:webchat:timed",

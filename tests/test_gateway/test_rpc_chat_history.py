@@ -5,7 +5,7 @@ import pytest
 
 from opensquilla.gateway.rpc import RpcContext
 from opensquilla.gateway.rpc_chat import _handle_chat_history
-from opensquilla.session.models import TranscriptEntry
+from opensquilla.session.models import SessionSummary, TranscriptEntry
 
 
 class _FakeSessionManager:
@@ -258,6 +258,7 @@ async def test_chat_history_exposes_subagent_completion_provenance() -> None:
 @pytest.mark.asyncio
 async def test_chat_history_exposes_stable_message_identity() -> None:
     entry = TranscriptEntry(
+        id=123,
         session_id="parent",
         session_key="agent:main:webchat:test",
         role="assistant",
@@ -276,6 +277,34 @@ async def test_chat_history_exposes_stable_message_identity() -> None:
     msg = result["messages"][0]
     assert msg["id"] == entry.message_id
     assert msg["message_id"] == entry.message_id
+    assert msg["transcript_id"] == 123
+
+
+@pytest.mark.asyncio
+async def test_chat_history_exposes_compaction_summary_anchor() -> None:
+    summary = SessionSummary(
+        id=7,
+        session_id="parent",
+        session_key="agent:main:webchat:test",
+        compaction_index=1,
+        compaction_id="compact-1",
+        trigger_reason="manual",
+        summary_text="older context",
+        removed_count=3,
+        kept_count=1,
+        covered_through_id=42,
+    )
+
+    result = await _handle_chat_history(
+        {"sessionKey": "agent:main:webchat:test"},
+        RpcContext(
+            conn_id="test",
+            principal=SimpleNamespace(role="operator"),
+            session_manager=_FakeSessionManager([], summaries=[summary]),
+        ),
+    )
+
+    assert result["compaction_summaries"][0]["covered_through_id"] == 42
 
 
 @pytest.mark.asyncio
@@ -428,3 +457,41 @@ async def test_chat_history_prefers_attachment_display_text() -> None:
     msg = result["messages"][0]
     assert msg["text"] == ""
     assert msg["attachments"][0]["name"] == "image.png"
+
+
+@pytest.mark.asyncio
+async def test_chat_history_exposes_download_url_for_transcript_attachment_refs() -> None:
+    sha = "d" * 64
+    entry = TranscriptEntry(
+        session_id="session-1",
+        session_key="agent:main:webchat:test",
+        role="user",
+        content=json.dumps(
+            {
+                "text": "Please process the attached pasted text.",
+                "attachments": [
+                    {
+                        "sha256_ref": sha,
+                        "name": "webchat-paste-test.txt",
+                        "mime": "text/plain",
+                        "size": 12,
+                    }
+                ],
+            }
+        ),
+    )
+
+    result = await _handle_chat_history(
+        {"sessionKey": "agent:main:webchat:test"},
+        RpcContext(
+            conn_id="test",
+            principal=SimpleNamespace(role="operator"),
+            session_manager=_FakeSessionManager([entry]),
+        ),
+    )
+
+    attachment = result["messages"][0]["attachments"][0]
+    assert attachment["download_url"] == (
+        f"/api/v1/attachments/{sha}?sessionKey=agent%3Amain%3Awebchat%3Atest"
+        "&name=webchat-paste-test.txt&mime=text%2Fplain"
+    )

@@ -1186,12 +1186,10 @@ def test_chat_compaction_events_render_recoverable_toasts_in_real_browser(
               return emitEvent(page, "session.event.compaction", payload, meta);
             }
 
-            // Always read the LAST rail element — settled rails persist in DOM
-            // so earlier states accumulate above the current one.
-            async function lastRailText(page) {
+            async function lastSeparatorText(page) {
               return await page.evaluate(() => {
-                const rails = document.querySelectorAll(".chat-context-rail");
-                return rails.length ? rails[rails.length - 1].innerText : "";
+                const separators = document.querySelectorAll(".chat-context-separator");
+                return separators.length ? separators[separators.length - 1].innerText : "";
               });
             }
 
@@ -1235,13 +1233,13 @@ def test_chat_compaction_events_render_recoverable_toasts_in_real_browser(
               });
 
               await emitCompaction(page, { status: "started", source: "manual" });
-              await page.waitForSelector(".chat-context-rail", { timeout: 5000 });
+              await page.waitForSelector(".chat-context-separator", { timeout: 5000 });
               await page.waitForTimeout(600);
-              const startedStatusVisible = await lastRailText(page);
-              const manualRailStarted = startedStatusVisible;
+              const startedStatusVisible = await lastSeparatorText(page);
+              const manualSeparatorStarted = startedStatusVisible;
               await emitCompaction(page, { status: "skipped", source: "manual" });
               await page.waitForTimeout(250);
-              const skippedStatusVisible = await lastRailText(page);
+              const skippedStatusVisible = await lastSeparatorText(page);
 
               await emitCompaction(page, {
                 status: "completed",
@@ -1250,7 +1248,7 @@ def test_chat_compaction_events_render_recoverable_toasts_in_real_browser(
                 tokens_after: 1300,
               });
               await page.waitForFunction(
-                () => document.body.innerText.includes("Context compacted"),
+                () => document.body.innerText.includes("context compacted"),
                 null, { timeout: 5000 }
               );
 
@@ -1290,8 +1288,8 @@ def test_chat_compaction_events_render_recoverable_toasts_in_real_browser(
                 phase: "preflight",
               });
               await page.waitForTimeout(800);
-              const automaticStartedStatusVisible = await lastRailText(page);
-              const automaticRailStarted = automaticStartedStatusVisible;
+              const automaticStartedStatusVisible = await lastSeparatorText(page);
+              const automaticSeparatorStarted = automaticStartedStatusVisible;
               await page.fill("#chat-textarea", "queued during automatic compact");
               await page.click("#chat-btn-send");
               await page.waitForTimeout(150);
@@ -1306,8 +1304,8 @@ def test_chat_compaction_events_render_recoverable_toasts_in_real_browser(
                 tokens_after: 2600,
               });
               await page.waitForTimeout(800);
-              const automaticObservedStatusVisible = await lastRailText(page);
-              const automaticRailObserved = automaticObservedStatusVisible;
+              const automaticObservedStatusVisible = await lastSeparatorText(page);
+              const automaticSeparatorObserved = automaticObservedStatusVisible;
               await emitCompaction(page, {
                 status: "completed",
                 source: "automatic",
@@ -1315,7 +1313,7 @@ def test_chat_compaction_events_render_recoverable_toasts_in_real_browser(
                 tokens_after: 1800,
               });
               await page.waitForTimeout(800);
-              const automaticRailCompleted = await lastRailText(page);
+              const automaticSeparatorCompleted = await lastSeparatorText(page);
               const automaticDidNotDrainBeforeDone = await page.evaluate(
                 expected => window.__compactUx.chatCalls.length === expected,
                 callsBeforeAutomaticCompact
@@ -1345,8 +1343,8 @@ def test_chat_compaction_events_render_recoverable_toasts_in_real_browser(
                 user_visible: false,
               });
               await page.waitForTimeout(300);
-              const automaticNoopRailHidden = await page
-                .locator(".chat-context-rail")
+              const automaticNoopSeparatorHidden = await page
+                .locator(".chat-context-separator")
                 .count();
               const automaticNoopBodyText = await page.locator("body").innerText();
 
@@ -1365,7 +1363,7 @@ def test_chat_compaction_events_render_recoverable_toasts_in_real_browser(
                 user_visible: true,
               });
               await page.waitForTimeout(800);
-              const automaticNonBenignSkipStatus = await lastRailText(page);
+              const automaticNonBenignSkipStatus = await lastSeparatorText(page);
 
               await page.waitForTimeout(1600);
               await emitCompaction(page, {
@@ -1383,7 +1381,7 @@ def test_chat_compaction_events_render_recoverable_toasts_in_real_browser(
                 tokens_after: 2400,
               });
               await page.waitForTimeout(800);
-              const emergencyStatusVisible = await lastRailText(page);
+              const emergencyStatusVisible = await lastSeparatorText(page);
 
               await page.waitForTimeout(1600);
               await emitCompaction(page, { status: "started", source: "manual" });
@@ -1399,7 +1397,7 @@ def test_chat_compaction_events_render_recoverable_toasts_in_real_browser(
                 refused: true,
               });
               await page.waitForTimeout(800);
-              const failedStatusVisible = await lastRailText(page);
+              const failedStatusVisible = await lastSeparatorText(page);
 
               const bodyText = await page.locator("body").innerText();
               const toastMessages = await page.evaluate(
@@ -1421,37 +1419,31 @@ def test_chat_compaction_events_render_recoverable_toasts_in_real_browser(
                   m => m.includes("Compact failed: still over budget")
                 ),
                 hasReplayedFailureToast: toastMessages.some(m => m.includes("old replay")),
-                startedStatusVisible: startedStatusVisible.includes("Compacting context"),
+                startedStatusVisible: startedStatusVisible.includes("context compacting"),
                 manualRailStarted:
-                  manualRailStarted.includes("MANUAL COMPACT") &&
-                  manualRailStarted.includes("Compacting context"),
+                  manualSeparatorStarted.includes("context compacting"),
                 skippedStatusVisible: skippedStatusVisible.includes(
-                  "Already within context budget; no compact was applied."
+                  "no compaction needed"
                 ),
                 failedStatusVisible:
-                  failedStatusVisible.includes("Compaction failed") &&
-                  failedStatusVisible.includes("still over budget"),
+                  failedStatusVisible.includes("compaction failed"),
                 queuedBeforeSkipped,
                 skippedDrainedQueuedSend: await page.evaluate(
                   () => window.__compactUx.chatCalls
                     .some(c => c.params.message === "queued during compact")
                 ),
                 automaticStartedStatusVisible: automaticStartedStatusVisible.includes(
-                  "Compacting context"
+                  "context compacting"
                 ),
                 automaticRailStarted:
-                  automaticRailStarted.includes("AUTO COMPACT BEFORE TURN") &&
-                  automaticRailStarted.includes("Compacting context"),
+                  automaticSeparatorStarted.includes("context compacting"),
                 automaticObservedStatusVisible: automaticObservedStatusVisible.includes(
-                  "Summarizing context"
+                  "context compacting"
                 ),
                 automaticRailObserved:
-                  automaticRailObserved.includes("Summarizing context") &&
-                  automaticRailObserved.includes("Distilling"),
+                  automaticSeparatorObserved.includes("context compacting"),
                 automaticRailCompleted:
-                  automaticRailCompleted.includes("Context compacted") &&
-                  automaticRailCompleted.includes("5,000 -> 1,800") &&
-                  automaticRailCompleted.includes("64% smaller"),
+                  automaticSeparatorCompleted.includes("context compacted"),
                 automaticQueuedBeforeCompleted:
                   automaticQueuedBeforeCompleted === callsBeforeAutomaticCompact,
                 automaticDidNotDrainBeforeDone,
@@ -1460,18 +1452,14 @@ def test_chat_compaction_events_render_recoverable_toasts_in_real_browser(
                     .some(c => c.params.message === "queued during automatic compact")
                 ),
                 emergencyStatusVisible:
-                  emergencyStatusVisible.includes("Temporary compaction") &&
-                  emergencyStatusVisible.includes("session history was not rewritten") &&
+                  emergencyStatusVisible.includes("temporary compaction") &&
                   !emergencyStatusVisible.includes("empty summary"),
-                automaticNoopRailHidden: automaticNoopRailHidden === 0,
+                automaticNoopRailHidden: automaticNoopSeparatorHidden === 0,
                 automaticNoopSkippedHidden:
                   !automaticNoopBodyText.includes("Context compaction skipped") &&
                   !automaticNoopBodyText.includes("structured content noop"),
                 automaticNonBenignSkipVisible:
-                  automaticNonBenignSkipStatus.includes("Compaction skipped") &&
-                  automaticNonBenignSkipStatus.includes(
-                    "Context compaction could not be applied"
-                  ) &&
+                  automaticNonBenignSkipStatus.includes("compaction skipped") &&
                   !automaticNonBenignSkipStatus.includes("empty summary"),
                 blockingFailureKeptPending:
                   (await page.locator("#chat-pending").innerText())
@@ -2140,6 +2128,7 @@ def test_webchat_large_paste_auto_attaches_text_in_real_browser(tmp_path: Path) 
                 const userBubbleText = document.querySelector(".msg.user")?.textContent || "";
                 const attachmentText =
                   document.querySelector(".msg.user .msg-attachments")?.textContent || "";
+                const attachmentChip = document.querySelector(".msg.user .msg-file-chip");
                 return {
                   callMethod: call.method,
                   message: params.message,
@@ -2166,7 +2155,75 @@ def test_webchat_large_paste_auto_attaches_text_in_real_browser(tmp_path: Path) 
                   ),
                   bubbleHasLongRawPaste: userBubbleText.includes("x".repeat(500)),
                   attachmentChipHasGeneratedName: attachmentText.includes("webchat-paste-"),
+                  attachmentChipTag: attachmentChip?.tagName || "",
+                  attachmentChipDownload: attachmentChip?.getAttribute("download") || "",
+                  attachmentChipHref: attachmentChip?.getAttribute("href") || "",
                 };
+              });
+              await page.evaluate((attachmentName) => {
+                const rpc = App.getRpc();
+                rpc.call = (method, params = {}) => {
+                  if (method === "tools.search_provider") {
+                    return Promise.resolve({ provider: "none" });
+                  }
+                  if (method === "config.get") {
+                    return Promise.resolve({
+                      permissions: { default_mode: "ask" },
+                      squilla_router: { enabled: false, rollout_phase: "off", tiers: {} },
+                    });
+                  }
+                  if (method === "sessions.messages.subscribe") {
+                    return Promise.resolve({
+                      subscribed: true,
+                      key: params.key,
+                      current_stream_seq: 0,
+                      replay_complete: true,
+                      replayed_count: 0,
+                      run_status: "idle",
+                    });
+                  }
+                  if (method === "chat.history") {
+                    return Promise.resolve({
+                      messages: [{
+                        role: "user",
+                        text: "Please process the attached pasted text.",
+                        timestamp: new Date().toISOString(),
+                        attachments: [{
+                          sha256_ref: "d".repeat(64),
+                          name: attachmentName,
+                          mime: "text/plain",
+                          size: 20000,
+                          download_url:
+                            `/api/v1/attachments/${"d".repeat(64)}`
+                            + "?sessionKey=agent%3Amain%3Awebchat%3Atest"
+                            + `&name=${encodeURIComponent(attachmentName)}`
+                            + "&mime=text%2Fplain",
+                        }],
+                      }],
+                      history_scope: "complete",
+                      has_more: false,
+                    });
+                  }
+                  return Promise.resolve({});
+                };
+                ChatView.destroy();
+                ChatView.render(document.getElementById("content"));
+              }, payload.attachmentName);
+              await page.waitForSelector(".msg.user .msg-file-chip[href^='/api/v1/attachments/']", {
+                timeout: 5000,
+              });
+              const historyPayload = await page.evaluate(() => {
+                const chip = document.querySelector(".msg.user .msg-file-chip");
+                return {
+                  tag: chip?.tagName || "",
+                  download: chip?.getAttribute("download") || "",
+                  href: chip?.getAttribute("href") || "",
+                };
+              });
+              Object.assign(payload, {
+                historyAttachmentChipTag: historyPayload.tag,
+                historyAttachmentChipDownload: historyPayload.download,
+                historyAttachmentChipHref: historyPayload.href,
               });
               payload.pageErrors = errors;
 
@@ -2231,6 +2288,12 @@ def test_webchat_large_paste_auto_attaches_text_in_real_browser(tmp_path: Path) 
     assert payload["bubbleHasPlaceholder"] is True, payload
     assert payload["bubbleHasLongRawPaste"] is False, payload
     assert payload["attachmentChipHasGeneratedName"] is True, payload
+    assert payload["attachmentChipTag"] == "A", payload
+    assert payload["attachmentChipDownload"].startswith("webchat-paste-"), payload
+    assert payload["attachmentChipHref"].startswith("data:text/plain;base64,"), payload
+    assert payload["historyAttachmentChipTag"] == "A", payload
+    assert payload["historyAttachmentChipDownload"].startswith("webchat-paste-"), payload
+    assert payload["historyAttachmentChipHref"].startswith("/api/v1/attachments/"), payload
     assert payload["pageErrors"] == [], payload
 
 
@@ -2313,9 +2376,15 @@ def test_image_paste_consumes_attachment_without_inserting_wsl_path_text_in_real
                 return {
                   defaultPrevented: event.defaultPrevented,
                   textareaValue: textarea.value,
-                  previewHidden: document.querySelector("#chat-attach-preview")?.classList.contains("hidden"),
-                  attachmentThumbs: document.querySelectorAll("#chat-attach-preview .attachment-thumb").length,
-                  attachmentChips: document.querySelectorAll("#chat-attach-preview .attachment-chip").length,
+                  previewHidden: document
+                    .querySelector("#chat-attach-preview")
+                    ?.classList.contains("hidden"),
+                  attachmentThumbs: document
+                    .querySelectorAll("#chat-attach-preview .attachment-thumb")
+                    .length,
+                  attachmentChips: document
+                    .querySelectorAll("#chat-attach-preview .attachment-chip")
+                    .length,
                 };
               }, { includeImage, text });
             }
@@ -2333,7 +2402,8 @@ def test_image_paste_consumes_attachment_without_inserting_wsl_path_text_in_real
               await page.waitForSelector("#chat-textarea", { timeout: 15000 });
               await waitRpc(page);
 
-              const wslPath = "/tmp/.wsl-screenshot-cli/361d381f306061eb91d29b48ca876da8ab0ee3374a57bcfaa9212c3b7105858.png";
+              const wslPath = "/tmp/.wsl-screenshot-cli/"
+                + "361d381f306061eb91d29b48ca876da8ab0ee3374a57bcfaa9212c3b7105858.png";
               const imagePaste = await dispatchSyntheticPaste(page, {
                 includeImage: true,
                 text: wslPath,
@@ -2397,7 +2467,9 @@ def test_image_paste_consumes_attachment_without_inserting_wsl_path_text_in_real
     assert payload["imagePaste"]["previewHidden"] is False, payload
     assert payload["imagePaste"]["attachmentThumbs"] == 1, payload
     assert payload["textOnlyPaste"]["defaultPrevented"] is False, payload
-    assert payload["textOnlyPaste"]["textareaValue"].startswith("/tmp/.wsl-screenshot-cli/"), payload
+    assert payload["textOnlyPaste"]["textareaValue"].startswith(
+        "/tmp/.wsl-screenshot-cli/"
+    ), payload
     assert payload["pageErrors"] == [], payload
 
 
