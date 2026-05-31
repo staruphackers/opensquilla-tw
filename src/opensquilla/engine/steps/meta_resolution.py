@@ -195,6 +195,69 @@ _META_SKILL_EXPLANATION_RE = re.compile(
     r"\b(how|what|why|explain|describe)\b.*\bmeta-skill\b"
 )
 
+_PASTED_CONTEXT_MARKERS = (
+    "webchat dump",
+    "chat dump",
+    "page dump",
+    "transcript",
+    "conversation dump",
+    "history dump",
+    "skill list",
+    "old skill",
+    "历史记录",
+    "历史 transcript",
+    "历史页面",
+    "页面内容",
+    "粘贴材料",
+    "整页 webchat",
+    "旧 skill",
+)
+
+_PASTED_CONTEXT_BOUNDARY_RE = re.compile(
+    r"^\s*(?:```|~~~|[-=]{3,}|<skill\b|</skill>|"
+    r"(?:user|assistant|system|tool)\s*:)",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_pasted_context(message: str) -> bool:
+    text = (message or "").strip()
+    if not text:
+        return False
+    lower = text.lower()
+    marker_hit = any(marker in lower for marker in _PASTED_CONTEXT_MARKERS)
+    if not marker_hit:
+        return False
+    return len(text) > 1200 or text.count("\n") >= 8
+
+
+def _trigger_match_text(message: str) -> str:
+    """Return the current-intent slice used for deterministic trigger scans.
+
+    Meta-skill triggers are intentionally cheap and deterministic. For normal
+    short user requests, scanning the whole message is the right behavior. For
+    long pasted chat/page dumps, however, the full message often includes old
+    skill lists, historical assistant text, and quoted examples. In that shape,
+    only the user's leading instruction is a reasonable current-intent signal.
+    """
+
+    if not _looks_like_pasted_context(message):
+        return message
+
+    prefix: list[str] = []
+    for index, line in enumerate(message.splitlines()):
+        lower = line.lower()
+        if index > 0 and _PASTED_CONTEXT_BOUNDARY_RE.match(line):
+            break
+        if index > 0 and any(marker in lower for marker in _PASTED_CONTEXT_MARKERS):
+            break
+        prefix.append(line)
+
+    candidate = "\n".join(prefix).strip()
+    if candidate:
+        return candidate
+    return "\n".join(message.splitlines()[:3]).strip()
+
 
 def _tier_sort_key(name: str, index: int) -> tuple[int, int]:
     """Prefer numeric router tiers (t0 < t1 < t2 < t3), then declaration order."""
@@ -243,12 +306,21 @@ def _trigger_matches(trigger: str, message_lower: str) -> bool:
       substring matching does not produce ambiguous fires.
     """
     tl = trigger.lower()
-    if tl not in message_lower:
-        return False
     if all(ord(c) < 128 for c in tl):
         if _META_SKILL_EXPLANATION_RE.search(message_lower):
             return False
-        return bool(re.search(r"\b" + re.escape(tl) + r"\b", message_lower))
+        normalized_trigger = re.sub(r"[^a-z0-9]+", " ", tl).strip()
+        normalized_message = re.sub(r"[^a-z0-9]+", " ", message_lower).strip()
+        if not normalized_trigger or normalized_trigger not in normalized_message:
+            return False
+        return bool(
+            re.search(
+                r"\b" + re.escape(normalized_trigger) + r"\b",
+                normalized_message,
+            )
+        )
+    if tl not in message_lower:
+        return False
     return True
 
 
@@ -363,6 +435,9 @@ def _semantic_meta_candidate(
         or getattr(ctx, "message", "")
         or ""
     )
+    if not str(query).strip():
+        return None
+    query = _trigger_match_text(str(query))
     if not str(query).strip():
         return None
     if not _has_semantic_workflow_cue(str(query)):
@@ -600,11 +675,18 @@ async def meta_resolution(ctx: TurnContext) -> TurnContext:
     # Use the normalized current user intent for semantic trigger work.
     # Raw/page-dump material can still live in ``ctx.message`` on some direct
     # paths after input normalization, but meta triggers and templates should
-    # see the same semantic text.
+    # see the same semantic text. Long pasted chat/page dumps are narrowed to
+    # the leading current-intent slice so quoted skill names and historical
+    # trigger phrases do not force a DAG.
     semantic_text = _current_semantic_text(ctx)
-    message_lower = semantic_text.lower()
+    trigger_text = _trigger_match_text(semantic_text)
+    message_lower = trigger_text.lower()
     if not message_lower:
         return ctx
+
+    pasted_context = _looks_like_pasted_context(semantic_text)
+    if pasted_context:
+        _sticky_drop(session_id)
 
     # Sticky-cancel: explicit user opt-out always wins over a stale match.
     if _hits_cancel_keywords(semantic_text, _STICKY_CANCEL_KEYWORDS):
@@ -640,6 +722,8 @@ async def meta_resolution(ctx: TurnContext) -> TurnContext:
     if not matched:
         if _is_skill_marketplace_intent(semantic_text):
             _sticky_drop(session_id)
+            return ctx
+        if pasted_context:
             return ctx
 
         # No current trigger — try the sticky cache for this session.
@@ -781,5 +865,6 @@ async def meta_resolution(ctx: TurnContext) -> TurnContext:
         # Include the head of the actual input so an operator can
         # diagnose accidental fires from the log alone.
         message_head=semantic_text[:200],
+        trigger_scan_head=trigger_text[:200],
     )
     return ctx

@@ -384,6 +384,58 @@ async def test_meta_resolution_highest_priority_wins() -> None:
 
 
 @pytest.mark.asyncio
+async def test_meta_resolution_ignores_triggers_inside_pasted_webchat_dump() -> None:
+    spec = _make_meta_spec(
+        name="meta-household-calendar-test",
+        composition={"steps": [{"id": "a", "skill": "summarize"}]},
+        triggers=["家庭日程"],
+        priority=56,
+    )
+    loader = _FakeLoader([spec])
+    dump_body = "\n".join(
+        [
+            "WebChat dump",
+            "assistant: 这里是旧页面里的 skill 列表",
+            "meta-household-calendar-test 家庭日程协调",
+            "meta-skill-creator",
+        ]
+        + [f"history line {i}" for i in range(20)]
+    )
+    ctx = SimpleNamespace(
+        message=f"请分析下面历史页面是否有误触发，不要运行任何技能。\n{dump_body}",
+        semantic_message=f"请分析下面历史页面是否有误触发，不要运行任何技能。\n{dump_body}",
+        system_prompt="base",
+        metadata={"skill_loader": loader},
+    )
+
+    out = await meta_resolution(ctx)  # type: ignore[arg-type]
+
+    assert "meta_match" not in out.metadata
+    assert out.system_prompt == "base"
+
+
+@pytest.mark.asyncio
+async def test_meta_resolution_still_matches_current_cjk_intent() -> None:
+    spec = _make_meta_spec(
+        name="meta-household-calendar-test",
+        composition={"steps": [{"id": "a", "skill": "summarize"}]},
+        triggers=["家庭日程"],
+        priority=56,
+    )
+    loader = _FakeLoader([spec])
+    ctx = SimpleNamespace(
+        message="帮我安排明天的家庭日程",
+        semantic_message="帮我安排明天的家庭日程",
+        system_prompt="base",
+        metadata={"skill_loader": loader},
+    )
+
+    out = await meta_resolution(ctx)  # type: ignore[arg-type]
+
+    assert out.metadata["meta_match"].plan.name == "meta-household-calendar-test"
+
+
+@pytest.mark.asyncio
 async def test_meta_resolution_promotes_meta_skill_creator_to_highest_text_tier() -> None:
     spec = _make_meta_spec(
         name="meta-skill-creator",
@@ -1438,6 +1490,46 @@ async def test_make_llm_chat_from_provider_uses_deliverable_sized_token_budget()
 
     assert await llm_chat("system", "user") == "ok"
     assert captured["max_tokens"] == 16384
+
+
+@pytest.mark.asyncio
+async def test_make_llm_chat_from_provider_forwards_billed_cost_to_usage_tracker() -> None:
+    from opensquilla.engine.usage import UsageTracker, usage_scope
+    from opensquilla.provider.types import DoneEvent as ProviderDoneEvent
+    from opensquilla.provider.types import TextDeltaEvent as ProviderTextDelta
+
+    class FakeProvider:
+        async def chat(self, _messages, *, tools, config):
+            assert tools is None
+            assert config.temperature == 0.0
+            yield ProviderTextDelta(text="ok")
+            yield ProviderDoneEvent(
+                input_tokens=10,
+                output_tokens=2,
+                model="deepseek/deepseek-v4-pro-20260423",
+                billed_cost=0.123,
+            )
+
+    tracker = UsageTracker()
+    llm_chat = make_llm_chat_from_provider(
+        provider=FakeProvider(),
+        base_config=AgentConfig(model_id="fallback-model"),
+        usage_tracker=tracker,
+        session_key="session-a",
+    )
+
+    with usage_scope("meta-run:step-a"):
+        assert await llm_chat("system", "user") == "ok"
+
+    usage = tracker.get("session-a")
+    scoped = tracker.get_scope("session-a", "meta-run:step-a")
+    assert usage is not None
+    assert scoped is not None
+    assert usage.input_tokens == 10
+    assert usage.output_tokens == 2
+    assert usage.billed_cost == pytest.approx(0.123)
+    assert usage.total_cost == pytest.approx(0.123)
+    assert scoped.billed_cost == pytest.approx(0.123)
 
 
 @pytest.mark.asyncio
