@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import unicodedata
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any, Literal
@@ -128,11 +129,11 @@ def _summarize_args(name: str, args: dict | None) -> str:
         return ""
     if name in {"exec_command", "background_process"}:
         cmd = args.get("command") or args.get("cmd") or ""
-        return str(cmd)[:60] if cmd else ""
+        return _clip_arg(str(cmd)) if cmd else ""
     if name == "execute_code":
         code = args.get("code") or args.get("source") or ""
         first_line = str(code).split("\n", 1)[0]
-        return first_line[:60] if first_line else ""
+        return _clip_arg(first_line) if first_line else ""
     if name in {"read_file", "write_file", "list_dir", "apply_patch"}:
         path = (
             args.get("path")
@@ -140,14 +141,27 @@ def _summarize_args(name: str, args: dict | None) -> str:
             or args.get("target")
             or ""
         )
-        return str(path)[-50:] if path else ""
+        return _clip_arg(str(path), keep_end=True) if path else ""
     if name == "web_search":
         query = args.get("query") or ""
-        return str(query)[:60] if query else ""
+        return _clip_arg(str(query)) if query else ""
     if name == "web_fetch":
         url = args.get("url") or args.get("uri") or ""
-        return str(url)[:60] if url else ""
+        return _clip_arg(str(url)) if url else ""
     return ""
+
+
+def _clip_arg(value: str, *, limit: int = 90, keep_end: bool = False) -> str:
+    """Clip a tool-call argument for the inline tool row, ellipsizing overflow.
+
+    Paths keep their tail (the filename matters most); everything else keeps its
+    head (the command/query/url start matters most).
+    """
+    if len(value) <= limit:
+        return value
+    if keep_end:
+        return f"…{value[-(limit - 1):]}"
+    return f"{value[: limit - 1]}…"
 
 
 def _summarize_result(result: Any | None, *, max_chars: int = 220) -> str:
@@ -161,7 +175,9 @@ def _summarize_result(result: Any | None, *, max_chars: int = 220) -> str:
     lines = [
         line.strip()
         for line in text.splitlines()
-        if line.strip() and not _is_result_decoration_line(line)
+        if line.strip()
+        and not _is_result_decoration_line(line)
+        and not _is_useless_result_line(line)
     ]
     if not lines:
         return ""
@@ -219,6 +235,15 @@ def _is_result_decoration_line(line: str) -> bool:
         _RESULT_DECORATION_ONLY_RE.fullmatch(stripped)
         or _RESULT_DECORATION_BANNER_RE.fullmatch(stripped)
     )
+
+
+def _is_useless_result_line(line: str) -> bool:
+    stripped = line.strip()
+    if stripped == "exit_code=0":
+        return True
+    if len(stripped) <= 1:
+        return True
+    return all(unicodedata.category(char).startswith("P") for char in stripped)
 
 
 def _start_on_fresh_line(payload: str) -> str:
