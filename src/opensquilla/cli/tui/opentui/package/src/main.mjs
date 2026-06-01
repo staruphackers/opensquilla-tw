@@ -39,10 +39,15 @@ const OPENTUI_DAILY_THEME = Object.freeze({
   toolAccent: "#69D2E7",
   detailText: "#8A96A6",
   answerAccent: "#9AD18B",
+  modelText: "#C4B5FD",
   promptAccent: "#FFB86C",
   routeText: "#C4B5FD",
   savingText: "#8BD5CA",
 });
+// Card rules: the top edge runs long, the bottom edge stays short, keeping the
+// "top longer than bottom" look while extending further to the right than before.
+const CARD_RULE_LONG = "─".repeat(48);
+const CARD_RULE_SHORT = "─".repeat(8);
 const STATUS_PULSE_FRAMES = Object.freeze({
   thinking: ["∙", "•", "●", "•"],
   tool: ["◌", "◔", "◑", "◕"],
@@ -60,6 +65,8 @@ let createCliRenderer;
 let conversationBox;
 let inputBox;
 let inputText = "";
+// Caret position as a grapheme index into Array.from(inputText), range [0, len].
+let cursorPos = 0;
 let pulseFrame = 0;
 let pulseTimer;
 let scrollbackSeq = 0;
@@ -198,19 +205,40 @@ function buildLayout() {
   rerenderInputRegion();
 }
 
+// Render the caret as a thin bar when visible, a blank (same width) when the
+// blink is off so the line layout never jumps. Cursor blinks regardless of the
+// composer being disabled, so a running turn still shows a live caret.
+function caretGlyph() {
+  return cursorVisible ? "▏" : " ";
+}
+
+// Split the input into display lines and splice the caret into the line/column
+// that cursorPos lands on. Returns an array of line strings to render.
+function composerLines() {
+  const chars = Array.from(inputText);
+  const pos = Math.max(0, Math.min(cursorPos, chars.length));
+  const caret = caretGlyph();
+  if (chars.length === 0) {
+    // Empty: caret sits before the muted placeholder.
+    return [{ text: `${caret}${composer.placeholder}`, muted: true }];
+  }
+  const before = chars.slice(0, pos).join("");
+  const after = chars.slice(pos).join("");
+  const withCaret = `${before}${caret}${after}`;
+  return withCaret.split("\n").map((line) => ({ text: line, muted: false }));
+}
+
 function rerenderInputRegion() {
   if (!inputBox) return;
   for (const child of inputBox.getChildren?.() ?? []) inputBox.remove?.(child.id);
-  const cursor = !composer.disabled && cursorVisible ? "▏" : " ";
-  const composerLine = inputText || composer.text;
-  const text = composerLine ? `${composerLine}${cursor}` : `${cursor}${composer.placeholder}`;
+  const lines = composerLines();
   const composerNode = new BoxRenderable(renderer, {
     id: "composer-box",
     position: "absolute",
     left: 1,
     right: 34,
-    bottom: 1,
-    height: 4,
+    bottom: 0,
+    height: FOOTER_HEIGHT,
     borderStyle: "rounded",
     borderColor: composer.disabled ? OPENTUI_DAILY_THEME.composerDisabledBorder : OPENTUI_DAILY_THEME.composerBorder,
     bottomTitle: `${statusIcon()} ${turnStatus.label}`,
@@ -220,11 +248,13 @@ function rerenderInputRegion() {
     flexDirection: "column",
     justifyContent: "center",
   });
-  composerNode.add(new TextRenderable(renderer, {
-    id: "composer-text",
-    content: text,
-    fg: composerLine ? OPENTUI_DAILY_THEME.text : OPENTUI_DAILY_THEME.muted,
-  }));
+  lines.forEach((line, index) => {
+    composerNode.add(new TextRenderable(renderer, {
+      id: `composer-text-${index}`,
+      content: line.text,
+      fg: line.muted ? OPENTUI_DAILY_THEME.muted : OPENTUI_DAILY_THEME.text,
+    }));
+  });
   inputBox.add(composerNode);
 
   const routerNode = new BoxRenderable(renderer, {
@@ -278,6 +308,7 @@ class TurnView {
     this._answerText = "";
     this.answerMd = null;
     this.answerTop = null;
+    this.answerGap = null;
     this.ended = false;
     this._seq = 0;
     this.box = new BoxRenderable(renderer, {
@@ -296,12 +327,11 @@ class TurnView {
   }
 
   setPrompt(text) {
-    this._line("p-top", "╭─ prompt ─────", OPENTUI_DAILY_THEME.promptAccent);
+    this._line("p-top", `╭─ prompt ${CARD_RULE_LONG}`, OPENTUI_DAILY_THEME.promptAccent);
     stripTerminalControls(String(text)).split("\n").forEach((line, index) => {
       this._line(`p-${index}`, `│ ${line}`, OPENTUI_DAILY_THEME.promptAccent);
     });
-    this._line("p-bot", "╰─────", OPENTUI_DAILY_THEME.promptAccent);
-    this._line("rail-top", "│", OPENTUI_DAILY_THEME.faint);
+    this._line("p-bot", `╰${CARD_RULE_SHORT}`, OPENTUI_DAILY_THEME.promptAccent);
     renderer.requestRender?.();
   }
 
@@ -310,6 +340,7 @@ class TurnView {
     const cleanName = stripTerminalControls(String(name));
     const cleanSummary = stripTerminalControls(String(summary));
     const tail = cleanSummary ? ` ${cleanSummary}` : "";
+    this._line(`rail-tool-${toolId}`, "│", OPENTUI_DAILY_THEME.faint);
     const node = this._line(`tool-${toolId}`, `${STATUS_PULSE_FRAMES.tool[0]} ${cleanName}${tail}`, OPENTUI_DAILY_THEME.toolAccent);
     node._toolName = cleanName;
     node._toolTail = tail;
@@ -333,6 +364,7 @@ class TurnView {
       toolPulseNodes.delete(node);
       this.runningNodes.delete(node);
     } else {
+      this._line(`rail-tool-${toolId}`, "│", OPENTUI_DAILY_THEME.faint);
       this._line(`tool-${toolId}`, `${glyph} ${finalName}${tail}`, fg);
     }
     renderer.requestRender?.();
@@ -370,7 +402,12 @@ class TurnView {
   }
 
   appendModelText(text) {
-    this._line(`model-${this._seq++}`, stripTerminalControls(String(text)), OPENTUI_DAILY_THEME.answerAccent);
+    // Intermediate model output (between tool calls). Render in a distinct
+    // colour from tool/answer lines, and drop blank leading/trailing lines so it
+    // does not introduce stray gaps in the timeline.
+    const clean = stripTerminalControls(String(text)).replace(/^\n+|\n+$/g, "");
+    if (!clean) return;
+    this._line(`model-${this._seq++}`, clean, OPENTUI_DAILY_THEME.modelText);
     renderer.requestRender?.();
   }
 
@@ -378,7 +415,9 @@ class TurnView {
     if (!this.sawAnswer) {
       this.sawAnswer = true;
       this._answerText = "";
-      this.answerTop = this._line("a-top", "╭─ answer ─ squilla ─────", OPENTUI_DAILY_THEME.frame);
+      // Rail above the answer card preserves the timeline while keeping spacing.
+      this.answerGap = this._line("a-gap", "│", OPENTUI_DAILY_THEME.faint);
+      this.answerTop = this._line("a-top", `╭─ answer ─ squilla ${CARD_RULE_LONG}`, OPENTUI_DAILY_THEME.toolAccent);
       this.answerMd = new MarkdownRenderable(renderer, {
         id: `turn-${this.id}-md`,
         content: "",
@@ -399,12 +438,14 @@ class TurnView {
 
   demoteAnswerToTimeline() {
     if (!this.sawAnswer) return;
+    if (this.answerGap && typeof this.box.remove === "function") this.box.remove(this.answerGap.id);
     if (this.answerTop && typeof this.box.remove === "function") this.box.remove(this.answerTop.id);
     if (this.answerMd && typeof this.box.remove === "function") this.box.remove(this.answerMd.id);
     const text = stripTerminalControls(this._answerText);
-    if (text) this._line(`answer-${this._seq++}`, text, OPENTUI_DAILY_THEME.answerAccent);
+    if (text) this._line(`answer-${this._seq++}`, text, OPENTUI_DAILY_THEME.modelText);
     this.sawAnswer = false;
     this._answerText = "";
+    this.answerGap = null;
     this.answerTop = null;
     this.answerMd = null;
   }
@@ -422,7 +463,7 @@ class TurnView {
     this.ended = true;
     const renderedAnswer = this.promoteAnswerToCard();
     if (cancelled) this._line("a-cancel", "│ turn cancelled", OPENTUI_DAILY_THEME.muted);
-    if (renderedAnswer) this._line("a-bot", "╰─────", OPENTUI_DAILY_THEME.frame);
+    if (renderedAnswer) this._line("a-bot", `╰${CARD_RULE_SHORT}`, OPENTUI_DAILY_THEME.toolAccent);
     renderer.requestRender?.();
   }
 
@@ -537,9 +578,16 @@ function submitInput() {
   historyIndex = inputHistory.length;
   draftBeforeHistory = "";
   inputText = "";
+  cursorPos = 0;
   composer.text = "";
   sendHostMessage({ type: "input.submit", text });
   rerenderInputRegion();
+}
+
+function setInput(text) {
+  inputText = text;
+  composer.text = text;
+  cursorPos = Array.from(text).length;
 }
 
 // Up/Down arrows walk the input history. The slot past the end (index ===
@@ -552,32 +600,137 @@ function recallHistory(direction) {
   const next = historyIndex + direction;
   if (next < 0 || next > inputHistory.length) return;
   historyIndex = next;
-  inputText = next === inputHistory.length ? draftBeforeHistory : inputHistory[next];
-  composer.text = inputText;
+  setInput(next === inputHistory.length ? draftBeforeHistory : inputHistory[next]);
   wakeCursor();
   rerenderInputRegion();
+}
+
+// Caret line/column from cursorPos. Lines split on "\n"; column is the grapheme
+// offset within the line the caret sits on.
+function caretLineCol() {
+  const chars = Array.from(inputText);
+  const pos = Math.max(0, Math.min(cursorPos, chars.length));
+  let line = 0;
+  let col = 0;
+  for (let i = 0; i < pos; i += 1) {
+    if (chars[i] === "\n") {
+      line += 1;
+      col = 0;
+    } else {
+      col += 1;
+    }
+  }
+  return { line, col, chars, pos };
+}
+
+// Convert a (line, col) back to a grapheme index into the char array.
+function lineColToPos(chars, targetLine, targetCol) {
+  let line = 0;
+  let col = 0;
+  for (let i = 0; i < chars.length; i += 1) {
+    if (line === targetLine && col === targetCol) return i;
+    if (chars[i] === "\n") {
+      if (line === targetLine) return i; // target col past end of this line
+      line += 1;
+      col = 0;
+    } else {
+      col += 1;
+    }
+  }
+  return chars.length;
+}
+
+// Move caret up/down a line. Returns true if it moved within the text; false if
+// already at the very first/last line (caller may then switch history).
+function moveCaretVertical(direction) {
+  const { line, col, chars } = caretLineCol();
+  const lineCount = inputText.split("\n").length;
+  const target = line + direction;
+  if (target < 0 || target >= lineCount) return false;
+  cursorPos = lineColToPos(chars, target, col);
+  return true;
+}
+
+function moveCaretHorizontal(direction) {
+  const len = Array.from(inputText).length;
+  cursorPos = Math.max(0, Math.min(len, cursorPos + direction));
+}
+
+function insertAtCursor(insertText) {
+  const chars = Array.from(inputText);
+  const pos = Math.max(0, Math.min(cursorPos, chars.length));
+  const insertChars = Array.from(insertText);
+  inputText = [...chars.slice(0, pos), ...insertChars, ...chars.slice(pos)].join("");
+  composer.text = inputText;
+  cursorPos = pos + insertChars.length;
+}
+
+function deleteBeforeCursor() {
+  const chars = Array.from(inputText);
+  const pos = Math.max(0, Math.min(cursorPos, chars.length));
+  if (pos === 0) return;
+  inputText = [...chars.slice(0, pos - 1), ...chars.slice(pos)].join("");
+  composer.text = inputText;
+  cursorPos = pos - 1;
 }
 
 function installKeyboardHandlers() {
   renderer.keyInput.on("keypress", (key) => {
     if (key.ctrl && key.name === "c") {
-      sendHostMessage({ type: "input.cancel" });
+      // With text: clear the input. Empty: signal EOF (exit the TUI).
+      if (inputText.length > 0) {
+        setInput("");
+        historyIndex = inputHistory.length;
+        wakeCursor();
+        rerenderInputRegion();
+      } else {
+        sendHostMessage({ type: "input.eof" });
+      }
       return;
     }
     if (key.ctrl && key.name === "d") {
       sendHostMessage({ type: "input.eof" });
       return;
     }
+    if (key.name === "escape") {
+      // Interrupt the in-flight turn (reuses the cancel path on the Python side).
+      sendHostMessage({ type: "input.cancel" });
+      return;
+    }
     if (key.name === "return") {
       submitInput();
       return;
     }
+    if (key.name === "left") {
+      moveCaretHorizontal(-1);
+      wakeCursor();
+      rerenderInputRegion();
+      return;
+    }
+    if (key.name === "right") {
+      moveCaretHorizontal(1);
+      wakeCursor();
+      rerenderInputRegion();
+      return;
+    }
     if (key.name === "up") {
-      recallHistory(-1);
+      // Move the caret up a line; only switch history when already on the very
+      // first character (cursorPos === 0).
+      if (cursorPos === 0 || !moveCaretVertical(-1)) recallHistory(-1);
+      else {
+        wakeCursor();
+        rerenderInputRegion();
+      }
       return;
     }
     if (key.name === "down") {
-      recallHistory(1);
+      // Move the caret down a line; only switch history when already at the very
+      // end of the input.
+      if (cursorPos === Array.from(inputText).length || !moveCaretVertical(1)) recallHistory(1);
+      else {
+        wakeCursor();
+        rerenderInputRegion();
+      }
       return;
     }
     if (key.name === "pageup") {
@@ -591,19 +744,19 @@ function installKeyboardHandlers() {
       return;
     }
     if (key.name === "backspace") {
-      inputText = Array.from(inputText).slice(0, -1).join("");
+      deleteBeforeCursor();
       wakeCursor();
       rerenderInputRegion();
       return;
     }
     const printable = key.sequence ?? key.name ?? "";
     if (printable.length > 0 && !key.ctrl && !key.meta && key.name !== "space") {
-      inputText += printable;
+      insertAtCursor(printable);
       historyIndex = inputHistory.length;
       wakeCursor();
       rerenderInputRegion();
     } else if (key.name === "space") {
-      inputText += " ";
+      insertAtCursor(" ");
       historyIndex = inputHistory.length;
       wakeCursor();
       rerenderInputRegion();
@@ -612,7 +765,7 @@ function installKeyboardHandlers() {
 
   const decoder = new TextDecoder();
   renderer.keyInput.on("paste", (event) => {
-    inputText += decoder.decode(event.bytes);
+    insertAtCursor(decoder.decode(event.bytes));
     historyIndex = inputHistory.length;
     wakeCursor();
     rerenderInputRegion();
@@ -625,6 +778,8 @@ async function main() {
   renderer = await createCliRenderer({
     screenMode: "alternate-screen",
     exitOnCtrlC: false,
+    // Release mouse tracking so the terminal keeps native drag-to-select copy.
+    useMouse: false,
   });
 
   syntaxStyle = SyntaxStyle.create();

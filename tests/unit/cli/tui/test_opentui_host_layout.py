@@ -55,6 +55,26 @@ def test_opentui_host_has_turnview_with_inplace_tool_nodes() -> None:
     assert "✓" in source and "✗" in source
 
 
+def test_opentui_host_draws_continuous_tool_timeline_rail() -> None:
+    source = HOST_SOURCE.read_text(encoding="utf-8")
+
+    set_prompt_body = source.split("  setPrompt(text) {", 1)[1].split(
+        "  addTool(", 1
+    )[0]
+    add_tool_body = source.split("  addTool(toolId, name, summary) {", 1)[1].split(
+        "  finishTool(", 1
+    )[0]
+    append_answer_body = source.split("  appendAnswer(delta) {", 1)[1].split(
+        "  demoteAnswerToTimeline(", 1
+    )[0]
+
+    assert "rail-top" not in set_prompt_body
+    assert "`rail-tool-${toolId}`" in add_tool_body
+    assert '"│", OPENTUI_DAILY_THEME.faint' in add_tool_body
+    assert add_tool_body.index("rail-tool") < add_tool_body.index("tool-${toolId}")
+    assert 'this._line("a-gap", "│", OPENTUI_DAILY_THEME.faint)' in append_answer_body
+
+
 def test_opentui_host_uses_lines_not_backgrounds_for_visual_separation() -> None:
     source = HOST_SOURCE.read_text(encoding="utf-8")
 
@@ -98,16 +118,21 @@ def test_opentui_promotes_only_final_answer_run_to_card() -> None:
     finish_answer_body = source.split("  finishAnswer(cancelled) {", 1)[1].split(
         "  setUsage(", 1
     )[0]
+    demote_answer_body = source.split("  demoteAnswerToTimeline() {", 1)[1].split(
+        "  finishAnswer(", 1
+    )[0]
 
     assert "this.answerTop = null;" in source
     assert "this.box.remove(this.answerTop.id)" in source
     assert "this.box.remove(this.answerMd.id)" in source
     assert "demoteAnswerToTimeline" in source
     assert "this.demoteAnswerToTimeline();" in add_tool_body
+    assert "OPENTUI_DAILY_THEME.modelText" in demote_answer_body
     assert "promoteAnswerToCard" in source
     assert "this.promoteAnswerToCard()" in finish_answer_body
-    assert '"╭─ answer ─ squilla ─────"' in source
-    assert '"╰─────"' in source
+    # The answer card header runs a long rule; the footer stays short (top > bottom).
+    assert "╭─ answer ─ squilla ${CARD_RULE_LONG}" in source
+    assert "╰${CARD_RULE_SHORT}" in source
 
 
 def test_opentui_input_region_and_scroll_routing() -> None:
