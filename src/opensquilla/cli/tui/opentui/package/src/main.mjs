@@ -277,7 +277,6 @@ class TurnView {
     this.sawAnswer = false;
     this._answerText = "";
     this.answerMd = null;
-    this.answerTextNode = null;
     this.answerTop = null;
     this.ended = false;
     this._seq = 0;
@@ -389,15 +388,12 @@ class TurnView {
         fg: OPENTUI_DAILY_THEME.text,
         tableOptions: { style: "columns" },
         internalBlockMode: "top-level",
-        height: 0,
         paddingLeft: 1,
       });
       this.box.add(this.answerMd);
-      this.answerTextNode = this._line(`answer-fallback-${this._seq++}`, "", OPENTUI_DAILY_THEME.text);
     }
     this._answerText += String(delta);
     if (this.answerMd) this.answerMd.content = this._answerText;
-    if (this.answerTextNode) this.answerTextNode.content = stripTerminalControls(this._answerText);
     renderer.requestRender?.();
   }
 
@@ -405,14 +401,12 @@ class TurnView {
     if (!this.sawAnswer) return;
     if (this.answerTop && typeof this.box.remove === "function") this.box.remove(this.answerTop.id);
     if (this.answerMd && typeof this.box.remove === "function") this.box.remove(this.answerMd.id);
-    if (this.answerTextNode && typeof this.box.remove === "function") this.box.remove(this.answerTextNode.id);
     const text = stripTerminalControls(this._answerText);
     if (text) this._line(`answer-${this._seq++}`, text, OPENTUI_DAILY_THEME.answerAccent);
     this.sawAnswer = false;
     this._answerText = "";
     this.answerTop = null;
     this.answerMd = null;
-    this.answerTextNode = null;
   }
 
   promoteAnswerToCard() {
