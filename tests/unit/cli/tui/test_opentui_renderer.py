@@ -22,7 +22,7 @@ async def test_renderer_emits_turn_lifecycle_and_blocks() -> None:
     renderer.__enter__()
     await renderer.astatus("先扫描结构")
     await renderer.atool_start("read_file", {"path": "main.py"}, "c1")
-    await renderer.atool_finished("c1", success=True)
+    await renderer.atool_finished("c1", success=True, result="exit_code=0")
     await renderer.aappend_text("架构分四层")
     answer_texts = [p.get("text") for t, p in handle.sent if t == "answer.text"]
     assert "".join(answer_texts) == "架构分四层"
@@ -42,6 +42,10 @@ async def test_renderer_emits_turn_lifecycle_and_blocks() -> None:
     assert all(p.get("id") == "c1" for p in tool_calls)
     assert tool_calls[0]["name"] == "read_file"
     assert tool_calls[0]["summary"]  # arg summary is preserved on the finish line
+    # tool.detail carries the owning tool_id so the host can group it under the
+    # right tool node (matters when tools run in parallel).
+    tool_details = [p for t, p in handle.sent if t == "tool.detail"]
+    assert tool_details and all(p.get("tool_id") == "c1" for p in tool_details)
     assert any(t == "turn.status" and p.get("phase") == "tool" for t, p in handle.sent)
     assert any(t == "turn.status" and p.get("phase") == "output" for t, p in handle.sent)
     # composer is disabled when the turn begins and re-enabled when it ends
@@ -56,12 +60,18 @@ async def test_renderer_marks_tool_error_and_cancel() -> None:
     renderer.__enter__()
     await renderer.atool_start("grep", {"pattern": "x"}, "c2")
     await renderer.atool_finished("c2", success=False, error="boom")
+    await renderer.aerror("turn-level failure")
     await renderer.afinalize(None, cancelled=True)
 
     tool_states = [p.get("status") for t, p in handle.sent if t == "tool.call"]
     assert "error" in tool_states
     end = [p for t, p in handle.sent if t == "turn.end"][0]
     assert end["cancelled"] is True
+    # The failed tool's detail is tied to its tool_id; the turn-level aerror
+    # detail has no owning tool, so its tool_id stays None (host appends it).
+    details = {p.get("text"): p.get("tool_id") for t, p in handle.sent if t == "tool.detail"}
+    assert details.get("boom") == "c2"
+    assert details.get("turn-level failure") is None
 
 
 def test_tool_result_summary_keeps_meaningful_lines_without_banners() -> None:

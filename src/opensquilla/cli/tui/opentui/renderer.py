@@ -135,7 +135,7 @@ class OpenTuiStreamRenderer:
         else:
             detail = _summarize_result(result)
         if detail:
-            await self._emit("tool.detail", ToolDetail(text=detail))
+            await self._emit("tool.detail", ToolDetail(text=detail, tool_id=tool_use_id))
 
     async def aerror(self, message: str) -> None:
         await self._ensure_begin()

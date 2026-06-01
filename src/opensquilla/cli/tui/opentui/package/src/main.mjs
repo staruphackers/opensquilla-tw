@@ -272,6 +272,7 @@ class TurnView {
   constructor(id) {
     this.id = id;
     this.toolNodes = new Map();
+    this.detailCountByTool = new Map();  // toolId -> detail rows already inserted under it
     this.runningNodes = new Set();   // this turn's nodes still in toolPulseNodes
     this.sawAnswer = false;
     this._answerText = "";
@@ -338,13 +339,33 @@ class TurnView {
     renderer.requestRender?.();
   }
 
-  addToolDetail(text) {
+  addToolDetail(text, toolId = null) {
     const lines = stripTerminalControls(String(text)).split("\n");
     const max = 3;
-    lines.slice(0, max).forEach((line, index) => {
-      this._line(`detail-${this._seq}-${index}`, `│   ${line}`, OPENTUI_DAILY_THEME.detailText);
+    const rows = lines.slice(0, max).map((line) => `│   ${line}`);
+    if (lines.length > max) rows.push(`│   … ${lines.length - max} more lines`);
+
+    const toolNode = toolId != null ? this.toolNodes.get(toolId) : null;
+    rows.forEach((content, index) => {
+      const node = new TextRenderable(renderer, {
+        id: `turn-${this.id}-detail-${this._seq}-${index}`,
+        content,
+        fg: OPENTUI_DAILY_THEME.detailText,
+      });
+      if (toolNode) {
+        // Insert directly under the owning tool node so each tool + its detail
+        // stay grouped. Re-read the index every time: inserting detail under an
+        // earlier tool shifts later tools' positions, so a cached index is stale.
+        const base = this.box.getChildren().indexOf(toolNode);
+        const offset = (this.detailCountByTool.get(toolId) ?? 0) + 1;
+        if (base >= 0) this.box.add(node, base + offset);
+        else this.box.add(node);
+        this.detailCountByTool.set(toolId, offset);
+      } else {
+        // turn-level detail (e.g. aerror) with no owning tool: append at the end.
+        this.box.add(node);
+      }
     });
-    if (lines.length > max) this._line(`detail-more-${this._seq}`, `│   … ${lines.length - max} more lines`, OPENTUI_DAILY_THEME.detailText);
     this._seq += 1;
     renderer.requestRender?.();
   }
@@ -481,7 +502,7 @@ function handlePythonMessage(message) {
       }
       return;
     case "tool.detail":
-      activeTurn?.addToolDetail(String(message.text ?? ""));
+      activeTurn?.addToolDetail(String(message.text ?? ""), message.tool_id ?? null);
       return;
     case "answer.text":
       activeTurn?.appendAnswer(String(message.text ?? ""));

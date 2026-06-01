@@ -52,6 +52,7 @@ class ToolCall:
 @dataclass(frozen=True)
 class ToolDetail:
     text: str
+    tool_id: str | None = None
 
 
 @dataclass(frozen=True)
