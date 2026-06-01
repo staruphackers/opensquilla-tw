@@ -98,3 +98,29 @@ def test_python_message_to_json_serializes_structured_blocks() -> None:
         "turn.status", TurnStatusState(phase="tool", label="read_file", active=True)
     )
     assert '"phase":"tool"' in status and '"active":true' in status
+
+
+def test_block_messages_serialize_with_kind_and_fields() -> None:
+    from opensquilla.cli.tui.opentui.messages import (
+        BlockAppend,
+        BlockBegin,
+        BlockEnd,
+        BlockRetype,
+        BlockUpdate,
+        python_message_to_json,
+    )
+    begin = python_message_to_json(
+        "block.begin",
+        BlockBegin(id="b1", kind="tool", meta={"name": "ls", "args": "src"}),
+    )
+    assert '"type":"block.begin"' in begin
+    assert '"kind":"tool"' in begin
+    assert '"name":"ls"' in begin
+    append = python_message_to_json("block.append", BlockAppend(id="b1", delta="line"))
+    assert '"delta":"line"' in append
+    update = python_message_to_json("block.update", BlockUpdate(id="b1", patch={"status": "ok"}))
+    assert '"status":"ok"' in update
+    retype = python_message_to_json("block.retype", BlockRetype(id="b1", kind="thinking"))
+    assert '"kind":"thinking"' in retype
+    end = python_message_to_json("block.end", BlockEnd(id="b1"))
+    assert '"type":"block.end"' in end

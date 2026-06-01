@@ -56,6 +56,36 @@ class ToolDetail:
 
 
 @dataclass(frozen=True)
+class BlockBegin:
+    id: str
+    kind: str
+    meta: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class BlockAppend:
+    id: str
+    delta: str
+
+
+@dataclass(frozen=True)
+class BlockUpdate:
+    id: str
+    patch: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class BlockRetype:
+    id: str
+    kind: str
+
+
+@dataclass(frozen=True)
+class BlockEnd:
+    id: str
+
+
+@dataclass(frozen=True)
 class AnswerText:
     text: str
 
