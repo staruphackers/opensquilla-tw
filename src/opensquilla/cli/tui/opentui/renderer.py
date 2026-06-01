@@ -41,6 +41,7 @@ class OpenTuiStreamRenderer:
         self._open_text_id: str | None = None
         self._tool_block_ids: dict[str, str] = {}
         self._last_tool_block_id: str | None = None
+        self._open_tool_ids: set[str] = set()
 
     async def _emit(self, message_type: str, payload: Any) -> None:
         await self._emit_raw(message_type, asdict(payload))
@@ -137,6 +138,7 @@ class OpenTuiStreamRenderer:
             "block.begin",
             BlockBegin(id=block_id, kind="tool", meta={"name": name, "args": summary}),
         )
+        self._open_tool_ids.add(block_id)
 
     async def atool_finished(
         self,
@@ -165,6 +167,7 @@ class OpenTuiStreamRenderer:
             BlockUpdate(id=block_id, patch={"status": "ok" if success else "error"}),
         )
         await self._emit("block.end", BlockEnd(id=block_id))
+        self._open_tool_ids.discard(block_id)
 
     async def aerror(self, message: str) -> None:
         await self._ensure_begin()
@@ -177,13 +180,22 @@ class OpenTuiStreamRenderer:
     async def afinalize(self, usage: Any | None = None, *, cancelled: bool = False) -> None:
         await self._ensure_begin()
         await self._close_text_as("answer")
-        await self._emit("turn.end", TurnEnd(id=self._turn_id, cancelled=cancelled))
-        block_id = self._next_block_id()
+        # Force-close any tool blocks still open (e.g. a turn cancelled mid-tool
+        # never reaches atool_finished). They resolve to ✗: a cancelled in-flight
+        # tool did not succeed, so error is the honest status.
+        for block_id in list(self._open_tool_ids):
+            await self._emit("block.update", BlockUpdate(id=block_id, patch={"status": "error"}))
+            await self._emit("block.end", BlockEnd(id=block_id))
+        self._open_tool_ids.clear()
+        # Emit usage BEFORE turn.end so it attaches to the still-active turn view
+        # (turn.end marks the turn ended; a later block would spawn an orphan turn).
+        usage_id = self._next_block_id()
         await self._emit(
             "block.begin",
-            BlockBegin(id=block_id, kind="usage", meta={"text": _format_usage(usage)}),
+            BlockBegin(id=usage_id, kind="usage", meta={"text": _format_usage(usage)}),
         )
-        await self._emit("block.end", BlockEnd(id=block_id))
+        await self._emit("block.end", BlockEnd(id=usage_id))
+        await self._emit("turn.end", TurnEnd(id=self._turn_id, cancelled=cancelled))
         await self._emit(
             "turn.status", TurnStatusState(phase="idle", label="ready", active=False)
         )

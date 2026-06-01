@@ -67,6 +67,45 @@ async def test_renderer_marks_tool_error_and_cancel() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancel_midtool_closes_open_tool_block() -> None:
+    handle = _RecordingHandle()
+    r = OpenTuiStreamRenderer(output_handle=handle)
+    r.__enter__()
+    await r.atool_start("grep", {"pattern": "x"}, "c9")
+    # NO atool_finished — simulate cancellation
+    await r.afinalize(None, cancelled=True)
+    # the open tool must be force-closed: an error update + an end for its id
+    updates = [p for t, p in handle.sent if t == "block.update" and p["id"] == "c9"]
+    ends = [p for t, p in handle.sent if t == "block.end" and p["id"] == "c9"]
+    assert updates and updates[-1]["patch"].get("status") == "error"
+    assert ends, "cancelled in-flight tool block was never closed"
+
+
+@pytest.mark.asyncio
+async def test_usage_block_emitted_before_turn_end() -> None:
+    handle = _RecordingHandle()
+    r = OpenTuiStreamRenderer(output_handle=handle)
+    r.__enter__()
+    await r.aappend_text("done")
+    await r.afinalize(None)
+    types = [t for t, _ in handle.sent]
+    usage_begin = next(
+        i
+        for i, (t, p) in enumerate(handle.sent)
+        if t == "block.begin" and p.get("kind") == "usage"
+    )
+    turn_end = types.index("turn.end")
+    assert usage_begin < turn_end, "usage block must render in the active turn, before turn.end"
+    # answer card still closes (its block.end) before usage
+    answer_end = next(
+        i
+        for i, (t, p) in enumerate(handle.sent)
+        if t == "block.end" and p["id"].endswith("-b1")
+    )
+    assert answer_end < usage_begin
+
+
+@pytest.mark.asyncio
 async def test_anonymous_tools_each_close_independently() -> None:
     handle = _RecordingHandle()
     r = OpenTuiStreamRenderer(output_handle=handle)
