@@ -620,6 +620,22 @@ opensquilla gateway restart
 
 ## Credits
 
+OpenSquilla's main-line release history is maintained by the OpenSquilla
+maintainers and community contributors whose work reaches users through
+`dev`, release branches, and published `main` updates:
+
+- [@ab2ence](https://github.com/ab2ence) for Tokenjuice tool compression,
+  memory dream consolidation, and canonical tool-result projection work in
+  #56, #61, #81, and #88.
+- [@lose4578](https://github.com/lose4578) and
+  [@cwan0785](https://github.com/cwan0785) for the TUI backend/runtime
+  foundation and shared chat-envelope extraction in #80.
+- [@nice-code-la](https://github.com/nice-code-la) for high-value MetaSkill
+  routing, router model-switch intent, and router/MetaSkill execution work in
+  #82, #93, and #119.
+- [@openvictory](https://github.com/openvictory) for UTF-8 migration loading
+  and early installer/README cleanup in #18, #25, and #116.
+
 OpenSquilla is inspired by
 [OpenClaw](https://github.com/openclaw/openclaw). Bundled third-party
 content is attributed in
