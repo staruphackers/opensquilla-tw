@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import json
+from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from tui_real_terminal.scenarios import scenario_by_id
+from tui_real_terminal.replay import replay_architecture_prompt
+from tui_real_terminal.scenarios import TuiScenario, scenario_by_id
 
 pytestmark = pytest.mark.tui_real_terminal
 
@@ -16,6 +20,65 @@ ARCHITECTURE_REPLAY_FIXTURE = (
     / "tui"
     / "architecture_prompt_replay.json"
 )
+
+
+class _ReplayRecordingRenderer:
+    def __init__(self) -> None:
+        self.statuses: list[str] = []
+        self.finished_tools: list[dict[str, Any]] = []
+        self.text_chunks: list[str] = []
+
+    async def astatus(self, message: str, *, style: str = "dim") -> None:
+        self.statuses.append(message)
+
+    async def atool_start(
+        self,
+        name: str,
+        args: dict[str, Any] | None,
+        tool_use_id: str,
+    ) -> None:
+        pass
+
+    async def atool_finished(
+        self,
+        tool_use_id: str,
+        *,
+        success: bool,
+        elapsed: float | None = None,
+        error: str | None = None,
+        result: str | None = None,
+    ) -> None:
+        self.finished_tools.append(
+            {
+                "tool_use_id": tool_use_id,
+                "success": success,
+                "elapsed": elapsed,
+                "error": error,
+                "result": result,
+            }
+        )
+
+    async def aappend_text(self, text: str) -> None:
+        self.text_chunks.append(text)
+
+
+class _ReplayRecordingOutput:
+    def set_toolbar(self, key: str, value: object | None) -> None:
+        pass
+
+    def invalidate(self) -> None:
+        pass
+
+
+def _architecture_prompt_scenario_for_assertions() -> TuiScenario:
+    scenario = scenario_by_id("architecture_prompt")
+    steps = tuple(
+        replace(step, value="架构分析")
+        if step.step_id == "wait-architecture"
+        else step
+        for step in scenario.steps
+    )
+    return replace(scenario, steps=steps)
 
 
 def test_architecture_prompt_replay_fixture_is_saved_for_render_only_runs() -> None:
@@ -41,10 +104,33 @@ def test_architecture_prompt_replay_fixture_is_saved_for_render_only_runs() -> N
     )
 
 
+def test_architecture_prompt_replay_routes_tool_output_through_finished_result() -> None:
+    renderer = _ReplayRecordingRenderer()
+
+    usage = asyncio.run(replay_architecture_prompt(renderer, _ReplayRecordingOutput()))
+
+    finished_by_id = {
+        event["tool_use_id"]: event for event in renderer.finished_tools
+    }
+    list_result = finished_by_id["tool-list"]["result"]
+    read_result = finished_by_id["tool-read"]["result"]
+
+    assert usage.model == "fake-terminal"
+    assert isinstance(list_result, str)
+    assert "top-level repository layout" in list_result
+    assert "AGENTS.md" in list_result
+    assert isinstance(read_result, str)
+    assert "Textual app owns input chrome" in read_result
+    assert "class TextualChatApp(App[None]):" in read_result
+    assert not any("tool_output" in message for message in renderer.statuses)
+    assert not any("stdout:" in message for message in renderer.statuses)
+    assert not any("truncated" in message for message in renderer.statuses)
+
+
 def test_architecture_prompt_renders_tools_and_chinese_output(
     run_real_terminal_scenario,
 ) -> None:
-    result = run_real_terminal_scenario(scenario_by_id("architecture_prompt"))
+    result = run_real_terminal_scenario(_architecture_prompt_scenario_for_assertions())
 
     assert result.status == "pass"
     transcript = (result.run_dir / "transcript.txt").read_text(encoding="utf-8")
@@ -75,19 +161,33 @@ def test_architecture_prompt_renders_tools_and_chinese_output(
         # tool/detail history is assertable. The fullscreen opentui viewport
         # only retains the final frame (see the opentui branch below).
         assert ARCHITECTURE_PROMPT in rendered_output or result.backend_id == "textual"
+        assert "list_dir" in rendered_output
         assert "read_file" in rendered_output
-        assert "tool_output" in rendered_output
-        assert "stdout:" in rendered_output
-        assert "truncated" in rendered_output
+        assert "top-level repository layout" in rendered_output
+        assert "AGENTS.md" in rendered_output
+        assert "pyproject.toml" in rendered_output
+        assert "Textual app owns input chrome" in rendered_output
+        assert "class TextualChatApp(App[None]):" in rendered_output
+        assert "tool_output" not in rendered_output
+        assert "stdout:" not in rendered_output
+        assert "truncated" not in rendered_output
         assert "router.reason" in rendered_output
         assert "architecture-analysis-complete" in rendered_output
     if result.backend_id == "opentui":
         # Fullscreen alt-screen viewport: the conversation lives in a ScrollBox,
         # so assertions cover the markers that remain visible in the final frame
-        # (answer card + usage + finished tool nodes), not the whole transcript.
+        # (answer card + usage + grouped finished tool detail), not the whole transcript.
+        assert "✓ list_dir" in rendered_output
         assert "✓ read_file" in rendered_output
+        assert "│   top-level repository layout" in rendered_output
+        assert "│   AGENTS.md" in rendered_output
+        assert "│   Textual app owns input chrome" in rendered_output
+        assert "│   class TextualChatApp(App[None]):" in rendered_output
         assert "╭─ answer ─ squilla" in rendered_output
         assert "╰─────" in rendered_output
         assert "· in 1 / out 2 · fake-terminal" in rendered_output
+        assert "tool_output" not in rendered_output
+        assert "stdout:" not in rendered_output
+        assert "truncated" not in rendered_output
     assert "Traceback" not in rendered_output
     assert "\x1b[" not in rendered_output

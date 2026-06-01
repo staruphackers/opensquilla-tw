@@ -17,8 +17,10 @@ ARCHITECTURE_PROMPT_FIXTURE = (
 async def replay_architecture_prompt(renderer: Any, output: Any) -> UsageSummary:
     fixture = json.loads(ARCHITECTURE_PROMPT_FIXTURE.read_text(encoding="utf-8"))
     usage = UsageSummary(model="fake-terminal", input_tokens=1, output_tokens=2)
+    events = fixture["events"]
+    tool_outputs_by_id = _tool_outputs_by_id(events)
 
-    for event in fixture["events"]:
+    for event in events:
         kind = event["kind"]
         payload = event.get("payload", {})
         if kind == "toolbar":
@@ -38,16 +40,16 @@ async def replay_architecture_prompt(renderer: Any, output: Any) -> UsageSummary
             )
         elif kind == "tool_finished":
             elapsed = payload.get("elapsed")
+            tool_use_id = str(payload.get("tool_use_id", ""))
             await renderer.atool_finished(
-                str(payload.get("tool_use_id", "")),
+                tool_use_id,
                 success=bool(payload.get("success", True)),
                 elapsed=elapsed if isinstance(elapsed, float | int) else None,
                 error=str(payload["error"]) if "error" in payload else None,
+                result=_tool_result_from_output(tool_outputs_by_id.get(tool_use_id)),
             )
         elif kind == "tool_output":
-            await renderer.astatus(_tool_output_summary(payload))
-            for detail in _tool_output_details(payload):
-                await renderer.astatus(detail)
+            continue
         elif kind == "text_delta":
             await renderer.aappend_text(str(payload.get("text", "")))
         elif kind == "done":
@@ -68,28 +70,35 @@ def _details_from_payload(payload: dict[str, Any]) -> list[str]:
     return []
 
 
-def _tool_output_summary(payload: dict[str, Any]) -> str:
-    name = str(payload.get("name", "tool"))
-    line_count = int(payload.get("line_count", 0))
+def _tool_outputs_by_id(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    outputs: dict[str, dict[str, Any]] = {}
+    for event in events:
+        if event.get("kind") != "tool_output":
+            continue
+        payload = event.get("payload", {})
+        if not isinstance(payload, dict):
+            continue
+        tool_use_id = payload.get("tool_use_id")
+        if tool_use_id is None:
+            continue
+        outputs[str(tool_use_id)] = payload
+    return outputs
+
+
+def _tool_result_from_output(payload: dict[str, Any] | None) -> str | None:
+    if payload is None:
+        return None
+
+    parts: list[str] = []
     summary = str(payload.get("summary", "")).strip()
-    suffix = f" — {summary}" if summary else ""
-    truncated = " truncated" if payload.get("truncated") else ""
-    return f"tool_output {name} {line_count} lines{truncated}{suffix}"
+    if summary:
+        parts.append(summary)
 
-
-def _tool_output_details(payload: dict[str, Any]) -> list[str]:
-    details: list[str] = []
     stdout = payload.get("stdout", [])
-    stderr = payload.get("stderr", [])
     if isinstance(stdout, list) and stdout:
-        details.append("│ stdout:")
-        details.extend(f"│   {line}" for line in stdout[:8])
-    if isinstance(stderr, list) and stderr:
-        details.append("│ stderr:")
-        details.extend(f"│   {line}" for line in stderr[:8])
-    if payload.get("truncated"):
-        details.append(f"│ omitted: {payload.get('line_count', 0)} total lines in fixture")
-    return details
+        parts.extend(str(line) for line in stdout)
+
+    return "\n".join(parts) if parts else None
 
 
 def _set_toolbar(output: Any, key: str, value: object | None) -> None:

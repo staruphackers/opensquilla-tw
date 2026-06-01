@@ -41,6 +41,7 @@ def test_all_abcd_scenarios_are_declared() -> None:
         "complex_ui_state",
         "architecture_prompt",
         "live_architecture_prompt",
+        "live_opentui_architecture_prompt",
         "terminal_changes",
     }
     assert scenarios["launch_input_loop"].family == "launch_and_input_loop"
@@ -49,6 +50,7 @@ def test_all_abcd_scenarios_are_declared() -> None:
     assert scenarios["complex_ui_state"].family == "complex_ui_state"
     assert scenarios["architecture_prompt"].family == "architecture_prompt"
     assert scenarios["live_architecture_prompt"].family == "live_prompt"
+    assert scenarios["live_opentui_architecture_prompt"].family == "live_prompt"
     assert scenarios["terminal_changes"].family == "terminal_changes"
     assert scenarios["live_architecture_prompt"].requires_tmux is True
     assert scenarios["live_architecture_prompt"].requires_prompt_ready is False
@@ -60,6 +62,12 @@ def test_all_abcd_scenarios_are_declared() -> None:
     assert scenarios["live_architecture_prompt"].steps[-1].action == "capture"
     assert scenarios["live_architecture_prompt"].steps[-1].timeout_s >= 0.1
     assert "send a massage" in scenarios["live_architecture_prompt"].expected_text
+    assert scenarios["live_opentui_architecture_prompt"].requires_tmux is True
+    assert scenarios["live_opentui_architecture_prompt"].requires_prompt_ready is False
+    assert (
+        scenarios["live_opentui_architecture_prompt"].required_backend_id
+        == "live-opentui"
+    )
 
 
 def test_launch_scenario_serializes_to_json(tmp_path: Path) -> None:
