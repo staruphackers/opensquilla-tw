@@ -438,9 +438,10 @@ def test_replay_gap_history_refresh_preserves_scroll_in_real_browser(tmp_path: P
                 const originalCall = rpc.call.bind(rpc);
                 const messages = [];
                 for (let i = 1; i <= 70; i += 1) {
+                  const label = i % 2 ? "User" : "Assistant";
                   messages.push({
                     role: i % 2 ? "user" : "assistant",
-                    text: `${i % 2 ? "User" : "Assistant"} history row ${String(i).padStart(2, "0")} `.repeat(8),
+                    text: `${label} history row ${String(i).padStart(2, "0")} `.repeat(8),
                     timestamp: `2026-06-03T00:${String(i % 60).padStart(2, "0")}:00.000Z`,
                     message_id: `gap-probe-${i}`,
                   });
@@ -486,7 +487,10 @@ def test_replay_gap_history_refresh_preserves_scroll_in_real_browser(tmp_path: P
               });
 
               await page.evaluate(() =>
-                Router.navigate("/chat?session=" + encodeURIComponent("agent:main:webchat:gap-playwright-regression"))
+                Router.navigate(
+                  "/chat?session=" +
+                    encodeURIComponent("agent:main:webchat:gap-playwright-regression")
+                )
               );
               await page.waitForSelector("#chat-thread .msg", { timeout: 15000 });
               await page.waitForFunction(
@@ -527,7 +531,9 @@ def test_replay_gap_history_refresh_preserves_scroll_in_real_browser(tmp_path: P
                   clientHeight: thread.clientHeight,
                   bottomDistance: thread.scrollHeight - thread.clientHeight - thread.scrollTop,
                   messageCount: document.querySelectorAll("#chat-thread .msg").length,
-                  toasts: Array.from(document.querySelectorAll(".toast")).map(el => el.textContent.trim()),
+                  toasts: Array.from(document.querySelectorAll(".toast")).map(el =>
+                    el.textContent.trim()
+                  ),
                   probe: window.__gapProbe,
                 };
               });
