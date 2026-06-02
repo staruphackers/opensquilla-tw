@@ -11,7 +11,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
-from typing import Any, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 from opensquilla.cli.chat.output import ChatOutputHandle
 from opensquilla.cli.chat.turn import TurnResult, UsageSummary
@@ -42,6 +42,9 @@ TuiEventSinkFactory = Callable[
     [ChatOutputHandle | None],
     Callable[[TuiDomainEvent], None] | None,
 ]
+
+if TYPE_CHECKING:
+    from opensquilla.engine.agent_injection import PendingInputProvider
 
 
 class GatewayStreamingClient(Protocol):
@@ -925,6 +928,7 @@ async def stream_response_turnrunner(
     *,
     tui_output: ChatOutputHandle | None = None,
     deps: TurnStreamDependencies | None = None,
+    pending_input_provider: PendingInputProvider | None = None,
 ) -> TurnResult:
     """Stream a TurnRunner response into a renderer."""
     from opensquilla.engine.runtime import TurnRunner
@@ -977,7 +981,12 @@ async def stream_response_turnrunner(
         try:
             try:
                 stream = turn_runner.run(
-                    message, session_key, tool_context=tool_ctx, model=model, timeout=timeout
+                    message,
+                    session_key,
+                    tool_context=tool_ctx,
+                    model=model,
+                    timeout=timeout,
+                    pending_input_provider=pending_input_provider,
                 )
                 async for event in stream_deps.stream_wrapper(stream, svc):
                     if isinstance(event, TextDeltaEvent):
@@ -1210,6 +1219,7 @@ async def handle_image_command_turnrunner(
     *,
     tui_output: ChatOutputHandle | None = None,
     deps: TurnStreamDependencies | None = None,
+    pending_input_provider: PendingInputProvider | None = None,
 ) -> TurnResult:
     """Handle /image <path> [prompt] via TurnRunner attachments."""
     from opensquilla.engine.runtime import TurnRunner
@@ -1261,6 +1271,7 @@ async def handle_image_command_turnrunner(
                     model=model,
                     attachments=attachments,
                     timeout=timeout,
+                    pending_input_provider=pending_input_provider,
                 )
                 async for event in stream_deps.stream_wrapper(stream, svc):
                     if isinstance(event, TextDeltaEvent):

@@ -9,7 +9,7 @@ or standalone runtime dependencies.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from rich.panel import Panel
 
@@ -28,6 +28,9 @@ from opensquilla.cli.tui.adapters import slash_bridge as _slash_bridge
 from opensquilla.cli.tui.backend.contracts import TuiOutputHandle
 from opensquilla.cli.ui import ACCENT, console, error_panel
 from opensquilla.engine.commands import Surface
+
+if TYPE_CHECKING:
+    from opensquilla.engine.agent_injection import PendingInputProvider
 
 PENDING_QUEUE_MAX_SIZE = 8
 
@@ -246,6 +249,7 @@ async def stream_response_turnrunner(
     timeout: float | None = None,
     *,
     tui_output: TuiOutputHandle | None = None,
+    pending_input_provider: PendingInputProvider | None = None,
 ) -> TurnResult:
     from opensquilla.cli.tui import turn_bridge as _turn_bridge
 
@@ -259,6 +263,7 @@ async def stream_response_turnrunner(
         timeout=timeout,
         tui_output=tui_output,
         deps=_turn_stream_dependencies(),
+        pending_input_provider=pending_input_provider,
     )
 
 
@@ -272,6 +277,7 @@ async def handle_image_command_turnrunner(
     timeout: float | None = None,
     *,
     tui_output: TuiOutputHandle | None = None,
+    pending_input_provider: PendingInputProvider | None = None,
 ) -> TurnResult:
     from opensquilla.cli.tui import turn_bridge as _turn_bridge
 
@@ -285,6 +291,7 @@ async def handle_image_command_turnrunner(
         timeout=timeout,
         tui_output=tui_output,
         deps=_turn_stream_dependencies(),
+        pending_input_provider=pending_input_provider,
     )
 
 

@@ -12,7 +12,7 @@ import getpass
 import os
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 
 from opensquilla.cli.chat.session_context import (
@@ -27,6 +27,9 @@ from opensquilla.cli.tui.backend.contracts import TuiOutputHandle
 from opensquilla.cli.ui import console
 from opensquilla.engine.commands import Surface
 from opensquilla.permissions import configured_default_elevated
+
+if TYPE_CHECKING:
+    from opensquilla.engine.agent_injection import PendingInputProvider
 
 
 class StandaloneRunConcurrentRepl(Protocol):
@@ -51,6 +54,7 @@ class StandaloneStreamResponse(Protocol):
         timeout: float | None = None,
         *,
         tui_output: TuiOutputHandle | None = None,
+        pending_input_provider: PendingInputProvider | None = None,
     ) -> TurnResult: ...
 
 
@@ -66,6 +70,7 @@ class StandaloneImageCommandHandler(Protocol):
         timeout: float | None = None,
         *,
         tui_output: TuiOutputHandle | None = None,
+        pending_input_provider: PendingInputProvider | None = None,
     ) -> TurnResult: ...
 
 
@@ -272,6 +277,7 @@ async def run_standalone_chat(
                 services: object = None,
                 timeout: float | None = None,
                 tui_output: TuiOutputHandle | None = None,
+                pending_input_provider: PendingInputProvider | None = None,
             ) -> TurnResult:
                 return await deps.stream_response(
                     turn_runner,
@@ -282,6 +288,7 @@ async def run_standalone_chat(
                     svc=services,
                     timeout=timeout,
                     tui_output=tui_output,
+                    pending_input_provider=pending_input_provider,
                 )
 
             async def _image_command_handler(
@@ -294,6 +301,7 @@ async def run_standalone_chat(
                 services: object = None,
                 timeout: float | None = None,
                 tui_output: TuiOutputHandle | None = None,
+                pending_input_provider: PendingInputProvider | None = None,
             ) -> TurnResult:
                 return await deps.image_command_handler(
                     turn_runner,
@@ -304,6 +312,7 @@ async def run_standalone_chat(
                     svc=services,
                     timeout=timeout,
                     tui_output=tui_output,
+                    pending_input_provider=pending_input_provider,
                 )
 
             slash_context = _standalone_slash_adapter.StandaloneSlashContext(

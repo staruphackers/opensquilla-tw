@@ -11,7 +11,7 @@ import inspect
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 from uuid import uuid4
 
 import opensquilla.cli.tui.adapters.input_bridge as _input_bridge
@@ -28,6 +28,9 @@ from opensquilla.session.compaction import (
 from opensquilla.session.compaction_lifecycle import (
     flush_receipt_is_successful_flush,
 )
+
+if TYPE_CHECKING:
+    from opensquilla.engine.agent_injection import PendingInputProvider
 
 STANDALONE_SLASH_HANDLER_WORDS = frozenset(
     {
@@ -61,6 +64,7 @@ class StandaloneStreamResponse(Protocol):
         services: object = None,
         timeout: float | None = None,
         tui_output: TuiOutputHandle | None = None,
+        pending_input_provider: PendingInputProvider | None = None,
     ) -> TurnResult: ...
 
 
@@ -76,6 +80,7 @@ class StandaloneImageCommandHandler(Protocol):
         services: object = None,
         timeout: float | None = None,
         tui_output: TuiOutputHandle | None = None,
+        pending_input_provider: PendingInputProvider | None = None,
     ) -> TurnResult: ...
 
 
@@ -180,8 +185,19 @@ async def stream_response_turnrunner(
     services: object = None,
     timeout: float | None = None,
     tui_output: TuiOutputHandle | None = None,
+    pending_input_provider: PendingInputProvider | None = None,
 ) -> TurnResult:
-    del turn_runner, session_key, tool_context, message, model, services, timeout, tui_output
+    del (
+        turn_runner,
+        session_key,
+        tool_context,
+        message,
+        model,
+        services,
+        timeout,
+        tui_output,
+        pending_input_provider,
+    )
     raise RuntimeError("standalone streaming dependency was not configured")
 
 
@@ -195,8 +211,19 @@ async def handle_image_command_turnrunner(
     services: object = None,
     timeout: float | None = None,
     tui_output: TuiOutputHandle | None = None,
+    pending_input_provider: PendingInputProvider | None = None,
 ) -> TurnResult:
-    del turn_runner, session_key, tool_context, command, model, services, timeout, tui_output
+    del (
+        turn_runner,
+        session_key,
+        tool_context,
+        command,
+        model,
+        services,
+        timeout,
+        tui_output,
+        pending_input_provider,
+    )
     raise RuntimeError("standalone image dependency was not configured")
 
 
