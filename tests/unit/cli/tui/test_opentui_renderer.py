@@ -35,24 +35,47 @@ class _ToolbarRecordingHandle(_RecordingHandle):
 
 
 @pytest.mark.asyncio
-async def test_text_before_tool_stays_answer_never_retyped() -> None:
-    """Text the model speaks before a tool call is real answer text, not
-    thinking. It must stay an answer block — never retyped — and the protocol
-    must emit no block.retype at all."""
+async def test_intermediate_text_is_thinking_final_text_is_answer_card() -> None:
+    """Intermediate narration before a tool (presentation="intermediate") opens
+    a purple thinking block; the final answer (presentation="answer") opens a
+    cyan answer card. Each is the right kind from its first delta — no retype."""
     handle = _RecordingHandle()
     r = OpenTuiStreamRenderer(output_handle=handle)
     r.__enter__()
-    await r.aappend_text("Let me check")
+    # narration before the tool call, classified intermediate by the agent
+    await r.aappend_text("Let me check", presentation="intermediate")
     await r.atool_start("web_search", {"query": "x"}, "c1")
     await r.atool_finished("c1", success=True, result="result line")
-    await r.aappend_text("Final answer")
+    # the final answer, classified answer by the agent
+    await r.aappend_text("Final answer", presentation="answer")
     await r.afinalize(None)
+
     assert not [t for t, _ in handle.sent if t == "block.retype"]
+    begins = [
+        (p["kind"], p["id"])
+        for t, p in handle.sent
+        if t == "block.begin" and p.get("kind") in {"thinking", "answer"}
+    ]
+    # intermediate -> thinking block, final -> answer card, in that order
+    assert [kind for kind, _id in begins] == ["thinking", "answer"]
     tool_begins = [p for t, p in handle.sent if t == "block.begin" and p.get("kind") == "tool"]
     assert tool_begins and tool_begins[0]["meta"]["name"] == "web_search"
+
+
+@pytest.mark.asyncio
+async def test_final_answer_is_a_card_from_the_first_delta() -> None:
+    """A pure-answer turn opens an answer card on the very first delta and
+    streams into it — never a thinking block, never a retype."""
+    handle = _RecordingHandle()
+    r = OpenTuiStreamRenderer(output_handle=handle)
+    r.__enter__()
+    await r.aappend_text("The ", presentation="answer")
+    await r.aappend_text("answer.", presentation="answer")
+    await r.afinalize(None)
+
+    assert not [t for t, _ in handle.sent if t == "block.retype"]
     answer_begins = [p for t, p in handle.sent if t == "block.begin" and p.get("kind") == "answer"]
-    assert len(answer_begins) == 2
-    # the pre-tool text was never reclassified as thinking
+    assert len(answer_begins) == 1
     assert not [
         p for t, p in handle.sent if t == "block.begin" and p.get("kind") == "thinking"
     ]

@@ -38,6 +38,7 @@ class OpenTuiStreamRenderer:
         self._saw_output = False
         self._block_seq = 0
         self._open_text_id: str | None = None
+        self._open_text_presentation: str = "answer"
         self._open_reasoning_id: str | None = None
         self._tool_block_ids: dict[str, str] = {}
         self._last_tool_block_id: str | None = None
@@ -87,7 +88,7 @@ class OpenTuiStreamRenderer:
         self._block_seq += 1
         return f"{self._turn_id}-b{self._block_seq}"
 
-    async def aappend_text(self, delta: str) -> None:
+    async def aappend_text(self, delta: str, *, presentation: str = "answer") -> None:
         if not delta:
             return
         await self._ensure_begin()
@@ -96,15 +97,25 @@ class OpenTuiStreamRenderer:
             await self._emit(
                 "turn.status", TurnStatusState(phase="output", label="output", active=True)
             )
-        # Answer text and reasoning are distinct from the source: a reasoning
-        # stream that was open must close before the answer begins so the two
-        # render as separate blocks (never the same block re-typed).
+        # The agent tells us, per text segment, whether it is the turn's final
+        # answer (-> cyan card) or intermediate narration between tool calls
+        # (-> purple ✱ thinking line). We trust that signal and open the right
+        # block kind from the first delta — the block never changes kind, so the
+        # final answer is a card from its first visible character (no flicker),
+        # and intermediate text never masquerades as an answer card.
+        kind = "answer" if presentation == "answer" else "thinking"
+        # A reasoning stream that was open must close before assistant text.
         await self._close_reasoning()
+        # If the presentation flips mid-stream, close the old block so each
+        # segment is its own block of the correct kind.
+        if self._open_text_id is not None and self._open_text_presentation != kind:
+            await self._close_text()
         self.buffer += delta
         if self._open_text_id is None:
             self._open_text_id = self._next_block_id()
+            self._open_text_presentation = kind
             await self._emit(
-                "block.begin", BlockBegin(id=self._open_text_id, kind="answer", meta={})
+                "block.begin", BlockBegin(id=self._open_text_id, kind=kind, meta={})
             )
         await self._emit("block.append", BlockAppend(id=self._open_text_id, delta=delta))
 

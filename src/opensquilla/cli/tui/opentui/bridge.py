@@ -201,12 +201,16 @@ class OpenTuiReplayRenderer:
 
     buffer: str = ""
     reasoning_buffer: str = ""
+    intermediate_buffer: str = ""
     flush_count: int = 0
     statuses: list[tuple[str, str]] = field(default_factory=list)
     tool_events: list[tuple[str, str | None]] = field(default_factory=list)
 
-    async def aappend_text(self, delta: str) -> None:
-        self.buffer += delta
+    async def aappend_text(self, delta: str, *, presentation: str = "answer") -> None:
+        if presentation == "intermediate":
+            self.intermediate_buffer += delta
+        else:
+            self.buffer += delta
         self.flush_count += 1
 
     async def aappend_reasoning(self, delta: str) -> None:

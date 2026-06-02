@@ -94,7 +94,8 @@ class _BackendFallbackRenderer:
     def __exit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> Literal[False]:
         return False
 
-    async def aappend_text(self, delta: str) -> None:
+    async def aappend_text(self, delta: str, *, presentation: str = "answer") -> None:
+        del presentation
         self.buffer += delta
 
     def pulse(self) -> None:
@@ -306,13 +307,25 @@ def normalize_router_decision_payload(payload: Mapping[str, Any]) -> dict[str, A
     }
 
 
+async def _renderer_append_text(
+    renderer: Any,
+    text: str,
+    presentation: str,
+) -> None:
+    # Pass presentation when the renderer supports it; fall back for renderers
+    # (tests, fallbacks) whose aappend_text takes only the delta.
+    try:
+        await renderer.aappend_text(text, presentation=presentation)
+    except TypeError:
+        await renderer.aappend_text(text)
+
+
 async def _flush_streaming_text(
     renderer: Any,
     plane: StreamingPlane,
     text: str,
 ) -> None:
-    del plane
-    await renderer.aappend_text(text)
+    await _renderer_append_text(renderer, text, getattr(plane, "_text_presentation", "answer"))
 
 
 async def _append_text_delta(
@@ -323,17 +336,23 @@ async def _append_text_delta(
     *,
     source: TuiDomainEventSource,
     turn_id: str | None,
+    presentation: str = "answer",
 ) -> None:
     if plane is None:
-        await renderer.aappend_text(delta)
+        await _renderer_append_text(renderer, delta, presentation)
         return
+    # A presentation switch (intermediate -> answer) is a hard boundary: flush
+    # whatever is buffered under the old presentation before mixing in the new,
+    # so the renderer opens the right block kind for each.
+    prev = getattr(plane, "_text_presentation", None)
+    if prev is not None and prev != presentation:
+        flush = plane.finish()
+        if flush is not None:
+            await _renderer_append_text(renderer, flush.text, prev)
+    plane._text_presentation = presentation  # type: ignore[attr-defined]
     flush = plane.append(delta)
     if flush is not None:
-        await _flush_streaming_text(
-            renderer,
-            plane,
-            flush.text,
-        )
+        await _flush_streaming_text(renderer, plane, flush.text)
 
 
 async def _finish_text_delta_stream(
@@ -731,6 +750,7 @@ async def stream_response_gateway(
                             event.get("text", ""),
                             source="gateway",
                             turn_id=session_key,
+                            presentation=event.get("presentation", "answer"),
                         )
                     elif event_name == "session.event.router_decision":
                         await _finish_text_delta_stream(
@@ -1055,6 +1075,7 @@ async def stream_response_turnrunner(
                             event.text,
                             source="turn_runner",
                             turn_id=session_key,
+                            presentation=getattr(event, "presentation", "answer"),
                         )
                     elif isinstance(event, ThinkingEvent):
                         await _append_reasoning_delta(
