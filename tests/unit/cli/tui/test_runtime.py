@@ -13,6 +13,8 @@ from opensquilla.cli.tui.backend.contracts import (
     TuiRuntimeHooks,
 )
 from opensquilla.cli.tui.backend.runtime import run_tui_runtime
+from opensquilla.cli.tui.backend.state import TuiRuntimeState
+from opensquilla.engine.agent_injection import PendingInputProvider
 
 
 class _FakeSurface:
@@ -74,6 +76,15 @@ async def _queued_echo(surface: Any) -> None:
     await surface.write_through("queued")
 
 
+async def _wait_until(predicate: Callable[[], bool], *, timeout: float = 2.0) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not predicate():
+        if loop.time() >= deadline:
+            raise AssertionError("timed out waiting for runtime condition")
+        await asyncio.sleep(0)
+
+
 def _runtime_config(**kwargs: Any) -> TuiRuntimeConfig:
     return TuiRuntimeConfig(task_name="chat-turn-test", **kwargs)
 
@@ -84,6 +95,57 @@ def _runtime_hooks(**kwargs: Any) -> TuiRuntimeHooks:
         on_queued_turn_start=_queued_echo,
         **kwargs,
     )
+
+
+def test_runtime_state_drains_pending_inputs_for_agent_injection() -> None:
+    state = TuiRuntimeState()
+    state.enqueue("second")
+    state.enqueue("third")
+
+    assert isinstance(state, PendingInputProvider)
+    assert state.drain_pending() == ["second", "third"]
+    assert state.pending_items == ()
+
+
+@pytest.mark.asyncio
+async def test_runtime_allows_active_turn_to_drain_mid_turn_input() -> None:
+    inputs: asyncio.Queue[str | None] = asyncio.Queue()
+    surface = _FakeSurface(inputs)
+    state = TuiRuntimeState()
+    executed: list[str] = []
+    drained: list[str] = []
+    first_started = asyncio.Event()
+    drain_completed = asyncio.Event()
+
+    async def _dispatch(user_input: str) -> bool:
+        executed.append(user_input)
+        if user_input == "first":
+            first_started.set()
+            await _wait_until(lambda: state.pending_items == ("second",))
+            drained.extend(state.drain_pending())
+            drain_completed.set()
+        return True
+
+    task = asyncio.create_task(
+        run_tui_runtime(
+            dispatch=_dispatch,
+            surface_factory=_surface_factory(surface),
+            config=_runtime_config(state=state),
+            hooks=_runtime_hooks(),
+        )
+    )
+
+    await inputs.put("first")
+    await asyncio.wait_for(first_started.wait(), timeout=2.0)
+    await inputs.put("second")
+    await asyncio.wait_for(drain_completed.wait(), timeout=2.0)
+    await inputs.put(None)
+    await asyncio.wait_for(task, timeout=2.0)
+
+    assert drained == ["second"]
+    assert executed == ["first"]
+    assert state.pending_items == ()
+    assert "queued" not in surface.writes
 
 
 @pytest.mark.asyncio
@@ -409,6 +471,50 @@ async def test_runtime_cancel_invokes_adapter_cancel_hook() -> None:
 
     assert cancel_calls == ["cancel"]
     assert dispatch_cancelled.is_set() is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_cancel_drops_pending_inputs_from_active_turn() -> None:
+    inputs: asyncio.Queue[str | None] = asyncio.Queue()
+    surface = _FakeSurface(inputs)
+    state = TuiRuntimeState()
+    executed: list[str] = []
+    first_started = asyncio.Event()
+
+    async def _dispatch(user_input: str) -> bool:
+        if user_input == "first":
+            executed.append("first-start")
+            first_started.set()
+            try:
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                executed.append("first-cancelled")
+                raise
+        executed.append(user_input)
+        return True
+
+    task = asyncio.create_task(
+        run_tui_runtime(
+            dispatch=_dispatch,
+            surface_factory=_surface_factory(surface),
+            config=_runtime_config(state=state),
+            hooks=_runtime_hooks(),
+        )
+    )
+
+    await inputs.put("first")
+    await asyncio.wait_for(first_started.wait(), timeout=2.0)
+    await inputs.put("second")
+    await inputs.put("third")
+    await _wait_until(lambda: state.pending_items == ("second", "third"))
+    active_cb = next(cb for cb in reversed(surface.cancel_callbacks) if cb is not None)
+    active_cb()
+    await inputs.put(None)
+    await asyncio.wait_for(task, timeout=2.0)
+
+    assert executed == ["first-start", "first-cancelled"]
+    assert state.pending_items == ()
+    assert "queued" not in surface.writes
 
 
 @pytest.mark.asyncio

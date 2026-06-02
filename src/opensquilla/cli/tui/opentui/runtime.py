@@ -25,6 +25,7 @@ from opensquilla.cli.tui.backend.contracts import (
 from opensquilla.cli.tui.backend.output_binding import TuiOutputBinding
 from opensquilla.cli.tui.backend.plugins import TuiPluginManager
 from opensquilla.cli.tui.backend.runtime import run_tui_runtime
+from opensquilla.cli.tui.backend.state import TuiRuntimeState
 from opensquilla.cli.tui.opentui.messages import ModelText, PromptEcho
 from opensquilla.cli.tui.opentui.surface import open_opentui_surface
 from opensquilla.engine.commands import Surface
@@ -136,22 +137,29 @@ async def run_opentui_chat_runtime(
     def _notice(payload: str) -> None:
         opentui_notice(scope, payload)
 
-    await run_tui_runtime(
-        dispatch=dispatch,
-        surface_factory=_surface_factory,
-        config=TuiRuntimeConfig(
-            task_name=surface_task_name(surface),
-            queue_max_size=queue_max_size,
-            concurrent_input_during_turn=True,
-            classify_input=classify_chat_input,
-        ),
-        hooks=TuiRuntimeHooks(
-            on_user_input_echo=echo_opentui_user_input,
-            on_queued_turn_start=echo_opentui_queued_turn_start,
-            clear_current_cancel=clear_current_cancel,
-            notice=_notice,
-            on_cancel_active_turn=context.abort_turn,
-            expose_surface=context.expose_surface,
-            clear_exposed_surface=context.clear_output,
-        ),
-    )
+    runtime_state = TuiRuntimeState()
+    scope["pending_input_provider"] = runtime_state
+    try:
+        await run_tui_runtime(
+            dispatch=dispatch,
+            surface_factory=_surface_factory,
+            config=TuiRuntimeConfig(
+                task_name=surface_task_name(surface),
+                queue_max_size=queue_max_size,
+                concurrent_input_during_turn=True,
+                classify_input=classify_chat_input,
+                state=runtime_state,
+            ),
+            hooks=TuiRuntimeHooks(
+                on_user_input_echo=echo_opentui_user_input,
+                on_queued_turn_start=echo_opentui_queued_turn_start,
+                clear_current_cancel=clear_current_cancel,
+                notice=_notice,
+                on_cancel_active_turn=context.abort_turn,
+                expose_surface=context.expose_surface,
+                clear_exposed_surface=context.clear_output,
+            ),
+        )
+    finally:
+        if scope.get("pending_input_provider") is runtime_state:
+            scope.pop("pending_input_provider", None)

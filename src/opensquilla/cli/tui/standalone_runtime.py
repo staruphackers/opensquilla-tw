@@ -342,6 +342,10 @@ async def run_standalone_chat(
             )
             return handled
 
+        pending_input_provider = cast(
+            "PendingInputProvider | None",
+            session_context.scope.get("pending_input_provider"),
+        )
         result = await deps.stream_response(
             turn_runner,
             session_context.session_key,
@@ -351,6 +355,7 @@ async def run_standalone_chat(
             svc=svc,
             timeout=timeout,
             tui_output=deps.get_tui_output(session_context.scope),
+            pending_input_provider=pending_input_provider,
         )
         session_context.state.model = result.model_after or session_context.model
         session_context.state.transcript.add("user", user_input)

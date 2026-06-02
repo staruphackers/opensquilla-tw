@@ -95,6 +95,7 @@ async def test_standalone_runtime_mirrors_turn_model_update_to_legacy_scope(
     services = _FakeServices()
     turn_runner = object()
     output = cast(TuiOutputHandle, object())
+    pending_provider = SimpleNamespace(drain_pending=lambda: [])
     captured: dict[str, Any] = {}
 
     async def fake_build_services() -> _FakeServices:
@@ -113,6 +114,7 @@ async def test_standalone_runtime_mirrors_turn_model_update_to_legacy_scope(
         timeout: float | None = None,
         *,
         tui_output: TuiOutputHandle | None = None,
+        pending_input_provider: object | None = None,
     ) -> TurnResult:
         captured["stream"] = {
             "turn_runner": active_turn_runner,
@@ -123,6 +125,7 @@ async def test_standalone_runtime_mirrors_turn_model_update_to_legacy_scope(
             "svc": svc,
             "timeout": timeout,
             "tui_output": tui_output,
+            "pending_input_provider": pending_input_provider,
         }
         return TurnResult(
             text="assistant reply",
@@ -138,6 +141,7 @@ async def test_standalone_runtime_mirrors_turn_model_update_to_legacy_scope(
     ) -> None:
         captured["surface"] = surface
         captured["initial_scope"] = dict(scope)
+        scope["pending_input_provider"] = pending_provider
 
         assert await dispatch("hello") is True
 
@@ -176,6 +180,7 @@ async def test_standalone_runtime_mirrors_turn_model_update_to_legacy_scope(
     assert captured["stream"]["svc"] is services
     assert captured["stream"]["timeout"] == 7.25
     assert captured["stream"]["tui_output"] is output
+    assert captured["stream"]["pending_input_provider"] is pending_provider
     assert captured["scope_after_message"]["model"] == "standalone/after"
     assert captured["state_after_message"].model == "standalone/after"
     assert captured["state_after_message"].usage.input_tokens == 5

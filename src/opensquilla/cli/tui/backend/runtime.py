@@ -45,6 +45,7 @@ async def run_tui_runtime(
         def _cancel_inflight_turn() -> None:
             task = turn_task
             if task is not None and not task.done():
+                runtime_state.clear_pending()
                 with contextlib.suppress(Exception):
                     abort_turn = hooks.on_cancel_active_turn()
                     asyncio.create_task(_schedule_abort(abort_turn))
