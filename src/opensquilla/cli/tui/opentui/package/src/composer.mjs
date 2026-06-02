@@ -32,6 +32,162 @@ export function fixedRouterRow(label, value) {
   return `${label.padEnd(5)} ${clipped}${padding}`;
 }
 
+function clamp(value, min, max) {
+  if (max < min) return min;
+  return Math.max(min, Math.min(max, value));
+}
+
+export function tokenUnderCaret(text, cursorPos) {
+  const chars = Array.from(String(text ?? ""));
+  const pos = clamp(Number(cursorPos) || 0, 0, chars.length);
+  let start = pos;
+  while (start > 0 && !/\s/u.test(chars[start - 1])) start -= 1;
+  return { token: chars.slice(start, pos).join(""), start };
+}
+
+function lineStartForToken(text, start) {
+  const chars = Array.from(String(text ?? ""));
+  const pos = clamp(Number(start) || 0, 0, chars.length);
+  return pos === 0 || chars[pos - 1] === "\n";
+}
+
+export function shouldTriggerMenu(token, start, lineStart) {
+  const value = String(token ?? "");
+  if (value.startsWith("/") && lineStart) {
+    return { active: true, kind: "slash", query: value.slice(1) };
+  }
+  if (value.startsWith("@")) {
+    return { active: true, kind: "file", query: value.slice(1) };
+  }
+  return { active: false, kind: null, query: "" };
+}
+
+function subsequencePositions(query, text) {
+  const positions = [];
+  let from = 0;
+  for (const char of Array.from(query)) {
+    const index = text.indexOf(char, from);
+    if (index < 0) return null;
+    positions.push(index);
+    from = index + 1;
+  }
+  return positions;
+}
+
+function pathSegments(text) {
+  return String(text ?? "")
+    .replaceAll("\\", "/")
+    .split(/[\/._\-\s]+/u)
+    .filter(Boolean);
+}
+
+function isSegmentStart(text, position) {
+  return position === 0 || "/\\._- ".includes(text[position - 1]);
+}
+
+function fuzzyScore(query, candidate) {
+  const q = String(query ?? "").toLocaleLowerCase();
+  const text = String(candidate ?? "").toLocaleLowerCase();
+  if (!q) return 0;
+  const positions = subsequencePositions(q, text);
+  if (!positions) return null;
+
+  let score = q.length * 100;
+  if (text.startsWith(q)) score += 80;
+  const prefixSegment = pathSegments(text).find((segment) => segment.startsWith(q));
+  if (prefixSegment) {
+    score += 60;
+    score += Math.max(0, 24 - prefixSegment.length * 2);
+  }
+
+  let runLength = 1;
+  let longestRun = 1;
+  for (let i = 1; i < positions.length; i += 1) {
+    if (positions[i] === positions[i - 1] + 1) {
+      runLength += 1;
+      longestRun = Math.max(longestRun, runLength);
+    } else {
+      runLength = 1;
+    }
+  }
+  score += longestRun * longestRun * 8;
+
+  for (const position of positions) {
+    if (isSegmentStart(text, position)) score += 18;
+  }
+  score += Math.max(0, 30 - positions[0] * 0.75);
+  score += Math.max(0, 18 - String(candidate ?? "").length * 0.35);
+  return score;
+}
+
+export function filterCatalog(catalog, query) {
+  const items = Array.isArray(catalog) ? catalog : [];
+  const q = String(query ?? "");
+  if (!q) return [...items];
+  return items
+    .map((item, index) => ({
+      item,
+      index,
+      score: fuzzyScore(q, String(item?.label ?? "")),
+    }))
+    .filter((entry) => entry.score !== null)
+    .sort((a, b) => (b.score - a.score) || (a.index - b.index))
+    .map((entry) => entry.item);
+}
+
+export function acceptCompletionText(text, tokenStart, cursorPos, insertText) {
+  const chars = Array.from(String(text ?? ""));
+  const start = clamp(Number(tokenStart) || 0, 0, chars.length);
+  const cursor = clamp(Number(cursorPos) || 0, start, chars.length);
+  const insertChars = Array.from(String(insertText ?? ""));
+  const nextText = [
+    ...chars.slice(0, start),
+    ...insertChars,
+    ...chars.slice(cursor),
+  ].join("");
+  return { text: nextText, cursor: start + insertChars.length };
+}
+
+export function shouldDropResponse(responseReqId, currentSeq) {
+  return Number(responseReqId) !== Number(currentSeq);
+}
+
+export function menuKeyAction(menu, keyName) {
+  if (!menu?.active) return { handled: false, action: "pass", menu };
+  const selected = Number(menu.selected) || 0;
+  const maxSelected = Math.max(0, (menu.filtered?.length ?? 0) - 1);
+  if (keyName === "up") {
+    return {
+      handled: true,
+      action: "navigate",
+      menu: { ...menu, selected: clamp(selected - 1, 0, maxSelected) },
+    };
+  }
+  if (keyName === "down") {
+    return {
+      handled: true,
+      action: "navigate",
+      menu: { ...menu, selected: clamp(selected + 1, 0, maxSelected) },
+    };
+  }
+  if (keyName === "escape") {
+    return { handled: true, action: "close", menu: { ...menu, active: false } };
+  }
+  if (keyName === "return" || keyName === "tab") {
+    return { handled: true, action: "accept", menu };
+  }
+  return { handled: false, action: "pass", menu };
+}
+
+function fileCompletionItems(paths) {
+  return (Array.isArray(paths) ? paths : []).map((path) => ({
+    label: String(path),
+    description: String(path),
+    insert_text: `@${path} `,
+    category: "file",
+  }));
+}
+
 // Factory for the composer / input-region. All state that main.mjs previously
 // held as module-level globals lives here as closure state; the rendering deps
 // (renderer, renderable classes, boxes, footer height, host writer) are injected
@@ -87,6 +243,16 @@ export function createComposer(deps) {
     files: [],
     filtersSensitivePaths: true,
   };
+  const menu = {
+    active: false,
+    kind: null,
+    query: "",
+    tokenStart: 0,
+    filtered: [],
+    selected: 0,
+    requestSeq: 0,
+  };
+  let fileDebounce = null;
 
   function colorForStyle(style) {
     if (style === "warning") return THEME.routerWarning;
@@ -140,6 +306,113 @@ export function createComposer(deps) {
   // composer being disabled, so a running turn still shows a live caret.
   function caretGlyph() {
     return cursorVisible ? "▏" : " ";
+  }
+
+  function resetMenu() {
+    menu.active = false;
+    menu.kind = null;
+    menu.query = "";
+    menu.tokenStart = 0;
+    menu.filtered = [];
+    menu.selected = 0;
+    if (fileDebounce) {
+      clearTimeout(fileDebounce);
+      fileDebounce = null;
+    }
+  }
+
+  function clampMenuSelection() {
+    menu.selected = clamp(menu.selected, 0, Math.max(0, menu.filtered.length - 1));
+  }
+
+  function scheduleFileCompletionRequest(query) {
+    if (fileDebounce) clearTimeout(fileDebounce);
+    const requestId = menu.requestSeq + 1;
+    menu.requestSeq = requestId;
+    fileDebounce = setTimeout(() => {
+      fileDebounce = null;
+      if (!menu.active || menu.kind !== "file" || menu.requestSeq !== requestId) return;
+      sendHostMessage({
+        type: "completion.request",
+        kind: "file",
+        query,
+        request_id: requestId,
+      });
+    }, 120);
+    fileDebounce.unref?.();
+  }
+
+  function updateMenuFromInput() {
+    const { token, start } = tokenUnderCaret(inputText, cursorPos);
+    const trigger = shouldTriggerMenu(token, start, lineStartForToken(inputText, start));
+    if (!trigger.active) {
+      resetMenu();
+      return;
+    }
+
+    menu.active = true;
+    menu.kind = trigger.kind;
+    menu.query = trigger.query;
+    menu.tokenStart = start;
+    if (menu.kind === "slash") {
+      if (fileDebounce) {
+        clearTimeout(fileDebounce);
+        fileDebounce = null;
+      }
+      menu.filtered = filterCatalog(completionContext.catalog, menu.query);
+    } else {
+      menu.filtered = filterCatalog(fileCompletionItems(completionContext.files), menu.query);
+      scheduleFileCompletionRequest(menu.query);
+    }
+    clampMenuSelection();
+  }
+
+  function completionMenuRows() {
+    if (menu.filtered.length === 0) {
+      return [{ content: "no matches", fg: THEME.muted }];
+    }
+    const visible = Math.min(6, menu.filtered.length);
+    const selected = clamp(menu.selected, 0, menu.filtered.length - 1);
+    let start = Math.max(0, selected - Math.floor(visible / 2));
+    start = Math.min(start, Math.max(0, menu.filtered.length - visible));
+    return menu.filtered.slice(start, start + visible).map((item, offset) => {
+      const index = start + offset;
+      const marker = index === selected ? "› " : "  ";
+      const label = String(item.label ?? "");
+      const description = String(item.description ?? "");
+      return {
+        content: `${marker}${label}${description ? `  ${description}` : ""}`,
+        fg: index === selected ? THEME.toolAccent : THEME.text,
+      };
+    });
+  }
+
+  function renderCompletionMenu() {
+    if (!menu.active) return;
+    const rows = completionMenuRows();
+    const menuNode = new BoxRenderable(renderer, {
+      id: "completion-menu",
+      position: "absolute",
+      left: 1,
+      right: 34,
+      bottom: footerHeight,
+      height: Math.min(8, rows.length + 2),
+      borderStyle: "rounded",
+      borderColor: THEME.composerBorder,
+      title: menu.kind === "file" ? " files " : " commands ",
+      titleAlignment: "left",
+      flexDirection: "column",
+      paddingLeft: 1,
+      paddingRight: 1,
+    });
+    rows.forEach((row, index) => {
+      menuNode.add(new TextRenderable(renderer, {
+        id: `completion-menu-row-${index}`,
+        content: row.content,
+        fg: row.fg,
+      }));
+    });
+    inputBox.add(menuNode);
   }
 
   // Split the input into display lines and splice the caret into the line/column
@@ -207,6 +480,7 @@ export function createComposer(deps) {
     routerNode.add(new TextRenderable(renderer, { id: "router-saving", content: fixedRouterRow("save", routerState.saving), fg: THEME.savingText }));
     routerNode.add(new TextRenderable(renderer, { id: "router-context", content: fixedRouterRow("ctx", routerState.context), fg: THEME.routerWarning }));
     inputBox.add(routerNode);
+    renderCompletionMenu();
     renderer.requestRender?.();
   }
 
@@ -220,6 +494,7 @@ export function createComposer(deps) {
     inputText = "";
     cursorPos = 0;
     composer.text = "";
+    resetMenu();
     sendHostMessage({ type: "input.submit", text });
     rerenderInputRegion();
   }
@@ -241,6 +516,7 @@ export function createComposer(deps) {
     if (next < 0 || next > inputHistory.length) return;
     historyIndex = next;
     setInput(next === inputHistory.length ? draftBeforeHistory : inputHistory[next]);
+    updateMenuFromInput();
     wakeCursor();
     rerenderInputRegion();
   }
@@ -314,13 +590,46 @@ export function createComposer(deps) {
     cursorPos = pos - 1;
   }
 
+  function acceptCompletion() {
+    const item = menu.filtered[clamp(menu.selected, 0, menu.filtered.length - 1)];
+    if (!item) {
+      resetMenu();
+      rerenderInputRegion();
+      return;
+    }
+    const insertText = String(item.insert_text ?? item.label ?? "");
+    const accepted = acceptCompletionText(inputText, menu.tokenStart, cursorPos, insertText);
+    inputText = accepted.text;
+    composer.text = inputText;
+    cursorPos = accepted.cursor;
+    resetMenu();
+    wakeCursor();
+    rerenderInputRegion();
+  }
+
+  function applyMenuKeyResult(result) {
+    if (!result.handled) return false;
+    if (result.action === "accept") {
+      acceptCompletion();
+      return true;
+    }
+    Object.assign(menu, result.menu);
+    rerenderInputRegion();
+    return true;
+  }
+
   function installKeyboardHandlers() {
     renderer.keyInput.on("keypress", (key) => {
+      if (menu.active) {
+        const menuResult = menuKeyAction(menu, key.name);
+        if (applyMenuKeyResult(menuResult)) return;
+      }
       if (key.ctrl && key.name === "c") {
         // With text: clear the input. Empty: signal EOF (exit the TUI).
         if (inputText.length > 0) {
           setInput("");
           historyIndex = inputHistory.length;
+          resetMenu();
           wakeCursor();
           rerenderInputRegion();
         } else {
@@ -341,6 +650,7 @@ export function createComposer(deps) {
         if (key.option || key.meta || key.alt) {
           insertAtCursor("\n");
           historyIndex = inputHistory.length;
+          updateMenuFromInput();
           wakeCursor();
           rerenderInputRegion();
           return;
@@ -392,6 +702,7 @@ export function createComposer(deps) {
       }
       if (key.name === "backspace") {
         deleteBeforeCursor();
+        updateMenuFromInput();
         wakeCursor();
         rerenderInputRegion();
         return;
@@ -400,11 +711,13 @@ export function createComposer(deps) {
       if (printable.length > 0 && !key.ctrl && !key.meta && key.name !== "space") {
         insertAtCursor(printable);
         historyIndex = inputHistory.length;
+        updateMenuFromInput();
         wakeCursor();
         rerenderInputRegion();
       } else if (key.name === "space") {
         insertAtCursor(" ");
         historyIndex = inputHistory.length;
+        updateMenuFromInput();
         wakeCursor();
         rerenderInputRegion();
       }
@@ -412,8 +725,11 @@ export function createComposer(deps) {
 
     const decoder = new TextDecoder();
     renderer.keyInput.on("paste", (event) => {
-      insertAtCursor(decoder.decode(event.bytes));
+      const pasted = decoder.decode(event.bytes);
+      insertAtCursor(pasted);
       historyIndex = inputHistory.length;
+      if (pasted.includes("\n")) resetMenu();
+      else updateMenuFromInput();
       wakeCursor();
       rerenderInputRegion();
     });
@@ -438,6 +754,7 @@ export function createComposer(deps) {
     // Route text through setInput so inputText/composer.text/cursorPos stay in
     // sync (caret lands at the end of any prefilled text instead of drifting).
     setInput(composer.text);
+    updateMenuFromInput();
     rerenderInputRegion();
   }
 
@@ -471,6 +788,23 @@ export function createComposer(deps) {
     completionContext.filtersSensitivePaths = Boolean(
       message.filters_sensitive_paths ?? completionContext.filtersSensitivePaths,
     );
+    if (menu.active) {
+      updateMenuFromInput();
+      rerenderInputRegion();
+    }
+  }
+
+  function applyCompletionResponse(message) {
+    if (
+      !menu.active
+      || menu.kind !== String(message.kind ?? "")
+      || shouldDropResponse(message.request_id, menu.requestSeq)
+    ) {
+      return;
+    }
+    menu.filtered = Array.isArray(message.items) ? message.items : [];
+    clampMenuSelection();
+    rerenderInputRegion();
   }
 
   // main.mjs owns the pulse timer; it calls tickPulse(frame) each tick so the
@@ -494,6 +828,7 @@ export function createComposer(deps) {
     setRouterState,
     setTurnStatus,
     setCompletionContext,
+    applyCompletionResponse,
     onResize,
     tickPulse,
   };
