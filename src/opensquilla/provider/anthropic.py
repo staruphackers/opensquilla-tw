@@ -17,6 +17,7 @@ from .request_proof import (
     prove_or_compact_provider_payload,
     prove_provider_payload_from_env,
 )
+from .stream_assembly import ReasoningAccumulator
 from .types import (
     ChatConfig,
     DoneEvent,
@@ -400,7 +401,7 @@ class AnthropicProvider:
         output_tokens = 0
         cached_tokens = 0
         cache_creation_tokens = 0
-        thinking_parts: list[str] = []
+        reasoning = ReasoningAccumulator()
         thinking_signature: str | None = None
         stop_reason = "end_turn"
 
@@ -478,7 +479,9 @@ class AnthropicProvider:
                                 else:
                                     log.debug("anthropic.unknown_delta_index", index=index)
                             elif dtype == "thinking_delta":
-                                thinking_parts.append(delta.get("thinking", ""))
+                                reasoning_event = reasoning.emit(delta.get("thinking", ""))
+                                if reasoning_event is not None:
+                                    yield reasoning_event
                             elif dtype == "signature_delta":
                                 thinking_signature = delta.get("signature") or thinking_signature
 
@@ -523,7 +526,7 @@ class AnthropicProvider:
                             stop_reason = event.get("delta", {}).get("stop_reason", "end_turn")
 
                         elif etype == "message_stop":
-                            reasoning_content = "".join(thinking_parts) or None
+                            reasoning_content = reasoning.finalize()
                             yield DoneEvent(
                                 stop_reason=stop_reason,
                                 input_tokens=input_tokens,

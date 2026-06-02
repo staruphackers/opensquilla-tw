@@ -64,6 +64,9 @@ from opensquilla.provider import (
     ErrorEvent as ProviderErrorEvent,
 )
 from opensquilla.provider import (
+    ReasoningDeltaEvent as ProviderReasoningDelta,
+)
+from opensquilla.provider import (
     TextDeltaEvent as ProviderTextDelta,
 )
 from opensquilla.provider import (
@@ -113,6 +116,7 @@ from .types import (
     RunHeartbeatEvent,
     StateChangeEvent,
     TextDeltaEvent,
+    ThinkingEvent,
     ThinkingLevel,
     ToolCall,
     ToolResult,
@@ -1981,6 +1985,13 @@ class Agent:
                                 if raw_ev.text:
                                     attempt_user_visible_emitted = True
                                 yield TextDeltaEvent(text=raw_ev.text)
+
+                            elif isinstance(raw_ev, ProviderReasoningDelta):
+                                # Reasoning is the model's thinking, not the
+                                # answer: re-emit as ThinkingEvent and keep it
+                                # out of assistant_text_parts. The joined text
+                                # still arrives via DoneEvent.reasoning_content.
+                                yield ThinkingEvent(text=raw_ev.text)
 
                             elif isinstance(raw_ev, ProviderToolUseStart):
                                 if not tools_supported_for_call:
