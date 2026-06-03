@@ -752,6 +752,22 @@ async def stream_response_gateway(
                             turn_id=session_key,
                             presentation=event.get("presentation", "answer"),
                         )
+                    elif event_name == "session.event.thinking":
+                        # The agent re-emits reasoning as ThinkingEvent, which
+                        # rpc_sessions broadcasts as session.event.thinking. The
+                        # renderer collapses it to a "Thinking…" marker (the
+                        # verbatim process is not shown), so no coalescing plane
+                        # is needed — drive the marker directly. The marker is
+                        # retired when the next text/tool opens (aappend_text /
+                        # atool_start close the reasoning block).
+                        await _append_reasoning_delta(
+                            renderer,
+                            stream_deps,
+                            None,
+                            event.get("text", ""),
+                            source="gateway",
+                            turn_id=session_key,
+                        )
                     elif event_name == "session.event.router_decision":
                         await _finish_text_delta_stream(
                             renderer,

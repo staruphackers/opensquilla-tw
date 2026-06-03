@@ -9,8 +9,11 @@ import signal
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+import structlog
 
 from opensquilla.cli.tui.backend.transcript import ViewportProjection
 from opensquilla.cli.tui.opentui.messages import (
@@ -28,6 +31,8 @@ from opensquilla.cli.tui.renderers.selection import (
 
 DEFAULT_HOST_PACKAGE_DIR = Path(__file__).resolve().parent / "package"
 DEFAULT_READY_TIMEOUT_SECONDS = 5.0
+
+log = structlog.get_logger(__name__)
 
 
 class OpenTuiBridgeError(RuntimeError):
@@ -132,6 +137,13 @@ class OpenTuiBridge:
         self._to_host_file = os.fdopen(to_host_write, "w", encoding="utf-8", buffering=1)
         self._from_host_file = os.fdopen(from_host_read, "r", encoding="utf-8")
 
+        # Record which main.mjs this Bun host actually loaded. A stale, still-running
+        # host keeps serving the JS it spawned with, so a "fixed" frontend can look
+        # broken until the old process is killed. Logging the script's mtime + the
+        # child PID at spawn makes "old process running old code" diagnosable: compare
+        # the logged mtime against the source file's current mtime.
+        self._log_host_version()
+
         message = await asyncio.wait_for(self.next_message(), timeout=self.ready_timeout)
         if isinstance(message, HostReady):
             return
@@ -139,6 +151,21 @@ class OpenTuiBridge:
         if isinstance(message, HostError):
             raise OpenTuiBridgeError(message.message)
         raise OpenTuiBridgeError(f"OpenTUI host did not become ready: {message!r}")
+
+    def _log_host_version(self) -> None:
+        script = self.paths.main_script
+        try:
+            mtime = script.stat().st_mtime
+            mtime_iso = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+        except OSError:
+            mtime_iso = "unknown"
+        pid = self._process.pid if self._process is not None else None
+        log.info(
+            "opentui.host.spawned",
+            main_script=str(script),
+            main_script_mtime=mtime_iso,
+            host_pid=pid,
+        )
 
     async def send(self, message_type: str, payload: object | None = None) -> None:
         self.send_nowait(message_type, payload)
