@@ -20,7 +20,7 @@ export function createThinkingBlock(ctx) {
     }
     const lines = trimmed.split("\n");
     lines.forEach((line, i) => {
-      const prefix = i === 0 ? `${TOOL_INDENT}✱ ` : `${TOOL_INDENT}  `;
+      const prefix = i === 0 ? `${TOOL_INDENT}✱ ` : `${TOOL_INDENT}│ `;
       const avail = timelineAvailCells(prefix, renderer.terminalWidth);
       const content = `${prefix}${clipToCells(line, avail)}`;
       const id = `${idPrefix}-l${i}`;
