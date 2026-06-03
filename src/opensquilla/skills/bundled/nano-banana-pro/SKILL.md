@@ -63,9 +63,18 @@ through `with:` by convention; for edit workflows call the script.
 
 ## Auth
 
-Reads `OPENROUTER_API_KEY` from the process environment. The gateway
-already injects it from `.env` if configured. No Google Gemini key
-needed.
+API-key resolution order (first hit wins):
+1. `--api-key` CLI argument (rarely used; meta-skills don't pass it)
+2. `OPENROUTER_API_KEY` environment variable (gateway injects from `.env`)
+3. `OPENSQUILLA_LLM_API_KEY` environment variable (Pydantic-settings
+   shortcut for the `llm.api_key` config field)
+4. `llm.api_key` from the OpenSquilla TOML config file —
+   `./opensquilla.toml`, then `$OPENSQUILLA_STATE_DIR/config.toml`,
+   then `~/.opensquilla/config.toml`. Only consumed when `llm.provider`
+   in the same file equals `"openrouter"`.
+
+No Google Gemini key needed — OpenRouter routes the request to the
+Gemini image model on the user's behalf.
 
 ## Output
 

@@ -102,9 +102,17 @@ See `references/recipes.md`, `references/modes-and-recipes.md`,
 
 ## Auth
 
-- `openrouter` provider reads `OPENROUTER_API_KEY`.
+- `openrouter` provider API-key resolution order:
+  1. `OPENROUTER_API_KEY` env var
+  2. `OPENSQUILLA_LLM_API_KEY` env var (Pydantic shortcut for `llm.api_key`)
+  3. `llm.api_key` from the OpenSquilla TOML config (`./opensquilla.toml`,
+     then `$OPENSQUILLA_STATE_DIR/config.toml`, then
+     `~/.opensquilla/config.toml`) — only used when `llm.provider` in
+     the same file equals `"openrouter"`.
 - `volcengine` / `byteplus` provider reads `ARK_API_KEY` (with provider-
-  specific fallbacks `VOLC_ARK_API_KEY` / `BYTEPLUS_API_KEY`).
+  specific fallbacks `VOLC_ARK_API_KEY` / `BYTEPLUS_API_KEY`). No
+  config-file fallback for these — the OpenSquilla config file holds
+  the **agent's** key, which is OpenRouter, so it would not apply.
 - All three send the key as `Authorization: Bearer <key>`.
 - For OpenRouter the same bearer is also added when downloading the
   resulting `unsigned_urls[0]`. Volcengine returns pre-signed object

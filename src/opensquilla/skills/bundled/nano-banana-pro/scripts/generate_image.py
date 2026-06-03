@@ -75,10 +75,53 @@ def _openrouter_attribution_headers(url: str | None) -> dict[str, str]:
     }
 
 
+def _openrouter_key_from_config() -> str | None:
+    """Fallback: read llm.api_key from the OpenSquilla TOML config file.
+
+    Bundled skills run as detached Python subprocesses and cannot import
+    opensquilla itself, so this duplicates the config-discovery logic
+    from ``opensquilla.gateway.config.GatewayConfig.load`` and
+    ``opensquilla.paths.default_opensquilla_home`` deliberately. Only
+    returns a key when ``llm.provider`` resolves to OpenRouter (the
+    config-file key is whatever the main agent uses, which only makes
+    sense to reuse here when both providers match).
+    """
+    import tomllib
+
+    candidates: list[Path] = [Path.cwd() / "opensquilla.toml"]
+    state_dir = (os.environ.get("OPENSQUILLA_STATE_DIR") or "").strip()
+    if state_dir:
+        candidates.append(Path(state_dir).expanduser() / "config.toml")
+    candidates.append(Path.home() / ".opensquilla" / "config.toml")
+
+    for path in candidates:
+        try:
+            if not path.is_file():
+                continue
+            with open(path, "rb") as f:
+                data = tomllib.load(f)
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        llm = data.get("llm") if isinstance(data, dict) else None
+        if not isinstance(llm, dict):
+            continue
+        provider = str(llm.get("provider") or "openrouter").strip().lower()
+        if provider != "openrouter":
+            continue
+        key = str(llm.get("api_key") or "").strip()
+        if key:
+            return key
+    return None
+
+
 def resolve_api_key(provided: str | None) -> str | None:
     if provided:
         return provided.strip()
-    return (os.environ.get("OPENROUTER_API_KEY") or "").strip() or None
+    for env_name in ("OPENROUTER_API_KEY", "OPENSQUILLA_LLM_API_KEY"):
+        val = (os.environ.get(env_name) or "").strip()
+        if val:
+            return val
+    return _openrouter_key_from_config()
 
 
 def encode_input_image(path: str) -> str:

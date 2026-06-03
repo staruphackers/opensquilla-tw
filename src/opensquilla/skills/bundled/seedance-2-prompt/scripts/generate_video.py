@@ -275,13 +275,62 @@ def _encode_input_image(path: str) -> str:
     return f"data:{mime};base64,{base64.b64encode(raw).decode('ascii')}"
 
 
-def _resolve_api_key(provided: str | None, env_names: Iterable[str]) -> str | None:
+def _openrouter_key_from_config() -> str | None:
+    """Fallback: read llm.api_key from the OpenSquilla TOML config file.
+
+    Bundled skills run as detached Python subprocesses and cannot
+    import opensquilla, so this duplicates the config-discovery logic
+    from ``opensquilla.gateway.config.GatewayConfig.load`` and
+    ``opensquilla.paths.default_opensquilla_home`` deliberately. Only
+    returns a key when ``llm.provider`` is openrouter — the config key
+    is what the main agent talks to, and reusing it here only makes
+    sense when both share the same provider host.
+    """
+    import tomllib
+
+    candidates: list[Path] = [Path.cwd() / "opensquilla.toml"]
+    state_dir = (os.environ.get("OPENSQUILLA_STATE_DIR") or "").strip()
+    if state_dir:
+        candidates.append(Path(state_dir).expanduser() / "config.toml")
+    candidates.append(Path.home() / ".opensquilla" / "config.toml")
+
+    for path in candidates:
+        try:
+            if not path.is_file():
+                continue
+            with open(path, "rb") as f:
+                data = tomllib.load(f)
+        except (OSError, tomllib.TOMLDecodeError):
+            continue
+        llm = data.get("llm") if isinstance(data, dict) else None
+        if not isinstance(llm, dict):
+            continue
+        provider = str(llm.get("provider") or "openrouter").strip().lower()
+        if provider != "openrouter":
+            continue
+        key = str(llm.get("api_key") or "").strip()
+        if key:
+            return key
+    return None
+
+
+def _resolve_api_key(
+    provided: str | None,
+    env_names: Iterable[str],
+    *,
+    provider_name: str = "",
+) -> str | None:
     if provided:
         return provided.strip()
-    for name in env_names:
+    extra_env_names: tuple[str, ...] = ()
+    if provider_name == "openrouter":
+        extra_env_names = ("OPENSQUILLA_LLM_API_KEY",)
+    for name in (*env_names, *extra_env_names):
         val = (os.environ.get(name) or "").strip()
         if val:
             return val
+    if provider_name == "openrouter":
+        return _openrouter_key_from_config()
     return None
 
 
@@ -481,7 +530,9 @@ def main() -> int:
     provider = PROVIDERS[raw.provider]
     base_url = raw.base_url or provider.default_base_url
     model_id = raw.model or provider.default_model
-    api_key = _resolve_api_key(raw.api_key or None, provider.default_env)
+    api_key = _resolve_api_key(
+        raw.api_key or None, provider.default_env, provider_name=provider.name,
+    )
     if not api_key:
         env_hint = " / ".join(provider.default_env)
         print(
