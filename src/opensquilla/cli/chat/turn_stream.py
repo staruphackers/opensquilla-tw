@@ -386,10 +386,8 @@ async def _finish_text_delta_stream(
 
 async def _flush_streaming_reasoning(
     renderer: Any,
-    plane: StreamingPlane,
     text: str,
 ) -> None:
-    del plane
     append = getattr(renderer, "aappend_reasoning", None)
     if append is not None:
         await append(text)
@@ -405,11 +403,11 @@ async def _append_reasoning_delta(
     turn_id: str | None,
 ) -> None:
     if plane is None:
-        await _flush_streaming_reasoning(renderer, plane, delta)
+        await _flush_streaming_reasoning(renderer, delta)
         return
     flush = plane.append(delta)
     if flush is not None:
-        await _flush_streaming_reasoning(renderer, plane, flush.text)
+        await _flush_streaming_reasoning(renderer, flush.text)
 
 
 async def _finish_reasoning_stream(
@@ -424,7 +422,7 @@ async def _finish_reasoning_stream(
         return
     flush = plane.finish()
     if flush is not None:
-        await _flush_streaming_reasoning(renderer, plane, flush.text)
+        await _flush_streaming_reasoning(renderer, flush.text)
 
 
 def _async_renderer_method(method: object) -> Callable[..., Awaitable[None]]:
