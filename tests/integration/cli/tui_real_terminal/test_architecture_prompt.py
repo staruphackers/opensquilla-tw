@@ -13,7 +13,7 @@ from tui_real_terminal.scenarios import TuiScenario, scenario_by_id
 
 pytestmark = pytest.mark.tui_real_terminal
 
-ARCHITECTURE_PROMPT = "帮我分析这个代码长的架构 /Users/cwan0785/opensquilla"
+ARCHITECTURE_PROMPT = "帮我分析这个代码长的架构 /workspace/opensquilla"
 ARCHITECTURE_REPLAY_FIXTURE = (
     Path(__file__).resolve().parents[3]
     / "fixtures"

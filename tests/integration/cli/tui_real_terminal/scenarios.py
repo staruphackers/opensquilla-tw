@@ -180,7 +180,7 @@ def all_scenarios() -> tuple[TuiScenario, ...]:
                 ScenarioStep(
                     "send-message",
                     "send_text",
-                    "帮我分析这个代码长的架构 /Users/cwan0785/opensquilla",
+                    "帮我分析这个代码长的架构 /workspace/opensquilla",
                     "after-input",
                 ),
                 ScenarioStep(
@@ -338,7 +338,7 @@ def all_scenarios() -> tuple[TuiScenario, ...]:
                 ScenarioStep(
                     "send-message",
                     "send_text",
-                    "帮我分析这个代码长的架构 /Users/cwan0785/opensquilla",
+                    "帮我分析这个代码长的架构 /workspace/opensquilla",
                     "after-input",
                 ),
                 ScenarioStep(
