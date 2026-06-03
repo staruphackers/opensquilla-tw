@@ -9,7 +9,7 @@ import signal
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -156,7 +156,7 @@ class OpenTuiBridge:
         script = self.paths.main_script
         try:
             mtime = script.stat().st_mtime
-            mtime_iso = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+            mtime_iso = datetime.fromtimestamp(mtime, tz=UTC).isoformat()
         except OSError:
             mtime_iso = "unknown"
         pid = self._process.pid if self._process is not None else None
