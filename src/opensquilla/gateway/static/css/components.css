@@ -140,10 +140,27 @@
   font-size: var(--fs-xs);
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  cursor: pointer;
   user-select: none;
 }
 .data-table th:hover { color: var(--text); }
+.table-sort-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+.table-sort-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 .data-table tbody tr:nth-child(even) td { background: rgba(255,255,255,0.015); }
 [data-theme="light"] .data-table tbody tr:nth-child(even) td { background: rgba(0,0,0,0.02); }
 .data-table tbody tr:hover td { background: var(--bg-hover); }
@@ -221,24 +238,59 @@
   height: 6px;
   border-radius: 50%;
   background: currentColor;
+  box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 22%, transparent);
 }
 .conn-pill.ok {
   color: var(--ok);
   border-color: color-mix(in srgb, var(--ok) 35%, var(--border));
   background: color-mix(in srgb, var(--ok) 10%, var(--bg-elevated));
 }
+/* Heartbeat halo on connected — barely there, just enough to read "alive".  */
+.conn-pill.ok::before {
+  animation: conn-pill-heartbeat 2.4s ease-in-out infinite;
+}
+@keyframes conn-pill-heartbeat {
+  0%, 100% { box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 22%, transparent); }
+  50%      { box-shadow: 0 0 0 5px color-mix(in srgb, currentColor 6%, transparent); }
+}
 .conn-pill.warn {
   color: var(--warn);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--border));
   background: color-mix(in srgb, var(--warn) 10%, var(--bg-elevated));
+}
+/* Reconnecting (warn) pulses faster — signals "actively trying". */
+.conn-pill.warn::before {
+  animation: conn-pill-reconnect 0.9s ease-in-out infinite;
+}
+@keyframes conn-pill-reconnect {
+  0%, 100% { transform: scale(1);   opacity: 1; }
+  50%      { transform: scale(1.4); opacity: 0.55; }
 }
 .conn-pill.err {
   color: var(--danger);
   border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
   background: color-mix(in srgb, var(--danger) 10%, var(--bg-elevated));
 }
+@media (prefers-reduced-motion: reduce) {
+  .conn-pill::before { animation: none !important; }
+}
 
-/* Tier badge — compact monospaced t0/t1/t2/t3 indicator for router decisions. */
+/* Connected state: demote pill to a quiet dot when healthy */
+.conn-pill.ok.compact {
+  padding: 3px;
+  width: 12px;
+  height: 12px;
+  font-size: 0;
+  gap: 0;
+  border-radius: 50%;
+  overflow: hidden;
+}
+.conn-pill.ok.compact::before {
+  margin: 0;
+  animation: conn-pill-heartbeat 2.4s ease-in-out infinite;
+}
+
+/* Tier badge — compact monospaced c0/c1/c2/c3 indicator for router decisions. */
 .tier {
   display: inline-flex;
   align-items: center;
@@ -253,9 +305,9 @@
   color: var(--accent);
   border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
 }
-.tier.t0 { background: color-mix(in srgb, var(--text-dim) 18%, transparent); color: var(--text-muted); border-color: var(--border); }
-.tier.t2 { background: color-mix(in srgb, var(--info) 14%, transparent); color: var(--info); border-color: color-mix(in srgb, var(--info) 30%, var(--border)); }
-.tier.t3 { background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn); border-color: color-mix(in srgb, var(--warn) 30%, var(--border)); }
+.tier.c0 { background: color-mix(in srgb, var(--text-dim) 18%, transparent); color: var(--text-muted); border-color: var(--border); }
+.tier.c2 { background: color-mix(in srgb, var(--info) 14%, transparent); color: var(--info); border-color: color-mix(in srgb, var(--info) 30%, var(--border)); }
+.tier.c3 { background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn); border-color: color-mix(in srgb, var(--warn) 30%, var(--border)); }
 
 /* Spinner — generic 18px loading indicator. */
 .spinner {
@@ -801,7 +853,7 @@
   padding: 4px 8px;
   border-radius: var(--radius-sm);
 }
-.drawer__close:hover { background: var(--bg-elev); color: var(--text); }
+.drawer__close:hover { background: var(--bg-elevated); color: var(--text); }
 
 .drawer__body {
   flex: 1 1 auto;
@@ -844,7 +896,7 @@
 .ui-combo__input:focus {
   outline: none;
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(240, 160, 48, 0.18);
+  box-shadow: 0 0 0 3px var(--focus-ring);
 }
 .ui-combo__list {
   position: absolute;
@@ -874,7 +926,7 @@
 }
 .ui-combo__option:hover,
 .ui-combo__option.is-active {
-  background: var(--bg-elev);
+  background: var(--bg-elevated);
 }
 .ui-combo__option.is-disabled {
   opacity: 0.4;
@@ -899,7 +951,7 @@
 }
 .ui-combo__option--create:hover,
 .ui-combo__option--create.is-active {
-  background: rgba(240, 160, 48, 0.12);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 .ui-combo__empty {
   padding: 8px 10px;

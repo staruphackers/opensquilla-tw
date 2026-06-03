@@ -56,6 +56,9 @@ def transcript_entries_to_chat_messages(
             "provenance_source_session_key": getattr(entry, "provenance_source_session_key", None),
             "provenance_source_tool": getattr(entry, "provenance_source_tool", None),
         }
+        transcript_id = getattr(entry, "id", None)
+        if transcript_id is not None:
+            msg["transcript_id"] = transcript_id
         if attachments:
             msg["attachments"] = attachments
         if artifacts:

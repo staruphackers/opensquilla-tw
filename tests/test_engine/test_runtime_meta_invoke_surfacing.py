@@ -12,7 +12,11 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 
+import pytest
+
+from opensquilla.engine.pipeline import TurnContext
 from opensquilla.engine.runtime import TurnRunner
+from opensquilla.provider import ToolDefinition, ToolInputSchema
 from opensquilla.skills.loader import SkillLoader
 from opensquilla.tools.registry import get_default_registry
 from opensquilla.tools.types import ToolContext
@@ -120,6 +124,30 @@ def test_build_tools_does_not_surface_meta_invoke_for_disabled_meta_skill(
     assert ctx.surfaced_tools is None or "meta_invoke" not in ctx.surfaced_tools
 
 
+def test_build_tools_does_not_surface_meta_invoke_when_meta_skill_disabled_by_config(
+    tmp_path: Path,
+) -> None:
+    from types import SimpleNamespace
+
+    registry = get_default_registry()
+    loader = _make_loader_with_meta(tmp_path)
+    runner = TurnRunner(
+        provider_selector=None,
+        config=SimpleNamespace(meta_skill=SimpleNamespace(enabled=False)),
+    )
+    runner._tool_registry = registry
+    runner._skill_loader = loader
+
+    ctx = ToolContext(is_owner=True, workspace_dir=str(tmp_path))
+    metadata: dict[str, object] = {}
+    tool_defs, _handler = runner._build_tools(ctx, metadata=metadata)
+    names = {getattr(td, "name", "") for td in tool_defs}
+
+    assert "meta_invoke" not in names
+    assert ctx.surfaced_tools is None or "meta_invoke" not in ctx.surfaced_tools
+    assert metadata["meta_skill_enabled"] is False
+
+
 def test_build_tools_preserves_existing_surfaced_tools(tmp_path: Path) -> None:
     """If the caller pre-populates ctx.surfaced_tools (e.g. for a custom
     per-request tool surface), _build_tools must add to it, not overwrite."""
@@ -153,3 +181,117 @@ def test_runtime_does_not_hard_auto_invoke_meta_match() -> None:
 
     assert "meta_resolution.auto_invoke" not in source
     assert "auto_meta_invoke_" not in source
+
+
+@pytest.mark.asyncio
+async def test_runtime_pipeline_runs_meta_resolution_before_skill_filter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def noop_router(ctx: TurnContext) -> TurnContext:
+        return ctx
+
+    noop_router.__name__ = "apply_squilla_router"
+    monkeypatch.setattr("opensquilla.engine.steps.apply_squilla_router", noop_router)
+
+    loader = _make_loader_with_meta(tmp_path)
+    runner = TurnRunner(provider_selector=None, config=None)
+    runner._skill_loader = loader
+
+    turn, _provider = await runner._run_pipeline(
+        "please run tiny-meta-trigger for this request",
+        "agent:main:test-meta-resolution",
+        None,
+        None,
+        [
+            ToolDefinition(
+                name="meta_invoke",
+                description="invoke meta skills",
+                input_schema=ToolInputSchema(),
+            ),
+            ToolDefinition(
+                name="web_search",
+                description="search the web",
+                input_schema=ToolInputSchema(),
+            ),
+        ],
+        "base prompt",
+        [],
+    )
+
+    step_names = [record.step_name for record in turn.metadata["pipeline_steps"]]
+    assert step_names.index("meta_resolution") < step_names.index("filter_skills")
+    assert turn.metadata["meta_match"].plan.name == "meta-tiny"
+    assert "meta_invoke(name=\"meta-tiny\")" in str(turn.system_prompt)
+    assert "meta-tiny" in str(turn.system_prompt)
+
+    # Deterministic trigger matches force the first tool call to meta_invoke so
+    # cheaper routed models do not bypass the meta DAG by calling ordinary tools.
+    assert {tool.name for tool in turn.tool_defs} == {"meta_invoke", "web_search"}
+    assert "meta_match_tool_surface_restricted" not in turn.metadata
+    assert turn.metadata["meta_match_tool_choice"] == {
+        "type": "function",
+        "function": {"name": "meta_invoke"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_pipeline_pins_meta_skill_when_skill_filter_enabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the retriever is on, ``<available_skills>`` may drop the
+    meta-skill description out of the prompt. The matched meta-skill is
+    pinned, and deterministic trigger matches force meta_invoke as the first
+    tool call while leaving the broader tool surface intact for later turns.
+    """
+    from types import SimpleNamespace
+
+    async def noop_router(ctx: TurnContext) -> TurnContext:
+        return ctx
+
+    noop_router.__name__ = "apply_squilla_router"
+    monkeypatch.setattr("opensquilla.engine.steps.apply_squilla_router", noop_router)
+
+    loader = _make_loader_with_meta(tmp_path)
+    skills_cfg = SimpleNamespace(
+        filter_enabled=True,
+        filter_top_k=5,
+        max_skills_prompt_chars=8000,
+        injection_mode="system",
+    )
+    runner = TurnRunner(
+        provider_selector=None,
+        config=SimpleNamespace(skills=skills_cfg),
+    )
+    runner._skill_loader = loader
+
+    turn, _provider = await runner._run_pipeline(
+        "please run tiny-meta-trigger for this request",
+        "agent:main:test-meta-restrict",
+        None,
+        None,
+        [
+            ToolDefinition(
+                name="meta_invoke",
+                description="invoke meta skills",
+                input_schema=ToolInputSchema(),
+            ),
+            ToolDefinition(
+                name="web_search",
+                description="search the web",
+                input_schema=ToolInputSchema(),
+            ),
+        ],
+        "base prompt",
+        [],
+    )
+
+    assert turn.metadata["meta_match"].plan.name == "meta-tiny"
+    assert {tool.name for tool in turn.tool_defs} == {"meta_invoke", "web_search"}
+    assert "meta_match_tool_surface_restricted" not in turn.metadata
+    assert turn.metadata["meta_match_tool_choice"] == {
+        "type": "function",
+        "function": {"name": "meta_invoke"},
+    }
+    assert "meta-tiny" in str(turn.system_prompt)

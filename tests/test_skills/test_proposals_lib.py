@@ -119,6 +119,232 @@ def test_show_returns_payload(tmp_path: Path) -> None:
     assert out["gates"]["auto_enable_eligible"] is True
 
 
+def test_full_gated_requires_runtime_e2e_result(tmp_path: Path) -> None:
+    home = tmp_path / ".opensquilla"
+    result = proposals_lib.write_proposal(
+        home,
+        SAMPLE_SKILL_MD,
+        GATES_PASSING,
+        SMOKE_PASSING,
+        creator_mode="FULL_GATED",
+        acceptance_result={
+            "raw": (
+                "WINNER: orchestrated\n"
+                "REASONS:\n"
+                "- candidate has stricter gates\n"
+                "REGRESSIONS:\n"
+                "- none\n"
+                "REQUIRED_IMPROVEMENTS:\n"
+                "- none\n"
+            ),
+        },
+    )
+
+    assert result["status"] == "ok"
+    assert result["auto_enable_eligible"] is False
+    shown = proposals_lib.show_proposal(home, result["proposal_id"])
+    assert shown["gates"]["runtime_e2e"]["required"] is True
+    assert shown["gates"]["runtime_e2e"]["passed"] is False
+    assert shown["gates"]["runtime_e2e"]["reason"] == "missing_runtime_e2e_result"
+
+    accepted = proposals_lib.accept_proposal(home, result["proposal_id"])
+    assert accepted["status"] == "refused"
+    assert "gates not all passed" in accepted["reason"]
+
+
+def test_full_gated_runtime_e2e_blocks_baseline_winner(tmp_path: Path) -> None:
+    home = tmp_path / ".opensquilla"
+    result = proposals_lib.write_proposal(
+        home,
+        SAMPLE_SKILL_MD,
+        GATES_PASSING,
+        SMOKE_PASSING,
+        creator_mode="FULL_GATED",
+        acceptance_result={
+            "raw": (
+                "WINNER: orchestrated\n"
+                "REASONS:\n"
+                "- candidate has stricter gates\n"
+                "REGRESSIONS:\n"
+                "- none\n"
+                "REQUIRED_IMPROVEMENTS:\n"
+                "- none\n"
+            ),
+        },
+        runtime_e2e_result={
+            "status": "ok",
+            "passed": False,
+            "winner": "baseline",
+            "cases": [
+                {
+                    "prompt": "please use synth test trigger",
+                    "winner": "baseline",
+                    "regression": "meta answer missed the requested summary",
+                },
+            ],
+        },
+    )
+
+    assert result["auto_enable_eligible"] is False
+    shown = proposals_lib.show_proposal(home, result["proposal_id"])
+    assert shown["gates"]["runtime_e2e"]["passed"] is False
+    assert shown["gates"]["runtime_e2e"]["winner"] == "baseline"
+
+
+def test_full_gated_acceptance_blocks_single_model_winner_even_when_runtime_passes(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / ".opensquilla"
+    result = proposals_lib.write_proposal(
+        home,
+        SAMPLE_SKILL_MD,
+        GATES_PASSING,
+        SMOKE_PASSING,
+        creator_mode="FULL_GATED",
+        acceptance_result={
+            "raw": (
+                "WINNER: single-model\n"
+                "REASONS:\n"
+                "- baseline SKILL.md reads cleaner\n"
+                "REGRESSIONS:\n"
+                "- none\n"
+                "REQUIRED_IMPROVEMENTS:\n"
+                "- none\n"
+            ),
+        },
+        runtime_e2e_result={
+            "status": "ok",
+            "passed": True,
+            "winner": "meta",
+            "cases": [
+                {
+                    "prompt": "please use synth test trigger",
+                    "winner": "meta",
+                    "regression": "",
+                },
+            ],
+        },
+        collision_result="PASS: no trigger collision",
+        risk_result="RISK: low\nCAPABILITIES:\n- read-only",
+    )
+
+    assert result["auto_enable_eligible"] is False
+    shown = proposals_lib.show_proposal(home, result["proposal_id"])
+    assert shown["gates"]["acceptance_compare"]["passed"] is False
+    assert shown["gates"]["acceptance_compare"]["winner"] == "single-model"
+    assert shown["gates"]["runtime_e2e"]["passed"] is True
+
+
+def test_full_gated_acceptance_blocks_low_weighted_quality_score(tmp_path: Path) -> None:
+    home = tmp_path / ".opensquilla"
+    result = proposals_lib.write_proposal(
+        home,
+        SAMPLE_SKILL_MD,
+        GATES_PASSING,
+        SMOKE_PASSING,
+        creator_mode="FULL_GATED",
+        acceptance_result={
+            "raw": (
+                "WINNER: orchestrated\n"
+                "QUALITY_SCORE: 0.71\n"
+                "REASONS:\n"
+                "- candidate works but lacks output contracts\n"
+                "REGRESSIONS:\n"
+                "- weaker final artifact quality\n"
+                "REQUIRED_IMPROVEMENTS:\n"
+                "- none\n"
+            ),
+        },
+        runtime_e2e_result={
+            "status": "ok",
+            "passed": True,
+            "winner": "meta",
+            "cases": [{"winner": "meta", "regression": ""}],
+        },
+    )
+
+    assert result["auto_enable_eligible"] is False
+    shown = proposals_lib.show_proposal(home, result["proposal_id"])
+    assert shown["gates"]["acceptance_compare"]["passed"] is False
+    assert shown["gates"]["acceptance_compare"]["quality_score"] == 0.71
+    assert "quality score below 0.80" in shown["gates"]["acceptance_compare"]["diagnostics"]
+
+
+def test_full_gated_blocks_collision_and_high_risk_results(tmp_path: Path) -> None:
+    home = tmp_path / ".opensquilla"
+    result = proposals_lib.write_proposal(
+        home,
+        SAMPLE_SKILL_MD,
+        GATES_PASSING,
+        SMOKE_PASSING,
+        creator_mode="FULL_GATED",
+        acceptance_result={
+            "raw": (
+                "WINNER: orchestrated\n"
+                "QUALITY_SCORE: 0.93\n"
+                "REQUIRED_IMPROVEMENTS:\n"
+                "- none\n"
+            ),
+        },
+        runtime_e2e_result={
+            "status": "ok",
+            "passed": True,
+            "winner": "meta",
+            "cases": [{"winner": "meta", "regression": ""}],
+        },
+        collision_result="REVISE_NEEDED: trigger overlaps with summarize",
+        risk_result="RISK: high\nCAPABILITIES:\n- shell",
+    )
+
+    assert result["auto_enable_eligible"] is False
+    shown = proposals_lib.show_proposal(home, result["proposal_id"])
+    assert shown["gates"]["collision_check"]["passed"] is False
+    assert shown["gates"]["risk_classify"]["passed"] is False
+
+
+def test_full_gated_runtime_e2e_allows_meta_winner_when_acceptance_passes(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / ".opensquilla"
+    result = proposals_lib.write_proposal(
+        home,
+        SAMPLE_SKILL_MD,
+        GATES_PASSING,
+        SMOKE_PASSING,
+        creator_mode="FULL_GATED",
+        acceptance_result={
+            "raw": (
+                "WINNER: orchestrated\n"
+                "REASONS:\n"
+                "- candidate has stricter gates\n"
+                "REGRESSIONS:\n"
+                "- none\n"
+                "REQUIRED_IMPROVEMENTS:\n"
+                "- none\n"
+            ),
+        },
+        runtime_e2e_result={
+            "status": "ok",
+            "passed": True,
+            "winner": "meta",
+            "cases": [
+                {
+                    "prompt": "please use synth test trigger",
+                    "winner": "meta",
+                    "regression": "",
+                },
+            ],
+        },
+        collision_result="PASS: no trigger collision",
+        risk_result="RISK: low\nCAPABILITIES:\n- read-only",
+    )
+
+    assert result["auto_enable_eligible"] is True
+    shown = proposals_lib.show_proposal(home, result["proposal_id"])
+    assert shown["gates"]["acceptance_compare"]["passed"] is True
+    assert shown["gates"]["runtime_e2e"]["passed"] is True
+
+
 def test_show_rejects_invalid_id(tmp_path: Path) -> None:
     home = tmp_path / ".opensquilla"
     out = proposals_lib.show_proposal(home, "../etc")
@@ -281,3 +507,64 @@ def test_write_atomic_under_concurrent_writers(tmp_path: Path) -> None:
         ids.append(out["proposal_id"])
     assert len(set(ids)) == 5  # all distinct
     assert proposals_lib.pending_count(home)["count"] == 5
+
+
+# ── D1: degraded smoke must not yield auto_enable_eligible ──
+
+SMOKE_DEGRADED = {
+    "G3": {"passed": True, "degraded": True},
+    "G4": {"passed": True, "degraded": True},
+    "degraded": True,
+}
+
+
+def test_degraded_smoke_blocks_auto_enable_eligible(tmp_path: Path) -> None:
+    """D1: when the smoke runner has no fixture-generator LLM, it falls
+    back to a deterministic stub and flags the result ``degraded: True``.
+    G3/G4 still report ``passed: True`` because the deterministic
+    fixtures self-match by construction, but the candidate has not
+    been validated against a real model. The eligibility evaluator
+    must observe ``degraded`` and refuse to auto-enable so an
+    unattended creator pipeline cannot promote a never-validated
+    proposal.
+
+    The proposal itself still lands (``status == "ok"``) so an operator
+    can inspect it; only ``auto_enable_eligible`` flips to False."""
+    home = tmp_path / ".opensquilla"
+    result = proposals_lib.write_proposal(
+        home,
+        SAMPLE_SKILL_MD,
+        GATES_PASSING,
+        SMOKE_DEGRADED,
+    )
+    assert result["status"] == "ok"
+    assert result["auto_enable_eligible"] is False
+    shown = proposals_lib.show_proposal(home, result["proposal_id"])
+    assert shown["gates"]["auto_enable_eligible"] is False
+    # Cross-check: the smoke record on disk retains ``degraded`` so an
+    # auditor can grep for it without re-deriving from the eligibility
+    # flag.
+    assert shown["gates"]["smoke"].get("degraded") is True
+
+
+def test_non_degraded_smoke_still_yields_auto_enable_eligible(
+    tmp_path: Path,
+) -> None:
+    """D1 negative control: a smoke result that does NOT carry a
+    ``degraded`` flag (or carries it as False) must still be eligible
+    when all other gates pass. Without this regression the D1 change
+    could silently mark every proposal ineligible."""
+    home = tmp_path / ".opensquilla"
+    smoke_clean = {
+        "G3": {"passed": True, "degraded": False},
+        "G4": {"passed": True, "degraded": False},
+        "degraded": False,
+    }
+    result = proposals_lib.write_proposal(
+        home,
+        SAMPLE_SKILL_MD,
+        GATES_PASSING,
+        smoke_clean,
+    )
+    assert result["status"] == "ok"
+    assert result["auto_enable_eligible"] is True

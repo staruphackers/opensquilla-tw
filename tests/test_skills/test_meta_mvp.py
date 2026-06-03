@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from opensquilla.engine.steps.meta_resolution import meta_resolution
+from opensquilla.engine.steps.meta_resolution import _build_hint, meta_resolution
 from opensquilla.engine.types import (
     AgentConfig,
     AgentEvent,
@@ -17,6 +17,7 @@ from opensquilla.engine.types import (
     TextDeltaEvent,
 )
 from opensquilla.skills.loader import SkillLoader
+from opensquilla.skills.meta.inputs import make_meta_inputs
 from opensquilla.skills.meta.orchestrator import (
     MetaOrchestrator,
     format_step_prompt,
@@ -137,11 +138,130 @@ def test_render_with_args_xml_escape_and_truncate() -> None:
     assert rendered["q"] == "Hello &lt;world"
 
 
+def test_render_with_args_extracts_user_mentioned_spreadsheet_path() -> None:
+    rendered = render_with_args(
+        {"path": "{{ inputs.user_message | extract_path('xlsx') }}"},
+        inputs={
+            "user_message": (
+                "材料在这里："
+                "/tmp/opensquilla-meta-skill-pr/tests/fixtures/watchlist.xlsx，"
+                "请做观察清单。"
+            ),
+        },
+        outputs={},
+    )
+
+    assert (
+        rendered["path"]
+        == "/tmp/opensquilla-meta-skill-pr/tests/fixtures/watchlist.xlsx"
+    )
+
+
+def test_meta_activation_hint_uses_meta_skill_wording_without_preamble() -> None:
+    hint = _build_hint("meta-x", "travel plan", activation_mode="recommend")
+
+    assert 'call `meta_invoke(name="meta-x")`' in hint
+    assert "Do not emit explanatory text before" in hint
+    assert "meta-skill" in hint
+    assert "workflow" not in hint.lower()
+
+
 def test_render_with_args_unknown_variable_raises() -> None:
     with pytest.raises(ValueError, match="undefined template variable"):
         render_with_args(
             {"q": "{{ outputs.missing }}"},
             inputs={},
+            outputs={},
+        )
+
+
+def test_render_with_args_blocks_class_introspection_escape() -> None:
+    """A1: the Jinja environment must block ``__class__`` attribute access so
+    a SKILL.md author cannot escape via Python's MRO chain
+    (``{{ inputs.__class__.__mro__[1].__subclasses__() }}``)."""
+    with pytest.raises(ValueError, match="security violation"):
+        render_with_args(
+            {"hack": "{{ inputs.__class__ }}"},
+            inputs={"x": 1},
+            outputs={},
+        )
+
+
+def test_render_with_args_blocks_subclasses_walk() -> None:
+    """A1: full attribute chain that previously let a template enumerate
+    every loaded Python subclass must raise SecurityError (wrapped as
+    ValueError for the orchestrator's step-failure path)."""
+    with pytest.raises(ValueError, match="security violation"):
+        render_with_args(
+            {"hack": "{{ inputs.__class__.__mro__[1].__subclasses__() }}"},
+            inputs={"x": 1},
+            outputs={},
+        )
+
+
+def test_render_with_args_preserves_nested_get_chain() -> None:
+    """A1 regression guard: the sandbox upgrade must preserve the
+    ``inputs.get('collected', {}).get('field', default)`` pattern that
+    bundled creator skills (meta-skill-creator, meta-paper-write, etc.)
+    rely on. Without this guard a sandbox-strictness change could break
+    every bundled meta skill silently."""
+    rendered = render_with_args(
+        {"out": "{{ inputs.get('collected', {}).get('field', 'fallback') }}"},
+        inputs={"collected": {"field": "got it"}},
+        outputs={},
+    )
+    assert rendered == {"out": "got it"}
+
+
+def test_render_with_args_preserves_subscript_and_filter_pipeline() -> None:
+    """A1 regression guard: subscript access, the ``tojson`` filter, and
+    the ``length`` filter must all survive the sandbox upgrade. These are
+    the load-bearing primitives for the bundled meta-skill-creator DAG.
+
+    NOTE: the third pipeline uses ``outputs.numbers`` rather than ``items``
+    on purpose — ``obj.items`` resolves to the bound dict method via
+    Jinja's getattr-first attribute protocol, which would fail under any
+    Jinja environment (sandboxed or not). The pipeline shape we care
+    about is "dotted access into a stored list, then ``| length``"."""
+    rendered = render_with_args(
+        {
+            "subscript": "{{ inputs['user_message'] | truncate(8) }}",
+            "tojson": "{{ outputs.payload | tojson }}",
+            "length": "{{ outputs.numbers | length }}",
+        },
+        inputs={"user_message": "hello-world-meta-skill"},
+        outputs={"payload": {"k": "v"}, "numbers": [1, 2, 3]},
+    )
+    assert rendered["subscript"] == "hello-wo"
+    assert rendered["tojson"] == '{"k": "v"}'
+    assert rendered["length"] == "3"
+
+
+def test_resolve_route_blocks_class_introspection_escape() -> None:
+    """A1: ``route.when`` expressions go through ``compile_expression`` on
+    the same sandboxed env; introspection escapes must surface as
+    ValueError so the orchestrator treats them as a step failure rather
+    than a silent allow."""
+    from opensquilla.skills.meta.templating import resolve_route
+    from opensquilla.skills.meta.types import RouteCase
+
+    with pytest.raises(ValueError, match="security violation"):
+        resolve_route(
+            (RouteCase(when="inputs.__class__.__name__ == 'dict'", to="x"),),
+            inputs={"x": 1},
+            outputs={},
+        )
+
+
+def test_evaluate_when_blocks_class_introspection_escape() -> None:
+    """A1: step-level ``when`` expressions follow the same contract as
+    ``route.when`` — sandbox violations must raise ValueError."""
+    from opensquilla.skills.meta.templating import evaluate_when
+
+    with pytest.raises(ValueError, match="security violation"):
+        evaluate_when(
+            "inputs.__class__.__name__ == 'dict'",
+            inputs={"x": 1},
             outputs={},
         )
 
@@ -161,6 +281,21 @@ def test_format_step_prompt_includes_all_args() -> None:
     assert "summarize" in out
     assert "text: hello" in out
     assert "max_words: 100" in out
+
+
+def test_make_meta_inputs_marks_plain_english_requests_as_english_only() -> None:
+    inputs = make_meta_inputs(user_message="Please build a launch brief.")
+
+    assert inputs["user_language"] == "en"
+    assert "English only" in inputs["language_instruction"]
+    assert "Do not copy Chinese or bilingual headings" in inputs["language_instruction"]
+
+
+def test_make_meta_inputs_marks_chinese_requests_as_simplified_chinese() -> None:
+    inputs = make_meta_inputs(user_message="帮我做一个发布简报")
+
+    assert inputs["user_language"] == "zh"
+    assert "Simplified Chinese" in inputs["language_instruction"]
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +334,136 @@ async def test_meta_resolution_matches_trigger() -> None:
     match = out.metadata["meta_match"]
     assert match.plan.name == "meta-x"
     assert match.inputs["user_message"] == "please make me a PDF briefing on rust"
+    assert out.metadata["meta_match_tool_choice"] == {
+        "type": "function",
+        "function": {"name": "meta_invoke"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_meta_resolution_ignores_trigger_inside_raw_page_dump() -> None:
+    spec = _make_meta_spec(
+        composition={"steps": [{"id": "a", "skill": "summarize"}]},
+        triggers=["家庭日程"],
+        priority=10,
+    )
+    loader = _FakeLoader([spec])
+    semantic_text = "Please process the attached WebChat page dump."
+    ctx = SimpleNamespace(
+        message=(
+            "WebChat page dump: navigation, ads, contacts, and a copied section "
+            "mentioning 家庭日程 inside the attached material."
+        ),
+        raw_message=semantic_text,
+        semantic_message=semantic_text,
+        metadata={"skill_loader": loader},
+    )
+
+    out = await meta_resolution(ctx)  # type: ignore[arg-type]
+
+    assert "meta_match" not in out.metadata
+    assert "meta_skill_match" not in out.metadata
+
+
+@pytest.mark.asyncio
+async def test_meta_resolution_semantic_fallback_matches_without_trigger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib
+    meta_resolution_module = importlib.import_module(
+        "opensquilla.engine.steps.meta_resolution",
+    )
+
+    spec = _make_meta_spec(
+        name="meta-pdf-intelligence",
+        composition={"steps": [{"id": "a", "skill": "summarize"}]},
+        triggers=["PDF analysis"],
+        priority=55,
+    )
+    loader = _FakeLoader([spec])
+
+    class FakeRetriever:
+        def __init__(self, **kwargs: Any) -> None:
+            assert kwargs["strategy"] == "hybrid"
+
+        def retrieve(self, skills: list[SkillSpec], query: str, top_k: int = 1) -> list[SkillSpec]:
+            assert query == "帮我看一下这个文档，重点讲结论和风险"
+            assert top_k == 1
+            return [skills[0]]
+
+    monkeypatch.setattr(meta_resolution_module, "HybridRetriever", FakeRetriever)
+
+    ctx = SimpleNamespace(
+        message="帮我看一下这个文档，重点讲结论和风险",
+        semantic_message="帮我看一下这个文档，重点讲结论和风险",
+        session_key="semantic-session",
+        metadata={"skill_loader": loader},
+        system_prompt=("base prompt", ""),
+        config=SimpleNamespace(skills=SimpleNamespace(filter_strategy="lexical")),
+    )
+
+    out = await meta_resolution(ctx)  # type: ignore[arg-type]
+
+    assert out.metadata["meta_match"].plan.name == "meta-pdf-intelligence"
+    assert out.metadata["meta_match_source"] == "semantic"
+    assert out.metadata["meta_match_trigger"] == "semantic"
+    assert out.metadata["meta_activation_mode"] == "hint"
+    assert "meta_match_tool_choice" not in out.metadata
+    hint = str(out.system_prompt)
+    assert "Activation mode: hint" in hint
+    assert 'meta_invoke(name="meta-pdf-intelligence")' in hint
+    assert "Do not answer directly" in hint
+    assert "Do not call ordinary tools before `meta_invoke`" in hint
+
+
+@pytest.mark.asyncio
+async def test_meta_resolution_soft_hint_directs_meta_invoke_not_skill_view() -> None:
+    spec = _make_meta_spec(
+        composition={"steps": [{"id": "a", "skill": "summarize"}]},
+        triggers=["travel plan"],
+        priority=10,
+    )
+    loader = _FakeLoader([spec])
+    ctx = SimpleNamespace(
+        message="please make a travel plan for Dalian",
+        semantic_message="please make a travel plan for Dalian",
+        metadata={"skill_loader": loader},
+        system_prompt=("base prompt", ""),
+    )
+
+    out = await meta_resolution(ctx)  # type: ignore[arg-type]
+
+    hint = out.system_prompt[1]
+    assert out.metadata["meta_activation_mode"] == "recommend"
+    assert out.metadata["meta_match_tool_choice"] == {
+        "type": "function",
+        "function": {"name": "meta_invoke"},
+    }
+    assert "Activation mode: recommend" in hint
+    assert 'call `meta_invoke(name="meta-x")`' in hint
+    assert "Do not call `skill_view` for this meta-skill" in hint
+
+
+@pytest.mark.asyncio
+async def test_meta_resolution_noops_when_meta_skill_config_disabled() -> None:
+    spec = _make_meta_spec(
+        composition={"steps": [{"id": "a", "skill": "summarize"}]},
+        triggers=["pdf briefing"],
+        priority=10,
+    )
+    loader = _FakeLoader([spec])
+    ctx = SimpleNamespace(
+        message="please make me a PDF briefing on rust",
+        semantic_message="please make me a PDF briefing on rust",
+        config=SimpleNamespace(meta_skill=SimpleNamespace(enabled=False)),
+        metadata={"skill_loader": loader},
+        system_prompt="base",
+    )
+
+    out = await meta_resolution(ctx)  # type: ignore[arg-type]
+
+    assert "meta_match" not in out.metadata
+    assert out.system_prompt == "base"
 
 
 @pytest.mark.asyncio
@@ -226,6 +491,58 @@ async def test_meta_resolution_highest_priority_wins() -> None:
 
 
 @pytest.mark.asyncio
+async def test_meta_resolution_ignores_triggers_inside_pasted_webchat_dump() -> None:
+    spec = _make_meta_spec(
+        name="meta-household-calendar-test",
+        composition={"steps": [{"id": "a", "skill": "summarize"}]},
+        triggers=["家庭日程"],
+        priority=56,
+    )
+    loader = _FakeLoader([spec])
+    dump_body = "\n".join(
+        [
+            "WebChat dump",
+            "assistant: 这里是旧页面里的 skill 列表",
+            "meta-household-calendar-test 家庭日程协调",
+            "meta-skill-creator",
+        ]
+        + [f"history line {i}" for i in range(20)]
+    )
+    ctx = SimpleNamespace(
+        message=f"请分析下面历史页面是否有误触发，不要运行任何技能。\n{dump_body}",
+        semantic_message=f"请分析下面历史页面是否有误触发，不要运行任何技能。\n{dump_body}",
+        system_prompt="base",
+        metadata={"skill_loader": loader},
+    )
+
+    out = await meta_resolution(ctx)  # type: ignore[arg-type]
+
+    assert "meta_match" not in out.metadata
+    assert out.system_prompt == "base"
+
+
+@pytest.mark.asyncio
+async def test_meta_resolution_still_matches_current_cjk_intent() -> None:
+    spec = _make_meta_spec(
+        name="meta-household-calendar-test",
+        composition={"steps": [{"id": "a", "skill": "summarize"}]},
+        triggers=["家庭日程"],
+        priority=56,
+    )
+    loader = _FakeLoader([spec])
+    ctx = SimpleNamespace(
+        message="帮我安排明天的家庭日程",
+        semantic_message="帮我安排明天的家庭日程",
+        system_prompt="base",
+        metadata={"skill_loader": loader},
+    )
+
+    out = await meta_resolution(ctx)  # type: ignore[arg-type]
+
+    assert out.metadata["meta_match"].plan.name == "meta-household-calendar-test"
+
+
+@pytest.mark.asyncio
 async def test_meta_resolution_promotes_meta_skill_creator_to_highest_text_tier() -> None:
     spec = _make_meta_spec(
         name="meta-skill-creator",
@@ -243,10 +560,10 @@ async def test_meta_resolution_promotes_meta_skill_creator_to_highest_text_tier(
         config=SimpleNamespace(
             squilla_router=SimpleNamespace(
                 tiers={
-                    "t0": {"model": "cheap-model"},
-                    "t1": {"model": "balanced-model"},
-                    "t2": {"model": "strong-model"},
-                    "t3": {"model": "frontier-model"},
+                    "c0": {"model": "cheap-model"},
+                    "c1": {"model": "balanced-model"},
+                    "c2": {"model": "strong-model"},
+                    "c3": {"model": "frontier-model"},
                     "image": {"model": "vision-model", "image_only": True},
                 },
             ),
@@ -261,13 +578,50 @@ async def test_meta_resolution_promotes_meta_skill_creator_to_highest_text_tier(
         "dynamic system prompt"
     )
     assert out.model == "frontier-model"
-    assert out.metadata["meta_required_tier"] == "t3"
+    assert out.metadata["meta_required_tier"] == "c3"
     assert out.metadata["meta_required_model"] == "frontier-model"
     assert out.metadata["meta_required_source"] == "meta-skill-creator"
-    assert out.metadata["routed_tier"] == "t3"
+    assert out.metadata["routed_tier"] == "c3"
     assert out.metadata["routed_model"] == "frontier-model"
     assert out.metadata["routing_source"] == "meta_skill_required_tier"
     assert out.metadata["routing_confidence"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_meta_resolution_does_not_promote_non_creator_meta_to_highest_text_tier() -> None:
+    spec = _make_meta_spec(
+        name="meta-pdf-intelligence",
+        composition={"steps": [{"id": "a", "skill": "summarize"}]},
+        triggers=["PDF intelligence"],
+        priority=55,
+    )
+    loader = _FakeLoader([spec])
+    ctx = SimpleNamespace(
+        message="Run this as a PDF intelligence task",
+        semantic_message="Run this as a PDF intelligence task",
+        model="router-default-model",
+        system_prompt=("base system prompt", ""),
+        metadata={"skill_loader": loader},
+        config=SimpleNamespace(
+            squilla_router=SimpleNamespace(
+                tiers={
+                    "c1": {"model": "cheap-model"},
+                    "c3": {"model": "frontier-model"},
+                    "vision": {"model": "vision-model", "image_only": True},
+                },
+            ),
+        ),
+    )
+
+    out = await meta_resolution(ctx)  # type: ignore[arg-type]
+
+    assert out.metadata["meta_match"].plan.name == "meta-pdf-intelligence"
+    assert out.model == "router-default-model"
+    assert "meta_required_tier" not in out.metadata
+    assert "meta_required_model" not in out.metadata
+    assert "meta_required_source" not in out.metadata
+    assert "routing_source" not in out.metadata
+    assert "routing_confidence" not in out.metadata
 
 
 @pytest.mark.asyncio
@@ -485,12 +839,28 @@ def test_bundled_sample_loads(tmp_path: Path) -> None:
     loader = SkillLoader(bundled_dir=bundled, snapshot_path=snapshot)
     loader.invalidate_cache()
     specs = {s.name: s for s in loader.load_all()}
-    meta = specs.get("meta-web-to-pdf-briefing")
+    meta = specs.get("meta-web-research-to-report")
     assert meta is not None
     assert meta.kind == "meta"
     plan = parse_meta_plan(meta)
     assert plan is not None
-    assert [s.id for s in plan.steps] == ["search", "digest", "render"]
+    assert [s.id for s in plan.steps] == [
+        "preferences",
+        "report_clarify",
+        "report_mode",
+        "source_seed",
+        "search",
+        "search_fallback",
+        "source_quality",
+        "research",
+        "outline",
+        "report_draft",
+        "source_to_claim",
+        "quality_gate",
+        "final_report",
+        "final_report_audit",
+        "export",
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -936,16 +1306,23 @@ async def test_orchestrator_skill_exec_invokes_subprocess(tmp_path: Path) -> Non
     skill_dir.mkdir()
     script = skill_dir / "echo.py"
     script.write_text(
-        "import json, sys\n"
-        "args = sys.argv[1:]\n"
-        "print(json.dumps({'argv': args, 'ok': True}))\n",
+        "import json\n"
+        "import sys\n"
+        "print(json.dumps({'argv': sys.argv[1:], 'ok': True}))\n",
+        encoding="utf-8",
     )
 
     fake_spec = _make_skill_spec("fake-echo", content="echo me")
     fake_spec.base_dir = str(skill_dir)
     fake_spec.entrypoint = {
-        "command": "python {baseDir}/echo.py",
-        "args": ["--query", "{{ inputs.user_message }}", "--n", "{{ with.n }}"],
+        "command": "python",
+        "args": [
+            "{baseDir}/echo.py",
+            "--query",
+            "{{ inputs.user_message }}",
+            "--n",
+            "{{ with.n }}",
+        ],
         "parse": "json",
         "timeout": 15,
     }
@@ -988,11 +1365,16 @@ async def test_orchestrator_skill_exec_propagates_nonzero_exit(tmp_path: Path) -
     skill_dir = tmp_path / "fail_skill"
     skill_dir.mkdir()
     script = skill_dir / "fail.py"
-    script.write_text("import sys; sys.stderr.write('boom\\n'); sys.exit(7)\n")
+    script.write_text(
+        "import sys\n"
+        "sys.stderr.write('boom\\n')\n"
+        "raise SystemExit(7)\n",
+        encoding="utf-8",
+    )
 
     fake_spec = _make_skill_spec("fail-skill", content="x")
     fake_spec.base_dir = str(skill_dir)
-    fake_spec.entrypoint = {"command": "python {baseDir}/fail.py", "args": []}
+    fake_spec.entrypoint = {"command": "python", "args": ["{baseDir}/fail.py"]}
 
     plan_spec = _make_meta_spec(
         composition={
@@ -1193,7 +1575,214 @@ async def test_orchestrator_llm_chat_uses_single_llm_call_when_wired() -> None:
 
     assert result.ok, result.error
     assert result.final_text == "compact report"
-    assert chat_calls == [("Write a compact report.", "Input: x")]
+    assert len(chat_calls) == 1
+    assert chat_calls[0][0].startswith("Write a compact report.")
+    assert "write final user-facing prose" in chat_calls[0][0]
+    assert "English only" in chat_calls[0][0]
+    assert chat_calls[0][1] == "Input: x"
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_llm_chat_includes_rendered_context_args() -> None:
+    spec = _make_meta_spec(
+        composition={
+            "steps": [
+                {
+                    "id": "diff",
+                    "kind": "llm_chat",
+                    "with": {"task": "Return a diff."},
+                },
+                {
+                    "id": "summarize",
+                    "kind": "llm_chat",
+                    "depends_on": ["diff"],
+                    "with": {
+                        "task": "Summarize the upstream evidence.",
+                        "upstream": "{{ outputs.diff | truncate(2000) }}",
+                        "prior_outputs": {"diff": "{{ outputs.diff }}"},
+                    },
+                },
+            ],
+        },
+        final_text_mode="step:summarize",
+    )
+    plan = parse_meta_plan(spec)
+    assert plan is not None
+
+    chat_calls: list[tuple[str, str]] = []
+
+    async def fake_chat(system_prompt: str, user_message: str) -> str:
+        chat_calls.append((system_prompt, user_message))
+        if len(chat_calls) == 1:
+            return "diff --git a/README.md"
+        return "summary"
+
+    async def explode_runner(_s: str, _u: str) -> AsyncIterator[AgentEvent]:
+        raise AssertionError("agent runner must not be called for llm_chat")
+        yield  # pragma: no cover
+
+    orch = MetaOrchestrator(
+        agent_runner=explode_runner,
+        skill_loader=_FakeLoader([]),
+        llm_chat=fake_chat,
+    )
+    result = await orch.run(MetaMatch(plan=plan, inputs={}))
+
+    assert result.ok, result.error
+    assert "Context:" in chat_calls[1][1]
+    assert "upstream:\ndiff --git a/README.md" in chat_calls[1][1]
+    assert '"diff": "diff --git a/README.md"' in chat_calls[1][1]
+
+
+@pytest.mark.asyncio
+async def test_meta_llm_chat_injects_english_language_guard_for_bilingual_templates() -> None:
+    spec = _make_meta_spec(
+        composition={
+            "steps": [
+                {
+                    "id": "final",
+                    "kind": "llm_chat",
+                    "with": {
+                        "system": "Write the final plan.",
+                        "task": (
+                            "Use these template headings if applicable: "
+                            "\"Top 3 / 前三优先级\", \"Data limits / 数据限制\".\n"
+                            "Request: {{ inputs.user_message }}"
+                        ),
+                    },
+                },
+            ],
+        },
+        final_text_mode="step:final",
+    )
+    plan = parse_meta_plan(spec)
+    assert plan is not None
+    chat_calls: list[tuple[str, str]] = []
+
+    async def fake_chat(system_prompt: str, user_message: str) -> str:
+        chat_calls.append((system_prompt, user_message))
+        return "## Top 3\n\nData limits: only pasted context was used."
+
+    async def explode_runner(_s: str, _u: str) -> AsyncIterator[AgentEvent]:
+        raise AssertionError("agent runner must not be called for llm_chat")
+        yield  # pragma: no cover
+
+    orch = MetaOrchestrator(
+        agent_runner=explode_runner,
+        skill_loader=_FakeLoader([]),
+        llm_chat=fake_chat,
+    )
+    result = await orch.run(
+        MetaMatch(
+            plan=plan,
+            inputs=make_meta_inputs(
+                user_message="Please make a daily brief for tomorrow.",
+            ),
+        ),
+    )
+
+    assert result.ok, result.error
+    assert "前" not in result.final_text
+    assert len(chat_calls) == 1
+    assert "English only" in chat_calls[0][0]
+    assert "Do not copy Chinese or bilingual headings" in chat_calls[0][0]
+    assert "Top 3 / 前三优先级" in chat_calls[0][1]
+
+
+@pytest.mark.asyncio
+async def test_meta_agent_step_injects_language_guard_into_subagent_prompt() -> None:
+    spec = _make_meta_spec(
+        composition={
+            "steps": [
+                {
+                    "id": "agent_step",
+                    "skill": "skill_a",
+                    "with": {
+                        "text": "Use heading \"风险 / Risk\" if applicable.",
+                    },
+                },
+            ],
+        },
+        final_text_mode="step:agent_step",
+    )
+    plan = parse_meta_plan(spec)
+    assert plan is not None
+    calls: list[tuple[str, str]] = []
+
+    async def stub_runner(system_prompt: str, user_message: str) -> AsyncIterator[AgentEvent]:
+        calls.append((system_prompt, user_message))
+        yield TextDeltaEvent(text="Risk\n- Review the calendar.")
+        yield DoneEvent(text="")
+
+    orch = MetaOrchestrator(
+        agent_runner=stub_runner,
+        skill_loader=_FakeLoader([_make_skill_spec("skill_a", content="Skill body")]),
+    )
+    result = await orch.run(
+        MetaMatch(
+            plan=plan,
+            inputs=make_meta_inputs(
+                user_message="Please coordinate a household plan for Friday.",
+            ),
+        ),
+    )
+
+    assert result.ok, result.error
+    assert result.final_text == "Risk\n- Review the calendar."
+    assert len(calls) == 1
+    assert "English only" in calls[0][0]
+    assert "English only" in calls[0][1]
+
+
+@pytest.mark.asyncio
+async def test_meta_orchestrator_repairs_chinese_leakage_in_english_final_text() -> None:
+    spec = _make_meta_spec(
+        composition={
+            "steps": [
+                {
+                    "id": "final",
+                    "kind": "llm_chat",
+                    "with": {
+                        "system": "Write a short answer.",
+                        "task": "Request: {{ inputs.user_message }}",
+                    },
+                },
+            ],
+        },
+        final_text_mode="step:final",
+    )
+    plan = parse_meta_plan(spec)
+    assert plan is not None
+    chat_calls: list[tuple[str, str]] = []
+
+    async def fake_chat(system_prompt: str, user_message: str) -> str:
+        chat_calls.append((system_prompt, user_message))
+        if "localization pass" in system_prompt:
+            return "# Proposal Preview\n\nBasic information only."
+        return "# 提案预览\n\n基本信息。"
+
+    async def explode_runner(_s: str, _u: str) -> AsyncIterator[AgentEvent]:
+        raise AssertionError("agent runner must not be called for llm_chat")
+        yield  # pragma: no cover
+
+    orch = MetaOrchestrator(
+        agent_runner=explode_runner,
+        skill_loader=_FakeLoader([]),
+        llm_chat=fake_chat,
+    )
+    result = await orch.run(
+        MetaMatch(
+            plan=plan,
+            inputs=make_meta_inputs(
+                user_message="Please create a release readiness skill.",
+            ),
+        ),
+    )
+
+    assert result.ok, result.error
+    assert result.final_text == "# Proposal Preview\n\nBasic information only."
+    assert len(chat_calls) == 2
+    assert "English only" in chat_calls[1][0]
 
 
 @pytest.mark.asyncio
@@ -1214,7 +1803,47 @@ async def test_make_llm_chat_from_provider_uses_deliverable_sized_token_budget()
     )
 
     assert await llm_chat("system", "user") == "ok"
-    assert captured["max_tokens"] == 4096
+    assert captured["max_tokens"] == 16384
+
+
+@pytest.mark.asyncio
+async def test_make_llm_chat_from_provider_forwards_billed_cost_to_usage_tracker() -> None:
+    from opensquilla.engine.usage import UsageTracker, usage_scope
+    from opensquilla.provider.types import DoneEvent as ProviderDoneEvent
+    from opensquilla.provider.types import TextDeltaEvent as ProviderTextDelta
+
+    class FakeProvider:
+        async def chat(self, _messages, *, tools, config):
+            assert tools is None
+            assert config.temperature == 0.0
+            yield ProviderTextDelta(text="ok")
+            yield ProviderDoneEvent(
+                input_tokens=10,
+                output_tokens=2,
+                model="deepseek/deepseek-v4-pro-20260423",
+                billed_cost=0.123,
+            )
+
+    tracker = UsageTracker()
+    llm_chat = make_llm_chat_from_provider(
+        provider=FakeProvider(),
+        base_config=AgentConfig(model_id="fallback-model"),
+        usage_tracker=tracker,
+        session_key="session-a",
+    )
+
+    with usage_scope("meta-run:step-a"):
+        assert await llm_chat("system", "user") == "ok"
+
+    usage = tracker.get("session-a")
+    scoped = tracker.get_scope("session-a", "meta-run:step-a")
+    assert usage is not None
+    assert scoped is not None
+    assert usage.input_tokens == 10
+    assert usage.output_tokens == 2
+    assert usage.billed_cost == pytest.approx(0.123)
+    assert usage.total_cost == pytest.approx(0.123)
+    assert scoped.billed_cost == pytest.approx(0.123)
 
 
 @pytest.mark.asyncio
@@ -1576,6 +2205,49 @@ async def test_orchestrator_llm_classify_coerces_noisy_reply() -> None:
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_llm_classify_repairs_ambiguous_reply_with_llm() -> None:
+    spec = _make_meta_spec(
+        composition={
+            "steps": [
+                {
+                    "id": "classify",
+                    "kind": "llm_classify",
+                    "output_choices": ["A", "B"],
+                    "with": {"text": "{{ inputs.user_message }}"},
+                },
+            ],
+        },
+    )
+    plan = parse_meta_plan(spec)
+    assert plan is not None
+
+    chat_calls: list[tuple[str, str]] = []
+
+    async def repairing_chat(system_prompt: str, user_message: str) -> str:
+        chat_calls.append((system_prompt, user_message))
+        if len(chat_calls) == 1:
+            return "I cannot tell from the prompt"
+        return "B"
+
+    async def explode_runner(_s: str, _u: str) -> AsyncIterator[AgentEvent]:
+        raise AssertionError("should not run")
+        yield  # pragma: no cover
+
+    orch = MetaOrchestrator(
+        agent_runner=explode_runner,
+        skill_loader=_FakeLoader([]),
+        llm_chat=repairing_chat,
+    )
+    result = await orch.run(MetaMatch(plan=plan, inputs={"user_message": "x"}))
+
+    assert result.ok
+    assert result.step_outputs["classify"] == "B"
+    assert len(chat_calls) == 2
+    assert "repair classifier outputs" in chat_calls[1][0].lower()
+    assert "I cannot tell" in chat_calls[1][1]
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_llm_classify_falls_back_to_agent_runner() -> None:
     spec = _make_meta_spec(
         composition={
@@ -1801,12 +2473,16 @@ async def test_iter_events_invokes_real_skill_view_for_skill_steps(
     from opensquilla.skills.meta.types import MetaResult
 
     script = tmp_path / "echo.py"
-    script.write_text("print('{\"ok\": true}')\n")
+    script.write_text(
+        "import json\n"
+        "print(json.dumps({'ok': True}))\n",
+        encoding="utf-8",
+    )
     exec_spec = _make_skill_spec("scripty", content="Run the wrapped CLI.")
     exec_spec.base_dir = str(tmp_path)
     exec_spec.entrypoint = {
-        "command": "python {baseDir}/echo.py",
-        "args": [],
+        "command": "python",
+        "args": ["{baseDir}/echo.py"],
         "parse": "json",
     }
     agent_spec = _make_skill_spec("brainy", content="Sub-agent skill body.")
@@ -2113,6 +2789,60 @@ async def test_iter_events_forwards_subagent_tool_events_but_folds_text() -> Non
 
 
 @pytest.mark.asyncio
+async def test_paper_section_author_uses_llm_chat_without_subagent_tools() -> None:
+    """paper-section-author is a text-only section writer.
+
+    Running it as a full sub-Agent exposes shell/code tools, which can turn a
+    single section into a long write/check/rewrite loop. When the orchestrator
+    has an LLM-only dependency, this skill should bypass the sub-Agent runner.
+    """
+
+    spec = _make_meta_spec(
+        composition={
+            "steps": [
+                {
+                    "id": "abstract",
+                    "kind": "agent",
+                    "skill": "paper-section-author",
+                    "with": {"task": "Write the abstract."},
+                },
+            ],
+        },
+    )
+    plan = parse_meta_plan(spec)
+    assert plan is not None
+
+    async def explode_runner(_s: str, _u: str) -> AsyncIterator[AgentEvent]:
+        raise AssertionError("paper-section-author must not use sub-Agent tools")
+        if False:
+            yield DoneEvent(text="")  # pragma: no cover
+
+    llm_calls: list[tuple[str, str]] = []
+
+    async def llm_chat(system_prompt: str, user_message: str) -> str:
+        llm_calls.append((system_prompt, user_message))
+        return "\\begin{abstract}\nFast section.\n\\end{abstract}"
+
+    orch = MetaOrchestrator(
+        agent_runner=explode_runner,
+        skill_loader=_FakeLoader([
+            _make_skill_spec("paper-section-author", content="SECTION BODY"),
+        ]),
+        llm_chat=llm_chat,
+    )
+
+    final: MetaResult | None = None
+    async for ev in orch.iter_events(MetaMatch(plan=plan, inputs={})):
+        if isinstance(ev, MetaResult):
+            final = ev
+
+    assert final is not None and final.ok
+    assert len(llm_calls) == 1
+    assert "SECTION BODY" in llm_calls[0][0]
+    assert "\\begin{abstract}" in final.final_text
+
+
+@pytest.mark.asyncio
 async def test_iter_events_emits_error_result_on_step_failure() -> None:
     from opensquilla.engine.types import ToolResultEvent
     from opensquilla.skills.meta.types import MetaResult
@@ -2261,63 +2991,85 @@ async def test_drain_agent_runner_fails_when_sub_agent_produces_no_text() -> Non
 
     assert result.ok is False
     assert result.failed_step_id == "a"
-    assert result.error and "no plain-text output" in result.error
 
 
-def test_bundled_kb_bootstrap_has_routes() -> None:
-    bundled = Path(__file__).resolve().parents[2] / "src" / "opensquilla" / "skills" / "bundled"
-    skill_path = bundled / "meta-knowledge-base-bootstrap" / "SKILL.md"
-    assert skill_path.is_file()
-    loader = SkillLoader(
-        bundled_dir=bundled,
-        snapshot_path=Path("/tmp/_kb_bootstrap_snap.json"),
+@pytest.mark.asyncio
+async def test_drain_agent_runner_uses_done_event_text_when_deltas_absent() -> None:
+    """Some providers surface final text only on DoneEvent; keep that output."""
+
+    spec = _make_meta_spec(
+        composition={
+            "steps": [
+                {"id": "a", "skill": "done-only", "with": {}},
+            ],
+        },
     )
-    loader.invalidate_cache()
-    specs = {s.name: s for s in loader.load_all()}
-    kb = specs["meta-knowledge-base-bootstrap"]
-    plan = parse_meta_plan(kb)
+    plan = parse_meta_plan(spec)
     assert plan is not None
-    by_id = {s.id: s for s in plan.steps}
-    assert {"classify", "ingest", "memorize", "index"} <= set(by_id)
-    # classify must use the lightweight llm_classify executor, not a sub-Agent.
-    assert by_id["classify"].kind == "llm_classify"
-    assert set(by_id["classify"].output_choices) == {"URL", "PDF", "GIT", "TEXT"}
-    # ingest must run multi-search-engine deterministically via skill_exec
-    # (no sub-Agent in the loop for the wrapped-CLI step).
-    assert by_id["ingest"].kind == "skill_exec"
-    assert by_id["ingest"].skill == "multi-search-engine"
-    # memorize must call memory_save directly — no LLM in the loop.
-    assert by_id["memorize"].kind == "tool_call"
-    assert by_id["memorize"].tool == "memory_save"
+
+    async def done_only_runner(_s: str, _u: str) -> AsyncIterator[AgentEvent]:
+        yield DoneEvent(text="final answer from done")
+
+    orch = MetaOrchestrator(
+        agent_runner=done_only_runner,
+        skill_loader=_FakeLoader([_make_skill_spec("done-only", content="DONE")]),
+    )
+    result = await orch.run(MetaMatch(plan=plan, inputs={}))
+
+    assert result.ok is True
+    assert result.step_outputs["a"] == "final answer from done"
 
 
-def test_bundled_migration_assistant_has_routes() -> None:
+def test_bundled_competitive_intel_has_quality_gate_and_exports() -> None:
     bundled = Path(__file__).resolve().parents[2] / "src" / "opensquilla" / "skills" / "bundled"
-    skill_path = bundled / "meta-migration-assistant" / "SKILL.md"
+    skill_path = bundled / "meta-competitive-intel" / "SKILL.md"
     assert skill_path.is_file()
     loader = SkillLoader(
         bundled_dir=bundled,
-        snapshot_path=Path("/tmp/_migration_snap.json"),
+        snapshot_path=Path("/tmp/_competitive_intel_snap.json"),
     )
     loader.invalidate_cache()
     specs = {s.name: s for s in loader.load_all()}
-    skill = specs["meta-migration-assistant"]
+    skill = specs["meta-competitive-intel"]
     plan = parse_meta_plan(skill)
     assert plan is not None
     assert [s.id for s in plan.steps] == [
-        "classify",
-        "fetch_guide",
-        "repo_context",
-        "write_plan",
+        "preferences",
+        "intel_clarify",
+        "depth",
+        "intel_context",
+        "recall_baseline",
+        "recall_baseline_fallback",
+        "search_strategy",
+        "web_research",
+        "web_research_fallback",
+        "target_search_query_1",
+        "web_research_target_1",
+        "web_research_target_1_fallback",
+        "target_search_query_2",
+        "web_research_target_2",
+        "web_research_target_2_fallback",
+        "target_search_query_3",
+        "web_research_target_3",
+        "web_research_target_3_fallback",
+        "research_status",
+        "search_retry_query",
+        "web_research_retry",
+        "web_research_retry_fallback",
+        "research_status_final",
+        "summarize_web",
+        "deep_dive",
+        "enrich_accounts",
+        "extract_signals",
+        "baseline_diff",
+        "verdict",
+        "recommend_actions",
+        "signals_xlsx",
+        "deliver_intel_brief",
+        "intel_brief_audit",
+        "store_brief",
+        "store_brief_fallback",
+        "export_docx",
     ]
-    classify = plan.steps[0]
-    assert classify.kind == "llm_classify"
-    assert "OPENAI_V0_TO_V1" in classify.output_choices
-    fetch = plan.steps[1]
-    routes_to = {case.to for case in fetch.route}
-    assert routes_to == {"github", "multi-search-engine"}
-    # Default fallthrough must be deep-research (for OTHER verdict)
-    assert fetch.skill == "deep-research"
-    repo_context = plan.steps[2]
-    assert repo_context.skill == "git-diff"
-    assert "current repo" in repo_context.when
+    step_ids = {s.id for s in plan.steps}
+    assert {"baseline_diff", "intel_brief_audit", "signals_xlsx", "export_docx"} <= step_ids

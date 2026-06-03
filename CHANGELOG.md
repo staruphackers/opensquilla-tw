@@ -10,11 +10,102 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+### Fixed
+
+## [0.3.1] - 2026-06-03
+
+### Added
+
+- Slack Socket Mode support now covers app mentions, self-targeting replies,
+  channel metadata, and threaded response routing across onboarding and channel
+  runtime paths.
+- Short-drama and video helper workflows remain available in the bundled
+  MetaSkill catalog, with stronger Windows-safe script handling and clearer
+  review pauses for generated media flows.
+- CI impact-surface gates classify docs, runtime, dependency, release, and test
+  changes so pull requests can run the right checks without forcing the full
+  matrix for every documentation-only edit.
+
+### Changed
+
+- WebChat and the Skills view now make MetaSkill readiness, active runs, and
+  install visibility easier to inspect while workflows are being reviewed.
+- Release install documentation and installer defaults now point to the 0.3.1
+  wheel and Windows portable asset names.
+
+### Fixed
+
+- User chat bubbles preserve multiline text and read like authored messages
+  instead of collapsing or visually blending with generated output.
+- Slack onboarding and runtime paths now reject incomplete Socket Mode setup,
+  preserve existing secrets, enforce webhook signing secrets where needed, and
+  keep threaded reply channel context.
+- Voice/audio workflows and clarification pauses are represented on the main
+  release line, so release users get the same usable handoff and resume
+  behavior already validated on integration branches.
+- Provider request hardening keeps malformed tool-call history from reaching
+  providers as invalid request state.
+
+### Acknowledgements
+
+- Thanks @openvictory for #123, #133, and #137, which helped bring visible
+  running-state feedback plus short-drama and media helper workflows into the
+  0.3.1 release line.
+- Thanks @freeaccount-create for #142, which helped bring Slack Socket Mode and
+  self-targeting replies into the channel workflow.
+- Thanks @ruhook for #124, and thanks @qq712696307 for the authored commit in
+  that pull request, which preserved user message newlines in WebChat.
+- Thanks @Cola-Alex for #143, which increased tokenjuice summarize and
+  failure-context windows for fallback tool-result projection.
+- Thanks @nice-code-la for #165 and #166, which helped make voice workflows
+  usable end to end and clarification pauses resume cleanly.
+
+## [0.3.0] - 2026-05-31
+
+### Added
+
+- MetaSkills are now first-class workflow capabilities: bundled stable
+  MetaSkills, composition parsing, step scheduling, pause/resume user-input
+  flows, proposal gates, runtime history, and authoring documentation let
+  repeatable multi-step work become reusable agent routines.
+- `opensquilla doctor` and the WebUI Health view now provide actionable
+  readiness diagnostics across provider, gateway, memory, logs, search, image
+  generation, router, channels, sandbox, and embedding surfaces.
+- Tokenjuice-backed tool-result projection now compacts large logs, diffs,
+  JSON, test output, package-manager output, and other known tool shapes before
+  they crowd out provider context.
+- A task-oriented documentation set now covers quickstart, configuration,
+  WebUI, CLI, tools and sandboxing, sessions, providers, usage and cost,
+  memory, compaction, MetaSkills, tool compression, scheduling, channels, MCP,
+  troubleshooting, and contribution guidance.
+
+### Changed
+
+- Tool-output context management now separates durable runtime results from
+  provider-visible compact previews, records projection telemetry, and uses
+  provider request proof/compaction before oversized payloads reach an LLM.
+- WebChat, CLI chat, and terminal TUI internals now share more runtime-backed
+  turn, stream, slash-command, artifact, attachment, and recovery behavior.
+- Long-session memory and compaction flows now preserve raw archive evidence,
+  checkpoint receipts, repair queues, and WebUI-safe compaction status instead
+  of treating semantic memory quality and context safety as the same signal.
 - Channel install extras now expose only real optional packages; Feishu,
   Telegram, DingTalk, WeCom, and QQ are included in the base install instead
   of being accepted as no-op extras.
 
 ### Fixed
+
+- WebChat reliability fixes cover router replay, session restore gaps,
+  duplicate compaction status, attachment and pasted-text rendering, artifact
+  downloads, composer layout, model-router animation timing, and visible
+  recovery during long turns.
+- Provider and runtime hardening reduces malformed tool-call fallout, preserves
+  configured model-switch intent, handles provider tool-choice requirements,
+  and keeps oversized current-turn tool payloads from surfacing as bare
+  internal failures.
+- Cross-platform CI and Windows portability fixes stabilize CLI help rendering,
+  sqlite fallback behavior, UTF-8 subprocess handling, Windows-only test
+  fixtures, onboarding commands, and release-surface checks.
 
 ## [0.2.1] - 2026-05-21
 

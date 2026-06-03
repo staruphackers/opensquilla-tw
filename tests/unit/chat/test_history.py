@@ -7,6 +7,7 @@ from opensquilla.chat.history import transcript_entries_to_chat_messages
 
 def test_transcript_entries_to_chat_messages_preserves_usage_and_artifacts() -> None:
     entry = SimpleNamespace(
+        id=42,
         message_id="m1",
         role="assistant",
         content=(
@@ -25,6 +26,7 @@ def test_transcript_entries_to_chat_messages_preserves_usage_and_artifacts() -> 
 
     assert messages[0]["id"] == "m1"
     assert messages[0]["text"] == "shown"
+    assert messages[0]["transcript_id"] == 42
     assert messages[0]["artifacts"][0]["id"] == "art-a1"
     assert messages[0]["input_tokens"] == 1
     assert messages[0]["output_tokens"] == 2

@@ -153,7 +153,7 @@ opensquilla skills view pdf-toolkit
 opensquilla skills install <skill-name>
 opensquilla skills update --all
 opensquilla skills uninstall <skill-name>
-opensquilla skills inspect meta-web-to-pdf-briefing
+opensquilla skills inspect meta-skill-creator
 opensquilla skills meta proposals list
 opensquilla skills meta runs list
 opensquilla skills meta runs show <run-id>
@@ -168,6 +168,8 @@ Read:
 
 - [`features/skills.md`](features/skills.md)
 - [`features/meta-skills.md`](features/meta-skills.md)
+- [`features/meta-skill-user-guide.md`](features/meta-skill-user-guide.md)
+- [`authoring/meta-skills.md`](authoring/meta-skills.md)
 
 ## Sessions and History
 

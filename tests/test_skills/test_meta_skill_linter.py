@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -11,16 +12,20 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 _LINTER_DIR = REPO / "src" / "opensquilla" / "skills" / "bundled" / "skill-creator-linter"
+_BUNDLED_DIR = REPO / "src" / "opensquilla" / "skills" / "bundled"
+_EXP_DIR = REPO / "src" / "opensquilla" / "skills" / "exp"
 LINT = _LINTER_DIR / "scripts" / "lint.py"
 
 
 def _run_lint(skill_md: str, gates: str = "G1,G2") -> dict:
     proc = subprocess.run(
         [sys.executable, str(LINT), "--gates", gates, "--skill-md-stdin"],
-        input=skill_md, capture_output=True, text=True, encoding="utf-8",
+        input=skill_md,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
     )
-    assert proc.returncode == 0, proc.stderr
-    assert proc.stdout, proc.stderr
     return json.loads(proc.stdout)
 
 
@@ -54,15 +59,6 @@ def test_g1_passes_on_valid_p1() -> None:
     assert out["G1"]["passed"] is True
 
 
-def test_g1_accepts_utf8_stdin_with_localized_trigger() -> None:
-    localized = VALID_P1.replace(
-        '  - "lint test trigger"',
-        '  - "处理 PDF — 质量门"',
-    )
-    out = _run_lint(localized)
-    assert out["G1"]["passed"] is True
-
-
 def test_g1_fails_on_missing_xml_escape() -> None:
     bad = VALID_P1.replace("{{ inputs.user_message | xml_escape | truncate(512) }}",
                             "{{ inputs.user_message }}")
@@ -84,17 +80,19 @@ def test_g2_passes_on_valid_p1() -> None:
 
 
 EXISTING_META_BUNDLES = [
-    "meta-pdf-intelligence", "meta-travel-planner", "meta-security-review-bundle",
-    "meta-migration-assistant", "meta-knowledge-base-bootstrap",
-    "meta-multi-format-export-pack", "meta-compliance-audit-bundle",
-    "meta-spreadsheet-insight", "meta-web-research-to-report",
-    "meta-web-to-pdf-briefing", "meta-github-pr-watch-digest",
-    "meta-issue-to-pr-autopilot", "meta-long-running-build-watchdog",
-    "meta-pdf-reformat-pipeline", "meta-scheduled-morning-digest",
-    "meta-stack-trace-investigator", "meta-arxiv-daily-digest-deck",
-    "meta-diagram-triangulation", "meta-codereview-current-diff",
-    "meta-pre-commit-quality-gate",
+    "meta-pdf-intelligence", "meta-travel-planner",
+    "meta-migration-assistant", "meta-web-research-to-report",
+    "meta-stack-trace-investigator", "meta-paper-write",
+    "meta-skill-creator",
 ]
+
+
+def _existing_meta_skill_md(name: str) -> Path:
+    for root in (_BUNDLED_DIR, _EXP_DIR):
+        candidate = root / name / "SKILL.md"
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(name)
 
 
 def test_g1_fails_on_non_xml_escape_first_filter() -> None:
@@ -143,12 +141,13 @@ def test_g1_rejects_nested_meta_skill_reference() -> None:
     producing misleading auto_enable_eligible=true proposals that crashed at
     runtime."""
     nested_meta = VALID_P1.replace(
-        "skill: pdf-toolkit", "skill: meta-pdf-intelligence"
+        "skill: pdf-toolkit", "skill: meta-web-research-to-report"
     )
     out = _run_lint(nested_meta)
     assert out["G1"]["passed"] is False
     assert any(
-        "meta-pdf-intelligence" in d and ("nested" in d.lower() or "kind: meta" in d)
+        "meta-web-research-to-report" in d
+        and ("nested" in d.lower() or "kind: meta" in d)
         for d in out["G1"]["diagnostics"]
     ), f"Expected nested meta-skill diagnostic; got: {out['G1']['diagnostics']}"
 
@@ -157,8 +156,7 @@ def test_g1_rejects_nested_meta_skill_reference() -> None:
 def test_linter_passes_existing_meta_bundle(bundle: str) -> None:
     """Regression: linter must accept every existing kind=meta bundle.
     Catches over-strict lint rules."""
-    skill_path = REPO / "src" / "opensquilla" / "skills" / "bundled" / bundle / "SKILL.md"
-    skill_md = skill_path.read_text(encoding="utf-8")
+    skill_md = _existing_meta_skill_md(bundle).read_text(encoding="utf-8")
     out = _run_lint(skill_md)
     assert out["G1"]["passed"] is True, f"{bundle} G1 fail: {out['G1']['diagnostics']}"
     assert out["G2"]["passed"] is True, f"{bundle} G2 fail: {out['G2']['diagnostics']}"

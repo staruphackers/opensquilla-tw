@@ -1,6 +1,6 @@
 [project]
 name = "opensquilla"
-version = "0.2.1"
+version = "0.3.1"
 description = "OpenSquilla — microkernel Python agent runtime with MCP-native tools and multi-channel messaging"
 license = "Apache-2.0"
 readme = "README.md"
@@ -97,6 +97,8 @@ exclude = [
     "src/opensquilla/scheduler/templates/*.md",
     "src/opensquilla/skills/bundled/**/THIRD_PARTY_NOTICES.md",
     "src/opensquilla/skills/bundled/**/references/*.md",
+    "src/opensquilla/skills/exp/**",
+    "src/opensquilla/skills/meta/META_SKILL_AUTHORING.md",
 ]
 
 [tool.hatch.build.targets.wheel.force-include]
@@ -107,7 +109,7 @@ exclude = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-norecursedirs = ["tests/_private", ".omx", ".codex", ".claude"]
+norecursedirs = ["tests/_private", "tests/fixtures", ".omx", ".codex", ".claude"]
 markers = [
     "llm: marks tests that make real external model/provider API calls (deselect with '-m \"not llm\"')",
     "llm_smoke: low-cost live LLM smoke tests",
@@ -138,6 +140,24 @@ select = ["E", "F", "I", "N", "W", "UP"]
 # harm readability. E402 imports-after-sys.path-munge is intentional.
 "src/opensquilla/skills/bundled/skill-creator/scripts/*.py" = ["E501", "N806", "E402"]
 "src/opensquilla/skills/bundled/skill-creator-linter/scripts/*.py" = ["E402", "I001"]
+# meta-short-drama subprocess scripts: long lines hold argv arrays,
+# ffmpeg filter graphs, Chinese error strings, and OpenRouter payload
+# field comments meant to stay readable as one unit.
+"src/opensquilla/skills/bundled/ai-video-script/scripts/*.py" = ["E501"]
+"src/opensquilla/skills/bundled/nano-banana-pro/scripts/*.py" = ["E501"]
+"src/opensquilla/skills/bundled/seedance-2-prompt/scripts/*.py" = ["E501"]
+"src/opensquilla/skills/bundled/srt-from-script/scripts/*.py" = ["E501"]
+"src/opensquilla/skills/bundled/subtitle-burner/scripts/*.py" = ["E501"]
+"src/opensquilla/skills/bundled/text-file-read/scripts/*.py" = ["E501"]
+"src/opensquilla/skills/bundled/title-card-image/scripts/*.py" = ["E501"]
+"src/opensquilla/skills/bundled/video-merger/scripts/*.py" = ["E501"]
+# video-merger src/ is vendored from upstream MIT-0 clawhub package; keep
+# its Chinese docstrings + ffmpeg argv lines unwrapped.
+"src/opensquilla/skills/bundled/video-merger/src/*.py" = ["E501", "F401"]
+"src/opensquilla/skills/bundled/video-still-animator/scripts/*.py" = ["E501"]
+# meta-short-drama DAG generator: template strings embed YAML blocks
+# whose original line breaks must be preserved.
+"scripts/_gen_meta_short_drama.py" = ["E501"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -146,6 +166,9 @@ warn_unused_configs = true
 exclude = [
     "^src/opensquilla/squilla_router/models/",
     "^src/opensquilla/skills/bundled/.*/scripts/",
+    # video-merger ships an upstream MIT-0 library under src/; same
+    # treatment as the per-skill scripts/ trees.
+    "^src/opensquilla/skills/bundled/video-merger/src/",
 ]
 
 [[tool.mypy.overrides]]
@@ -162,6 +185,7 @@ module = [
     "src.router.*",
     "tiktoken.*",
     "tokenizers.*",
+    "websockets.*",
     "yaml.*",
     "yoyo.*",
 ]

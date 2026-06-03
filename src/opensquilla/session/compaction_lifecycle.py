@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Final, Literal
@@ -14,6 +15,9 @@ FlushCompactionDecision = Literal[
     "disabled",
 ]
 FlushCompactionSafetyMode = Literal["protect", "best_effort", "block", "off"]
+CompactionSafetyStatus = Literal["safe", "degraded_archive", "unsafe", "not_required"]
+SemanticMemoryStatus = Literal["healthy", "pending", "degraded", "failed", "not_required"]
+CompactionDurability = Literal["durable", "request_scoped", "none"]
 
 SAFE_FLUSH_OUTPUT_COVERAGE_STATUSES: Final[frozenset[str]] = frozenset({"ok"})
 SAFE_FLUSH_OBLIGATION_STATUSES: Final[frozenset[str]] = frozenset(
@@ -25,14 +29,32 @@ COMPACTION_SUMMARY_VERIFIED_EVENT: Final[str] = "compaction.summary_verified"
 COMPACTION_PERSISTED_EVENT: Final[str] = "compaction.persisted"
 COMPACTION_REPLAYED_EVENT: Final[str] = "compaction.replayed"
 COMPACTION_COVERAGE_UNKNOWN: Final[str] = "unknown"
+BENIGN_AUTOMATIC_COMPACTION_SKIP_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        "already_attempted_this_turn",
+        "already_compacted_this_turn",
+        "no_entries",
+        "stale_preimage",
+        "structured_content_noop",
+        "within_budget",
+        "within_compaction_budget",
+    }
+)
 NOOP_FLUSH_RESULT_STATUSES: Final[frozenset[str]] = frozenset({"ok_noop_no_memory"})
 ARCHIVE_ONLY_FLUSH_RESULT_STATUSES: Final[frozenset[str]] = frozenset(
     {"ok_archive_only"}
 )
 ARCHIVED_DEGRADED_FLUSH_RESULT_STATUSES: Final[frozenset[str]] = frozenset(
-    {"parse_failed_archived", "provider_failed_archived"}
+    {"parse_failed_archived", "provider_failed_archived", "apply_failed_archived"}
 )
 FAILED_FLUSH_RESULT_STATUSES: Final[frozenset[str]] = frozenset({"archive_failed"})
+
+
+@dataclass(frozen=True)
+class CompactionMemoryStatus:
+    safety_status: CompactionSafetyStatus
+    semantic_status: SemanticMemoryStatus
+    allows_destructive_compaction: bool
 
 
 @dataclass(frozen=True)
@@ -96,6 +118,55 @@ def compaction_lifecycle_payload(compaction_id: str, event: str) -> dict[str, An
     return payload
 
 
+def compaction_effect_payload(
+    *,
+    status: str,
+    source: str = "automatic",
+    reason: str | None = None,
+    skip_reason: str | None = None,
+    applied: bool | None = None,
+    durability: CompactionDurability | None = None,
+    user_visible: bool | None = None,
+) -> dict[str, Any]:
+    """Return normalized user-facing semantics for a compaction event."""
+
+    normalized_status = str(status or "").lower()
+    normalized_source = str(source or "").lower()
+    normalized_reason = str(skip_reason or reason or "").strip() or None
+
+    if applied is None:
+        applied = normalized_status in {"completed", "emergency_ephemeral"}
+    if durability is None:
+        if normalized_status == "completed":
+            durability = "durable"
+        elif normalized_status == "emergency_ephemeral":
+            durability = "request_scoped"
+        else:
+            durability = "none"
+    if user_visible is None:
+        if normalized_source == "manual":
+            user_visible = True
+        elif normalized_status in {"started", "observed", "completed", "emergency_ephemeral"}:
+            user_visible = True
+        elif normalized_status in {"failed", "error", "cancelled"}:
+            user_visible = True
+        elif normalized_status == "skipped":
+            user_visible = (
+                normalized_reason not in BENIGN_AUTOMATIC_COMPACTION_SKIP_REASONS
+            )
+        else:
+            user_visible = False
+
+    payload: dict[str, Any] = {
+        "applied": bool(applied),
+        "durability": durability,
+        "user_visible": bool(user_visible),
+    }
+    if normalized_status == "skipped" and normalized_reason:
+        payload["skip_reason"] = normalized_reason
+    return payload
+
+
 def compaction_result_payload(
     result: Any,
     *,
@@ -127,6 +198,9 @@ def compaction_result_payload(
         payload["tokens_after"] = int(tokens_after)
     if remaining_budget_tokens is not None:
         payload["remaining_budget_tokens"] = int(remaining_budget_tokens)
+    skip_reason = str(getattr(result, "skip_reason", "") or "")
+    if skip_reason:
+        payload["skip_reason"] = skip_reason
     return payload
 
 
@@ -264,6 +338,11 @@ def flush_receipt_allows_destructive_compaction(receipt: Any) -> bool:
         return False
     if _receipt_value(receipt, "candidate_missing_ids", []):
         return False
+    if (
+        _receipt_int(_receipt_value(receipt, "obligation_count", 0)) <= 0
+        and not _receipt_value(receipt, "obligation_missing_ids", [])
+    ):
+        return True
     obligation_status = str(
         _receipt_value(receipt, "obligation_status", "unverified") or "unverified"
     )
@@ -272,13 +351,127 @@ def flush_receipt_allows_destructive_compaction(receipt: Any) -> bool:
     return not _receipt_value(receipt, "obligation_missing_ids", [])
 
 
+def durable_receipt_allows_destructive_compaction(receipt: Any) -> bool:
+    scope = str(_receipt_value(receipt, "scope", "") or "")
+    status = str(_receipt_value(receipt, "status", "") or "")
+    if scope == "checkpoint":
+        source_path = str(_receipt_value(receipt, "source_path", "") or "")
+        content_hash = str(_receipt_value(receipt, "content_hash", "") or "")
+        return status == "checkpoint_saved" and bool(source_path) and bool(content_hash)
+    if scope == "flush":
+        target_path = str(_receipt_value(receipt, "target_path", "") or "")
+        return status == "flush_appended" and bool(target_path)
+    if scope == "preimage":
+        target_path = str(_receipt_value(receipt, "target_path", "") or "")
+        content_hash = str(_receipt_value(receipt, "content_hash", "") or "")
+        return (
+            status == "preimage_saved"
+            and target_path.startswith("memory/.raw_fallbacks/")
+            and bool(content_hash)
+        )
+    if scope == "repair":
+        target_path = str(_receipt_value(receipt, "target_path", "") or "")
+        content_hash = str(_receipt_value(receipt, "content_hash", "") or "")
+        reason = str(_receipt_value(receipt, "reason", "") or "")
+        archived_reasons = (
+            ARCHIVE_ONLY_FLUSH_RESULT_STATUSES | ARCHIVED_DEGRADED_FLUSH_RESULT_STATUSES
+        )
+        return (
+            status == "repair_pending"
+            and reason in archived_reasons
+            and target_path.startswith("memory/.raw_fallbacks/")
+            and bool(content_hash)
+        )
+    return flush_receipt_allows_destructive_compaction(receipt)
+
+
+def _receipt_has_archive_evidence(receipt: Any) -> bool:
+    content_hash = str(_receipt_value(receipt, "content_hash", "") or "")
+    flushed_paths = _receipt_value(receipt, "flushed_paths", []) or []
+    if isinstance(flushed_paths, str):
+        flushed_paths = [flushed_paths]
+    return bool(content_hash) and any(
+        str(path).startswith("memory/.raw_fallbacks/") for path in flushed_paths
+    )
+
+
+def compaction_safety_allows_destructive_compaction(
+    receipt: Any,
+    *,
+    deterministic_receipt_safe: bool = False,
+) -> bool:
+    if deterministic_receipt_safe:
+        return True
+    if flush_receipt_allows_destructive_compaction(receipt):
+        return True
+    result_status = str(_receipt_value(receipt, "result_status", "") or "")
+    return (
+        result_status in ARCHIVE_ONLY_FLUSH_RESULT_STATUSES
+        or result_status in ARCHIVED_DEGRADED_FLUSH_RESULT_STATUSES
+    ) and _receipt_has_archive_evidence(receipt)
+
+
+def _semantic_memory_status(receipt: Any) -> SemanticMemoryStatus:
+    if receipt is None:
+        return "pending"
+    if flush_receipt_allows_destructive_compaction(receipt):
+        return "healthy"
+    result_status = str(_receipt_value(receipt, "result_status", "") or "")
+    if result_status in NOOP_FLUSH_RESULT_STATUSES:
+        return "healthy"
+    if result_status in ARCHIVE_ONLY_FLUSH_RESULT_STATUSES:
+        return "degraded"
+    if result_status in ARCHIVED_DEGRADED_FLUSH_RESULT_STATUSES:
+        return "failed"
+    if result_status in FAILED_FLUSH_RESULT_STATUSES:
+        return "failed"
+    return "degraded"
+
+
+def compaction_memory_status(
+    receipt: Any,
+    *,
+    deterministic_receipt_safe: bool = False,
+    required: bool = True,
+) -> CompactionMemoryStatus:
+    if not required:
+        return CompactionMemoryStatus(
+            safety_status="not_required",
+            semantic_status="not_required",
+            allows_destructive_compaction=True,
+        )
+    if deterministic_receipt_safe:
+        return CompactionMemoryStatus(
+            safety_status="safe",
+            semantic_status=_semantic_memory_status(receipt),
+            allows_destructive_compaction=True,
+        )
+    if flush_receipt_allows_destructive_compaction(receipt):
+        return CompactionMemoryStatus(
+            safety_status="safe",
+            semantic_status="healthy",
+            allows_destructive_compaction=True,
+        )
+    if compaction_safety_allows_destructive_compaction(receipt):
+        return CompactionMemoryStatus(
+            safety_status="degraded_archive",
+            semantic_status=_semantic_memory_status(receipt),
+            allows_destructive_compaction=True,
+        )
+    return CompactionMemoryStatus(
+        safety_status="unsafe",
+        semantic_status=_semantic_memory_status(receipt),
+        allows_destructive_compaction=False,
+    )
+
+
 def pre_compaction_flush_enabled(config: Any) -> bool:
     from opensquilla.memory.flush_config import is_session_flush_enabled
 
     if not is_session_flush_enabled():
         return False
     memory_cfg = getattr(config, "memory", None)
-    return bool(getattr(memory_cfg, "flush_enabled", True))
+    return bool(getattr(memory_cfg, "flush_enabled", False))
 
 
 def pre_compaction_flush_requires_safe_receipt(config: Any) -> bool:
@@ -294,3 +487,46 @@ def flush_receipt_to_dict(receipt: Any) -> dict[str, Any]:
     if isinstance(receipt, Mapping):
         return dict(receipt)
     return dict(vars(receipt))
+
+
+async def mark_compaction_flush_status_with_retry(
+    mark_status: Any,
+    *,
+    session_key: str,
+    compaction_id: str,
+    status: str,
+    log: Any,
+    failed_event: str,
+    updated_event: str,
+    skipped_event: str,
+    retry_delays: tuple[float, ...] = (0.0, 0.05, 0.25),
+) -> None:
+    for delay_seconds in retry_delays:
+        if delay_seconds:
+            await asyncio.sleep(delay_seconds)
+        try:
+            updated = await mark_status(session_key, compaction_id, status)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                failed_event,
+                session_key=session_key,
+                compaction_id=compaction_id,
+                status=status,
+                error=str(exc),
+            )
+            return
+        if updated:
+            log.info(
+                updated_event,
+                session_key=session_key,
+                compaction_id=compaction_id,
+                status=status,
+            )
+            return
+    log.debug(
+        skipped_event,
+        session_key=session_key,
+        compaction_id=compaction_id,
+        status=status,
+        reason="summary_not_found",
+    )

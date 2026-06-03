@@ -25,20 +25,28 @@ large_outputs/artifact_ref, retries, when conditions, persistence to
 from __future__ import annotations
 
 import asyncio
-import logging
+import json
+import re
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING, Any
+
+import structlog
 
 from opensquilla.engine.types import AgentConfig, AgentEvent
 from opensquilla.provider.protocol import LLMProvider
 from opensquilla.skills.meta.events import _StepDone, yield_skill_view_preface
-from opensquilla.skills.meta.executors.agent import run_step_with_skill_stream
+from opensquilla.skills.meta.executors.agent import (
+    run_step_with_skill_stream,
+    run_step_with_skill_text_only,
+)
 from opensquilla.skills.meta.executors.llm_classify import (
     run_llm_chat_step,
     run_llm_classify_step,
 )
 from opensquilla.skills.meta.executors.skill_exec import run_skill_exec_step
 from opensquilla.skills.meta.executors.tool_call import run_tool_call_step
+from opensquilla.skills.meta.inputs import language_instruction_for_user_message
 from opensquilla.skills.meta.scheduler import run_dag
 from opensquilla.skills.meta.templating import (
     _coerce_to_choice,  # noqa: F401 — re-exported for tests/back-compat
@@ -53,7 +61,9 @@ from opensquilla.skills.meta.types import MetaMatch, MetaPlan, MetaResult, MetaS
 if TYPE_CHECKING:
     from opensquilla.persistence.meta_run_writer import MetaRunWriter
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger(__name__)
+slog = structlog.get_logger(__name__)
+_CJK_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
 # ---------------------------------------------------------------------------
 # Injected-dependency protocols
@@ -71,6 +81,22 @@ LLMChat = Callable[[str, str], Awaitable[str]]
 
 #: Direct tool invoker — bypasses the LLM. Returns the tool's result as string.
 ToolInvoker = Callable[[str, dict[str, Any]], Awaitable[str]]
+
+_SUBAGENT_METADATA_BLOCKLIST = {
+    # These keys belong to the outer turn's meta-skill activation handshake.
+    # Forwarding them into one-shot sub-Agents can force invalid tool_choice
+    # values after meta_invoke has been stripped from the sub-Agent tools.
+    "meta_match",
+    "meta_match_tool_choice",
+    "meta_match_tool_surface_restricted",
+}
+
+
+def _metadata_for_meta_subagent(base_config: AgentConfig) -> dict[str, Any]:
+    metadata = dict(getattr(base_config, "metadata", {}) or {})
+    for key in _SUBAGENT_METADATA_BLOCKLIST:
+        metadata.pop(key, None)
+    return metadata
 
 
 class MetaOrchestrator:
@@ -103,6 +129,12 @@ class MetaOrchestrator:
         turn_id: str | None = None,
         memory_persist_enabled: bool = True,
         usage_tracker: Any | None = None,
+        # PR3: ``dao`` is the preferred alias for ``run_writer`` when the
+        # caller only needs the DAO surface (try_claim_resume /
+        # finish_run_sync). Defaults to ``None``; if both are supplied
+        # ``dao`` takes precedence so tests can inject a writer without
+        # disturbing the existing ``run_writer`` plumbing.
+        dao: MetaRunWriter | None = None,
     ) -> None:
         self._agent_runner = agent_runner
         self._skill_loader = skill_loader
@@ -126,6 +158,17 @@ class MetaOrchestrator:
         # cancellation vs. terminal MetaResult). ``None`` keeps the
         # legacy path unchanged — zero rows written.
         self._run_writer = run_writer
+        # ``_dao`` is the unified DAO handle used by PR3 resume/dispatch
+        # helpers. Prefers the explicit ``dao`` kwarg; falls back to the
+        # ``run_writer`` passed to the original persistence path so that
+        # production callers that only set ``run_writer`` also get resume
+        # capability without any changes.
+        self._dao: MetaRunWriter | None = dao if dao is not None else run_writer
+        # Tracks the run_id currently in flight so _dispatch_step_stream
+        # can route user_input steps to the executor without changing
+        # run_dag's signature. Set inside iter_events / resume, cleared
+        # in the finally block. None when no run is active.
+        self._current_run_id: str | None = None
         self._triggered_by = triggered_by
         self._session_key = session_key
         self._turn_id = turn_id
@@ -185,6 +228,10 @@ class MetaOrchestrator:
         # value the caller already put there.
         if "workspace_dir" not in match.inputs:
             match.inputs["workspace_dir"] = self._workspace_dir or ""
+        if "language_instruction" not in match.inputs:
+            match.inputs["language_instruction"] = language_instruction_for_user_message(
+                str(match.inputs.get("user_message") or ""),
+            )
 
         run_id: str | None = None
         loop = asyncio.get_running_loop()
@@ -260,6 +307,8 @@ class MetaOrchestrator:
 
         final_result: MetaResult | None = None
         cancelled = False
+        previous_run_id = self._current_run_id
+        self._current_run_id = run_id
         try:
             async for item in run_dag(
                 match,
@@ -285,8 +334,13 @@ class MetaOrchestrator:
                     if item.ok:
                         item.final_text = await self._resolve_final_text(
                             plan=match.plan,
+                            inputs=match.inputs,
                             current_final_text=item.final_text,
                             step_outputs=item.step_outputs,
+                        )
+                        item.final_text = await self._repair_final_text_language(
+                            match.inputs,
+                            item.final_text,
                         )
                     final_result = item
                 yield item
@@ -294,14 +348,21 @@ class MetaOrchestrator:
             cancelled = True
             raise
         finally:
+            self._current_run_id = previous_run_id
             if run_id is not None and self._run_writer is not None:
                 try:
-                    if cancelled:
-                        # A cancelled task may interrupt an awaited executor
-                        # future before the sqlite update is visible. The
-                        # cancel marker is a single local UPDATE, so keep it
-                        # in this task's finalizer.
-                        self._run_writer.finish_run_sync(
+                    # A paused MetaResult means a user_input step
+                    # successfully claimed awaiting_user state — do NOT
+                    # overwrite that with status='failed' / 'cancelled'.
+                    # The next user message will resume via try_claim_resume.
+                    if (
+                        final_result is not None
+                        and getattr(final_result, "paused", False)
+                    ):
+                        pass
+                    elif cancelled:
+                        await _to_thread(
+                            self._run_writer.finish_run_sync,
                             run_id=run_id,
                             status="cancelled",
                             result=None,
@@ -370,6 +431,11 @@ class MetaOrchestrator:
         full event stream through to the outer iterator so the user can see
         every inner tool call.
         """
+        log.warning(
+            "DEBUG_TRACE_dispatch_step_stream_entered",
+            step=step.id,
+            kind=step.kind,
+        )
 
         # Operator-controlled opt-out: when memory persistence is disabled
         # at the config level, short-circuit any step that targets the
@@ -425,6 +491,94 @@ class MetaOrchestrator:
             )
             yield _StepDone(text=text)
             return
+        if step.kind == "user_input":
+            from opensquilla.skills.meta.executors.user_input import (
+                run_user_input_step,
+            )
+            # skip_if takes precedence — when it evaluates true the step
+            # is a pure pass-through, no awaiting state is written, so
+            # neither a DAO nor a run_id is required. Tests rely on this
+            # to drive the DAG offline (pre-populated inputs.collected).
+            cfg = step.clarify_config
+            if cfg is not None and cfg.skip_if:
+                from opensquilla.skills.meta.templating import evaluate_when
+                try:
+                    if evaluate_when(cfg.skip_if, inputs=inputs, outputs=outputs):
+                        yield _StepDone(text="")
+                        return
+                except ValueError:
+                    pass
+            run_id = self._current_run_id
+            if self._dao is None or not run_id:
+                raise RuntimeError(
+                    f"user_input step {step.id!r} requires a DAO and a "
+                    f"run_id; construct MetaOrchestrator with dao= / "
+                    f"run_writer= and ensure begin_run_sync succeeded",
+                )
+            # Step (c) wiring: build a prefill_context from the data
+            # already on hand so the executor can ask the user only
+            # for fields it cannot infer. ``conversation_history`` is
+            # not yet in scope here (the producer-side wiring is a
+            # later commit); the resolver-side hook in
+            # ``meta_resolution._clarify_extract_context`` already
+            # carries it for the resume turn so reference resolution
+            # does not regress.
+            prefill_context: dict[str, Any] | None = None
+            llm_chat_for_prefill: Any = None
+            log.warning(
+                "DEBUG_TRACE_user_input_dispatch",
+                step=step.id,
+                cfg_nl_extract=bool(cfg and cfg.nl_extract),
+                has_llm_chat=self._llm_chat is not None,
+                inputs_keys=sorted(inputs.keys()),
+                outputs_keys=sorted(outputs.keys()),
+            )
+            if (
+                cfg is not None
+                and cfg.nl_extract
+                and self._llm_chat is not None
+            ):
+                ctx_payload: dict[str, Any] = {}
+                user_message = inputs.get("user_message")
+                if isinstance(user_message, str) and user_message.strip():
+                    ctx_payload["original_user_message"] = user_message
+                collected = inputs.get("collected")
+                if isinstance(collected, dict) and collected:
+                    ctx_payload["previously_collected"] = collected
+                if outputs:
+                    ctx_payload["prior_step_outputs"] = dict(outputs)
+                conversation = inputs.get("conversation_history")
+                if isinstance(conversation, list) and conversation:
+                    ctx_payload["conversation_history"] = conversation
+                if ctx_payload:
+                    prefill_context = ctx_payload
+                    llm_chat_for_prefill = self._llm_chat
+            text = await run_user_input_step(
+                step,
+                inputs=inputs,
+                outputs=outputs,
+                run_id=run_id,
+                session_id=self._session_key or "",
+                dao=self._dao,
+                now=time.time,
+                llm_chat=llm_chat_for_prefill,
+                prefill_context=prefill_context,
+            )
+            # Skip path only — pause path raises MetaPaused, which the
+            # scheduler catches before we get here.
+            yield _StepDone(text=text)
+            return
+        if effective_skill == "paper-section-author" and self._llm_chat is not None:
+            text = await run_step_with_skill_text_only(
+                step,
+                effective_skill,
+                inputs,
+                outputs,
+                llm_chat=self._llm_chat,
+                skill_loader=self._skill_loader,
+            )
+            yield _StepDone(text=text)
+            return
         # agent kind: forward sub-Agent events as they arrive.
         async for item in run_step_with_skill_stream(
             step,
@@ -436,10 +590,301 @@ class MetaOrchestrator:
         ):
             yield item
 
+    async def _dispatch_one_step(
+        self,
+        step: MetaStep,
+        effective_skill: str,
+        inputs: dict[str, Any],
+        outputs: dict[str, str],
+        *,
+        run_id: str,
+        session_id: str,
+    ) -> AsyncIterator[AgentEvent | _StepDone]:
+        """Single-step dispatcher exposing kind=user_input wiring for tests.
+
+        Production scheduler still uses its inline dispatch builders;
+        this method specifically supports the PR3 resume test harness
+        + future PR3 surface integration which needs to invoke
+        user_input dispatch from outside the orchestrator.
+        """
+        if step.kind == "user_input":
+            from opensquilla.skills.meta.executors.user_input import (
+                run_user_input_step,
+            )
+
+            if self._dao is None:
+                raise RuntimeError(
+                    f"user_input step {step.id!r} requires a DAO; "
+                    f"construct MetaOrchestrator with dao= or run_writer=",
+                )
+            text = await run_user_input_step(
+                step,
+                inputs=inputs,
+                outputs=outputs,
+                run_id=run_id,
+                session_id=session_id,
+                dao=self._dao,
+                now=time.time,
+            )
+            # Pass-through path: yields no events (skip_if was true).
+            yield _StepDone(text=text, status="ok")
+            return
+        # For other kinds, the test harness's outer dispatch handles them.
+        # Production orchestration uses its existing inline builders.
+        raise NotImplementedError(
+            f"_dispatch_one_step direct dispatch for kind={step.kind!r} "
+            f"is not needed in PR3 — the test harness's outer _dispatch "
+            f"handles these kinds.",
+        )
+
+    async def run_once(
+        self,
+        match: MetaMatch,
+        *,
+        run_id: str,
+        session_id: str,
+        dispatch_step_stream: Any,
+        yield_skill_view_preface: Any,
+    ) -> MetaResult:
+        """Drive ``run_dag`` to completion; return the terminal MetaResult.
+
+        Test-friendly wrapper that does NOT consume agent events. Production
+        surfaces continue to use the existing ``iter_events`` API.
+        """
+        final: MetaResult | None = None
+        async for ev in run_dag(
+            match,
+            dispatch_step_stream=dispatch_step_stream,
+            yield_skill_view_preface=yield_skill_view_preface,
+        ):
+            if isinstance(ev, MetaResult):
+                final = ev
+        if final is None:
+            return MetaResult(ok=False, error="run_dag yielded no MetaResult")
+        return final
+
+    async def resume(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+        filled_fields: dict[str, Any],
+        dispatch_step_stream: Any,
+        yield_skill_view_preface: Any,
+    ) -> MetaResult:
+        """Resume an awaiting run with collected field values.
+
+        Atomic transition awaiting_user → running via DAO.try_claim_resume.
+        On race-lost: returns MetaResult(ok=False, error=...).
+        On win: rehydrates plan/inputs/outputs, injects collected fields and
+        a clarify-summary markdown, then reenters run_dag with seed_outputs.
+        Calls finish_run_sync to finalize unless the DAG re-pauses.
+        """
+        if self._dao is None:
+            return MetaResult(
+                ok=False,
+                error="MetaOrchestrator has no DAO; resume requires PR2",
+            )
+
+        payload = await asyncio.to_thread(
+            self._dao.try_claim_resume,
+            run_id=run_id,
+            session_id=session_id,
+        )
+        if payload is None:
+            return MetaResult(
+                ok=False,
+                error=f"resume failed: run {run_id!r} not found or race lost",
+            )
+
+        return await self.resume_with_payload(
+            payload=payload,
+            filled_fields=filled_fields,
+            dispatch_step_stream=dispatch_step_stream,
+            yield_skill_view_preface=yield_skill_view_preface,
+        )
+
+    async def resume_with_payload(
+        self,
+        *,
+        payload: Any,
+        filled_fields: dict[str, Any],
+        dispatch_step_stream: Any,
+        yield_skill_view_preface: Any,
+    ) -> MetaResult:
+        """Resume from an already-claimed ResumePayload (skips the CAS).
+
+        Used by the runtime when ``meta_resolution`` performs the CAS
+        itself before stashing the payload on ``ctx.metadata['meta_resume']``.
+        Doing the CAS twice would always race-lose the second attempt.
+        """
+        from opensquilla.skills.meta.clarify_summary import render_clarify_summary
+        from opensquilla.skills.meta.plan_serde import (
+            clarify_config_from_jsonable,
+            from_jsonable,
+        )
+
+        if self._dao is None:
+            return MetaResult(
+                ok=False,
+                error="MetaOrchestrator has no DAO; resume requires PR2",
+            )
+
+        run_id = payload.run_id
+        plan = from_jsonable(json.loads(payload.plan_snapshot_json))
+        inputs = json.loads(payload.inputs_json or "{}")
+        outputs = json.loads(payload.step_outputs_json or "{}")
+
+        schema_dict = json.loads(payload.awaiting_schema_json or "{}")
+        filled_clean = _merge_clarify_defaults(schema_dict, filled_fields)
+
+        inputs.setdefault("collected", {})
+        inputs["collected"][payload.awaiting_step_id] = filled_clean
+        if "language_instruction" not in inputs:
+            inputs["language_instruction"] = language_instruction_for_user_message(
+                str(inputs.get("user_message") or ""),
+            )
+
+        cfg = clarify_config_from_jsonable(schema_dict)
+        outputs[payload.awaiting_step_id] = render_clarify_summary(
+            schema=cfg, filled=filled_clean,
+        )
+
+        match = MetaMatch(plan=plan, inputs=inputs)
+
+        final: MetaResult | None = None
+        previous_run_id = self._current_run_id
+        self._current_run_id = run_id
+        try:
+            async for ev in run_dag(
+                match,
+                dispatch_step_stream=dispatch_step_stream,
+                yield_skill_view_preface=yield_skill_view_preface,
+                seed_outputs=outputs,
+            ):
+                if isinstance(ev, MetaResult):
+                    final = ev
+        finally:
+            self._current_run_id = previous_run_id
+        if final is None:
+            final = MetaResult(ok=False, error="resume run_dag yielded no MetaResult")
+
+        # Finalize the run lifecycle unless re-paused. If re-paused,
+        # try_claim_awaiting has already moved the row back to
+        # 'awaiting_user' — calling finish_run_sync would corrupt state.
+        if not final.paused:
+            from typing import Literal
+            finish_status: Literal["ok", "failed", "cancelled"] = (
+                "ok" if final.ok else "failed"
+            )
+            await asyncio.to_thread(
+                self._dao.finish_run_sync,
+                run_id=run_id,
+                result=final,
+                status=finish_status,
+            )
+        return final
+
+    async def iter_resume_events(
+        self,
+        *,
+        payload: Any,
+        filled_fields: dict[str, Any],
+    ) -> AsyncIterator[Any]:
+        """Stream events from a resume just like ``iter_events`` does for a
+        fresh run.
+
+        Yields nested AgentEvents (TextDeltaEvent / ToolUseStartEvent /
+        ToolResultEvent — including the synthetic paused tool_result if
+        the DAG re-pauses) followed by the terminal MetaResult.
+
+        The runtime consumes this from ``_turn_generator`` when
+        ``ctx.metadata["meta_resume"]`` is set, threading every event
+        through the normal stream_consumer pipeline so surfaces see the
+        same shape they would for any other meta-skill turn.
+        """
+        from opensquilla.skills.meta.clarify_summary import render_clarify_summary
+        from opensquilla.skills.meta.plan_serde import (
+            clarify_config_from_jsonable,
+            from_jsonable,
+        )
+
+        if self._dao is None:
+            yield MetaResult(
+                ok=False,
+                error="MetaOrchestrator has no DAO; resume requires PR2",
+            )
+            return
+
+        run_id = payload.run_id
+        plan = from_jsonable(json.loads(payload.plan_snapshot_json))
+        inputs = json.loads(payload.inputs_json or "{}")
+        outputs = json.loads(payload.step_outputs_json or "{}")
+
+        schema_dict = json.loads(payload.awaiting_schema_json or "{}")
+        filled_clean = _merge_clarify_defaults(schema_dict, filled_fields)
+
+        inputs.setdefault("collected", {})
+        inputs["collected"][payload.awaiting_step_id] = filled_clean
+
+        cfg = clarify_config_from_jsonable(schema_dict)
+        outputs[payload.awaiting_step_id] = render_clarify_summary(
+            schema=cfg, filled=filled_clean,
+        )
+
+        match = MetaMatch(plan=plan, inputs=inputs)
+
+        previous_run_id = self._current_run_id
+        self._current_run_id = run_id
+        final: MetaResult | None = None
+        try:
+            async for ev in run_dag(
+                match,
+                dispatch_step_stream=self._dispatch_step_stream,
+                yield_skill_view_preface=self._yield_skill_view_preface,
+                seed_outputs=outputs,
+                max_parallelism=self._max_parallelism,
+                usage_tracker=self._usage_tracker,
+                session_key=self._session_key,
+                usage_scope_prefix=run_id,
+            ):
+                if isinstance(ev, MetaResult):
+                    if ev.ok:
+                        ev.final_text = await self._resolve_final_text(
+                            plan=plan,
+                            inputs=inputs,
+                            current_final_text=ev.final_text,
+                            step_outputs=ev.step_outputs,
+                        )
+                        ev.final_text = await self._repair_final_text_language(
+                            inputs,
+                            ev.final_text,
+                        )
+                    final = ev
+                yield ev
+        finally:
+            self._current_run_id = previous_run_id
+
+        # Finalize the run lifecycle unless re-paused. If re-paused,
+        # try_claim_awaiting has already moved the row back to
+        # 'awaiting_user' — calling finish_run_sync would corrupt state.
+        if final is not None and not final.paused:
+            from typing import Literal
+            finish_status: Literal["ok", "failed", "cancelled"] = (
+                "ok" if final.ok else "failed"
+            )
+            await asyncio.to_thread(
+                self._dao.finish_run_sync,
+                run_id=run_id,
+                result=final,
+                status=finish_status,
+            )
+
     async def _resolve_final_text(
         self,
         *,
         plan: MetaPlan,
+        inputs: dict[str, Any],
         current_final_text: str,
         step_outputs: dict[str, str],
     ) -> str:
@@ -476,7 +921,7 @@ class MetaOrchestrator:
         if self._llm_chat is None or not step_outputs:
             return current_final_text
         try:
-            summary = await self._summarize_step_outputs(plan, step_outputs)
+            summary = await self._summarize_step_outputs(plan, inputs, step_outputs)
         except Exception as exc:  # noqa: BLE001 — best-effort UX layer
             log.warning(
                 "orchestrator.final_text_summarize_failed skill=%s error=%s",
@@ -498,6 +943,7 @@ class MetaOrchestrator:
     async def _summarize_step_outputs(
         self,
         plan: MetaPlan,
+        inputs: dict[str, Any],
         step_outputs: dict[str, str],
     ) -> str:
         """One-shot LLM call to render step_outputs as a short Markdown summary.
@@ -535,6 +981,9 @@ class MetaOrchestrator:
             "deliverables (Chinese if outputs are Chinese, English "
             "otherwise)."
         )
+        language_instruction = str(inputs.get("language_instruction") or "").strip()
+        if language_instruction:
+            system_prompt = f"{system_prompt}\n\n{language_instruction}"
         snippets: list[str] = []
         for sid, raw in step_outputs.items():
             truncated = (raw or "")[:1200]
@@ -544,6 +993,79 @@ class MetaOrchestrator:
             + ("\n\n".join(snippets) if snippets else "(no step outputs)")
         )
         return (await self._llm_chat(system_prompt, user_msg)).strip()
+
+    async def _repair_final_text_language(
+        self,
+        inputs: dict[str, Any],
+        text: str,
+    ) -> str:
+        """Best-effort final guard for template/LLM language leakage."""
+
+        if (
+            self._llm_chat is None
+            or str(inputs.get("user_language") or "").lower() != "en"
+            or not _CJK_RE.search(text or "")
+        ):
+            return text
+        system_prompt = (
+            "You are a precise localization pass for a meta-skill result. "
+            "Return only the rewritten user-facing answer. Translate every "
+            "Chinese prose, heading, label, and summary into English. Preserve "
+            "Markdown structure, code identifiers, file paths, URLs, JSON keys, "
+            "and factual content. Do not add new claims."
+        )
+        language_instruction = str(inputs.get("language_instruction") or "").strip()
+        if language_instruction:
+            system_prompt = f"{system_prompt}\n\n{language_instruction}"
+        user_message = (
+            "User request:\n"
+            f"{str(inputs.get('user_message') or '')[:1600]}\n\n"
+            "Current answer to localize:\n"
+            f"{text[:12000]}"
+        )
+        repaired = (await self._llm_chat(system_prompt, user_message)).strip()
+        return repaired or text
+
+
+def _merge_clarify_defaults(
+    schema_dict: dict[str, Any],
+    filled_fields: dict[str, Any],
+) -> dict[str, Any]:
+    """Filter filled_fields to schema-declared names and back-fill
+    schema-declared defaults for fields the user did not supply.
+
+    Without this, optional fields with a ``default:`` value are missing
+    entirely from ``inputs.collected.<step>`` whenever the user skips
+    them — and any downstream Jinja template that reads
+    ``inputs.collected.<step>.<field>`` blows up with
+    ``UndefinedError: 'dict object' has no attribute '<field>'``.
+
+    The schema declaration is the contract: a default is the value the
+    author opted into when they wrote ``default: en`` / ``default: 10`` /
+    etc. The runtime should honour it; the manuscript prompt should
+    never need ``| default(...)`` to compensate for the runtime not
+    materializing what the schema promised.
+    """
+    fields = schema_dict.get("fields") or []
+    allowed = {
+        f["name"] for f in fields if isinstance(f, dict) and "name" in f
+    }
+    merged: dict[str, Any] = {}
+    # Step 1: schema-declared defaults form the baseline.
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        name = field.get("name")
+        if not isinstance(name, str):
+            continue
+        if "default" in field and field["default"] is not None:
+            merged[name] = field["default"]
+    # Step 2: user-supplied values win over defaults (and unknown keys
+    # are still dropped to keep prompt-injection vectors closed).
+    for k, v in (filled_fields or {}).items():
+        if k in allowed:
+            merged[k] = v
+    return merged
 
 
 def make_agent_runner_from_parent(
@@ -571,7 +1093,58 @@ def make_agent_runner_from_parent(
     file tools against it (sub_config.workspace_dir).
     """
 
+    # Diagnostic: log the workspace_dir this factory was constructed with
+    # so we can verify the value flowing into sub-Agents matches the
+    # gateway-configured workspace (vs. falling through to
+    # default_workspace_dir()). structlog-based so the gateway's
+    # configured log pipeline doesn't swallow it (stdlib INFO is
+    # filtered out by the default root logger level).
+    slog.info(
+        "meta_orchestrator.agent_runner_factory",
+        workspace_dir=workspace_dir,
+        session_key=session_key,
+    )
+
+    # Last-mile safety: if the caller chain (Agent meta_invoke /
+    # meta_resume handlers) ended up resolving workspace_dir to None,
+    # the sub-Agent's system prompt would not have a ``## Workspace``
+    # section and the LLM would invent default-workspace paths from its
+    # training prior. That tripped sandbox sensitive-path blocks repeatedly.
+    # Pull from ``current_tool_context`` as the authoritative fallback
+    # — the gateway always seeds it with the
+    # ``resolve_agent_workspace_dir`` value at turn start (see
+    # ``rpc_sessions._handle_chat_send`` and friends).
+    if not workspace_dir:
+        from opensquilla.tools.types import current_tool_context as _ctc
+        _ctx = _ctc.get()
+        ctc_ws = getattr(_ctx, "workspace_dir", None) if _ctx is not None else None
+        if ctc_ws:
+            workspace_dir = str(ctc_ws)
+            slog.warning(
+                "meta_orchestrator.agent_runner_factory_recovered_workspace",
+                workspace_dir=workspace_dir,
+                session_key=session_key,
+                source="current_tool_context",
+            )
+
     async def _runner(system_prompt: str, user_message: str) -> AsyncIterator[AgentEvent]:
+        # Per-call recovery: prefer the live tool_context's workspace_dir
+        # over the (possibly stale or None) factory closure value. The
+        # outer turn's tool_context is set by the gateway and is the
+        # single source of truth; trust it on every sub-Agent spawn.
+        # See ``rpc_sessions._handle_chat_send`` for where it's seeded
+        # with ``resolve_agent_workspace_dir`` from the gateway config.
+        from opensquilla.tools.types import current_tool_context as _ctc
+        _ctx = _ctc.get()
+        _live_ws = getattr(_ctx, "workspace_dir", None) if _ctx is not None else None
+        effective_workspace_dir = str(_live_ws) if _live_ws else workspace_dir
+        slog.info(
+            "meta_orchestrator.subagent_spawn",
+            factory_workspace_dir=workspace_dir,
+            live_workspace_dir=_live_ws,
+            effective_workspace_dir=effective_workspace_dir,
+            session_key=session_key,
+        )
         # Build a fresh AgentConfig keyed off the parent's settings but with
         # the skill body installed as the sub-turn's system prompt. The
         # iteration cap allows for multi-fetch flows (arxiv-deck pulls 6
@@ -599,10 +1172,10 @@ def make_agent_runner_from_parent(
         # TurnRunner._build_agent_for_turn; the live value lives only in
         # the per-call ToolContext and must be threaded through here.
         sub_system_prompt = system_prompt
-        if workspace_dir:
+        if effective_workspace_dir:
             sub_system_prompt = (
                 f"{system_prompt}\n\n## Workspace\n"
-                f"Your workspace directory is `{workspace_dir}`.\n"
+                f"Your workspace directory is `{effective_workspace_dir}`.\n"
                 f"When calling write_file / read_file / list_dir / "
                 f"publish_artifact, use absolute paths INSIDE this "
                 f"directory. Paths outside it may be blocked or require "
@@ -614,7 +1187,7 @@ def make_agent_runner_from_parent(
             max_iterations=min(getattr(base_config, "max_iterations", 30), 30),
             system_prompt=sub_system_prompt,
             extra_system_prompt=None,
-            metadata=dict(getattr(base_config, "metadata", {}) or {}),
+            metadata=_metadata_for_meta_subagent(base_config),
             # Forward the resolved workspace_dir so sub-Agent's write_file /
             # memory_save / shell tools resolve paths inside the operator's
             # workspace rather than falling back to process cwd. Without
@@ -626,11 +1199,30 @@ def make_agent_runner_from_parent(
         # Strip meta_invoke from the sub-Agent's tool surface so a step
         # cannot recurse into another meta-skill (pitfall #3 in the
         # mechanism doc: meta-A → meta-B → meta-A loops).
+        #
+        # Three tool-definition shapes are matched:
+        #   * attribute-style (``SimpleNamespace`` / dataclass with ``name``)
+        #   * flat-dict       ``{"name": "meta_invoke", ...}``
+        #   * OpenAI function-wrapped
+        #     ``{"type": "function", "function": {"name": "meta_invoke"}}``
+        # Missing the third shape would let provider routers that emit
+        # OpenAI-compatible schemas (OpenAI/OpenRouter/DeepSeek/Gemini)
+        # leak ``meta_invoke`` back into sub-Agents and reopen the
+        # recursion path the guard exists to close.
         filtered_tool_definitions = [
             td for td in tool_definitions
             if not (
                 getattr(td, "name", None) == "meta_invoke"
-                or (isinstance(td, dict) and td.get("name") == "meta_invoke")
+                or (
+                    isinstance(td, dict)
+                    and (
+                        td.get("name") == "meta_invoke"
+                        or (
+                            isinstance(td.get("function"), dict)
+                            and td["function"].get("name") == "meta_invoke"
+                        )
+                    )
+                )
             )
         ]
         agent = agent_factory(
@@ -679,30 +1271,32 @@ def make_llm_chat_from_provider(
     *,
     provider: LLMProvider,
     base_config: AgentConfig,
-    max_tokens: int = 4096,
+    max_tokens: int = 16384,
     usage_tracker: Any | None = None,
     session_key: str | None = None,
 ) -> LLMChat:
     """Build a single-turn LLM caller — no tools, no agent loop.
 
     Concatenates the streamed visible ``TextDeltaEvent`` payloads and returns
-    the final text. Used by ``llm_classify`` steps to avoid sub-Agent
-    overhead.
+    the final text. Used by ``llm_classify`` and ``llm_chat`` meta-skill
+    steps to avoid sub-Agent overhead.
 
-    ``max_tokens`` defaults to 4096. The earlier 256 default was sized for
-    "classifier returns one short label", which is correct in steady state
-    — but reasoning-capable models (e.g. deepseek-v4-flash with
-    ``reasoning_format='deepseek'``) emit a chain-of-thought into
-    ``reasoning_content`` BEFORE producing the visible label, and that
-    chain is counted against the same ``max_tokens`` budget. With 256
-    tokens the budget is exhausted inside the reasoning stream and the
-    visible content stays empty, producing zero output_chars and tripping
-    downstream ``meta_skill_fill_slots`` with an invalid empty argument
-    (observed live on meta-skill-creator pick_pattern step 2026-05-23).
-    2048 gives reasoning room for classifiers but is too small for final
-    deliverable steps such as travel plans and paper sections; 4096 keeps
-    those outputs from truncating while still bounding no-tool calls.
-    Callers that need very large payloads should still pass a larger value.
+    ``max_tokens`` defaults to 16384. History:
+      - 256 (classifiers): exhausted inside reasoning_content for
+        reasoning-format=deepseek models, producing empty visible output
+        (observed 2026-05-23 on meta-skill-creator pick_pattern).
+      - 4096 (earlier): big enough for short classifiers but truncated
+        meta-skill `llm_chat` steps that produce long deliverables.
+        meta-paper-write's final_manuscript_package routinely emitted
+        14k+ chars (≈ 5k+ tokens) of MANUSCRIPT_PLAN before reaching the
+        MANUSCRIPT_TEX section the compile_pdf step needed, then got
+        cut off (observed 2026-05-27).
+      - 16384: matches the deepseek/deepseek-v4-flash catalog upper
+        bound and is comfortably above what other OpenRouter-fronted
+        deepseek/glm models accept. Providers that cap lower will
+        clamp/error gracefully.
+    Callers that need MORE than 16k should pass a larger value
+    explicitly; callers that want LESS (classifiers) should also override.
     """
 
     from opensquilla.provider.types import ChatConfig, DoneEvent, Message
@@ -729,6 +1323,7 @@ def make_llm_chat_from_provider(
                         model_id=event.model or base_config.model_id or "",
                         cache_read_tokens=event.cached_tokens,
                         cache_write_tokens=event.cache_write_tokens,
+                        billed_cost=event.billed_cost,
                     )
             elif type(event).__name__ == "ErrorEvent" and not first_error:
                 # Capture provider-level errors (auth, network, illegal

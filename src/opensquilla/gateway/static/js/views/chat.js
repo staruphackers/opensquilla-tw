@@ -29,7 +29,9 @@ const ChatView = (() => {
   let _isStreaming = false;
   let _aborted = false;
   let _streamBubble = null;
+  let _streamSessionKey = '';
   let _streamRaw = '';           // full accumulated text (for export)
+  let _streamGeneration = 0;
   let _segments = [];             // [{type:'text', raw:'', el:DOM}, {type:'tool', el:DOM}, ...]
   let _activeTextSeg = null;      // pointer to current text segment's DOM element
   let _activeTextRaw = '';        // raw text for current active segment only
@@ -37,14 +39,208 @@ const ChatView = (() => {
   let _autoScroll = true;
   let _streamIdleTimer = null;
   let _streamIdlePausedForApproval = false;
+  let _approvalPendingForCurrentSession = false;
+  let _currentRunStatus = 'idle';
   let _historySyncTimer = null;
+  const _AWAITING_MODEL_CLASS = 'awaiting-model';
+  const _STREAM_ACTIVE_MARK_CLASS = 'streaming-active-mark';
+  const _STREAM_ACTIVE_MARK_DELAY_MS = 3500;
+  let _streamActiveMarkTimer = null;
+  let _streamActiveMarkVisibleStartedAt = 0;
+  let _lastVisibleStreamEvent = '';
   const _DEFAULT_STREAM_IDLE_TIMEOUT_MS = 210000; // server should emit terminal first
   let _streamIdleTimeoutMs = _DEFAULT_STREAM_IDLE_TIMEOUT_MS;
   let _lastStreamSeq = 0;
+  const _streamSeqBySession = new Map();
+  const _streamSeqSeenBySession = new Map();
+  const _STREAM_SEQ_SEEN_WINDOW = 800;
+  const _liveStreamStateBySession = new Map();
   let _activeTaskGroups = new Set();
+  let _pendingFinalizedAssistantBubble = null;
+  let _pendingFinalizedAssistantFallbackId = '';
+  const _pendingRouterDecisions = new Map();
+  let _routerFxScanDelayTimer = null;
+  let _routerFxScanPending = null;
+  const _CHAT_DIAG_KEY = 'opensquilla.chat.debugLog';
+  const _CHAT_DIAG_ENABLED_KEY = 'opensquilla.chat.debug.enabled';
+  const _CHAT_DIAG_MAX = 300;
   // Session epoch counter. Frames carrying an older epoch are stale
   // (arrived from a turn that predates the last reset) and must be discarded.
   let _currentEpoch = 0;
+
+  function _chatDiagEnabled() {
+    try {
+      return window.localStorage.getItem(_CHAT_DIAG_ENABLED_KEY) === '1';
+    } catch {
+      return false;
+    }
+  }
+
+  function _chatDiagShortText(value, maxLen = 120) {
+    if (value == null) return '';
+    return String(value).replace(/\s+/g, ' ').trim().slice(0, maxLen);
+  }
+
+  function _chatDiagClassName(el) {
+    if (!el) return '';
+    if (typeof el.className === 'string') return el.className;
+    return String(el.className || '');
+  }
+
+  function _chatDiagDescribeElement(el) {
+    if (!el) return null;
+    const dataset = el.dataset || {};
+    return {
+      tag: el.tagName || '',
+      cls: _chatDiagClassName(el),
+      role: el.getAttribute ? (el.getAttribute('data-history-role') || '') : '',
+      live: dataset.live || '',
+      state: dataset.state || '',
+      scanning: dataset.scanning || '',
+      sessionKey: dataset.sessionKey || '',
+      turnIndex: dataset.turnIndex || '',
+      routerIdentity: dataset.routerIdentity || '',
+      text: _chatDiagShortText(el.textContent || '', 90),
+      connected: !!el.isConnected,
+    };
+  }
+
+  function _chatDiagDomSnapshot() {
+    const thread = (typeof _thread !== 'undefined') ? _thread : null;
+    const streamBubble = (typeof _streamBubble !== 'undefined') ? _streamBubble : null;
+    const thinkingEl = (typeof _thinkingEl !== 'undefined') ? _thinkingEl : null;
+    const snapshot = {
+      sessionKey: (typeof _sessionKey !== 'undefined') ? _sessionKey : '',
+      isStreaming: !!((typeof _isStreaming !== 'undefined') && _isStreaming),
+      aborted: !!((typeof _aborted !== 'undefined') && _aborted),
+      streamGeneration: (typeof _streamGeneration !== 'undefined') ? _streamGeneration : null,
+      lastStreamSeq: (typeof _lastStreamSeq !== 'undefined') ? _lastStreamSeq : null,
+      streamRawLen: (typeof _streamRaw === 'string') ? _streamRaw.length : 0,
+      activeTextRawLen: (typeof _activeTextRaw === 'string') ? _activeTextRaw.length : 0,
+      streamBubble: _chatDiagDescribeElement(streamBubble),
+      thinkingEl: _chatDiagDescribeElement(thinkingEl),
+      threadReady: !!thread,
+    };
+    if (!thread) return snapshot;
+    const children = Array.from(thread.children || []);
+    snapshot.childCount = children.length;
+    snapshot.msgCount = thread.querySelectorAll('.msg').length;
+    snapshot.userMsgCount = thread.querySelectorAll('.msg.user').length;
+    snapshot.assistantMsgCount = thread.querySelectorAll('.msg.assistant').length;
+    snapshot.streamingMsgCount = thread.querySelectorAll('.msg.streaming').length;
+    snapshot.thinkingMsgCount = thread.querySelectorAll('.msg.thinking').length;
+    snapshot.routerCount = thread.querySelectorAll('.router-fx').length;
+    snapshot.liveRouterCount = thread.querySelectorAll('.router-fx[data-live="true"]').length;
+    snapshot.scanningRouterCount = thread.querySelectorAll('.router-fx[data-scanning="true"]').length;
+    snapshot.tail = children.slice(Math.max(0, children.length - 14)).map(_chatDiagDescribeElement);
+    return snapshot;
+  }
+
+  function _chatDiagSummarizePayload(payload) {
+    if (!payload || typeof payload !== 'object') {
+      return { value: _chatDiagShortText(payload, 160) };
+    }
+    const out = {};
+    [
+      'event', 'stream_seq', 'epoch', 'from_state', 'to_state', 'toState',
+      'tier', 'model', 'routed_tier', 'routed_model', 'routing_source',
+      'routing_applied', 'rollout_phase', 'reason', 'tool_name', 'name',
+      'tool_use_id', 'message_id', 'sessionKey', 'session_key',
+      'input_tokens', 'output_tokens',
+    ].forEach((key) => {
+      if (payload[key] != null) out[key] = payload[key];
+    });
+    if (typeof payload.text === 'string') {
+      out.textLen = payload.text.length;
+      out.textHead = _chatDiagShortText(payload.text, 100);
+    }
+    const raw = payload.result || payload.content || payload.output;
+    if (typeof raw === 'string') {
+      out.resultLen = raw.length;
+      out.resultHead = _chatDiagShortText(raw, 100);
+    }
+    if (payload.usage && typeof payload.usage === 'object') {
+      out.usage = _chatDiagSummarizePayload(payload.usage);
+    }
+    if (payload.arguments && typeof payload.arguments === 'object') {
+      out.arguments = {
+        kind: payload.arguments.kind || '',
+        paused: payload.arguments.paused,
+        hasClarifySchema: !!payload.arguments.clarify_schema,
+      };
+    }
+    return out;
+  }
+
+  function _chatDiagReadLog() {
+    try {
+      return JSON.parse(window.localStorage.getItem(_CHAT_DIAG_KEY) || '[]');
+    } catch {
+      return [];
+    }
+  }
+
+  function _chatDiagWriteLog(entries) {
+    try {
+      window.localStorage.setItem(_CHAT_DIAG_KEY, JSON.stringify(entries.slice(-_CHAT_DIAG_MAX)));
+    } catch {
+      // Ignore quota/storage failures. Console logging below still helps.
+    }
+  }
+
+  function _chatDiag(label, data) {
+    if (!_chatDiagEnabled()) return;
+    const entry = {
+      t: Date.now(),
+      iso: new Date().toISOString(),
+      label,
+      data: data || {},
+      dom: _chatDiagDomSnapshot(),
+    };
+    try {
+      const entries = _chatDiagReadLog();
+      entries.push(entry);
+      _chatDiagWriteLog(entries);
+    } catch {
+      // Keep diagnostics best-effort only.
+    }
+    try {
+      console.debug('[chat-diag]', label, entry);
+    } catch {}
+  }
+
+  function _installChatDiagConsole() {
+    if (typeof window === 'undefined') return;
+    window.OpenSquillaChatDiag = {
+      key: _CHAT_DIAG_KEY,
+      dump() {
+        const entries = _chatDiagReadLog();
+        try { console.log('[chat-diag dump]', entries); } catch {}
+        return entries;
+      },
+      clear() {
+        try { window.localStorage.removeItem(_CHAT_DIAG_KEY); } catch {}
+        return [];
+      },
+      disable() {
+        try { window.localStorage.setItem(_CHAT_DIAG_ENABLED_KEY, '0'); } catch {}
+        return false;
+      },
+      enable() {
+        try { window.localStorage.setItem(_CHAT_DIAG_ENABLED_KEY, '1'); } catch {}
+        return true;
+      },
+      snapshot: _chatDiagDomSnapshot,
+      copy() {
+        const text = JSON.stringify(_chatDiagReadLog(), null, 2);
+        if (window.navigator && window.navigator.clipboard) {
+          window.navigator.clipboard.writeText(text).catch(() => {});
+        }
+        return text;
+      },
+    };
+  }
+  _installChatDiagConsole();
 
   // Attachments
   // Two-mode attachment buffer: each entry is either
@@ -53,6 +249,21 @@ const ChatView = (() => {
   // Single source of truth for the inline-vs-staged threshold; never re-typed.
   const INLINE_THRESHOLD_BYTES = 2_000_000;
   const ATTACHMENT_TEXT_HARD_CAP_BYTES = INLINE_THRESHOLD_BYTES;
+  const LARGE_PASTE_CHARS = 20_000;
+  const PAGE_DUMP_CHARS = 8_000;
+  const PAGE_DUMP_MARKER_MIN_SCORE = 3;
+  const PAGE_DUMP_MARKERS = [
+    'Chat session',
+    'agent:main:webchat:',
+    'Still waiting for agent response',
+    'AI MODEL ROUTER',
+    'The provider returned an empty response',
+    'Pulsing',
+    'Running',
+    'Send a message',
+    'SYSTEM',
+    'SQUILLA',
+  ];
   const ATTACHMENT_IMAGE_HARD_CAP_BYTES = 5 * 1024 * 1024;
   const ATTACHMENT_PDF_HARD_CAP_BYTES = 30 * 1024 * 1024; // staged PDF bridge cap
   const ATTACHMENT_IMAGE_MIMES = [
@@ -125,14 +336,28 @@ const ChatView = (() => {
   let _pendingDrainAfterTerminalTimer = null;
   let _compactInFlight = false;
   let _compactInFlightKey = '';
+  let _compactSuppressedRouterSessionKey = '';
+  let _compactSuppressedRouterTurnIndex = '';
   let _lastCompactionToastSig = '';
   let _lastCompactionToastAt = 0;
-  let _compactStatusEl = null;
-  let _compactStatusTimer = null;
+  let _compactionSeparatorEl = null;
+  let _compactionSeparatorTimer = null;
   let _stopRequestedByUser = false;
   let _pendingArea = null;
   let _stopBtn = null;
   let _runStatusEl = null;
+  const CHAT_HISTORY_PAGE_SIZE = 50;
+  let _historyLoadedMessages = [];
+  let _historyOldestCursor = null;
+  let _historyNewestCursor = null;
+  let _historyHasMore = false;
+  let _historyScope = 'complete';
+  let _historyLoadingEarlier = false;
+  let _historyHydrating = false;
+  let _historyHasRendered = false;
+  let _historyRequestSeq = 0;
+  let _historyError = '';
+  let _historyCompactionSummaries = [];
 
   // Sent-message history navigation (↑/↓ on empty textarea).
   // History is derived from _messages (role==='user') so there is a single
@@ -289,6 +514,7 @@ const ChatView = (() => {
     memory_store: '\uD83E\uDDE0', // 🧠
   };
   function _toolEmoji(name) {
+    if (name && name.startsWith('meta-step:')) return '⚙️'; // ⚙️ meta-skill step
     return _TOOL_EMOJI[name] || '\u26A1'; // ⚡ default
   }
 
@@ -317,10 +543,19 @@ const ChatView = (() => {
   const _SAVINGS_POPUP_COOLDOWN_MS = 10 * 60 * 1000;
   let _savingsPopupLastTs = 0;
   let _lastSavingsPopupIdentity = '';
+  // Per-identity celebration timestamps so the cooldown throttles only repeats
+  // of the SAME routed (model|tier) — not every turn globally. Without this, a
+  // standard turn's celebration would mask a following, differently-routed
+  // tool-assisted turn for the whole 10-minute window.
+  const _savingsPopupTsByIdentity = new Map();
   function _resetSavingsPopupCooldown() {
     _savingsPopupLastTs = 0;
     _lastSavingsPopupIdentity = '';
-    if (window.SavingsFX) window.SavingsFX.resetStreak();
+    _savingsPopupTsByIdentity.clear();
+    if (window.SavingsFX) {
+      window.SavingsFX.resetStreak();
+      window.SavingsFX.cleanup();
+    }
   }
 
   // Token widget accumulator
@@ -393,6 +628,7 @@ const ChatView = (() => {
   let _thread = null;
   let _textarea = null;
   let _sendBtn = null;
+  let _micBtn = null;
   let _sessionInput = null;
   let _sessionChip = null;
   let _attachPreview = null;
@@ -403,6 +639,10 @@ const ChatView = (() => {
   let _elevatedPill = null;
   let _composer = null;
   let _composerObserver = null;
+  let _mediaRecorder = null;
+  let _recordedAudioChunks = [];
+  let _recordingStream = null;
+  let _voiceInputBusy = false;
 
   /* ── Helpers ────────────────────────────────────────────────────────── */
 
@@ -412,6 +652,18 @@ const ChatView = (() => {
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')
       .replace(/"/g, '&quot;');
+  }
+
+  function _escAttr(s) {
+    return _esc(s);
+  }
+
+  function _displayRoleLabel(role) {
+    return role === 'user' ? 'You'
+      : role === 'assistant' ? 'Squilla'
+      : role === 'subagent' ? 'Sub-agent'
+      : role ? role.charAt(0).toUpperCase() + role.slice(1)
+      : '';
   }
 
   /* ── Inline SVG icons local to chat.js (icons.js owned by another agent) ── */
@@ -466,6 +718,13 @@ const ChatView = (() => {
       + '<path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>';
   }
 
+  function _clearMessageActionFocus(reason = '') {
+    const active = document.activeElement;
+    if (!active || !active.closest || !active.closest('.msg-actions')) return;
+    active.blur();
+    _chatDiag('message_actions.focus_cleared', { reason: reason || '' });
+  }
+
   // Append the hover-action row to a message bubble. Buttons are CSS-hidden
   // until the bubble is hovered/focus-within; click handling lives in
   // _bindHoverActions (delegated on the thread). The row is anchored inside
@@ -483,7 +742,7 @@ const ChatView = (() => {
     const row = document.createElement('div');
     row.className = 'msg-actions';
     row.setAttribute('role', 'toolbar');
-    row.setAttribute('aria-label', role === 'user' ? 'User message actions' : 'Assistant message actions');
+    row.setAttribute('aria-label', role === 'user' ? 'User message actions' : 'Squilla message actions');
 
     if (role === 'assistant') {
       row.innerHTML =
@@ -648,6 +907,7 @@ const ChatView = (() => {
     _thread.addEventListener('click', (ev) => {
       const artifactBtn = ev.target.closest('[data-artifact-download]');
       if (artifactBtn) {
+        if (artifactBtn.tagName === 'A') return;
         ev.preventDefault();
         ev.stopPropagation();
         _downloadArtifact({
@@ -663,6 +923,7 @@ const ChatView = (() => {
       ev.stopPropagation();
       const bubble = btn.closest('.msg');
       if (!bubble) return;
+      btn.blur();
       const action = btn.dataset.action;
       if (action === 'copy') {
         const text = _extractBubbleText(bubble);
@@ -754,10 +1015,11 @@ const ChatView = (() => {
     const meta = document.createElement('div');
     meta.className = 'msg-meta';
     if (hasModel) {
-      const shortModel = model.includes('/') ? model.split('/').pop() : model;
+      const displayModel = _modelDisplayName(model);
       const span = document.createElement('span');
       span.className = 'msg-meta__model';
-      span.textContent = shortModel;
+      span.textContent = displayModel;
+      if (displayModel !== model) span.title = model;
       meta.appendChild(span);
     }
     if (hasTokens) {
@@ -888,6 +1150,7 @@ const ChatView = (() => {
     const canonicalKey = _canonicalSessionKey(key);
     if (canonicalKey !== _sessionKey) _clearActiveTaskGroups();
     _sessionKey = canonicalKey;
+    _syncLastStreamSeqFromSession(canonicalKey);
     if (_sessionInput && _sessionInput.value !== canonicalKey) _sessionInput.value = canonicalKey;
     try { localStorage.setItem('opensquilla_active_session', canonicalKey); } catch {}
     try {
@@ -933,23 +1196,23 @@ const ChatView = (() => {
     _sessionKey = _canonicalSessionKey(urlSession || (urlAgent ? _webchatSessionKey(urlAgent) : storedSession));
     _persistSession(_sessionKey);
 
+    const topbarCenter = App.getTopbarCenter && App.getTopbarCenter();
+    if (topbarCenter) {
+      topbarCenter.innerHTML = `
+        <label class="chat-label">Chat session</label>
+        <button type="button" class="chat-session-chip" id="chat-session-chip"
+                aria-label="Switch chat session" aria-haspopup="dialog" aria-expanded="false">
+          <span class="chat-session-chip-key" id="chat-session-chip-key" title="${_esc(_sessionKey)}">${_esc(_sessionKey)}</span>
+          <span class="chat-session-chip-caret" aria-hidden="true">${_iconChevronDown()}</span>
+        </button>
+        <button class="chat-session-copy-btn" id="chat-session-copy" title="Copy session key" aria-label="Copy session key">${icons.copy()}</button>
+        <span class="chip" id="chat-run-status" title="Idle">Idle</span>
+        <span class="chat-ctx-warn hidden" id="chat-ctx-warn">Request ctx</span>`;
+      topbarCenter.classList.remove('hidden');
+    }
+
     _el.innerHTML = `
       <div class="chat">
-        <div class="chat-header">
-          <div class="chat-header-left">
-            <label class="chat-label">Chat session</label>
-            <button type="button" class="chat-session-chip" id="chat-session-chip"
-                    aria-label="Switch chat session: ${_esc(_sessionKey)}" aria-haspopup="dialog" aria-expanded="false">
-              <span class="chat-session-chip-key" id="chat-session-chip-key" title="${_esc(_sessionKey)}">${_esc(_sessionKey)}</span>
-              <span class="chat-session-chip-caret" aria-hidden="true">${_iconChevronDown()}</span>
-            </button>
-            <button class="chat-session-copy-btn" id="chat-session-copy" title="Copy session key" aria-label="Copy session key">${icons.copy()}</button>
-          </div>
-          <div class="chat-header-right">
-            <span class="chip" id="chat-run-status" title="Idle">Idle</span>
-            <span class="chat-ctx-warn hidden" id="chat-ctx-warn">Context &gt; 85%</span>
-          </div>
-        </div>
         <div class="chat-body">
           <div class="chat-thread" id="chat-thread"
                role="region"
@@ -959,15 +1222,14 @@ const ChatView = (() => {
           </div>
         </div>
         <div class="chat-pending hidden" id="chat-pending"></div>
-        <div class="chat-compact-status hidden" id="chat-compact-status" role="status" aria-live="polite"></div>
-        <div class="chat-slash hidden" id="chat-slash"></div>
         <div class="chat-composer" id="chat-composer">
           <div class="chat-attachments hidden" id="chat-attach-preview"></div>
+          <div class="chat-slash hidden" id="chat-slash"></div>
           <div class="chat-input-bar">
-            <button class="btn btn--icon btn--ghost" id="chat-btn-attach" title="Attach files: PNG, JPEG, GIF, WEBP, PDF, TXT, MD, HTML, CSV, JSON">${icons.paperclip()}</button>
+            <button class="btn btn--icon btn--ghost" id="chat-btn-attach" title="Attach files: PNG, JPEG, GIF, WEBP, PDF, TXT, MD, HTML, CSV, JSON" aria-label="Attach files">${icons.paperclip()}</button>
             <div class="chat-toolbar-wrap">
               <button type="button" class="btn btn--icon btn--ghost chat-toolbar-trigger" id="chat-toolbar-trigger"
-                      title="Run modes — approvals, router"
+                      title="Run modes — execution, router"
                       aria-label="Run modes"
                       aria-haspopup="dialog"
                       aria-expanded="false">${_iconGear()}<span class="chat-toolbar-trigger-dots" aria-hidden="true"><i data-dot="bypass"></i><i data-dot="router"></i></span></button>
@@ -975,15 +1237,24 @@ const ChatView = (() => {
                 <div class="chat-toolbar-popover-arrow" aria-hidden="true"></div>
                 <div class="chat-toolbar-popover-inner" id="chat-toolbar">
                   <div class="chat-toolbar-row">
-                    <span class="chat-toolbar-row-label">Approvals</span>
+                    <span class="chat-toolbar-row-label">Execution mode</span>
                     <button class="chat-pill chat-pill--danger" id="pill-elevated"
-                            title="Approval prompts active. Click to enable full bypass for this browser session.">Bypass Off</button>
+                            title="Approval prompts are active. Click to enable approval bypass for this browser session.">Approval prompts</button>
                   </div>
                   <div class="chat-toolbar-row">
                     <span class="chat-toolbar-row-label">Squilla Router</span>
                     <div class="toggle-switch-wrap" id="pill-router-group" title="Squilla router">
                       <label class="toggle-switch" aria-label="Squilla Router">
                         <input type="checkbox" id="toggle-router" />
+                        <span class="toggle-track"><span class="toggle-thumb"></span></span>
+                      </label>
+                    </div>
+                  </div>
+                  <div class="chat-toolbar-row">
+                    <span class="chat-toolbar-row-label">Visual effects</span>
+                    <div class="toggle-switch-wrap" id="pill-router-fx-group" title="Show router and savings effects">
+                      <label class="toggle-switch" aria-label="Visual effects">
+                        <input type="checkbox" id="toggle-router-fx" />
                         <span class="toggle-track"><span class="toggle-thumb"></span></span>
                       </label>
                     </div>
@@ -996,10 +1267,11 @@ const ChatView = (() => {
                         placeholder="Send a message..." maxlength="100000"
                         aria-label="Message to send"></textarea>
             </div>
+            <button class="btn btn--icon btn--ghost" id="chat-btn-mic" title="Record voice input" aria-label="Record voice input">${icons.microphone ? icons.microphone() : icons.chat()}</button>
             <button class="btn btn--icon btn--ghost" id="chat-btn-new" title="New chat session in the current agent" aria-label="New chat session in the current agent">${icons.plus()}</button>
-            <button class="btn btn--icon btn--ghost" id="chat-btn-export" title="Export as Markdown">${icons.download()}</button>
-            <button class="btn btn--icon btn--primary" id="chat-btn-send" title="Send (queues while streaming)">${icons.send()}</button>
-            <button class="btn btn--icon btn--danger hidden" id="chat-btn-stop" title="Stop current response (Esc)">${icons.stop()}</button>
+            <button class="btn btn--icon btn--ghost" id="chat-btn-export" title="Export as Markdown" aria-label="Export as Markdown">${icons.download()}</button>
+            <button class="btn btn--icon btn--primary" id="chat-btn-send" title="Send (queues while streaming)" aria-label="Send message">${icons.send()}</button>
+            <button class="btn btn--icon btn--danger hidden" id="chat-btn-stop" title="Stop current response (Esc)" aria-label="Stop current response">${icons.stop()}</button>
           </div>
         </div>
         <input type="file" id="chat-file-input" accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,text/plain,text/markdown,text/html,text/csv,application/json,.md,.markdown" multiple class="hidden" />
@@ -1009,15 +1281,15 @@ const ChatView = (() => {
     _thread       = _el.querySelector('#chat-thread');
     _textarea     = _el.querySelector('#chat-textarea');
     _sendBtn      = _el.querySelector('#chat-btn-send');
+    _micBtn       = _el.querySelector('#chat-btn-mic');
     _sessionInput = null;  // replaced by chip; session key lives in _sessionKey
-    _sessionChip  = _el.querySelector('#chat-session-chip');
+    _sessionChip  = document.getElementById('chat-session-chip');
     _attachPreview = _el.querySelector('#chat-attach-preview');
     _pendingArea  = _el.querySelector('#chat-pending');
-    _compactStatusEl = _el.querySelector('#chat-compact-status');
     _stopBtn      = _el.querySelector('#chat-btn-stop');
     _slashEl      = _el.querySelector('#chat-slash');
-    _ctxWarn      = _el.querySelector('#chat-ctx-warn');
-    _runStatusEl  = _el.querySelector('#chat-run-status');
+    _ctxWarn      = document.getElementById('chat-ctx-warn');
+    _runStatusEl  = document.getElementById('chat-run-status');
     _fileInput    = _el.querySelector('#chat-file-input');
     _toolbar      = _el.querySelector('#chat-toolbar');
     _elevatedPill = _el.querySelector('#pill-elevated');
@@ -1025,6 +1297,7 @@ const ChatView = (() => {
 
     _messages = [];
     _clearContextStatus();
+    _resetHistoryPagingState();
     _lastHeaderRole = '';
     _lastHeaderDay = '';
     _applySessionRunState({ run_status: 'idle' });
@@ -1042,7 +1315,7 @@ const ChatView = (() => {
     // Config (which populates _routerFxModels and registers all
     // configured tiers including image_only ones) must finish before
     // the first history render — otherwise non-winner cells fall back
-    // to the tier id ("t1", "t2") instead of the real model name.
+    // to the tier id ("c1", "c2") instead of the real model name.
     _loadFeatureToggles()
       .catch(() => { /* fall through to history anyway */ })
       .finally(() => _loadHistory());
@@ -1066,7 +1339,7 @@ const ChatView = (() => {
 
   function _bindToolbarPills() {
     if (_elevatedPill) {
-      _elevatedPill.addEventListener('click', () => {
+      _elevatedPill.addEventListener('click', async () => {
         if (_elevatedUnavailable) {
           UI.toast(
             'Bypass requires a local owner session (loopback only).',
@@ -1079,9 +1352,12 @@ const ChatView = (() => {
           _setElevatedMode('', { toast: true, sync: true });
           return;
         }
-        const ok = window.confirm(
-          'Enable approval bypass for this browser session? This maps to /elevated bypass: host execution without approval prompts, while sensitive-path checks remain active.'
-        );
+        const ok = await UI.confirm({
+          title: 'Enable approval bypass?',
+          message: '<p>This allows host execution without approval prompts in this browser session. This maps to /elevated bypass.</p><p>Sensitive-path checks remain active.</p>',
+          confirmLabel: 'Enable bypass',
+          danger: true,
+        });
         if (ok) _setElevatedMode('bypass', { toast: true, sync: true });
       });
     }
@@ -1097,6 +1373,9 @@ const ChatView = (() => {
     if (routerToggle) {
       routerToggle.addEventListener('change', async () => {
         const enabled = routerToggle.checked;
+        const previousRouterFeatureEnabled = _routerFeatureEnabled;
+        _routerFeatureEnabled = enabled;
+        if (!enabled) _clearRouterFxVisuals('router_disabled');
         try {
           const patches = { 'squilla_router.enabled': enabled };
           patches['squilla_router.rollout_phase'] = enabled ? 'full' : 'observe';
@@ -1108,9 +1387,33 @@ const ChatView = (() => {
           UI.toast('Squilla Router: ' + (enabled ? 'ON' : 'OFF'), 'info');
         } catch (e) {
           // Revert on failure
+          _routerFeatureEnabled = previousRouterFeatureEnabled;
           routerToggle.checked = !enabled;
+          if (!previousRouterFeatureEnabled) _clearRouterFxVisuals('router_patch_reverted');
+          else _scheduleHistorySync();
           UI.toast('Failed: ' + e.message, 'err');
         }
+      });
+    }
+
+    // Router-fx visualisation toggle — purely client-side (no config write):
+    // it only controls whether THIS browser draws the animated grid.
+    const routerFxToggle = _el.querySelector('#toggle-router-fx');
+    if (routerFxToggle) {
+      routerFxToggle.addEventListener('change', () => {
+        _routerFx.enabled = routerFxToggle.checked;
+        _routerFxSavePref();
+        if (_routerFx.enabled) {
+          // Re-render via the normal history rebuild — the render gates now
+          // allow strips, so historical turns get their grid back.
+          _scheduleHistorySync();
+        } else if (_thread) {
+          // Hide now. This is a user-visible preference, so remove the visual
+          // immediately instead of preserving a separate live-strip path.
+          _thread.querySelectorAll('.router-fx').forEach((n) => _routerFxRemoveStrip(n));
+        }
+        if (window.SavingsFX) window.SavingsFX.setEnabled(_routerFx.enabled);
+        UI.toast('Visual effects: ' + (_routerFx.enabled ? 'ON' : 'OFF'), 'info');
       });
     }
 
@@ -1152,17 +1455,23 @@ const ChatView = (() => {
       if (routerToggle) routerToggle.checked = routerEnabled;
       _toolbarState.router = routerEnabled;
       _routerFeatureEnabled = !!(cfg?.squilla_router?.enabled);
+      // Hydrate the client-side router-fx visualisation preference and sync
+      // its switch. Independent of the operator routing state above; persisted
+      // per browser, so it survives view re-render / navigation. Inherits the
+      // visibility/focus refresh that re-runs this function for free.
+      _routerFxLoadPref();
+      const routerFxToggle = _el?.querySelector('#toggle-router-fx');
+      if (routerFxToggle) routerFxToggle.checked = _routerFx.enabled;
+      if (window.SavingsFX) window.SavingsFX.setEnabled(_routerFx.enabled);
       _globalElevatedMode = _normalizeElevatedMode(cfg?.permissions?.default_mode);
       _toolbarState.bypass = _isApprovalBypassMode(_effectiveElevatedMode());
       _updateElevatedPill();
       _refreshToolbarTriggerGlow();
 
-      // Pre-populate the router slider's tier list and model cache
-      // from the operator's actual configured tiers. We register EVERY
-      // tier (including image-only ones like "image_model") into the
-      // slot list, so image-capable models like kimi-k2.6 show up in
-      // the slider even before the first image route fires for the
-      // current session.
+      // Pre-populate the router visualisation from the operator's actual
+      // configured tiers. We keep every tier in the cache, including
+      // image-only routes, but render-time request-kind filtering decides
+      // which candidates can really be called for this turn.
       //
       // We REPLACE _routerFxSlotList from config (rather than merge)
       // so that tiers the operator has removed drop out of the grid
@@ -1175,18 +1484,29 @@ const ChatView = (() => {
       if (tiers && typeof tiers === 'object') {
         Object.keys(tiers).forEach((tier) => {
           if (typeof tier !== 'string' || !tier) return;
-          const lower = tier.toLowerCase();
+          const lower = _routerFxNormalizeTier(tier);
+          if (!lower) return;
           configTierKeys.push(lower);
           configTierSet.add(lower);
-          const model = tiers[tier]?.model;
-          if (typeof model === 'string' && model) {
-            _routerFxModels[lower] = model;
-          }
+          const rawTier = tiers[tier];
+          const tierConfig = {
+            model: typeof rawTier?.model === 'string' ? rawTier.model : '',
+            supportsImage: rawTier?.supports_image === true,
+            imageOnly: rawTier?.image_only === true,
+          };
+          _routerFxTierConfigs[lower] = tierConfig;
+          if (tierConfig.model) _routerFxModels[lower] = tierConfig.model;
         });
       }
+      Object.keys(_routerFxModels).forEach((tier) => {
+        if (!configTierSet.has(tier)) delete _routerFxModels[tier];
+      });
+      Object.keys(_routerFxTierConfigs).forEach((tier) => {
+        if (!configTierSet.has(tier)) delete _routerFxTierConfigs[tier];
+      });
+      _routerFxConfigTiers = configTierSet;
       if (configTierKeys.length > 0) {
         _routerFxSlotList = _routerFxSortTiers(configTierKeys);
-        _routerFxConfigTiers = configTierSet;
       }
       // Mark config ready as soon as the tier cache is populated.
       // Anything waiting on _routerFxAwaitConfig() (history rebuild)
@@ -1208,14 +1528,12 @@ const ChatView = (() => {
   function _updateSessionChip(key) {
     const previousKey = _sessionKey;
     _sessionKey = key;
-    const chipKey = _el && _el.querySelector('#chat-session-chip-key');
-    const chip = _el && _el.querySelector('#chat-session-chip');
-    const copyBtn = _el && _el.querySelector('#chat-session-copy');
+    const chipKey = document.getElementById('chat-session-chip-key');
+    const copyBtn = document.getElementById('chat-session-copy');
     if (chipKey) {
       chipKey.textContent = key;
       chipKey.title = key;
     }
-    if (chip) chip.setAttribute('aria-label', 'Switch chat session: ' + key);
     if (copyBtn) copyBtn.title = 'Copy session key: ' + key;
     // Drop every router strip that belonged to the previous session
     // the moment the chip flips, even before the new session's
@@ -1224,7 +1542,7 @@ const ChatView = (() => {
     if (previousKey && previousKey !== key && _thread) {
       _thread.querySelectorAll('.router-fx').forEach((el) => {
         if (el.dataset.sessionKey === key) return;
-        el.remove();
+        _routerFxRemoveStrip(el);
       });
     }
   }
@@ -1233,6 +1551,7 @@ const ChatView = (() => {
     const labels = {
       queued: 'Queued',
       running: 'Running',
+      approval_pending: 'Waiting for approval',
       interrupted: 'Interrupted',
       failed: 'Failed',
       timeout: 'Timed out',
@@ -1246,8 +1565,9 @@ const ChatView = (() => {
     const value = String(status || '').toLowerCase();
     if (value === 'abandoned') return 'interrupted';
     if (value === 'killed') return 'cancelled';
+    if (value === 'waiting for approval') return 'approval_pending';
     if (value === 'succeeded' || value === 'success' || value === 'complete') return 'idle';
-    if (['queued', 'running', 'interrupted', 'failed', 'timeout', 'cancelled'].includes(value)) {
+    if (['queued', 'running', 'approval_pending', 'interrupted', 'failed', 'timeout', 'cancelled'].includes(value)) {
       return value;
     }
     return 'idle';
@@ -1260,6 +1580,7 @@ const ChatView = (() => {
     return {
       queued: 'chip-warn',
       running: 'chip-ok',
+      approval_pending: 'chip-warn',
       interrupted: 'chip-warn',
       failed: 'chip-danger',
       timeout: 'chip-warn',
@@ -1273,9 +1594,13 @@ const ChatView = (() => {
     const activeStatus = active ? _normalizeRunStatus(active.status) : '';
     const rawStatus = source.run_status || source.runStatus || active?.status || last?.status || '';
     let status = _normalizeRunStatus(rawStatus);
-    if (active && (activeStatus === 'queued' || activeStatus === 'running')) status = activeStatus;
+    if (active && ['queued', 'running', 'approval_pending'].includes(activeStatus)) status = activeStatus;
     const task = active || last || null;
     return { status, label: _runStatusLabel(status), task };
+  }
+
+  function _runStatusIsActive(status) {
+    return ['queued', 'running', 'approval_pending'].includes(_normalizeRunStatus(status));
   }
 
   function _taskGroupId(payload) {
@@ -1292,6 +1617,59 @@ const ChatView = (() => {
     return !key || !_sessionKey || key === _sessionKey;
   }
 
+  function _sessionKeyFromPayload(payload) {
+    return payload?.key || payload?.session_key || payload?.sessionKey || '';
+  }
+
+  function _sessionStreamSeq(key) {
+    const stored = _streamSeqBySession.get(key || '');
+    return (typeof stored === 'number' && Number.isFinite(stored)) ? stored : 0;
+  }
+
+  function _setSessionStreamSeq(key, seq) {
+    if (!key || typeof seq !== 'number' || !Number.isFinite(seq)) return;
+    const next = Math.max(_sessionStreamSeq(key), seq);
+    _streamSeqBySession.set(key, next);
+    if (key === _sessionKey) _lastStreamSeq = next;
+  }
+
+  function _sessionStreamSeqSeen(key) {
+    const canonicalKey = key || '';
+    let seen = _streamSeqSeenBySession.get(canonicalKey);
+    if (!seen) {
+      seen = new Set();
+      _streamSeqSeenBySession.set(canonicalKey, seen);
+    }
+    return seen;
+  }
+
+  function _markSessionStreamSeqSeen(key, seq) {
+    if (!key || typeof seq !== 'number' || !Number.isFinite(seq)) return true;
+    const seen = _sessionStreamSeqSeen(key);
+    if (seen.has(seq)) return false;
+    seen.add(seq);
+    _setSessionStreamSeq(key, seq);
+
+    const highWater = _sessionStreamSeq(key);
+    const pruneBefore = highWater - _STREAM_SEQ_SEEN_WINDOW;
+    if (seen.size > _STREAM_SEQ_SEEN_WINDOW) {
+      seen.forEach((value) => {
+        if (value < pruneBefore) seen.delete(value);
+      });
+    }
+    return true;
+  }
+
+  function _syncLastStreamSeqFromSession(key) {
+    _lastStreamSeq = _sessionStreamSeq(key || _sessionKey || '');
+  }
+
+  function _dropForeignSessionPayload(event, payload) {
+    if (_isCurrentSessionPayload(payload)) return false;
+    _chatDiag(`${event}.drop.foreign_session`, _chatDiagSummarizePayload(payload));
+    return true;
+  }
+
   function _sessionChangeIsTerminal(payload) {
     const reason = String(payload?.reason || '').toLowerCase();
     if (reason === 'turn_complete' || reason === 'task_terminal') return true;
@@ -1301,20 +1679,37 @@ const ChatView = (() => {
     return ['failed', 'timeout', 'cancelled', 'interrupted'].includes(runStatus);
   }
 
+  function _subscribeResultNeedsTerminalHistorySync(res) {
+    if (!res || Number(res.replayed_count || 0) > 0) return false;
+    const state = _sessionRunStatus(res);
+    if (state.status !== 'idle' || !state.task) return false;
+    const taskStatus = String(state.task.status || '').toLowerCase();
+    const terminalReason = String(state.task.terminal_reason || state.task.terminalReason || '').toLowerCase();
+    return ['succeeded', 'success', 'complete', 'completed', 'done'].includes(taskStatus)
+      || terminalReason === 'completed';
+  }
+
   function _syncTerminalSessionChange(payload = {}) {
     if (!_isCurrentSessionPayload(payload)) return false;
     _clearActiveTaskGroups();
     const state = _sessionRunStatus(payload);
-    const interrupted = state.status === 'cancelled' || state.status === 'interrupted';
-    if (_isStreaming) _endStreaming(interrupted ? { reason: 'aborted' } : undefined);
+    const recoverPending = ['cancelled', 'interrupted', 'failed', 'timeout'].includes(state.status);
+    if (_isStreaming) _endStreaming(recoverPending ? { reason: 'aborted' } : undefined);
     _applySessionRunState(payload);
     _scheduleHistorySync();
-    if (interrupted) {
+    if (recoverPending) {
       _stopRequestedByUser = false;
-      _popAllPendingIntoComposer();
+      _recoverPendingAfterTerminal(state.status);
     } else {
       _schedulePendingDrainAfterTerminal();
     }
+    return true;
+  }
+
+  function _dropReplayedLiveWaitEvent(meta, payload, eventName) {
+    if (!(meta && meta.replayed)) return false;
+    if (_isStreaming || _streamBubble) return false;
+    _chatDiag(`${eventName}.drop.replayed_without_live_stream`, _chatDiagSummarizePayload(payload));
     return true;
   }
 
@@ -1349,15 +1744,18 @@ const ChatView = (() => {
   }
 
   function _applySessionRunState(source) {
-    const el = _runStatusEl || (_el && _el.querySelector('#chat-run-status'));
+    const state = _sessionRunStatus(source);
+    _currentRunStatus = state.status;
+    const el = _runStatusEl || document.getElementById('chat-run-status');
     if (!el) return;
     _runStatusEl = el;
-    const state = _sessionRunStatus(source);
     el.className = `chip ${_runStatusChipClass(state.status)}`.trim();
     el.textContent = state.label;
     const taskId = state.task && state.task.task_id ? state.task.task_id : '';
     const reason = state.task && state.task.terminal_reason ? state.task.terminal_reason : '';
-    el.title = [state.label, taskId, reason].filter(Boolean).join(' - ');
+    const queuePosition = state.task && (state.task.queue_position || state.task.queuePosition);
+    const queueTitle = queuePosition ? `queue #${queuePosition}` : '';
+    el.title = [state.label, taskId, queueTitle, reason].filter(Boolean).join(' - ');
   }
 
   function _copySessionKeyToClipboard() {
@@ -1390,13 +1788,15 @@ const ChatView = (() => {
   function _switchToSession(key) {
     if (!key || key === _sessionKey) return;
     _unsubscribeSession();
+    _cancelPendingRouterFxScan('session_switch');
+    _parkCurrentSessionStreamState('session_switch');
     _updateSessionChip(key);
     _persistSession(key);
     _messages = [];
     _pendingSessionIntent = null;
     _clearPendingDrainAfterTerminalTimer();
     _setCompactInFlight(false);
-    _hideCompactStatus();
+    _hideCompactionSeparator();
     _pendingQueue = []; if (_pendingArea) _renderPendingQueue();
     _applySessionRunState({ run_status: 'idle' });
     _clearContextStatus();
@@ -1407,6 +1807,7 @@ const ChatView = (() => {
     _viz.reset(); _resetSavingsPopupCooldown();
     _restoreWidgetState();
     _loadCurrentSessionUsage();
+    _restoreLiveStreamStateForSession(_sessionKey);
     _subscribeSession();
     _loadHistory();
   }
@@ -1414,8 +1815,8 @@ const ChatView = (() => {
   function _bindSessionChip() {
     // The chip itself now acts as the dropdown trigger (one-control session
     // chip per the design review). The copy button stays as a sibling.
-    const switchBtn = _el && _el.querySelector('#chat-session-chip');
-    const copyBtn = _el && _el.querySelector('#chat-session-copy');
+    const switchBtn = document.getElementById('chat-session-chip');
+    const copyBtn = document.getElementById('chat-session-copy');
     if (!switchBtn && !copyBtn) return;
 
     if (copyBtn) {
@@ -1540,7 +1941,7 @@ const ChatView = (() => {
       // Toggle off if already open.
       if (_popover) { _dismiss(); return; }
 
-      const chip = _el.querySelector('#chat-session-chip');
+      const chip = document.getElementById('chat-session-chip');
       if (!chip) return;
 
       // Build popover skeleton.
@@ -1553,6 +1954,7 @@ const ChatView = (() => {
       search.type = 'search';
       search.className = 'chat-session-popover-search';
       search.placeholder = 'Search sessions…';
+      search.setAttribute('aria-label', 'Search sessions');
       search.autocomplete = 'off';
       search.spellcheck = false;
       pop.appendChild(search);
@@ -1565,8 +1967,13 @@ const ChatView = (() => {
       // Anchor below the chip via fixed positioning so the popover escapes
       // any `overflow:hidden` ancestor (the chip itself clips its key text).
       const rect = chip.getBoundingClientRect();
+      const viewportWidth = window.innerWidth || document.documentElement.clientWidth || 320;
+      const margin = 12;
+      const popWidth = Math.min(320, Math.max(240, viewportWidth - margin * 2));
+      const maxLeft = Math.max(margin, viewportWidth - popWidth - margin);
       pop.style.position = 'fixed';
-      pop.style.left = rect.left + 'px';
+      pop.style.width = popWidth + 'px';
+      pop.style.left = Math.min(Math.max(rect.left, margin), maxLeft) + 'px';
       pop.style.top = (rect.bottom + 4) + 'px';
       document.body.appendChild(pop);
       _popover = pop;
@@ -1669,22 +2076,10 @@ const ChatView = (() => {
     trigger.classList.toggle('is-glowing', _toolbarTriggerActive());
     // Per-toggle status dots — each lights independently so a glance at the
     // composer reveals which mode is non-default, not just that something is.
-    const effectiveMode = _effectiveElevatedMode();
-    const bypass = _isApprovalBypassMode(effectiveMode);
+    const bypass = !!_toolbarState.bypass;
     const routerOff = _toolbarState.router === false;
     trigger.classList.toggle('has-dot-bypass', bypass);
     trigger.classList.toggle('has-dot-router', routerOff);
-    const bypassLabel = effectiveMode === 'full' ? 'FULL' : 'BYPASS';
-    const signalParts = [];
-    if (effectiveMode === 'full') {
-      signalParts.push(`${bypassLabel}: Full permission mode active`);
-    } else if (bypass) {
-      signalParts.push(`${bypassLabel}: Approvals bypassed`);
-    }
-    if (routerOff) signalParts.push('router off');
-    const statusLabel = signalParts.length ? `Run modes: ${signalParts.join(', ')}` : 'Run modes';
-    trigger.setAttribute('aria-label', statusLabel);
-    trigger.title = statusLabel;
   }
 
   function _bindToolbarTrigger() {
@@ -1902,15 +2297,15 @@ const ChatView = (() => {
     if (_elevatedMode) {
       _elevatedPill.textContent = `Session ${_elevatedMode.toUpperCase()}`;
       _elevatedPill.title =
-        'Session permission override is active. Click to clear the browser session override.';
+        'Session permission override is active. Approval prompts are bypassed for this browser chat session. Click to clear the override.';
     } else if (_globalElevatedMode) {
       _elevatedPill.textContent = `Global ${_globalElevatedMode.toUpperCase()}`;
       _elevatedPill.title =
-        'Global permission default is controlled by opensquilla sandbox on|bypass|full|reset.';
+        'Global permission default controls execution mode and is configured by opensquilla sandbox on|bypass|full|reset.';
     } else {
-      _elevatedPill.textContent = 'Bypass Off';
+      _elevatedPill.textContent = 'Approval prompts';
       _elevatedPill.title =
-        'Approval prompts active. Click to enable approval bypass for this browser session.';
+        'Approval prompts are active. Click to enable approval bypass for this browser session.';
     }
   }
 
@@ -1923,7 +2318,8 @@ const ChatView = (() => {
 
     // Send
     _sendBtn.addEventListener('click', _onSend);
-    if (_stopBtn) _stopBtn.addEventListener('click', _onStop);
+    if (_micBtn) _micBtn.addEventListener('click', _onVoiceInputToggle);
+    if (_stopBtn) _stopBtn.addEventListener('click', () => _onStop('webui_stop_button'));
     if (_pendingArea) _pendingArea.addEventListener('click', _onPendingAreaClick);
 
     // Session key is now managed via chip + switch (see _bindSessionChip).
@@ -1932,15 +2328,17 @@ const ChatView = (() => {
     // New session button
     newBtn.addEventListener('click', () => {
       _unsubscribeSession();
+      _parkCurrentSessionStreamState('new_chat');
       const key = _genKey();
       _updateSessionChip(key);
       _persistSession(key);
       _clearPendingDrainAfterTerminalTimer();
       _setCompactInFlight(false);
-      _hideCompactStatus();
+      _hideCompactionSeparator();
       _pendingSessionIntent = 'new_chat'; _pendingQueue = []; if (_pendingArea) _renderPendingQueue();
       _messages = [];
       _clearContextStatus();
+      _resetHistoryPagingState();
       _lastHeaderRole = '';
       _lastHeaderDay = '';
       _usageAccum = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: null, routedTurns: 0, sessionSaved: 0 };
@@ -1978,8 +2376,9 @@ const ChatView = (() => {
     });
 
     // Keyboard: Enter to send; slash navigation; ↑/↓ history; Alt+↑/↓ pending edit.
-    // ESC streaming abort lives on the document-level handler below so it works
-    // regardless of focus.
+    // ESC streaming abort lives on the document-level handler below. The
+    // composer textarea is allowed to bubble there while streaming; other
+    // editable targets keep ESC for text editing / menu dismissal.
     _textarea.addEventListener('keydown', (e) => {
       if (_composing || e.isComposing || e.keyCode === 229) return;
 
@@ -2065,7 +2464,8 @@ const ChatView = (() => {
       }
     });
 
-    // Document-level ESC: works regardless of focus. Priority chain:
+    // Document-level ESC: works across the chat view, while preserving
+    // non-composer editable targets. Priority chain:
     //   1. streaming  → _onStop (which also recovers pending)
     //   2. pending    → _popAllPendingIntoComposer
     //   3. otherwise drop through to the textarea handler / popovers / no-op
@@ -2080,24 +2480,25 @@ const ChatView = (() => {
     //   - DOM probe: catches sibling document-level consumers that haven't
     //     run yet — if any overlay is currently visible, defer to its handler
     //     instead of treating ESC as a turn abort.
+    //   - editable guard: preserves ESC inside non-composer inputs, while the
+    //     chat textarea can still abort the active stream.
     function _onDocKeydown(e) {
       if (e.key !== 'Escape') return;
       if (typeof Router !== 'undefined' && Router.currentPath && Router.currentPath() !== '/chat') return;
       if (e.defaultPrevented) return;
       if (_chatOverlayVisible()) return;
-      if (_isStreaming) {
-        e.preventDefault();
-        _onStop();
-        return;
-      }
       const target = e.target;
-      const inEditable = target && (
-        target === _textarea
-        || target.tagName === 'INPUT'
+      const inOtherEditable = target && target !== _textarea && (
+        target.tagName === 'INPUT'
         || target.tagName === 'TEXTAREA'
         || target.isContentEditable
       );
-      if (inEditable) return; // textarea handler will deal with the empty-clear case
+      if (inOtherEditable) return;
+      if (_isStreaming) {
+        e.preventDefault();
+        _onStop('webui_escape');
+        return;
+      }
       if (_pendingQueue.length > 0) {
         e.preventDefault();
         _popAllPendingIntoComposer();
@@ -2125,19 +2526,22 @@ const ChatView = (() => {
       if (Router.currentPath() !== '/chat') return;
       const items = e.clipboardData && e.clipboardData.items;
       if (!items) return;
+      let consumedAttachment = false;
       for (let i = 0; i < items.length; i++) {
         if (items[i].type.startsWith('image/')) {
           const file = items[i].getAsFile();
-          if (file) _addAttachment(file);
+          if (file && _addAttachment(file)) consumedAttachment = true;
         }
       }
+      if (consumedAttachment) e.preventDefault();
     };
     document.addEventListener('paste', pasteHandler);
     _unsubs.push(() => document.removeEventListener('paste', pasteHandler));
 
     // Auto-scroll detection
-    _thread.addEventListener('scroll', () => {
-      const gap = _thread.scrollHeight - _thread.scrollTop - _thread.clientHeight;
+    const threadEl = _thread;
+    threadEl.addEventListener('scroll', () => {
+      const gap = threadEl.scrollHeight - threadEl.scrollTop - threadEl.clientHeight;
       _autoScroll = gap < 60;
     });
 
@@ -2145,8 +2549,14 @@ const ChatView = (() => {
   }
 
   function _autoResizeTextarea() {
+    if (!_textarea) return;
+    if (!_textarea.value) {
+      _textarea.style.height = '';
+      return;
+    }
+    const minHeight = Number.parseFloat(getComputedStyle(_textarea).minHeight) || 40;
     _textarea.style.height = 'auto';
-    _textarea.style.height = Math.min(_textarea.scrollHeight, 160) + 'px';
+    _textarea.style.height = Math.max(minHeight, Math.min(_textarea.scrollHeight, 160)) + 'px';
   }
 
   /* ── Slash Command Menu ─────────────────────────────────────────────── */
@@ -2249,15 +2659,17 @@ const ChatView = (() => {
       case 'new_chat':
       case '/new': {
         _unsubscribeSession();
+        _parkCurrentSessionStreamState('new_chat');
         const key = _genKey();
         _updateSessionChip(key);
         _persistSession(key);
         _clearPendingDrainAfterTerminalTimer();
         _setCompactInFlight(false);
-        _hideCompactStatus();
+        _hideCompactionSeparator();
         _pendingSessionIntent = 'new_chat'; _pendingQueue = []; if (_pendingArea) _renderPendingQueue();
         _messages = [];
         _clearContextStatus();
+        _resetHistoryPagingState();
         _lastHeaderRole = '';
         _lastHeaderDay = '';
         _usageAccum = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: null, routedTurns: 0, sessionSaved: 0 };
@@ -2280,7 +2692,7 @@ const ChatView = (() => {
             _messages = [];
             _clearPendingDrainAfterTerminalTimer();
             _setCompactInFlight(false);
-            _hideCompactStatus();
+            _hideCompactionSeparator();
             _pendingQueue = [];
             if (_pendingArea) _renderPendingQueue();
             _clearContextStatus();
@@ -2295,7 +2707,11 @@ const ChatView = (() => {
       case '/compact': {
         const compactKey = _sessionKey;
         _setCompactInFlight(true, compactKey);
-        _showCompactionToast({ key: compactKey, source: 'manual', status: 'started' });
+        _syncCompactionSeparator(
+          { key: compactKey, source: 'manual', status: 'started', phase: 'manual' },
+          'started',
+          'manual',
+        );
         _rpc.call('sessions.contextCompact', { key: compactKey })
           .then((result) => {
             if (compactKey !== _sessionKey) return;
@@ -2341,14 +2757,18 @@ const ChatView = (() => {
     }
   }
 
-  async function _executeSlashCommand(text) {
+  async function _lookupSlashCommand(text) {
     if (!_slashCatalogLoaded) await _loadSlashCommands();
-    const [cmdText, ...rest] = text.trim().split(/\s+/);
-    const cmd = _slashCommandMap.get(_slashCommandKey(cmdText));
+    const [cmdText] = text.trim().split(/\s+/);
+    return _slashCommandMap.get(_slashCommandKey(cmdText)) || null;
+  }
+
+  async function _executeSlashCommand(text) {
+    const [, ...rest] = text.trim().split(/\s+/);
+    const cmd = await _lookupSlashCommand(text);
     if (!cmd) {
       _closeSlashMenu();
-      UI.toast('Unsupported command: ' + cmdText, 'warn', 2500);
-      return true;
+      return false;
     }
     _selectSlashCmd(cmd, rest.join(' '));
     return true;
@@ -2358,21 +2778,49 @@ const ChatView = (() => {
 
   async function _subscribeSession() {
     if (!_rpc || !_sessionKey) return;
+    const subscribeKey = _sessionKey;
     try {
       await _rpc.waitForConnection();
-      const params = { key: _sessionKey };
-      params.since_stream_seq = _lastStreamSeq;
+      if (subscribeKey !== _sessionKey) return;
+      const params = { key: subscribeKey };
+      params.since_stream_seq = _sessionStreamSeq(subscribeKey);
       const res = await _rpc.call('sessions.messages.subscribe', params);
+      if (subscribeKey !== _sessionKey) return;
       if (res && res.subscribed === false) throw new Error('No subscription manager available');
       _applySessionRunState(res);
+      const subscribedState = _sessionRunStatus(res);
+      if (!_isStreaming && _runStatusIsActive(subscribedState.status)) {
+        _startStreaming();
+        _showThinkingIndicator();
+      }
       if (res && res.replay_complete === false) {
-        _lastStreamSeq = typeof res.current_stream_seq === 'number'
-          ? Math.max(_lastStreamSeq, res.current_stream_seq)
-          : _lastStreamSeq;
-        UI.toast('Session stream gap detected; reloading transcript.', 'warn', 5000);
-        _loadHistory();
-      } else if (res && typeof res.current_stream_seq === 'number') {
-        _lastStreamSeq = Math.max(_lastStreamSeq, res.current_stream_seq);
+        if (typeof res.current_stream_seq === 'number') {
+          _setSessionStreamSeq(subscribeKey, res.current_stream_seq);
+        }
+        const replayGapReason = res.replay_gap_reason || res.replayGapReason || '';
+        if (_replayGapShouldWarn(replayGapReason)) {
+          UI.toast('Missed live stream events; transcript refreshed.', 'warn', 5000);
+        } else {
+          _chatDiag('session.subscribe.replay_gap.history_refresh', {
+            reason: replayGapReason,
+            currentStreamSeq: res.current_stream_seq,
+          });
+        }
+        _loadHistory(_historyRefreshScrollOptions());
+      } else if (
+        res
+        && typeof res.current_stream_seq === 'number'
+        && Number(res.replayed_count || 0) <= 0
+      ) {
+        _setSessionStreamSeq(subscribeKey, res.current_stream_seq);
+      }
+      if (_subscribeResultNeedsTerminalHistorySync(res)) {
+        _chatDiag('session.subscribe.terminal_without_replay.history_sync', {
+          runStatus: res.run_status || res.runStatus || '',
+          currentStreamSeq: res.current_stream_seq,
+          replayedCount: res.replayed_count || 0,
+        });
+        _scheduleHistorySync();
       }
       if (_isStreaming) _resetStreamIdleTimer();
     } catch (err) {
@@ -2387,35 +2835,11 @@ const ChatView = (() => {
     } catch { /* ignore */ }
   }
 
-  function _compactionTokenStats(payload) {
-    const beforeRaw = payload ? payload.tokens_before : undefined;
-    const afterRaw = payload ? payload.tokens_after : undefined;
-    const before = Number(beforeRaw);
-    const after = Number(afterRaw);
-    const remaining = Number(payload && payload.remaining_budget_tokens || 0);
-    const source = payload && payload.summary_source || '';
-    const summaryLen = Number(payload && payload.summary_len || 0);
-    if (
-      beforeRaw !== undefined &&
-      beforeRaw !== null &&
-      beforeRaw !== '' &&
-      afterRaw !== undefined &&
-      afterRaw !== null &&
-      afterRaw !== '' &&
-      Number.isFinite(before) &&
-      Number.isFinite(after)
-    ) {
-      const remain = remaining ? ', ' + remaining + ' remaining' : '';
-      const by = source ? ', ' + source : '';
-      return ' (' + before + ' -> ' + after + ' tokens' + remain + by + ')';
-    }
-    if (summaryLen) return ' (summary ' + summaryLen + ' chars)';
-    return '';
-  }
-
   function _suppressDuplicateCompactionToast(payload, status, source) {
     const key = String(payload && payload.key || _sessionKey || '');
-    const sig = `${key}|${source || ''}|${status || ''}`;
+    const event = String(payload && payload.event || '');
+    const reason = String(payload && (payload.reason || payload.skip_reason) || '');
+    const sig = `${key}|${source || ''}|${status || ''}|${event}|${reason}`;
     const now = Date.now();
     if (sig === _lastCompactionToastSig && now - _lastCompactionToastAt < 1500) {
       return true;
@@ -2425,36 +2849,232 @@ const ChatView = (() => {
     return false;
   }
 
-  function _clearCompactStatusTimer() {
-    if (_compactStatusTimer) {
-      clearTimeout(_compactStatusTimer);
-      _compactStatusTimer = null;
+  function _clearCompactionSeparatorTimer() {
+    if (_compactionSeparatorTimer) {
+      clearTimeout(_compactionSeparatorTimer);
+      _compactionSeparatorTimer = null;
     }
   }
 
-  function _hideCompactStatus() {
-    _clearCompactStatusTimer();
-    if (!_compactStatusEl) return;
-    _compactStatusEl.className = 'chat-compact-status hidden';
-    _compactStatusEl.innerHTML = '';
+  function _hideCompactionSeparator() {
+    _clearCompactionSeparatorTimer();
+    if (_compactionSeparatorEl && _compactionSeparatorEl.parentNode) {
+      _compactionSeparatorEl.remove();
+    }
+    _compactionSeparatorEl = null;
   }
 
-  function _setCompactStatus(status, message, options = {}) {
-    if (!_compactStatusEl) return;
-    _clearCompactStatusTimer();
-    const tone = options && options.tone || 'info';
-    const detail = options && options.detail ? String(options.detail) : '';
-    const dismissMs = Number(options && options.dismissMs || 0);
-    const isBusy = status === 'started';
-    const glyphClass = isBusy ? 'chat-compact-status__spinner' : 'chat-compact-status__dot';
-    _compactStatusEl.className = `chat-compact-status chat-compact-status--${tone}`;
-    _compactStatusEl.innerHTML = ''
-      + `<span class="${glyphClass}" aria-hidden="true"></span>`
-      + `<span class="chat-compact-status__text">${_esc(message)}</span>`
-      + (detail ? `<span class="chat-compact-status__detail">${_esc(detail)}</span>` : '');
-    if (dismissMs > 0) {
-      _compactStatusTimer = setTimeout(_hideCompactStatus, dismissMs);
+  function _placeCompactionSeparator() {
+    if (!_thread || !_compactionSeparatorEl) return;
+    const empty = _thread.querySelector('.chat-empty');
+    if (empty) empty.remove();
+    if (_isStreaming && _isCurrentSessionStreamBubble(_streamBubble)) {
+      if (_compactionSeparatorEl.nextSibling !== _streamBubble) {
+        _thread.insertBefore(_compactionSeparatorEl, _streamBubble);
+      }
+      return;
     }
+    if (_compactionSeparatorEl.parentNode !== _thread
+        || _thread.lastElementChild !== _compactionSeparatorEl) {
+      _thread.appendChild(_compactionSeparatorEl);
+    }
+  }
+
+  function _ensureCompactionSeparator() {
+    if (!_thread) return null;
+    if (!_compactionSeparatorEl || !_compactionSeparatorEl.isConnected) {
+      _compactionSeparatorEl = document.createElement('div');
+      _compactionSeparatorEl.className = 'chat-context-separator chat-context-separator--session chat-context-separator--info';
+      _compactionSeparatorEl.setAttribute('role', 'status');
+      _compactionSeparatorEl.setAttribute('aria-live', 'polite');
+    }
+    _placeCompactionSeparator();
+    return _compactionSeparatorEl;
+  }
+
+  function _scheduleCompactionSeparatorRemoval(delayMs = 4500) {
+    _clearCompactionSeparatorTimer();
+    const separator = _compactionSeparatorEl;
+    if (!separator) return;
+    _compactionSeparatorTimer = setTimeout(() => {
+      if (_compactionSeparatorEl === separator) _hideCompactionSeparator();
+    }, delayMs);
+  }
+
+  function _buildCompactionSeparator(label, tone = 'info', extraClass = '') {
+    const el = document.createElement('div');
+    el.className = ['chat-context-separator', extraClass, `chat-context-separator--${tone}`]
+      .filter(Boolean)
+      .join(' ');
+    el.innerHTML = `<span>${_esc(label)}</span>`;
+    return el;
+  }
+
+  const _COMPACTION_TERMINAL_STATUSES = new Set([
+    'completed',
+    'skipped',
+    'failed',
+    'error',
+    'cancelled',
+    'emergency_ephemeral',
+  ]);
+
+  function _compactionTerminalStatus(status) {
+    return _COMPACTION_TERMINAL_STATUSES.has(String(status || '').toLowerCase());
+  }
+
+  function _compactionSeparatorAnimated(status, overrides = {}) {
+    if (overrides && Object.prototype.hasOwnProperty.call(overrides, 'animated')) {
+      return !!overrides.animated;
+    }
+    return status === 'started' || status === 'observed';
+  }
+
+  function _shouldPersistCompactionSeparator(status, source, overrides = {}) {
+    if (overrides && Object.prototype.hasOwnProperty.call(overrides, 'persist')) {
+      return !!overrides.persist;
+    }
+    if (!_compactionTerminalStatus(status)) return false;
+    return status === 'completed';
+  }
+
+  function _compactionStatusLabel(payload, source, status) {
+    if (status === 'started') return 'context compacting';
+    if (status === 'observed') return 'context compacting';
+    if (status === 'emergency_ephemeral') return 'temporary compaction';
+    if (status === 'skipped') {
+      const reason = _compactionReason(payload);
+      return (!reason || _INTERNAL_COMPACTION_SKIP_REASONS.has(reason))
+        ? 'no compaction needed'
+        : 'compaction skipped';
+    }
+    if (status === 'failed' || status === 'error') return 'compaction failed';
+    if (status === 'cancelled') return 'compaction cancelled';
+    if (status === 'completed') return 'context compacted';
+    return source === 'manual' ? 'manual compact' : 'context maintenance';
+  }
+
+  function _compactionSeparatorTone(status, payload = {}) {
+    if (status === 'completed') return 'ok';
+    if (status === 'failed' || status === 'error') return 'err';
+    if (status === 'cancelled' || status === 'emergency_ephemeral') return 'warn';
+    if (status === 'skipped' && _compactionReason(payload)) return 'warn';
+    return 'info';
+  }
+
+  function _syncCompactionSeparator(payload, status, source, overrides = {}) {
+    if (payload && Object.prototype.hasOwnProperty.call(payload, 'user_visible')
+        && payload.user_visible === false) {
+      _hideCompactionSeparator();
+      return;
+    }
+    if (status === 'skipped' && !_compactionUserVisible(payload || {}, source, status)) {
+      _hideCompactionSeparator();
+      return;
+    }
+    const separator = _ensureCompactionSeparator();
+    if (!separator) return;
+    _clearCompactionSeparatorTimer();
+    const tone = overrides.tone || _compactionSeparatorTone(status, payload || {});
+    const label = overrides.label != null
+      ? overrides.label
+      : _compactionStatusLabel(payload || {}, source, status);
+    const liveClass = _compactionSeparatorAnimated(status, overrides)
+      ? 'chat-context-separator--live'
+      : '';
+    separator.className = [
+      'chat-context-separator',
+      'chat-context-separator--session',
+      liveClass,
+      `chat-context-separator--${tone}`,
+      `chat-context-separator--${status || 'unknown'}`,
+    ].filter(Boolean).join(' ');
+    separator.dataset.status = status || '';
+    separator.dataset.source = source || '';
+    separator.innerHTML = `<span>${_esc(label)}</span>`;
+    _placeCompactionSeparator();
+    if (_autoScroll) _scrollToBottom();
+    if (_compactionTerminalStatus(status)) {
+      if (_shouldPersistCompactionSeparator(status, source, overrides)) return;
+      _scheduleCompactionSeparatorRemoval();
+    }
+  }
+
+  function _clearCompactionSummarySeparators() {
+    if (!_thread) return;
+    _thread.querySelectorAll('.chat-compaction-separator').forEach((el) => el.remove());
+  }
+
+  function _messageTranscriptId(msg) {
+    const raw = msg && msg.transcript_id;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : null;
+  }
+
+  function _summaryCoveredThroughId(summary) {
+    const raw = summary && summary.covered_through_id;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : null;
+  }
+
+  function _messageElementTranscriptId(el) {
+    const value = Number(el && el.dataset ? el.dataset.transcriptId : NaN);
+    return Number.isFinite(value) ? value : null;
+  }
+
+  function _insertCompactionSummarySeparator(marker, target, mode) {
+    if (!target || target.parentNode !== _thread) return false;
+    if (mode === 'after') {
+      let anchor = target;
+      while (anchor.nextElementSibling
+          && anchor.nextElementSibling.classList
+          && anchor.nextElementSibling.classList.contains('router-fx')) {
+        anchor = anchor.nextElementSibling;
+      }
+      _thread.insertBefore(marker, anchor.nextSibling);
+      return true;
+    }
+    _thread.insertBefore(marker, target);
+    return true;
+  }
+
+  function _renderCompactionSummarySeparators(messages) {
+    _clearCompactionSummarySeparators();
+    if (!_thread || !_historyCompactionSummaries.length || !Array.isArray(messages)) return null;
+    const visibleMessages = Array.from(_thread.querySelectorAll('.msg'));
+    if (!visibleMessages.length) return null;
+    const visibleIds = visibleMessages
+      .map((el) => ({ el, id: _messageElementTranscriptId(el) }))
+      .filter((item) => item.id != null);
+    if (!visibleIds.length) return null;
+
+    const seen = new Set();
+    let inserted = 0;
+    let firstMarker = null;
+    _historyCompactionSummaries.forEach((summary) => {
+      const coveredId = _summaryCoveredThroughId(summary);
+      if (coveredId == null || seen.has(coveredId)) return;
+      seen.add(coveredId);
+      let target = visibleIds.find((item) => item.id === coveredId);
+      let mode = 'after';
+      if (!target) {
+        target = visibleIds.find((item) => item.id > coveredId);
+        mode = 'before';
+      }
+      if (!target) return;
+      const marker = _buildCompactionSeparator(
+        'context compacted',
+        'info',
+        'chat-compaction-separator chat-context-separator--history',
+      );
+      marker.dataset.coveredThroughId = String(coveredId);
+      if (_insertCompactionSummarySeparator(marker, target.el, mode)) {
+        inserted++;
+        if (!firstMarker) firstMarker = marker;
+      }
+    });
+    if (inserted > 0) _hideCompactionSeparator();
+    return firstMarker;
   }
 
   function _compactFailureBlocksPending(payload) {
@@ -2479,133 +3099,205 @@ const ChatView = (() => {
     ].includes(reason);
   }
 
+  function _compactSemanticMemoryNotice(payload) {
+    const semantic = payload && (payload.semanticMemory || payload.semantic_memory) || null;
+    const safety = payload && (payload.memorySafety || payload.memory_safety) || null;
+    const semanticStatus = String(semantic && semantic.status || '').toLowerCase();
+    const safetyStatus = String(safety && safety.status || '').toLowerCase();
+    if (semanticStatus === 'degraded' && safetyStatus !== 'error') {
+      return 'Memory saved; organizing';
+    }
+    return '';
+  }
+
+  function _compactSafeMessageDetail(payload) {
+    const message = payload && payload.message ? String(payload.message) : '';
+    if (!message) return '';
+    return message.replace(
+      /(?:[A-Za-z]:[\\/][^\s'"<>]*checkpoint[^\s'"<>]*|\/[^\s'"<>]*checkpoint[^\s'"<>]*|memory\/\.raw_fallbacks\/[^\s'"<>]+|[^\s'"<>]*checkpoint[^\s'"<>]*)/gi,
+      '[memory checkpoint]',
+    );
+  }
+
+  const _INTERNAL_COMPACTION_SKIP_REASONS = new Set([
+    'already_attempted_this_turn',
+    'already_compacted_this_turn',
+    'no_entries',
+    'stale_preimage',
+    'structured_content_noop',
+    'within_budget',
+    'within_compaction_budget',
+  ]);
+
+  const _COMPACTION_SKIP_MESSAGES = {
+    coverage_blocked: 'Context was left unchanged because required details could not be preserved.',
+    empty_ephemeral_webchat_session: 'No compactable chat history yet.',
+    empty_summary: 'Context was left unchanged because no usable summary was produced.',
+    no_entries: 'No compactable chat history yet.',
+    no_safe_turn_boundary: 'Context cannot be compacted safely during the current tool turn.',
+  };
+
+  const _COMPACTION_SKIP_DETAILS = {
+    coverage_blocked: 'Required details could not be preserved',
+    empty_ephemeral_webchat_session: 'No compactable history',
+    empty_summary: 'No usable summary was produced',
+    no_entries: 'No compactable history',
+    no_safe_turn_boundary: 'Current tool turn boundary is not safe to compact',
+    unsafe_flush_receipt: 'Memory safety check did not complete',
+  };
+
+  function _compactionReason(payload) {
+    return String(payload && (payload.reason || payload.skip_reason) || '');
+  }
+
+  function _compactionUserVisible(payload, source, status) {
+    if (payload && Object.prototype.hasOwnProperty.call(payload, 'user_visible')) {
+      return payload.user_visible !== false;
+    }
+    if (source === 'manual') return true;
+    if (status === 'skipped') {
+      const reason = _compactionReason(payload);
+      return !_INTERNAL_COMPACTION_SKIP_REASONS.has(reason);
+    }
+    return true;
+  }
+
+  function _compactionSkipMessage(payload, source) {
+    const reason = _compactionReason(payload);
+    if (source === 'manual') {
+      return _COMPACTION_SKIP_MESSAGES[reason] || 'Already within context budget; no compact was applied.';
+    }
+    if (_COMPACTION_SKIP_MESSAGES[reason]) return 'Context compaction could not be applied';
+    if (reason) return 'Context compaction skipped';
+    return 'Already within context budget; no compact was applied.';
+  }
+
+  function _compactionStatusDetail(payload, source = '', status = '') {
+    if (!_compactionUserVisible(payload, source, status)) return '';
+    if (status === 'emergency_ephemeral') return 'Request-scoped; session history was not rewritten';
+    const reason = _compactionReason(payload);
+    if (_INTERNAL_COMPACTION_SKIP_REASONS.has(reason)) return '';
+    if (_COMPACTION_SKIP_DETAILS[reason]) return _COMPACTION_SKIP_DETAILS[reason];
+    if (reason) return reason.replace(/_/g, ' ');
+    return '';
+  }
+
+  function _routerFxIsSuppressedForCompactionTurn(turnIndex) {
+    if (!_compactSuppressedRouterTurnIndex) return false;
+    if (String(turnIndex || '') !== _compactSuppressedRouterTurnIndex) return false;
+    return !_compactSuppressedRouterSessionKey || _compactSuppressedRouterSessionKey === _sessionKey;
+  }
+
+  function _suppressRouterFxForCompaction(payload = {}) {
+    _cancelPendingRouterFxScan('compaction');
+    if (!_thread) return;
+    const turnIndex = String(_routerFxCountUserMessages());
+    if (!turnIndex || turnIndex === '0') return;
+    const key = String(payload && payload.key || _sessionKey || '');
+    _compactSuppressedRouterSessionKey = key;
+    _compactSuppressedRouterTurnIndex = turnIndex;
+    _thread.querySelectorAll('.router-fx[data-live="true"]').forEach((el) => {
+      const sameSession = !key || !el.dataset.sessionKey || el.dataset.sessionKey === key;
+      const sameTurn = !el.dataset.turnIndex || el.dataset.turnIndex === turnIndex;
+      if (sameSession && sameTurn) _routerFxRemoveStrip(el);
+    });
+    _chatDiag('router_scan.suppressed_for_compaction', { key, turnIndex });
+  }
+
   function _showCompactionToast(payload, meta = {}) {
-    if (meta && meta.replayed) return;
     let status = String(payload && payload.status || '').toLowerCase();
     if (!status && payload && Object.prototype.hasOwnProperty.call(payload, 'compacted')) {
       status = payload.compacted ? 'completed' : 'skipped';
     }
     const source = String(payload && payload.source || '').toLowerCase();
+    const isReplay = !!(meta && meta.replayed);
+    if (isReplay && !_compactionTerminalStatus(status)) return;
     if (_suppressDuplicateCompactionToast(payload || {}, status, source)) return;
+    // Single surface: the in-thread context separator renders every lifecycle
+    // state (and hides itself for not-user-visible skips). The branches below
+    // only drive non-UI side effects — in-flight tracking, router-fx
+    // suppression, pending recovery — plus corner toasts when warranted.
+    _syncCompactionSeparator(payload || {}, status, source);
     if (status === 'started') {
-      if (source === 'manual') _setCompactInFlight(true, payload && payload.key || _sessionKey);
-      if (source === 'manual') _setCompactStatus('started', 'Compacting context...', { tone: 'info' });
-      UI.toast('Compacting context...', 'info', 2500);
+      _setCompactInFlight(true, payload && payload.key || _sessionKey);
+      _hideThinkingIndicator();
+      _suppressRouterFxForCompaction(payload || {});
+      return;
+    }
+    if (status === 'observed') {
+      _hideThinkingIndicator();
+      _suppressRouterFxForCompaction(payload || {});
+      return;
+    }
+    if (status === 'emergency_ephemeral') {
+      _settleCompactInFlight(payload || {});
+      if (!isReplay) {
+        UI.toast('Continuing with temporary context compaction for this turn', 'info', 4500);
+      }
       return;
     }
     if (status === 'skipped') {
       _settleCompactInFlight(payload || {});
-      if (source === 'manual') {
-        _setCompactStatus('skipped', 'Already within context budget; no compact was applied.', {
-          tone: 'info',
-          dismissMs: 5000,
-        });
-      }
-      UI.toast('Already within context budget; no compact was applied.', 'info', 3500);
+      _scheduleCompactionSeparatorRemoval();
+      return;
+    }
+    const semanticNotice = _compactSemanticMemoryNotice(payload || {});
+    if (semanticNotice) {
+      _settleCompactInFlight(payload || {});
+      _syncCompactionSeparator(payload || {}, 'completed', source, {
+        tone: 'ok',
+        label: 'context compacted',
+      });
+      _scheduleHistorySync();
       return;
     }
     if (status === 'failed' || status === 'error') {
       const preservePending = _compactFailureBlocksPending(payload || {});
+      const keepPendingQueued = preservePending || (source !== 'manual' && _isStreaming);
       const recovered = _settleCompactInFlight(payload || {}, {
-        recoverPending: true,
-        preservePending,
+        recoverPending: !keepPendingQueued,
+        preservePending: keepPendingQueued,
       });
-      const msg = payload && payload.message ? ': ' + payload.message : '';
-      const pendingSuffix = preservePending
+      const safe = _compactSafeMessageDetail(payload || {});
+      const msg = safe ? ': ' + safe : '';
+      const pendingSuffix = keepPendingQueued
         ? '; pending message preserved'
         : (recovered ? '; pending message recovered to input' : '');
-      if (source === 'manual') {
-        _setCompactStatus('failed', 'Compact failed' + msg + pendingSuffix, {
-          tone: 'err',
-          dismissMs: 10000,
-        });
-      }
-      UI.toast(
-        'Compact failed' + msg + pendingSuffix,
-        'err',
-        5000,
-      );
+      _syncCompactionSeparator(payload || {}, status, source, { label: 'compaction failed' });
+      if (!isReplay) UI.toast('Compact failed' + msg + pendingSuffix, 'err', 5000);
       return;
     }
     if (status === 'cancelled') {
       const recovered = _settleCompactInFlight(payload || {}, { recoverPending: true });
-      if (source === 'manual') {
-        _setCompactStatus('cancelled', 'Compact cancelled' + (recovered ? '; pending message recovered to input' : ''), {
-          tone: 'warn',
-          dismissMs: 8000,
-        });
+      if (!isReplay) {
+        UI.toast(
+          'Compact cancelled' + (recovered ? '; pending message recovered to input' : ''),
+          'info',
+          4500,
+        );
       }
-      UI.toast(
-        'Compact cancelled' + (recovered ? '; pending message recovered to input' : ''),
-        'info',
-        4500,
-      );
       return;
     }
     if (status !== 'completed') return;
     _settleCompactInFlight(payload || {});
-    const details = _compactionTokenStats(payload || {});
-    if (source === 'manual') {
-      _setCompactStatus('completed', 'Context compacted' + details, {
-        tone: 'ok',
-        dismissMs: 5000,
-      });
-      UI.toast('Context compacted' + details, 'info', 4500);
-      return;
-    }
-    UI.toast(
-      'Context compacted older messages to keep this session within budget' + details,
-      'info',
-      4500,
-    );
+    _scheduleHistorySync();
   }
 
-
   /* ── Router slider — arcade-brutalist whac-a-mole grid ─────────────
-   * Fires once per user message when session.event.router_decision
-   * lands. A 3 × 4 cell grid mixes the operator's real configured
-   * tiers (deduped by model) with popular decoy models from the
-   * OpenRouter ecosystem; a hammer-selector hops between cells with
-   * bouncy easing and locks onto the routed cell with a particle
-   * burst. The strip is non-blocking — assistant text streams below
-   * the grid while the chase plays above. */
-
-  const _ROUTER_FX_GRID_COLS = 4;
-  const _ROUTER_FX_GRID_ROWS = 3;
-  const _ROUTER_FX_GRID_CELLS = _ROUTER_FX_GRID_COLS * _ROUTER_FX_GRID_ROWS;
-
-  // Popular OpenRouter models used as visual decoys, ordered by
-  // approximate openrouter.ai traffic ranking. Anything already on
-  // the operator's router (matched after stripping the provider
-  // prefix) is filtered out at render-time, so the highest-traffic
-  // models that aren't on this user's dial bubble to the top of the
-  // visible decoys. The actual route is always chosen from the
-  // operator's configured tiers — these only decorate.
-  const _ROUTER_FX_DECOY_POOL = [
-    'claude-sonnet-4.6',
-    'claude-haiku-4.5',
-    'gpt-5-mini',
-    'gemini-2.5-flash',
-    'deepseek-r1',
-    'gpt-5',
-    'claude-opus-4.7',
-    'gemini-2.5-pro',
-    'gemini-2.0-flash',
-    'llama-4-405b',
-    'mistral-large-3',
-    'qwen-3-72b',
-    'grok-3-mini',
-    'sonar-large',
-    'command-r-plus',
-    'jamba-1.5-large',
-  ];
+   * Fires once per user message when session.event.router_decision lands.
+   * The grid contains only the effective candidates that could actually be
+   * called for this request kind, deduped by display model name. A
+   * hammer-selector hops between those real cells and locks onto the routed
+   * cell with a particle burst. The strip is non-blocking — assistant text
+   * streams below the grid while the chase plays above. */
 
   // OpenSquilla's tier ids vary by tier_profile. We seed the slot
   // list from config and register any decision tier we haven't seen
   // before, so the grid never silently drops an unfamiliar tier.
-  const _ROUTER_FX_DEFAULT_TIERS = ['t0', 't1', 't2', 't3'];
+  const _ROUTER_FX_DEFAULT_TIERS = ['c0', 'c1', 'c2', 'c3'];
   let _routerFxSlotList = _ROUTER_FX_DEFAULT_TIERS.slice();
   const _routerFxModels = {};
+  const _routerFxTierConfigs = {};
   // Authoritative set of tier ids that exist in the *current* config
   // snapshot (populated by _loadFeatureToggles). Used to skip history
   // strips whose routed_tier has been removed from config and to know
@@ -2613,10 +3305,43 @@ const ChatView = (() => {
   let _routerFxConfigTiers = null;     // Set<string> | null (unknown)
   let _routerFeatureEnabled = false;
 
+  // Per-browser preference for the router-fx VISUALISATION (distinct from
+  // _routerFeatureEnabled, which mirrors the operator's squilla_router.enabled
+  // routing state). `enabled` is "show the animated grid"; `variant` selects a
+  // style skin stamped as data-variant on the .router-fx root ('default' = the
+  // base, unstamped look). This is a cosmetic, client-side choice — it never
+  // touches gateway config — so it lives in localStorage like the theme pref.
+  const _ROUTER_FX_PREF_KEY = 'opensquilla-router-fx';
+  // Fixed scan-animation window. The panel locks + settles by this point, so
+  // the whole animation (scan + ~360ms settle transition) stays under ~1s.
+  const _ROUTER_FX_SCAN_MS = 600;
+  const _ROUTER_FX_START_DELAY_MS = 280;
+  const _routerFx = { enabled: true, variant: 'default' };
+  function _routerFxLoadPref() {
+    // Defaults stand (enabled ON, default variant) unless a stored pref
+    // overrides them. localStorage may throw (private mode / quota) — swallow.
+    _routerFx.variant = 'default';
+    try {
+      const raw = localStorage.getItem(_ROUTER_FX_PREF_KEY);
+      if (!raw) return;
+      const saved = JSON.parse(raw);
+      if (saved && typeof saved === 'object') {
+        if (typeof saved.enabled === 'boolean') _routerFx.enabled = saved.enabled;
+      }
+    } catch { /* keep defaults */ }
+  }
+  function _routerFxSavePref() {
+    try {
+      localStorage.setItem(_ROUTER_FX_PREF_KEY, JSON.stringify({
+        enabled: _routerFx.enabled,
+      }));
+    } catch { /* preference is best-effort */ }
+  }
+
   function _routerFxSortTiers(list) {
     return list.slice().sort((a, b) => {
-      const am = /^t(\d+)$/.exec(a);
-      const bm = /^t(\d+)$/.exec(b);
+      const am = /^c(\d+)$/.exec(a);
+      const bm = /^c(\d+)$/.exec(b);
       if (am && bm) return parseInt(am[1], 10) - parseInt(bm[1], 10);
       if (am) return -1;
       if (bm) return 1;
@@ -2624,24 +3349,135 @@ const ChatView = (() => {
     });
   }
 
+  function _routerFxNormalizeTier(tier) {
+    if (typeof tier !== 'string' || !tier) return '';
+    return tier.toLowerCase().replace(/^t([0-3])$/, 'c$1');
+  }
+
   function _routerFxRegisterTier(tier) {
-    if (typeof tier !== 'string' || !tier) return;
-    const norm = tier.toLowerCase();
+    const norm = _routerFxNormalizeTier(tier);
+    if (!norm) return;
     if (_routerFxSlotList.indexOf(norm) >= 0) return;
     _routerFxSlotList = _routerFxSortTiers(_routerFxSlotList.concat([norm]));
   }
 
-  // "z-ai/glm-5.1" -> "glm-5.1"; "claude-opus-4.7" -> "claude-opus-4.7"
-  function _routerFxStripProvider(name) {
+  // Normalize user-facing model labels without changing stored/provider ids.
+  // "z-ai/glm-5.1" -> "glm-5.1"; "glm-5.1-20260406" -> "glm-5.1".
+  function _modelDisplayName(name) {
     if (!name || typeof name !== 'string') return name;
     const idx = name.lastIndexOf('/');
-    return idx >= 0 ? name.slice(idx + 1) : name;
+    const stripped = idx >= 0 ? name.slice(idx + 1) : name;
+    return stripped.replace(/-\d{8}$/, '');
+  }
+
+  function _routerFxStripProvider(name) {
+    return _modelDisplayName(name);
+  }
+
+  function _routerFxRequestKindFromAttachments(attachments) {
+    const list = Array.isArray(attachments) ? attachments : [];
+    for (const item of list) {
+      const mime = String(item?.mime || item?.type || '').toLowerCase();
+      if (mime.indexOf('image/') === 0) return 'image';
+    }
+    return 'text';
+  }
+
+  function _routerFxNormalizeRequestKind(requestKind) {
+    return requestKind === 'image' ? 'image' : 'text';
+  }
+
+  function _routerFxTierConfig(tier) {
+    const norm = typeof tier === 'string' ? tier.toLowerCase() : '';
+    const known = norm ? _routerFxTierConfigs[norm] : null;
+    if (known) return known;
+    return {
+      model: norm && _routerFxModels[norm] ? _routerFxModels[norm] : '',
+      supportsImage: false,
+      imageOnly: false,
+    };
+  }
+
+  function _routerFxRememberTierDecision(tier, model) {
+    if (typeof tier !== 'string' || !tier) return;
+    const norm = tier.toLowerCase();
+    _routerFxRegisterTier(norm);
+    if (!model) return;
+    const modelName = String(model);
+    _routerFxModels[norm] = modelName;
+    const current = _routerFxTierConfigs[norm] || {};
+    _routerFxTierConfigs[norm] = {
+      model: modelName,
+      supportsImage: current.supportsImage === true,
+      imageOnly: current.imageOnly === true,
+    };
+  }
+
+  function _routerFxTierMatchesRequestKind(tierConfig, requestKind) {
+    const kind = _routerFxNormalizeRequestKind(requestKind);
+    if (kind === 'image') return !!(tierConfig.supportsImage || tierConfig.imageOnly);
+    return !tierConfig.imageOnly;
+  }
+
+  function _routerFxRequestKindFromDecision(decision, fallbackKind) {
+    if (fallbackKind) return _routerFxNormalizeRequestKind(fallbackKind);
+    const source = String(decision?.source || decision?.routing_source || '').toLowerCase();
+    const tier = String(decision?.tier || decision?.routed_tier || '').toLowerCase();
+    if (source === 'image_route' || tier === 'image_model') return 'image';
+    return 'text';
+  }
+
+  function _routerFxVisualEntries(requestKind, decision) {
+    if (_routerFxConfigTiers === null) return [];
+    const kind = _routerFxRequestKindFromDecision(decision, requestKind);
+    const byDisplay = new Map();
+    _routerFxSlotList.forEach((tier) => {
+      if (_routerFxConfigTiers !== null && !_routerFxConfigTiers.has(tier)) return;
+      const tierConfig = _routerFxTierConfig(tier);
+      if (!_routerFxTierMatchesRequestKind(tierConfig, kind)) return;
+      const displayName = tierConfig.model ? _routerFxStripProvider(tierConfig.model) : tier;
+      const key = displayName ? displayName.toLowerCase() : tier;
+      let entry = byDisplay.get(key);
+      if (!entry) {
+        entry = { key, tiers: [], model: tierConfig.model || '', displayName };
+        byDisplay.set(key, entry);
+      }
+      entry.tiers.push(tier);
+      if (!entry.model && tierConfig.model) entry.model = tierConfig.model;
+    });
+    const decisionTier = decision && typeof decision.tier === 'string'
+      ? decision.tier.toLowerCase()
+      : '';
+    const decisionModel = decision && typeof decision.model === 'string' ? decision.model : '';
+    if (decisionTier && decisionModel) {
+      const displayName = _routerFxStripProvider(decisionModel);
+      const key = displayName ? displayName.toLowerCase() : decisionTier;
+      let entry = byDisplay.get(key);
+      if (!entry && _routerFxTierMatchesRequestKind(_routerFxTierConfig(decisionTier), kind)) {
+        entry = { key, tiers: [], model: decisionModel, displayName };
+        byDisplay.set(key, entry);
+      }
+      if (entry) {
+        if (entry.tiers.indexOf(decisionTier) < 0) entry.tiers.push(decisionTier);
+        if (!entry.model) entry.model = decisionModel;
+      }
+    }
+    return Array.from(byDisplay.values()).map((e) => ({
+      key: e.key,
+      tiers: _routerFxSortTiers(e.tiers),
+      model: e.model,
+      displayName: e.displayName || (e.model ? _routerFxStripProvider(e.model) : e.tiers[0]),
+    }));
+  }
+
+  function _routerFxHasMultipleCandidates(requestKind, decision) {
+    return _routerFxVisualEntries(requestKind, decision).length > 1;
   }
 
   // Promise resolved when _loadFeatureToggles has populated tier
   // models from config. Any _loadHistory call awaits this gate so the
   // first history rebuild never renders strips with empty tier names
-  // ("t1", "t2", …) just because config hadn't returned yet.
+  // ("c1", "c2", …) just because config hadn't returned yet.
   let _routerFxConfigReadyResolve = null;
   const _routerFxConfigReady = new Promise((resolve) => {
     _routerFxConfigReadyResolve = resolve;
@@ -2711,6 +3547,23 @@ const ChatView = (() => {
     } catch (_) { /* ignore */ }
     return fresh;
   }
+  function _routerFxResolveLayoutSeed(sessionKey, hintTimestamp) {
+    return _routerFxResolveSeed(sessionKey, 0, 'layout', hintTimestamp);
+  }
+  function _routerFxIdentity(model, tier) {
+    const modelPart = typeof model === 'string' ? model.trim().toLowerCase() : '';
+    const tierPart = _routerFxNormalizeTier(tier);
+    if (!modelPart && !tierPart) return '';
+    return modelPart + '|' + tierPart;
+  }
+  function _routerFxDecisionIdentity(decision) {
+    if (!decision || typeof decision !== 'object') return '';
+    return _routerFxIdentity(decision.model || decision.routed_model || '', decision.tier || decision.routed_tier || '');
+  }
+  function _routerFxUsageIdentity(usage) {
+    if (!usage || typeof usage !== 'object') return '';
+    return _routerFxIdentity(usage.routed_model || usage.model || '', usage.routed_tier || '');
+  }
   function _routerFxCountUserMessages() {
     if (!_thread) return 0;
     return _thread.querySelectorAll(
@@ -2718,98 +3571,60 @@ const ChatView = (() => {
     ).length;
   }
 
-  // Group tiers by their backing model so two tiers that resolve to
-  // the same model don't get two cells.
-  function _routerFxRealEntries(decision) {
-    const winnerTier = decision && typeof decision.tier === 'string' ? decision.tier.toLowerCase() : '';
-    const winnerModel = decision && typeof decision.model === 'string' ? decision.model : '';
-    const slotKeyOf = (tier) => {
-      const m = _routerFxModels[tier];
-      return m ? m : 'tier:' + tier;
-    };
-    const byKey = new Map();
-    _routerFxSlotList.forEach((tier) => {
-      const key = slotKeyOf(tier);
-      let entry = byKey.get(key);
-      if (!entry) {
-        entry = { key, tiers: [], model: _routerFxModels[tier] || '' };
-        byKey.set(key, entry);
-      }
-      entry.tiers.push(tier);
+  function _pendingRouterDecisionKey(turnIndex) {
+    return `${_sessionKey || ''}:${turnIndex || 'latest'}`;
+  }
+
+  function _cachePendingRouterDecision(payload) {
+    const turnIndex = _routerFxCountUserMessages();
+    const key = _pendingRouterDecisionKey(turnIndex > 0 ? turnIndex : 'latest');
+    _pendingRouterDecisions.set(key, payload);
+    _chatDiag('router_decision.cached_pending_anchor', {
+      key,
+      payload: _chatDiagSummarizePayload(payload),
     });
-    if (winnerTier && winnerModel) {
-      const target = byKey.get(slotKeyOf(winnerTier));
-      if (target && !target.model) target.model = winnerModel;
+  }
+
+  function _flushPendingRouterDecisions() {
+    if (!_thread || !_routerFx.enabled) return;
+    if (!_routerFxLastUserMessage()) return;
+    const turnIndex = _routerFxCountUserMessages();
+    const keys = [
+      _pendingRouterDecisionKey(turnIndex),
+      _pendingRouterDecisionKey('latest'),
+    ];
+    for (const key of keys) {
+      if (!_pendingRouterDecisions.has(key)) continue;
+      const payload = _pendingRouterDecisions.get(key);
+      _pendingRouterDecisions.delete(key);
+      _chatDiag('router_decision.flush_pending_anchor', {
+        key,
+        payload: _chatDiagSummarizePayload(payload),
+      });
+      _handleRouterDecision(payload);
+      return;
     }
-    return Array.from(byKey.values()).map((e) => ({
-      key: e.key,
-      tiers: e.tiers,
-      model: e.model,
-      displayName: e.model ? _routerFxStripProvider(e.model) : e.tiers[0],
-    }));
   }
 
-  // FNV-1a 32-bit hash of a string — folds the seed key down to a
-  // single integer for mulberry32 to seed off.
-  function _routerFxHashSeed(key) {
-    let h = 0x811c9dc5;
-    const s = String(key == null ? '' : key);
-    for (let i = 0; i < s.length; i++) {
-      h ^= s.charCodeAt(i);
-      h = Math.imul(h, 0x01000193);
-    }
-    return h >>> 0;
+  // Build the visual roster for this turn only. Text requests exclude
+  // image-only routes; image requests include only image-capable routes.
+  // Entries are deduped by display model name so provider/thinking/tier
+  // differences do not create extra visual cells.
+  function _routerFxRealEntries(decision, requestKind) {
+    return _routerFxVisualEntries(requestKind, decision);
   }
 
-  // mulberry32 PRNG — deterministic, well-distributed, ~10 LoC.
-  function _routerFxMulberry32(seed) {
-    let state = seed >>> 0;
-    return function () {
-      state = (state + 0x6D2B79F5) >>> 0;
-      let t = state;
-      t = Math.imul(t ^ (t >>> 15), t | 1);
-      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-  }
-
-  // Fisher-Yates in place using the supplied RNG (defaults to
-  // Math.random when no seed key is given — exclusively for code
-  // paths that don't have a stable identifier).
-  function _routerFxShuffle(arr, seedKey) {
-    const rng = seedKey != null
-      ? _routerFxMulberry32(_routerFxHashSeed(seedKey))
-      : Math.random;
-    for (let i = arr.length - 1; i > 0; i--) {
-      const j = Math.floor(rng() * (i + 1));
-      const tmp = arr[i];
-      arr[i] = arr[j];
-      arr[j] = tmp;
-    }
-    return arr;
-  }
-
-  // Assemble the 12-cell grid: real (deduped) entries + decoys
-  // filtered to avoid collisions with real model names, then shuffled
-  // with a SEEDED RNG so the same turn always produces the same
-  // layout across re-renders (live → DoneEvent → history-sync, plus
-  // page refresh). seedKey is typically the turn's stable timestamp.
+  // Assemble the grid from real candidates only. No filler/decoy wall: every
+  // visible model name is a candidate that could actually be called this turn.
   function _routerFxBuildGridCells(realEntries, seedKey) {
-    const cells = [];
-    const realNames = new Set();
-    realEntries.forEach((entry) => {
-      cells.push({ kind: 'real', entry, displayName: entry.displayName });
-      if (entry.displayName) realNames.add(entry.displayName);
-    });
-    for (let i = 0; i < _ROUTER_FX_DECOY_POOL.length && cells.length < _ROUTER_FX_GRID_CELLS; i++) {
-      const name = _ROUTER_FX_DECOY_POOL[i];
-      if (realNames.has(name)) continue;
-      cells.push({ kind: 'decoy', displayName: name });
-    }
-    while (cells.length < _ROUTER_FX_GRID_CELLS) {
-      cells.push({ kind: 'decoy', displayName: '—' });
-    }
-    return _routerFxShuffle(cells, seedKey);
+    const orderedRealEntries = realEntries.slice().sort((a, b) => (
+      (a.displayName || a.key || '').localeCompare(b.displayName || b.key || '')
+    ));
+    return orderedRealEntries.map((entry) => ({
+      kind: 'real',
+      entry,
+      displayName: entry.displayName,
+    }));
   }
 
   function _buildRouterFxElement(decision, opts) {
@@ -2817,9 +3632,12 @@ const ChatView = (() => {
     const wrap = document.createElement('div');
     wrap.className = 'router-fx';
     wrap.setAttribute('data-history-role', 'router');
+    wrap.dataset.renderMode = opts.renderMode || (opts.preSettled ? 'history' : 'live');
     wrap.dataset.state = 'idle';
-    wrap.dataset.tier = decision.tier || '';
+    wrap.dataset.tier = _routerFxNormalizeTier(decision.tier);
     wrap.dataset.source = decision.source || 'none';
+    const identity = _routerFxDecisionIdentity(decision);
+    if (identity) wrap.dataset.routerIdentity = identity;
     const observeMode = decision && decision.routing_applied === false;
     if (observeMode) {
       wrap.dataset.observe = 'true';
@@ -2827,35 +3645,44 @@ const ChatView = (() => {
         ? decision.rollout_phase
         : 'observe';
     }
+    // Style-variant seam: stamp data-variant on the root so a future skin can
+    // hook [data-variant="..."] selectors (the same idiom as data-state /
+    // data-source / data-observe). Only stamp non-default values, leaving the
+    // base look as the attribute-free fallback. opts.variant overrides the
+    // global preference for callers that want a per-render skin.
+    const variant = (opts.variant != null ? opts.variant : _routerFx.variant) || 'default';
+    if (variant && variant !== 'default') wrap.dataset.variant = variant;
 
     const header = document.createElement('div');
     header.className = 'router-fx-header';
     header.innerHTML =
       '<span class="glyph">←</span>' +
-      '<span class="title">model router</span>' +
+      '<span class="title">AI model router</span>' +
       '<span class="glyph">→</span>';
     wrap.appendChild(header);
 
-    const realEntries = _routerFxRealEntries(decision);
-    // Seed the cell shuffle off the caller-supplied key (turn
-    // timestamp). Same key → same layout on every rebuild, so the
-    // user never sees the order shift after the hammer locked.
-    // Stash the seed on the wrap dataset for forensic reuse.
+    // Seed off the caller-supplied key (turn timestamp). Same key → same
+    // layout on every rebuild, so the field never reshuffles after lock.
     const seedKey = opts && opts.seedKey ? String(opts.seedKey) : '';
     if (seedKey) wrap.dataset.seed = seedKey;
+
+    const requestKind = _routerFxRequestKindFromDecision(decision, opts.requestKind);
+    const realEntries = _routerFxRealEntries(decision, requestKind);
+    if (realEntries.length <= 1) return null;
     const gridCells = _routerFxBuildGridCells(realEntries, seedKey || undefined);
 
     const grid = document.createElement('div');
     grid.className = 'router-fx-grid';
+    const cols = Math.min(4, Math.max(2, gridCells.length));
+    const mobileCols = gridCells.length > 2 ? 2 : gridCells.length;
+    grid.style.setProperty('--router-fx-cols', String(cols));
+    grid.style.setProperty('--router-fx-mobile-cols', String(Math.max(1, mobileCols)));
     gridCells.forEach((cellInfo, i) => {
       const cell = document.createElement('div');
       cell.className = 'router-fx-cell';
-      cell.dataset.kind = cellInfo.kind;
       cell.dataset.cellIdx = String(i);
-      if (cellInfo.kind === 'real') {
-        cell.dataset.tiers = cellInfo.entry.tiers.join(',');
-      }
-      cell.innerHTML = `<span class="nm">${_esc(cellInfo.displayName)}</span>`;
+      // title surfaces the full name on hover when a long one is ellipsized.
+      cell.innerHTML = `<span class="nm" title="${_esc(cellInfo.displayName)}">${_esc(cellInfo.displayName)}</span>`;
       grid.appendChild(cell);
     });
     const selector = document.createElement('div');
@@ -2865,10 +3692,14 @@ const ChatView = (() => {
 
     wrap._fxGridCells = gridCells;
     wrap._fxRealEntries = realEntries;
+    wrap._fxRequestKind = requestKind;
 
     if (opts.preSettled) {
-      const winnerIdx = _routerFxWinnerCellIndex(wrap, decision.tier);
-      if (winnerIdx >= 0) _settleRouterFxImmediate(wrap, winnerIdx, { burst: false });
+      const winnerIdx = _routerFxWinnerCellIndex(wrap, _routerFxNormalizeTier(decision.tier));
+      if (winnerIdx >= 0) {
+        _settleRouterFxImmediate(wrap, winnerIdx, { burst: false, decision });
+        _routerFxNormalizeSettledStrip(wrap, opts.renderMode || 'history', decision);
+      }
     }
     return wrap;
   }
@@ -2889,8 +3720,10 @@ const ChatView = (() => {
     if (!selector || !cell) return;
     opts = opts || {};
     const grid = cell.parentElement;
+    if (!grid || !grid.isConnected) return;
     const cellRect = cell.getBoundingClientRect();
     const gridRect = grid.getBoundingClientRect();
+    if (!cellRect.width || !cellRect.height || !gridRect.width || !gridRect.height) return;
     const padLeft = parseFloat(getComputedStyle(grid).paddingLeft) || 0;
     const padTop = parseFloat(getComputedStyle(grid).paddingTop) || 0;
     const x = cellRect.left - gridRect.left - padLeft;
@@ -2910,6 +3743,89 @@ const ChatView = (() => {
     setTimeout(() => cell.classList.remove('pinging'), 220);
   }
 
+  function _routerFxClearAnimationTimers(wrap) {
+    if (!wrap) return;
+    if (wrap._fxAnimFrame) {
+      cancelAnimationFrame(wrap._fxAnimFrame);
+      wrap._fxAnimFrame = null;
+    }
+    if (Array.isArray(wrap._fxAnimTimers)) {
+      wrap._fxAnimTimers.forEach((timer) => clearTimeout(timer));
+    }
+    wrap._fxAnimTimers = [];
+  }
+
+  function _routerFxApplySettledSemantics(wrap, decision, renderMode) {
+    if (!wrap) return;
+    const mode = renderMode || wrap.dataset.renderMode || 'history';
+    const effectiveDecision = decision || {
+      tier: wrap.dataset.tier || '',
+      model: '',
+      source: wrap.dataset.source || 'none',
+    };
+    wrap.dataset.renderMode = mode;
+    const winnerName = _routerFxWinnerName(effectiveDecision);
+    wrap.setAttribute('role', mode === 'live' ? 'status' : 'group');
+    wrap.setAttribute('aria-live', mode === 'live' ? 'polite' : 'off');
+    wrap.setAttribute(
+      'aria-label',
+      winnerName ? `Router selected ${winnerName}` : 'Router settled'
+    );
+  }
+
+  function _routerFxClearVisualResidue(wrap) {
+    if (!wrap) return;
+    const selector = wrap.querySelector('.router-fx-selector');
+    if (selector) selector.classList.remove('visible', 'lock', 'lock-impact');
+    wrap.querySelectorAll('.router-fx-cell.pinging').forEach((cell) => {
+      cell.classList.remove('pinging');
+    });
+    wrap.querySelectorAll('.router-fx-burst').forEach((burst) => burst.remove());
+  }
+
+  function _routerFxNormalizeSettledStrip(wrap, renderMode, decision) {
+    if (!wrap) return;
+    _routerFxStopScan(wrap);
+    _routerFxClearAnimationTimers(wrap);
+    _routerFxClearVisualResidue(wrap);
+    wrap.dataset.state = 'settled';
+    wrap.dataset.renderMode = renderMode || 'history';
+    delete wrap.dataset.live;
+    delete wrap.dataset.scanning;
+    wrap._fxFinished = true;
+    _routerFxApplySettledSemantics(wrap, decision, wrap.dataset.renderMode);
+    _routerFxFitLabels(wrap);
+  }
+
+  function _routerFxDisconnectLabelFit(wrap) {
+    if (!wrap) return;
+    if (wrap._fxFitFrame) {
+      cancelAnimationFrame(wrap._fxFitFrame);
+      wrap._fxFitFrame = null;
+    }
+    if (wrap._fxLabelResizeObserver) {
+      wrap._fxLabelResizeObserver.disconnect();
+      wrap._fxLabelResizeObserver = null;
+    }
+  }
+
+  function _routerFxRemoveStrip(wrap) {
+    if (!wrap) return;
+    _routerFxNormalizeSettledStrip(wrap, wrap.dataset.renderMode || 'history');
+    _routerFxDisconnectLabelFit(wrap);
+    wrap.remove();
+  }
+
+  function _routerFxStaticizeCompletedStrips(sessionKey) {
+    if (!_thread) return;
+    const key = sessionKey || _sessionKey || '';
+    _thread.querySelectorAll('.router-fx').forEach((wrap) => {
+      if (key && wrap.dataset.sessionKey && wrap.dataset.sessionKey !== key) return;
+      if (wrap.dataset.state !== 'settled') return;
+      _routerFxNormalizeSettledStrip(wrap, 'history', wrap._fxDecision || null);
+    });
+  }
+
   function _settleRouterFxImmediate(wrap, winnerIdx, opts) {
     opts = opts || {};
     const grid = wrap.querySelector('.router-fx-grid');
@@ -2919,19 +3835,21 @@ const ChatView = (() => {
     if (!cells[winnerIdx]) return;
 
     wrap.dataset.state = 'settled';
+    delete wrap.dataset.live;
+    delete wrap.dataset.scanning;
+    wrap._fxFinished = true;
     cells.forEach((c, i) => c.classList.toggle('win', i === winnerIdx));
+    _routerFxApplySettledSemantics(wrap, opts.decision || wrap._fxDecision || null, wrap.dataset.renderMode);
 
-    requestAnimationFrame(() => {
-      _routerFxPositionSelector(selector, cells[winnerIdx], { lock: true });
-      selector.classList.add('visible', 'lock');
-      if (opts.burst) {
-        selector.classList.remove('lock-impact');
-        void selector.offsetWidth;
-        selector.classList.add('lock-impact');
-        setTimeout(() => selector.classList.remove('lock-impact'), 320);
-        _routerFxFireBurst(grid, cells[winnerIdx]);
-      }
-    });
+    // Hide the chase hammer once settled — the .win cell IS the winner marker.
+    // Leaving the selector visible risks it stranding mid-hop (e.g. straddling
+    // two cells, the observed visual failure), since its position is measured
+    // and can race a layout change.
+    if (selector) selector.classList.remove('visible', 'lock', 'lock-impact');
+    _routerFxFitLabels(wrap);
+    if (opts.burst) {
+      requestAnimationFrame(() => _routerFxFireBurst(grid, cells[winnerIdx]));
+    }
   }
 
   function _routerFxFireBurst(grid, cell) {
@@ -2955,12 +3873,13 @@ const ChatView = (() => {
     if (!grid || !selector || winnerIdx < 0) return;
     const cells = grid.querySelectorAll('.router-fx-cell');
     if (!cells.length || !cells[winnerIdx]) return;
+    _routerFxClearAnimationTimers(wrap);
 
-    const reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    if (reduced) {
-      _settleRouterFxImmediate(wrap, winnerIdx, { burst: false });
-      return;
-    }
+    // The router panel is an explicitly toggled decorative effect — the in-app
+    // "Visual effects" switch IS the motion opt-in — so it plays regardless
+    // of the OS prefers-reduced-motion setting, which otherwise blanket-
+    // suppresses it in environments that force reduce-motion (some remote
+    // desktops / VMs do). Turn the switch off to stop it.
 
     wrap.dataset.state = 'playing';
 
@@ -2996,18 +3915,373 @@ const ChatView = (() => {
     sequence.forEach((idx, hopIdx) => {
       if (hopIdx === 0) return;
       scheduled += dwellTimes[hopIdx - 1] || 200;
-      setTimeout(() => {
+      const timer = setTimeout(() => {
+        if (!wrap.isConnected || wrap.dataset.renderMode !== 'live') return;
         if (hopIdx < sequence.length - 1) {
           _routerFxPositionSelector(selector, cells[idx], { hopIdx });
           _routerFxPing(cells[idx]);
         } else {
-          _settleRouterFxImmediate(wrap, idx, { burst: true });
+          _settleRouterFxImmediate(wrap, idx, { burst: true, decision: wrap._fxDecision });
           _routerFxPing(cells[idx]);
         }
       }, scheduled);
+      wrap._fxAnimTimers.push(timer);
     });
 
-    requestAnimationFrame(placeFirst);
+    wrap._fxAnimFrame = requestAnimationFrame(() => {
+      wrap._fxAnimFrame = null;
+      if (!wrap.isConnected || wrap.dataset.renderMode !== 'live') return;
+      placeFirst();
+    });
+  }
+
+  // Winner label used for settled semantics and assistive text.
+  function _routerFxWinnerName(decision) {
+    const model = decision && (decision.model || decision.routed_model);
+    if (model) return _routerFxStripProvider(String(model));
+    const tier = _routerFxNormalizeTier(decision && decision.tier);
+    if (tier && _routerFxModels[tier]) return _routerFxStripProvider(_routerFxModels[tier]);
+    return tier || '';
+  }
+
+  // ── Scan → lock ─────────────────────────────────────────────────────────
+  function _pendingRouterFxScanMatchesCurrentTurn() {
+    if (!_routerFxScanPending) return false;
+    return _routerFxScanPending.sessionKey === (_sessionKey || '')
+      && _routerFxScanPending.turnIndex === String(_routerFxCountUserMessages());
+  }
+
+  function _cancelPendingRouterFxScan(reason = '') {
+    const pending = _routerFxScanPending;
+    if (_routerFxScanDelayTimer) {
+      clearTimeout(_routerFxScanDelayTimer);
+      _routerFxScanDelayTimer = null;
+    }
+    _routerFxScanPending = null;
+    if (pending) {
+      _chatDiag('router_scan.pending.cancelled', {
+        reason: reason || '',
+        sessionKey: pending.sessionKey || '',
+        turnIndex: pending.turnIndex || '',
+      });
+    }
+  }
+
+  function _clearRouterFxVisuals(reason = '') {
+    _cancelPendingRouterFxScan(reason || 'clear_visuals');
+    if (!_thread) return;
+    _thread.querySelectorAll('.router-fx').forEach((el) => _routerFxRemoveStrip(el));
+  }
+
+  async function _finishPendingRouterFxScan() {
+    const pending = _routerFxScanPending;
+    _routerFxScanDelayTimer = null;
+    _routerFxScanPending = null;
+    if (!pending) return;
+    if (pending.sessionKey !== (_sessionKey || '')) {
+      _chatDiag('router_scan.pending.drop.session_changed', {
+        pendingSessionKey: pending.sessionKey || '',
+        sessionKey: _sessionKey || '',
+      });
+      return;
+    }
+    if (_isCompactInFlightForCurrentSession()
+        || _routerFxIsSuppressedForCompactionTurn(pending.turnIndex)) {
+      _chatDiag('router_scan.pending.drop.compaction_suppressed', {
+        sessionKey: pending.sessionKey || '',
+        turnIndex: pending.turnIndex || '',
+      });
+      return;
+    }
+    await _routerFxAwaitConfig();
+    if (pending.sessionKey !== (_sessionKey || '')) {
+      _chatDiag('router_scan.pending.drop.session_changed_after_config', {
+        pendingSessionKey: pending.sessionKey || '',
+        sessionKey: _sessionKey || '',
+      });
+      return;
+    }
+    if (_isCompactInFlightForCurrentSession()
+        || _routerFxIsSuppressedForCompactionTurn(pending.turnIndex)) {
+      _chatDiag('router_scan.pending.drop.compaction_suppressed_after_config', {
+        sessionKey: pending.sessionKey || '',
+        turnIndex: pending.turnIndex || '',
+      });
+      return;
+    }
+    const started = _routerFxBeginScan(pending.anchorDiv, pending.seedKey, {
+      requestKind: pending.requestKind,
+    });
+    if (!started || !pending.decision || !_thread) return;
+    const liveStrip = _thread.querySelector('.router-fx[data-live="true"]');
+    if (!liveStrip || liveStrip.dataset.turnIndex !== String(pending.turnIndex)) return;
+    liveStrip._fxDecision = pending.decision;
+    _chatDiag('router_decision.cached_on_delayed_live_strip', {
+      payload: _chatDiagSummarizePayload(pending.decision),
+      liveStrip: _chatDiagDescribeElement(liveStrip),
+    });
+    if (liveStrip._fxFinished) {
+      _routerFxLock(liveStrip, pending.decision);
+      _scrollToBottom();
+    }
+  }
+
+  function _scheduleRouterFxBeginScan(anchorDiv, seedKey, opts) {
+    opts = opts || {};
+    const requestKind = _routerFxNormalizeRequestKind(opts.requestKind);
+    _cancelPendingRouterFxScan('reschedule');
+    if (_routerFxIsSuppressedForCompactionTurn(_routerFxCountUserMessages())) {
+      _chatDiag('router_scan.schedule.skip.compaction_suppressed', {
+        turnIndex: String(_routerFxCountUserMessages()),
+      });
+      return false;
+    }
+    if (!_thread || !_routerFx.enabled || !_routerFeatureEnabled) {
+      _chatDiag('router_scan.schedule.skip', {
+        hasThread: !!_thread,
+        routerFxEnabled: !!_routerFx.enabled,
+        routerFeatureEnabled: !!_routerFeatureEnabled,
+      });
+      return false;
+    }
+    if (_routerFxConfigTiers !== null && !_routerFxHasMultipleCandidates(requestKind, null)) {
+      _chatDiag('router_scan.schedule.skip.single_candidate', {
+        requestKind,
+        candidates: _routerFxVisualEntries(requestKind, null).length,
+      });
+      return false;
+    }
+    _routerFxScanPending = {
+      anchorDiv,
+      seedKey,
+      requestKind,
+      sessionKey: _sessionKey || '',
+      turnIndex: String(_routerFxCountUserMessages()),
+      decision: null,
+    };
+    _routerFxScanDelayTimer = setTimeout(() => {
+      void _finishPendingRouterFxScan();
+    }, _ROUTER_FX_START_DELAY_MS);
+    _chatDiag('router_scan.scheduled', {
+      seedKey,
+      requestKind,
+      delayMs: _ROUTER_FX_START_DELAY_MS,
+      turnIndex: _routerFxScanPending.turnIndex,
+      anchor: _chatDiagDescribeElement(anchorDiv),
+    });
+    return true;
+  }
+
+  // Render the routing visualisation after a short grace period, animating
+  // continuously until the router_decision arrives and locks it onto the
+  // winner. The scan is JS-driven (discrete class/position changes every
+  // ~170ms), so it renders regardless of any CSS-animation quirk — and it
+  // fills the wait instead of trailing it, replacing the "Watching" placeholder.
+  function _routerFxBeginScan(anchorDiv, seedKey, opts) {
+    opts = opts || {};
+    const requestKind = _routerFxNormalizeRequestKind(opts.requestKind);
+    if (_routerFxIsSuppressedForCompactionTurn(_routerFxCountUserMessages())) {
+      _chatDiag('router_scan.skip.compaction_suppressed', {
+        turnIndex: String(_routerFxCountUserMessages()),
+      });
+      return false;
+    }
+    // Only scan when the router is actually going to route (else no decision
+    // arrives to lock it). Both flags: user wants the viz AND routing is on.
+    if (!_thread || !_routerFx.enabled || !_routerFeatureEnabled) {
+      _chatDiag('router_scan.skip', {
+        hasThread: !!_thread,
+        routerFxEnabled: !!_routerFx.enabled,
+        routerFeatureEnabled: !!_routerFeatureEnabled,
+      });
+      return false;
+    }
+    if (!_routerFxHasMultipleCandidates(requestKind, null)) {
+      _chatDiag('router_scan.skip.single_candidate', {
+        requestKind,
+        candidates: _routerFxVisualEntries(requestKind, null).length,
+      });
+      return false;
+    }
+    _thread.querySelectorAll('.router-fx[data-live="true"]').forEach((el) => {
+      _routerFxRemoveStrip(el);
+    });
+    const wrap = _buildRouterFxElement({ source: 'none' }, {
+      seedKey,
+      renderMode: 'live',
+      requestKind,
+    });
+    if (!wrap) {
+      _chatDiag('router_scan.skip.single_candidate', {
+        requestKind,
+        candidates: _routerFxVisualEntries(requestKind, null).length,
+      });
+      return false;
+    }
+    wrap.dataset.live = 'true';
+    wrap.dataset.scanning = 'true';
+    wrap.dataset.state = 'scanning';
+    wrap.dataset.sessionKey = _sessionKey || '';
+    wrap.dataset.turnIndex = String(_routerFxCountUserMessages());
+    if (anchorDiv && anchorDiv.parentNode === _thread) {
+      _thread.insertBefore(wrap, anchorDiv.nextSibling);
+    } else {
+      _routerFxInsertAnchored(wrap, null);
+    }
+    _routerFxScanRoam(wrap);
+    _chatDiag('router_scan.started', {
+      seedKey,
+      anchor: _chatDiagDescribeElement(anchorDiv),
+      strip: _chatDiagDescribeElement(wrap),
+    });
+    // HARD CAP: the scan animation lasts a fixed, short window (≤1s total incl.
+    // the settle transition), independent of when the decision WS event lands.
+    // The router decides up-front, so the decision is normally cached within
+    // tens of ms; at the cap we lock onto it and settle. This is what makes the
+    // panel "end quickly within one second" rather than roam until the event.
+    wrap._fxScanCap = setTimeout(() => _routerFxFinishScan(wrap), _ROUTER_FX_SCAN_MS);
+    _scrollToBottom();
+    return true;
+  }
+
+  // Finish the scan exactly once: lock onto the cached decision (the winner)
+  // and settle. If — vanishingly rarely — no decision has arrived yet, settle
+  // to a neutral final state; a late decision still locks via the data-live
+  // lookup in _handleRouterDecision.
+  function _routerFxFinishScan(wrap) {
+    if (!wrap || wrap._fxFinished) return;
+    wrap._fxFinished = true;
+    if (wrap._fxScanCap) { clearTimeout(wrap._fxScanCap); wrap._fxScanCap = null; }
+    if (wrap._fxDecision) {
+      _chatDiag('router_scan.finish.with_decision', {
+        strip: _chatDiagDescribeElement(wrap),
+        payload: _chatDiagSummarizePayload(wrap._fxDecision),
+      });
+      _routerFxLock(wrap, wrap._fxDecision);
+    } else {
+      _routerFxStopScan(wrap);
+      _routerFxClearVisualResidue(wrap);
+      wrap.dataset.state = 'settled';
+      _routerFxApplySettledSemantics(wrap, null, 'live');
+      _chatDiag('router_scan.finish.no_decision', {
+        strip: _chatDiagDescribeElement(wrap),
+      });
+    }
+  }
+
+  // JS-driven roaming "search": every ~190ms the selector hops across a real
+  // candidate cell.
+  function _routerFxScanRoam(wrap) {
+    const grid = wrap.querySelector('.router-fx-grid');
+    if (!grid) return;
+    const targets = grid.querySelectorAll('.router-fx-cell');
+    if (!targets.length) return;
+    const selector = grid.querySelector('.router-fx-selector');
+    if (selector) selector.classList.add('visible');
+    let prev = -1;
+    const step = () => {
+      if (!wrap.isConnected || wrap.dataset.scanning !== 'true') return;
+      let i;
+      let g = 0;
+      do { i = Math.floor(Math.random() * targets.length); g++; } while (i === prev && g < 8);
+      prev = i;
+      if (selector) {
+        _routerFxPositionSelector(selector, targets[i], { hopIdx: i });
+        _routerFxPing(targets[i]);
+      }
+      wrap._fxScanTimer = setTimeout(step, 190);
+    };
+    step();
+  }
+
+  function _routerFxStopScan(wrap) {
+    if (!wrap) return;
+    if (wrap._fxScanTimer) { clearTimeout(wrap._fxScanTimer); wrap._fxScanTimer = null; }
+    if (wrap._fxScanCap) { clearTimeout(wrap._fxScanCap); wrap._fxScanCap = null; }
+    delete wrap.dataset.scanning;
+  }
+
+  function _routerFxPauseScanTimers(wrap) {
+    if (!wrap) return;
+    if (wrap._fxScanTimer) { clearTimeout(wrap._fxScanTimer); wrap._fxScanTimer = null; }
+    if (wrap._fxScanCap) { clearTimeout(wrap._fxScanCap); wrap._fxScanCap = null; }
+  }
+
+  function _routerFxResumeLiveStrip(wrap) {
+    if (!wrap || wrap.dataset.live !== 'true') return;
+    _routerFxPauseScanTimers(wrap);
+    if (wrap.dataset.scanning === 'true' && !wrap._fxFinished) {
+      _routerFxScanRoam(wrap);
+      if (wrap._fxDecision) {
+        wrap._fxScanCap = setTimeout(() => _routerFxFinishScan(wrap), _ROUTER_FX_SCAN_MS);
+      } else {
+        _chatDiag('router_scan.resume_without_decision', {
+          strip: _chatDiagDescribeElement(wrap),
+        });
+      }
+      return;
+    }
+    if (wrap._fxFinished && wrap._fxDecision && !wrap.dataset.routerIdentity) {
+      _routerFxLock(wrap, wrap._fxDecision);
+    }
+  }
+
+  // When output begins, finish the in-flight selection scan without freezing
+  // the strip. The text/tool stream can render immediately, while the router
+  // still gets its visible winner-lock animation instead of becoming a static
+  // empty frame.
+  function _routerFxSettleForOutput() {
+    if (!_thread) return;
+    _thread.querySelectorAll('.router-fx[data-live="true"]').forEach((wrap) => {
+      // Output already complete/arriving → finish the scan immediately, locking
+      // onto the cached winner (no half-scan left hanging). Do not mark frozen:
+      // _routerFxLockGrid owns the visible selection motion.
+      if (wrap._fxDecision) {
+        _routerFxFinishScan(wrap);
+      } else {
+        _chatDiag('router_scan.keep_scanning_without_decision_on_output', {
+          strip: _chatDiagDescribeElement(wrap),
+        });
+      }
+    });
+  }
+
+  // Lock an in-flight scanning strip onto the routed winner.
+  function _routerFxLock(wrap, decision) {
+    if (!wrap) return;
+    decision = decision || {};
+    _routerFxStopScan(wrap);
+    wrap.dataset.tier = _routerFxNormalizeTier(decision.tier);
+    wrap.dataset.source = decision.source || 'none';
+    wrap.dataset.renderMode = wrap.dataset.renderMode || 'live';
+    wrap._fxDecision = decision;
+    const identity = _routerFxDecisionIdentity(decision);
+    if (identity) wrap.dataset.routerIdentity = identity;
+    if (decision.routing_applied === false) {
+      wrap.dataset.observe = 'true';
+      wrap.dataset.rolloutPhase = typeof decision.rollout_phase === 'string'
+        ? decision.rollout_phase : 'observe';
+    }
+    _routerFxLockGrid(wrap, decision);
+  }
+
+  function _routerFxLockGrid(wrap, decision) {
+    const tier = _routerFxNormalizeTier(decision.tier);
+    if (tier) {
+      _routerFxRememberTierDecision(tier, decision.model || '');
+    }
+    const winnerIdx = _routerFxWinnerCellIndex(wrap, tier);
+    if (winnerIdx >= 0) {
+      requestAnimationFrame(() => {
+        if (wrap.isConnected) _settleRouterFxImmediate(wrap, winnerIdx, { burst: true, decision });
+      });
+    } else {
+      wrap.dataset.state = 'settled';
+      delete wrap.dataset.live;
+      delete wrap.dataset.scanning;
+      wrap._fxFinished = true;
+      _routerFxApplySettledSemantics(wrap, decision, wrap.dataset.renderMode);
+    }
   }
 
   // Anchor invariant: the strip must always sit immediately below
@@ -3031,38 +4305,78 @@ const ChatView = (() => {
   // DoneEvent handler since the strip is anchored to the user msg,
   // which means it may not be the assistant bubble's immediate
   // previousElementSibling once tool cards / day-separators arrive.
-  function _routerFxFindAttachedStrip(assistantBubble) {
-    if (!assistantBubble) return null;
-    let prev = assistantBubble.previousElementSibling;
+  function _routerFxUserMessageForAssistant(referenceAssistant) {
+    if (!referenceAssistant) return null;
+    let prev = referenceAssistant.previousElementSibling;
     while (prev) {
-      if (prev.classList && prev.classList.contains('router-fx')) return prev;
-      if (prev.classList
-          && (prev.classList.contains('user')
-              || prev.getAttribute('data-history-role') === 'user')) {
-        return null;
+      if (prev.classList && (prev.classList.contains('user')
+          || prev.getAttribute('data-history-role') === 'user')) {
+        return prev;
       }
       prev = prev.previousElementSibling;
     }
     return null;
   }
 
+  // Shrink any grid cell label that overflows its cell so long model names
+  // (e.g. "gemini-3.1-flash-lite") show in full instead of clipping at the
+  // edges. Re-runs after insertion, font load, resize, and winner lock because
+  // all of those can change the measured width.
+  function _routerFxMeasureLabels(wrap) {
+    if (!wrap || !wrap.isConnected) return;
+    wrap.querySelectorAll('.router-fx-cell').forEach((cell) => {
+      const nm = cell.querySelector('.nm');
+      if (!nm) return;
+      nm.style.fontSize = '';
+      const avail = cell.clientWidth - 12;
+      if (avail <= 0) return;
+      const w = nm.scrollWidth;
+      if (w > avail) {
+        const base = parseFloat(getComputedStyle(nm).fontSize) || 10.5;
+        nm.style.fontSize = Math.max(7, base * (avail / w)).toFixed(1) + 'px';
+      }
+    });
+  }
+
+  function _routerFxScheduleLabelFit(wrap) {
+    if (!wrap) return;
+    if (wrap._fxFitFrame) cancelAnimationFrame(wrap._fxFitFrame);
+    wrap._fxFitFrame = requestAnimationFrame(() => {
+      wrap._fxFitFrame = null;
+      _routerFxMeasureLabels(wrap);
+    });
+  }
+
+  function _routerFxInstallLabelFit(wrap) {
+    if (!wrap || wrap._fxFitInstalled) return;
+    wrap._fxFitInstalled = true;
+    const grid = wrap.querySelector('.router-fx-grid');
+    if (grid && typeof ResizeObserver === 'function') {
+      wrap._fxLabelResizeObserver = new ResizeObserver(() => _routerFxScheduleLabelFit(wrap));
+      wrap._fxLabelResizeObserver.observe(grid);
+    }
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready
+        .then(() => _routerFxScheduleLabelFit(wrap))
+        .catch(() => {});
+    }
+  }
+
+  function _routerFxFitLabels(wrap) {
+    if (!wrap) return;
+    _routerFxInstallLabelFit(wrap);
+    _routerFxScheduleLabelFit(wrap);
+  }
+
   function _routerFxInsertAnchored(wrap, referenceAssistant) {
     if (!_thread) return;
+    // Fit long labels once the strip is in the DOM (rAF runs after the
+    // synchronous insertion below, regardless of which branch placed it).
+    _routerFxFitLabels(wrap);
     // Prefer the user msg that immediately precedes the assistant
     // turn we're about to render (during history rebuild we have a
     // concrete reference div; live, we don't).
-    let anchor = null;
-    if (referenceAssistant) {
-      let prev = referenceAssistant.previousElementSibling;
-      while (prev) {
-        if (prev.classList && (prev.classList.contains('user')
-            || prev.getAttribute('data-history-role') === 'user')) {
-          anchor = prev;
-          break;
-        }
-        prev = prev.previousElementSibling;
-      }
-    }
+    let anchor = _routerFxUserMessageForAssistant(referenceAssistant);
     if (!anchor) anchor = _routerFxLastUserMessage();
     if (anchor && anchor.parentNode === _thread) {
       if (anchor.nextSibling) {
@@ -3090,50 +4404,139 @@ const ChatView = (() => {
   // strip with empty _routerFxModels (tier-id placeholders). The
   // gate has its own 1.5 s ceiling so the await never hard-blocks.
   async function _handleRouterDecision(payload) {
-    if (!payload || typeof payload !== 'object') return;
-    const tier = typeof payload.tier === 'string' ? payload.tier : '';
-    if (!tier) return;
-    _routerFxRegisterTier(tier);
-    if (payload.model) {
-      _routerFxModels[tier.toLowerCase()] = String(payload.model);
+    _chatDiag('router_decision.handle.start', _chatDiagSummarizePayload(payload));
+    if (!payload || typeof payload !== 'object') {
+      _chatDiag('router_decision.skip.invalid_payload', {});
+      return;
     }
-    if (!_thread) return;
+    const tier = _routerFxNormalizeTier(payload.tier);
+    if (!tier) {
+      _chatDiag('router_decision.skip.no_tier', _chatDiagSummarizePayload(payload));
+      return;
+    }
+    _routerFxRememberTierDecision(tier, payload.model || '');
+    const turnIndex = _routerFxCountUserMessages();
+    if (_routerFxIsSuppressedForCompactionTurn(turnIndex)) {
+      if (_thread) {
+        _thread.querySelectorAll('.router-fx[data-live="true"]').forEach((el) => {
+          if (!el.dataset.turnIndex || el.dataset.turnIndex === String(turnIndex)) {
+            _routerFxRemoveStrip(el);
+          }
+        });
+      }
+      _chatDiag('router_decision.skip.compaction_suppressed', {
+        payload: _chatDiagSummarizePayload(payload),
+        turnIndex: String(turnIndex),
+      });
+      return;
+    }
+    // User-pref gate: visualisation hidden. Tier/model bookkeeping above is
+    // kept warm so re-enabling shows correct names without a config round-trip;
+    // skip the config await and all DOM work below. (Render-only gate — never
+    // purge already-rendered strips here, to stay clear of the streaming /
+    // history-rebuild strip lifecycle.)
+    if (!_routerFx.enabled) {
+      _chatDiag('router_decision.skip.disabled_pre_config', _chatDiagSummarizePayload(payload));
+      return;
+    }
+    if (!_thread) {
+      _chatDiag('router_decision.skip.no_thread_pre_config', _chatDiagSummarizePayload(payload));
+      return;
+    }
+    if (_pendingRouterFxScanMatchesCurrentTurn()) {
+      _routerFxScanPending.decision = payload;
+      _chatDiag('router_decision.cached_on_pending_scan', {
+        payload: _chatDiagSummarizePayload(payload),
+        turnIndex: _routerFxScanPending.turnIndex || '',
+        requestKind: _routerFxScanPending.requestKind || '',
+      });
+      return;
+    }
+    // A strip for this turn was rendered when the delayed scan began. CACHE the
+    // decision on it; the fixed-window scan (_routerFxFinishScan) locks onto it
+    // when the window closes — so the animation runs for a consistent ≤1s
+    // rather than however long the WS event took. If the window has ALREADY
+    // closed (late decision), lock immediately. Match by data-live so we find
+    // it whether it's still scanning or already settled-awaiting-winner.
+    const liveStrip = _thread.querySelector('.router-fx[data-live="true"]');
+    if (liveStrip
+        && liveStrip.dataset.turnIndex === String(_routerFxCountUserMessages())) {
+      liveStrip.dataset.sessionKey = _sessionKey || '';
+      liveStrip._fxDecision = payload;
+      _chatDiag('router_decision.cached_on_live_strip', {
+        payload: _chatDiagSummarizePayload(payload),
+        liveStrip: _chatDiagDescribeElement(liveStrip),
+        finished: !!liveStrip._fxFinished,
+      });
+      if (liveStrip._fxFinished) {
+        _routerFxLock(liveStrip, payload);
+        _scrollToBottom();
+      }
+      return;
+    }
     await _routerFxAwaitConfig();
     // Re-check the thread reference after the await — the view may
     // have been torn down while we were waiting.
-    if (!_thread) return;
-    // The router strip MUST anchor below a user message. If no user
-    // message has been rendered yet, this event is almost always a WS
-    // replay arriving before history has loaded — building a strip
-    // would orphan it at the top of the thread with no turn to attach
-    // to. Bail; the post-config history rebuild will create the
-    // correctly-anchored strip for this decision.
+    if (!_thread) {
+      _chatDiag('router_decision.skip.no_thread_post_config', _chatDiagSummarizePayload(payload));
+      return;
+    }
+    // Re-check the visualisation pref too: the user may have flipped it OFF
+    // during the (up to 1.5s cold-start) config await. Symmetric with the
+    // pre-await gate — without this a strip the user just hid would still
+    // flash in before the disabled-sweep removes it on the next sync.
+    if (!_routerFx.enabled) {
+      _chatDiag('router_decision.skip.disabled_post_config', _chatDiagSummarizePayload(payload));
+      return;
+    }
+    const replayRequestKind = _routerFxRequestKindFromDecision(payload, null);
+    if (!_routerFxHasMultipleCandidates(replayRequestKind, payload)) {
+      _chatDiag('router_decision.skip.single_candidate', _chatDiagSummarizePayload(payload));
+      return;
+    }
+    if (!_historyHasRendered || _historyHydrating) {
+      _cachePendingRouterDecision(payload);
+      _chatDiag('router_decision.cached_during_history_hydration', {
+        payload: _chatDiagSummarizePayload(payload),
+        historyHasRendered: !!_historyHasRendered,
+        historyHydrating: !!_historyHydrating,
+      });
+      return;
+    }
+    // The router strip MUST anchor below a user message. If a WS replay
+    // arrives before history has rendered the user turn, cache the decision
+    // and replay it after _loadHistory() has an anchor.
     const anchorUser = _routerFxLastUserMessage();
-    if (!anchorUser) return;
-    // Resolve a seed that's deterministic for this turn: cached in
-    // localStorage by (sessionKey, user-msg-index, tier). Subsequent
-    // rebuilds (history sync, F5) hit the same cache and produce the
-    // same shuffle — no visible reorder after the lock.
-    const turnIndex = _routerFxCountUserMessages();
-    const liveSeed = _routerFxResolveSeed(_sessionKey, turnIndex, tier);
-    const wrap = _buildRouterFxElement(payload, { seedKey: liveSeed });
+    if (!anchorUser) {
+      _cachePendingRouterDecision(payload);
+      return;
+    }
+    // No matching live scan means this decision is arriving via replay/history
+    // or after the user-visible turn already settled. Preserve the panel shape
+    // but render it as a settled historical result; never replay the choice
+    // animation for an already-finished turn.
+    const replaySeed = _routerFxResolveLayoutSeed(_sessionKey);
+    const wrap = _buildRouterFxElement(payload, {
+      preSettled: true,
+      renderMode: 'history',
+      seedKey: replaySeed,
+      requestKind: replayRequestKind,
+    });
+    if (!wrap) {
+      _chatDiag('router_decision.skip.single_candidate', _chatDiagSummarizePayload(payload));
+      return;
+    }
     const winnerIdx = _routerFxWinnerCellIndex(wrap, tier);
-    if (winnerIdx < 0) return;
-    wrap.dataset.live = 'true';
+    if (winnerIdx < 0) {
+      _chatDiag('router_decision.skip.no_winner', {
+        payload: _chatDiagSummarizePayload(payload),
+        winnerIdx,
+      });
+      return;
+    }
     wrap.dataset.sessionKey = _sessionKey || '';
     wrap.dataset.turnIndex = String(turnIndex);
-    // Observe-mode signalling: when the router classified a tier but
-    // routing_applied is false, the routed model was NOT actually
-    // used for this turn. Mark the strip so CSS can dim it and the
-    // animation skips straight to settled — animating a hop sequence
-    // would imply the router picked a model that drove the response.
     const observeMode = payload && payload.routing_applied === false;
-    if (observeMode) {
-      wrap.dataset.observe = 'true';
-      wrap.dataset.rolloutPhase = typeof payload.rollout_phase === 'string'
-        ? payload.rollout_phase
-        : 'observe';
-    }
     // Drop any earlier strip anchored to this user msg, regardless of
     // its lifecycle flag. A WS replay arriving after F5 will have
     // built a tier-id strip before config loaded; we replace it with
@@ -3143,22 +4546,21 @@ const ChatView = (() => {
         && userMsg.nextSibling.classList
         && userMsg.nextSibling.classList.contains('router-fx')
         && userMsg.nextSibling !== wrap) {
-      userMsg.nextSibling.remove();
+      _routerFxRemoveStrip(userMsg.nextSibling);
     }
     // Drop any earlier live strip from a different turn that hasn't
     // been promoted yet — protects against rapid back-to-back sends.
     _thread.querySelectorAll('.router-fx[data-live="true"]').forEach((el) => {
-      if (el !== wrap) el.remove();
+      if (el !== wrap) _routerFxRemoveStrip(el);
     });
     _routerFxInsertAnchored(wrap, null);
-    if (observeMode) {
-      // Skip the hop animation entirely — settle immediately on the
-      // winner cell with no sweep. The dimmed strip says "we would
-      // have routed here, but we didn't".
-      requestAnimationFrame(() => _settleRouterFxImmediate(wrap, winnerIdx, { burst: false }));
-    } else {
-      requestAnimationFrame(() => _animateRouterFx(wrap, winnerIdx));
-    }
+    _routerFxNormalizeSettledStrip(wrap, 'history', payload);
+    _chatDiag('router_decision.inserted_settled_strip', {
+      payload: _chatDiagSummarizePayload(payload),
+      strip: _chatDiagDescribeElement(wrap),
+      observeMode,
+      winnerIdx,
+    });
     _scrollToBottom();
   }
 
@@ -3166,22 +4568,28 @@ const ChatView = (() => {
   // `seedKey` should be a stable per-turn identifier (msg.timestamp
   // or message id) so the cell shuffle reproduces deterministically
   // across page refreshes.
-  function _buildRouterFxFromUsage(usage, seedKey) {
+  function _buildRouterFxFromUsage(usage, seedKey, opts) {
+    opts = opts || {};
     if (!usage) return null;
+    // User-pref gate: the viewer has hidden the router-fx visualisation, so
+    // no history strip is built. Distinct from the operator routing flag below
+    // (_routerFeatureEnabled): this one is "do I want to see it", that one is
+    // "is routing on". Caller null-checks, so suppression needs no other edit.
+    if (!_routerFx.enabled) return null;
     // If the operator has flipped squilla_router off since this turn
     // was recorded, drop the historic strip on the next rebuild —
     // the slider's whole point is conveying live router behaviour.
     if (_routerFxConfigTiers !== null && !_routerFeatureEnabled) return null;
-    const tier = typeof usage.routed_tier === 'string' ? usage.routed_tier : '';
+    const tier = _routerFxNormalizeTier(usage.routed_tier);
     if (!tier) return null;
     // If the operator has REMOVED this tier from config since the
     // turn was recorded, skip — rendering the strip would show a
-    // ghost cell ("t2") with no current meaning.
+    // ghost cell ("c2") with no current meaning.
     if (_routerFxConfigTiers !== null
-        && !_routerFxConfigTiers.has(tier.toLowerCase())) {
+        && !_routerFxConfigTiers.has(tier)) {
       return null;
     }
-    _routerFxRegisterTier(tier);
+    _routerFxRememberTierDecision(tier, usage.routed_model || usage.model || '');
     const decision = {
       tier,
       model: usage.routed_model || usage.model || '',
@@ -3191,7 +4599,7 @@ const ChatView = (() => {
       routing_applied: usage.routing_applied !== false,
       rollout_phase: usage.rollout_phase || 'full',
     };
-    if (decision.model) _routerFxModels[tier.toLowerCase()] = decision.model;
+    const requestKind = _routerFxRequestKindFromDecision(decision, opts.requestKind);
     // The cached seed from _routerFxResolveSeed already encodes
     // (stamp, tier, turnIndex) — pass it through verbatim so that
     // live and history paths derive the SAME shuffle for the same
@@ -3201,6 +4609,7 @@ const ChatView = (() => {
     return _buildRouterFxElement(decision, {
       preSettled: true,
       seedKey: seedKey != null ? String(seedKey) : ('history:' + tier),
+      requestKind: requestKind,
     });
   }
 
@@ -3222,57 +4631,129 @@ const ChatView = (() => {
     // Drops a per-turn inline slider above where the assistant bubble
     // will appear and sweeps the selector onto the routed tier.
     _unsubs.push(_rpc.on('session.event.router_decision', (payload) => {
-      if (_isStaleEpoch(payload)) return;
-      if (!_acceptStreamSeq(payload)) return;
+      if (_dropForeignSessionPayload('event.router_decision', payload)) return;
+      if (_isStaleEpoch(payload)) {
+        _chatDiag('event.router_decision.drop.stale_epoch', _chatDiagSummarizePayload(payload));
+        return;
+      }
+      if (!_acceptStreamSeq(payload)) {
+        _chatDiag('event.router_decision.drop.stream_seq', _chatDiagSummarizePayload(payload));
+        return;
+      }
+      _chatDiag('event.router_decision', _chatDiagSummarizePayload(payload));
       _handleRouterDecision(payload);
     }));
 
     // Text delta: accumulate into streaming bubble
     _unsubs.push(_rpc.on('session.event.text_delta', (payload) => {
-      if (_isStaleEpoch(payload)) return;
-      if (!_acceptStreamSeq(payload)) return;
+      if (_dropForeignSessionPayload('event.text_delta', payload)) return;
+      if (_isStaleEpoch(payload)) {
+        _chatDiag('event.text_delta.drop.stale_epoch', _chatDiagSummarizePayload(payload));
+        return;
+      }
+      if (!_acceptStreamSeq(payload)) {
+        _chatDiag('event.text_delta.drop.stream_seq', _chatDiagSummarizePayload(payload));
+        return;
+      }
+      _chatDiag('event.text_delta', _chatDiagSummarizePayload(payload));
       _resetStreamIdleTimer();
       _appendDelta(payload.text || '');
     }));
 
     // Tool call events (engine emits tool_use_start)
     _unsubs.push(_rpc.on('session.event.tool_use_start', (payload) => {
-      if (_isStaleEpoch(payload)) return;
-      if (_aborted) return;
-      if (!_acceptStreamSeq(payload)) return;
+      if (_dropForeignSessionPayload('event.tool_use_start', payload)) return;
+      if (_isStaleEpoch(payload)) {
+        _chatDiag('event.tool_use_start.drop.stale_epoch', _chatDiagSummarizePayload(payload));
+        return;
+      }
+      if (_aborted) {
+        _chatDiag('event.tool_use_start.drop.aborted', _chatDiagSummarizePayload(payload));
+        return;
+      }
+      if (!_acceptStreamSeq(payload)) {
+        _chatDiag('event.tool_use_start.drop.stream_seq', _chatDiagSummarizePayload(payload));
+        return;
+      }
+      _chatDiag('event.tool_use_start', _chatDiagSummarizePayload(payload));
       _resetStreamIdleTimer();
       _appendToolCall(payload);
     }));
 
     // Tool result events
     _unsubs.push(_rpc.on('session.event.tool_result', (payload) => {
-      if (_isStaleEpoch(payload)) return;
-      if (_aborted) return;
-      if (!_acceptStreamSeq(payload)) return;
+      if (_dropForeignSessionPayload('event.tool_result', payload)) return;
+      if (_isStaleEpoch(payload)) {
+        _chatDiag('event.tool_result.drop.stale_epoch', _chatDiagSummarizePayload(payload));
+        return;
+      }
+      if (_aborted) {
+        _chatDiag('event.tool_result.drop.aborted', _chatDiagSummarizePayload(payload));
+        return;
+      }
+      if (!_acceptStreamSeq(payload)) {
+        _chatDiag('event.tool_result.drop.stream_seq', _chatDiagSummarizePayload(payload));
+        return;
+      }
+      _chatDiag('event.tool_result', _chatDiagSummarizePayload(payload));
       _resetStreamIdleTimer();
       _appendToolResult(payload);
     }));
 
     _unsubs.push(_rpc.on('session.event.artifact', (payload) => {
-      if (_isStaleEpoch(payload)) return;
-      if (_aborted) return;
-      if (!_acceptStreamSeq(payload)) return;
+      if (_dropForeignSessionPayload('event.artifact', payload)) return;
+      if (_isStaleEpoch(payload)) {
+        _chatDiag('event.artifact.drop.stale_epoch', _chatDiagSummarizePayload(payload));
+        return;
+      }
+      if (_aborted) {
+        _chatDiag('event.artifact.drop.aborted', _chatDiagSummarizePayload(payload));
+        return;
+      }
+      if (!_acceptStreamSeq(payload)) {
+        _chatDiag('event.artifact.drop.stream_seq', _chatDiagSummarizePayload(payload));
+        return;
+      }
+      _chatDiag('event.artifact', _chatDiagSummarizePayload(payload));
       _resetStreamIdleTimer();
       _appendArtifact(payload);
     }));
 
     _unsubs.push(_rpc.on('session.event.subagent_completion', (payload) => {
-      if (_isStaleEpoch(payload)) return;
-      if (_aborted) return;
-      if (!_acceptStreamSeq(payload)) return;
+      if (_dropForeignSessionPayload('event.subagent_completion', payload)) return;
+      if (_isStaleEpoch(payload)) {
+        _chatDiag('event.subagent_completion.drop.stale_epoch', _chatDiagSummarizePayload(payload));
+        return;
+      }
+      if (_aborted) {
+        _chatDiag('event.subagent_completion.drop.aborted', _chatDiagSummarizePayload(payload));
+        return;
+      }
+      if (!_acceptStreamSeq(payload)) {
+        _chatDiag('event.subagent_completion.drop.stream_seq', _chatDiagSummarizePayload(payload));
+        return;
+      }
+      _chatDiag('event.subagent_completion', _chatDiagSummarizePayload(payload));
       _appendSubagentCompletion(payload);
     }));
 
     // Agent state transitions (thinking → streaming → tool_calling → done)
-    _unsubs.push(_rpc.on('session.event.state_change', (payload) => {
-      if (_isStaleEpoch(payload)) return;
-      if (!payload || _aborted) return;
-      if (!_acceptStreamSeq(payload)) return;
+    _unsubs.push(_rpc.on('session.event.state_change', (payload, meta = {}) => {
+      if (_dropForeignSessionPayload('event.state_change', payload)) return;
+      if (_isStaleEpoch(payload)) {
+        _chatDiag('event.state_change.drop.stale_epoch', _chatDiagSummarizePayload(payload));
+        return;
+      }
+      if (!payload || _aborted) {
+        _chatDiag('event.state_change.drop.empty_or_aborted', _chatDiagSummarizePayload(payload));
+        return;
+      }
+      if (!_acceptStreamSeq(payload)) {
+        _chatDiag('event.state_change.drop.stream_seq', _chatDiagSummarizePayload(payload));
+        return;
+      }
+      if (_dropReplayedLiveWaitEvent(meta, payload, 'event.state_change')) return;
+      _chatDiag('event.state_change', _chatDiagSummarizePayload(payload));
       _resetStreamIdleTimer();
       const to = payload.to_state || payload.toState || '';
       // Only use state_change to SHOW thinking indicator (on thinking/tool_calling
@@ -3285,16 +4766,33 @@ const ChatView = (() => {
         }
     }));
 
-    _unsubs.push(_rpc.on('session.event.run_heartbeat', (payload) => {
-      if (_isStaleEpoch(payload)) return;
-      if (_aborted) return;
-      if (!_acceptStreamSeq(payload)) return;
+    _unsubs.push(_rpc.on('session.event.run_heartbeat', (payload, meta = {}) => {
+      if (_dropForeignSessionPayload('event.run_heartbeat', payload)) return;
+      if (_isStaleEpoch(payload)) {
+        _chatDiag('event.run_heartbeat.drop.stale_epoch', _chatDiagSummarizePayload(payload));
+        return;
+      }
+      if (_aborted) {
+        _chatDiag('event.run_heartbeat.drop.aborted', _chatDiagSummarizePayload(payload));
+        return;
+      }
+      if (!_acceptStreamSeq(payload)) {
+        _chatDiag('event.run_heartbeat.drop.stream_seq', _chatDiagSummarizePayload(payload));
+        return;
+      }
+      if (_dropReplayedLiveWaitEvent(meta, payload, 'event.run_heartbeat')) return;
+      _chatDiag('event.run_heartbeat', _chatDiagSummarizePayload(payload));
       if (!_isStreaming) _startStreaming();
       _resetStreamIdleTimer();
-      if (!_streamBubble) _showThinkingIndicator();
+      if (_streamBubble) {
+        _showAwaitingModelHintAfterToolResult();
+      } else {
+        _showThinkingIndicator();
+      }
     }));
 
     _unsubs.push(_rpc.on('session.event.cron_result', (payload) => {
+      if (_dropForeignSessionPayload('event.cron_result', payload)) return;
       if (_isStaleEpoch(payload)) return;
       if (!_acceptStreamSeq(payload)) return;
       const msg = payload?.message || payload || {};
@@ -3315,6 +4813,7 @@ const ChatView = (() => {
     }));
 
     _unsubs.push(_rpc.on('session.event.compaction', (payload, meta) => {
+      if (_dropForeignSessionPayload('event.compaction', payload)) return;
       if (_isStaleEpoch(payload)) return;
       if (!_acceptStreamSeq(payload)) return;
       _showCompactionToast(payload || {}, meta || {});
@@ -3324,13 +4823,15 @@ const ChatView = (() => {
     // to generate an image but never called the tool). Toast only — never
     // written to the transcript, never fed back to the LLM.
     _unsubs.push(_rpc.on('session.event.warning', (payload) => {
+      if (_dropForeignSessionPayload('event.warning', payload)) return;
       if (_isStaleEpoch(payload)) return;
-      const msg = (payload && payload.message) || 'Assistant warning';
+      const msg = (payload && payload.message) || 'Squilla warning';
       UI.toast(msg, 'warn', 5000);
     }));
 
     // Track session epoch to discard stale frames from pre-reset turns.
     _unsubs.push(_rpc.on('session.epoch_changed', (payload) => {
+      if (_dropForeignSessionPayload('session.epoch_changed', payload)) return;
       const ep = payload && payload.epoch;
       if (typeof ep === 'number' && Number.isFinite(ep) && ep > _currentEpoch) {
         _clearActiveTaskGroups();
@@ -3351,6 +4852,7 @@ const ChatView = (() => {
 
     _unsubs.push(_rpc.on('task.queued', (payload) => {
       if (!_isCurrentSessionPayload(payload)) return;
+      if (_currentRunStatus === 'running' || _currentRunStatus === 'approval_pending') return;
       _applySessionRunState({
         run_status: 'queued',
         active_task: { ...(payload || {}), status: 'queued' },
@@ -3366,31 +4868,36 @@ const ChatView = (() => {
     }));
 
     _unsubs.push(_rpc.on('session.event.task_group.waiting', (payload) => {
+      if (_dropForeignSessionPayload('event.task_group.waiting', payload)) return;
       if (_isStaleEpoch(payload)) return;
       if (!_acceptStreamSeq(payload)) return;
       _noteTaskGroupActive(payload);
     }));
 
     _unsubs.push(_rpc.on('session.event.task_group.synthesizing', (payload) => {
+      if (_dropForeignSessionPayload('event.task_group.synthesizing', payload)) return;
       if (_isStaleEpoch(payload)) return;
       if (!_acceptStreamSeq(payload)) return;
       _noteTaskGroupActive(payload);
     }));
 
     _unsubs.push(_rpc.on('session.event.task_group.done', (payload) => {
+      if (_dropForeignSessionPayload('event.task_group.done', payload)) return;
       if (_isStaleEpoch(payload)) return;
       if (!_acceptStreamSeq(payload)) return;
       _noteTaskGroupTerminal(payload, 'succeeded');
     }));
 
     _unsubs.push(_rpc.on('session.event.task_group.failed', (payload) => {
+      if (_dropForeignSessionPayload('event.task_group.failed', payload)) return;
       if (_isStaleEpoch(payload)) return;
       if (!_acceptStreamSeq(payload)) return;
       _noteTaskGroupTerminal(payload, 'failed');
     }));
 
     // Wildcard listener for done + error events (tool events handled by dedicated listeners above)
-    _unsubs.push(_rpc.on('*', (rawEvent, rawPayload) => {
+    _unsubs.push(_rpc.on('*', (rawEvent, rawPayload, rawMeta = {}) => {
+      const isReplayedFrame = !!(rawMeta && rawMeta.replayed);
       const terminalStatus = _taskTerminalStatus(rawEvent);
       if (terminalStatus) {
         if (!_isCurrentSessionPayload(rawPayload)) return;
@@ -3405,20 +4912,52 @@ const ChatView = (() => {
             last_task: { ...(rawPayload || {}), status: terminalStatus },
           });
         }
+        if (rawEvent === 'task.succeeded') {
+          _scheduleSucceededTaskTerminalSync(rawPayload);
+          if (!_isStreaming) _schedulePendingDrainAfterTerminal();
+        } else if (!_isStreaming) {
+          _recoverPendingAfterTerminal(terminalRunStatus);
+        }
       }
       const normalized = _taskTerminalAsSessionEvent(rawEvent, rawPayload);
       // Drop normalized terminal events from epochs we've already left behind
       // (stale residue) and from turns we've already locally finalized
       // (_onStop synchronously calls _endStreaming, so _isStreaming is false
       // by the time the matching task.cancelled arrives).
-      if (normalized && _isStaleEpoch(rawPayload)) return;
-      if (normalized && !_isStreaming) return;
+      if (normalized && _isStaleEpoch(rawPayload)) {
+        _chatDiag('event.normalized.drop.stale_epoch', _chatDiagSummarizePayload(rawPayload));
+        return;
+      }
+      if (normalized && !_isStreaming) {
+        _chatDiag('event.normalized.drop.not_streaming', _chatDiagSummarizePayload(rawPayload));
+        return;
+      }
       const event = normalized ? normalized.event : rawEvent;
       const payload = normalized ? normalized.payload : rawPayload;
       if (typeof event !== 'string') return;
+      if (event.startsWith('session.event.') && _dropForeignSessionPayload('event.generic', payload)) return;
       // Discard done/error frames that pre-date the current epoch.
-      if (event.startsWith('session.event.') && _isStaleEpoch(payload)) return;
-      if (!_acceptStreamSeq(payload)) return;
+      if (event.startsWith('session.event.') && _isStaleEpoch(payload)) {
+        _chatDiag('event.generic.drop.stale_epoch', {
+          event,
+          payload: _chatDiagSummarizePayload(payload),
+        });
+        return;
+      }
+      if (!_acceptStreamSeq(payload)) {
+        if (_eventHasSpecificSessionHandler(event)) {
+          _chatDiag('event.generic.skip.specific_handler_stream_seq', {
+            event,
+            payload: _chatDiagSummarizePayload(payload),
+          });
+          return;
+        }
+        _chatDiag('event.generic.drop.stream_seq', {
+          event,
+          payload: _chatDiagSummarizePayload(payload),
+        });
+        return;
+      }
       if (event.startsWith('session.event.task_group.')) return;
 
       if (event === 'sessions.changed') {
@@ -3426,6 +4965,10 @@ const ChatView = (() => {
       }
 
       if (event.endsWith('.done') || event === 'chat.done') {
+        _chatDiag('event.done', {
+          event,
+          payload: _chatDiagSummarizePayload(payload),
+        });
         // Done event payload is flat: { text, input_tokens, output_tokens, iterations,
         // routed_tier, routing_source, ... }
         // Also support nested { usage: { ... } } for future compat
@@ -3470,16 +5013,9 @@ const ChatView = (() => {
         // replays the terminal done frame.
         const _finishedBubble = _streamBubble;
         const _doneWasAborted = payload?.reason === 'aborted';
-        // Promote any live router strip to a persisted strip: data-live
-        // is cleared so the next live decision's cleanup doesn't see
-        // it as a stale in-progress strip. The strip stays in DOM
-        // until the next history sync, which will replace it with a
-        // freshly built strip carrying the SAME seed (resolved from
-        // localStorage), so the swap is visually invisible.
-        const settledStrip = _routerFxFindAttachedStrip(_finishedBubble);
-        if (settledStrip) {
-          delete settledStrip.dataset.live;
-        }
+        // Keep the router strip lifecycle owned by the scan/history paths.
+        // _loadHistory no longer preserves strips just because they are live;
+        // it only matches persisted strips by turn identity.
         _endStreaming(_doneWasAborted ? { reason: 'aborted' } : undefined);
 
         // Populate savings indicator if data exists
@@ -3493,7 +5029,7 @@ const ChatView = (() => {
         }
 
         // Attach per-turn savings chips to the just-finished assistant bubble
-        _maybeFireSavingsPopup(_finishedBubble, u);
+        _maybeFireSavingsPopup(_finishedBubble, u, { animate: !isReplayedFrame });
 
         // Attach model + session token footer below the assistant bubble
         _attachTurnMeta(_finishedBubble, _usageModel, u.input_tokens | 0, u.output_tokens | 0, u);
@@ -3541,6 +5077,7 @@ const ChatView = (() => {
         _endStreaming();
         _addMessage('error', _sessionErrorMessage(payload));
         _scheduleHistorySync();
+        _recoverPendingAfterTerminal(_normalizeRunStatus(payload?.code || payload?.status || 'failed'));
         if (_activeTaskGroups.size > 0) {
           _applySessionRunState(_activeTaskGroupRunState(payload));
         } else {
@@ -3559,7 +5096,7 @@ const ChatView = (() => {
         _hideThinkingIndicator();
         _subscribeSession();
         _loadCurrentSessionUsage();
-        _loadHistory();
+        _loadHistory(_historyRefreshScrollOptions());
       }
       if (state === 'disconnected' && _isStreaming) {
         _clearStreamIdleTimer();
@@ -3584,7 +5121,7 @@ const ChatView = (() => {
   // server reports a real squilla-router routed savings percentage or an
   // active provider/OpenSquilla cache hit. Cache hits do not increment the
   // savings streak unless the turn also has routed savings.
-  function _maybeFireSavingsPopup(bubble, u) {
+  function _maybeFireSavingsPopup(bubble, u, opts = {}) {
     u = u || {};
     const now = Date.now();
     const identityModel = u.routed_model || u.model || '';
@@ -3608,6 +5145,7 @@ const ChatView = (() => {
     // visible same-identity savings turn continue combo.
     window.SavingsFX.noteTurn(u);
     if (suppressPopup) return;
+    if (opts.animate === false) return;
 
     const hasTier  = !!(u.routed_tier && u.routing_source && u.routing_source !== 'none');
     const turnSavedPct = (typeof u.total_savings_pct === 'number' && u.total_savings_pct > 0)
@@ -3615,11 +5153,28 @@ const ChatView = (() => {
     const hasRoutedSavings = hasTier && turnSavedPct > 0;
     const cacheHit = !!(u.cache_hit_active || (u.cached_tokens || 0) > 0);
     if (!hasRoutedSavings && !cacheHit) return;
-    if (!cacheHit && now - _savingsPopupLastTs < _SAVINGS_POPUP_COOLDOWN_MS) return;
-    if (!bubble || !bubble.isConnected) return;
+    // Cooldown is now per routed-identity (cache hits still bypass). A distinct
+    // qualifying turn — e.g. a tool-assisted turn routed differently than a
+    // preceding standard turn — is no longer suppressed by an unrelated
+    // celebration's global wall.
+    const _identityLastTs = identity ? (_savingsPopupTsByIdentity.get(identity) || 0) : _savingsPopupLastTs;
+    if (!cacheHit && now - _identityLastTs < _SAVINGS_POPUP_COOLDOWN_MS) return;
 
-    window.SavingsFX.fire(bubble, u);
+    // The burst + "Saved ~X%" label are viewport-centered and need no bubble;
+    // only the reduced-motion border pulse uses one (and self-guards null). Fall
+    // back to the last assistant bubble so tool-assisted turns (and refresh-only
+    // terminal frames) still celebrate even if the stream bubble reference was
+    // already cleared. (querySelectorAll + last, since :last-of-type keys off
+    // element type, not the .msg.assistant class.)
+    let fxBubble = (bubble && bubble.isConnected) ? bubble : null;
+    if (!fxBubble && _thread) {
+      const _assistants = _thread.querySelectorAll('.msg.assistant');
+      fxBubble = _assistants.length ? _assistants[_assistants.length - 1] : null;
+    }
+
+    window.SavingsFX.fire(fxBubble, u);
     _savingsPopupLastTs = now;
+    if (identity) _savingsPopupTsByIdentity.set(identity, now);
   }
 
   /* ── Context Usage Warning ──────────────────────────────────────────── */
@@ -3660,85 +5215,358 @@ const ChatView = (() => {
 
   /* ── Chat History ───────────────────────────────────────────────────── */
 
+  function _historyRefreshScrollOptions() {
+    if (!_thread || !_historyHasRendered) return {};
+    const gap = _thread.scrollHeight - _thread.scrollTop - _thread.clientHeight;
+    if (gap < 60) return {};
+    return {
+      preserveScroll: true,
+      previousScrollHeight: _thread.scrollHeight,
+      previousScrollTop: _thread.scrollTop,
+    };
+  }
+
+  function _replayGapShouldWarn(reason) {
+    const value = String(reason || '').toLowerCase();
+    return !['stream_buffer_empty', 'stream_buffer_reset', 'cursor_ahead_of_stream'].includes(value);
+  }
+
   function _scheduleHistorySync() {
     if (_historySyncTimer) clearTimeout(_historySyncTimer);
     _historySyncTimer = setTimeout(() => {
       _historySyncTimer = null;
-      _loadHistory();
+      _loadHistory(_historyRefreshScrollOptions());
     }, 50);
   }
 
-  async function _loadHistory() {
+  function _resetHistoryPagingState() {
+    _historyLoadedMessages = [];
+    _historyOldestCursor = null;
+    _historyNewestCursor = null;
+    _historyHasMore = false;
+    _historyScope = 'complete';
+    _historyLoadingEarlier = false;
+    _historyHydrating = false;
+    _historyHasRendered = false;
+    _historyError = '';
+    _historyCompactionSummaries = [];
+    _historyRequestSeq++;
+    _removeHistoryScopeRows();
+    _clearCompactionSummarySeparators();
+  }
+
+  function _historyResponseMetadata(data) {
+    return {
+      hasMore: !!(data && data.has_more),
+      oldestCursor: data ? (data.oldest_cursor || null) : null,
+      newestCursor: data ? (data.newest_cursor || null) : null,
+      scope: data ? (data.history_scope || 'complete') : 'complete',
+      summaries: Array.isArray(data && data.compaction_summaries)
+        ? data.compaction_summaries
+        : [],
+    };
+  }
+
+  function _applyHistoryMetadata(data) {
+    const meta = _historyResponseMetadata(data);
+    _historyOldestCursor = meta.oldestCursor;
+    _historyNewestCursor = meta.newestCursor;
+    _historyHasMore = meta.hasMore;
+    _historyScope = meta.scope;
+    _historyCompactionSummaries = meta.summaries;
+  }
+
+  function _messagePageIdentity(msg) {
+    if (!msg) return '';
+    const stable = msg.message_id || msg.id || '';
+    if (stable) return `stable:${stable}`;
+    return `fallback:${_historyFallbackMessageIdentity(msg.role, msg.text || '')}`;
+  }
+
+  function _mergeHistoryMessagePages(olderMessages, currentMessages) {
+    const seen = new Set();
+    const merged = [];
+    (olderMessages || []).concat(currentMessages || []).forEach((msg) => {
+      const identity = _messagePageIdentity(msg);
+      if (identity && seen.has(identity)) return;
+      if (identity) seen.add(identity);
+      merged.push(msg);
+    });
+    return merged;
+  }
+
+  function _removeHistoryScopeRows() {
+    if (!_thread) return;
+    _thread.querySelectorAll('.chat-history-scope').forEach((el) => el.remove());
+  }
+
+  function _renderHistoryScopeRow() {
+    if (!_thread) return;
+    _removeHistoryScopeRows();
+    if (_messages.length === 0 && !_historyError) return;
+
+    let tone = '';
+    let message = '';
+    let detail = '';
+    let showLoadEarlier = false;
+    let showRetry = false;
+
+    if (_historyLoadingEarlier) {
+      tone = 'loading';
+      message = 'Loading earlier messages...';
+    } else if (_historyError) {
+      tone = 'error';
+      message = _historyError;
+      showRetry = true;
+    } else if (_historyHasMore || _historyScope === 'latest_window') {
+      tone = 'partial';
+      message = `Showing latest ${_historyLoadedMessages.length} messages.`;
+      detail = 'Older history is available.';
+      showLoadEarlier = !!_historyOldestCursor;
+    } else if (_historyScope === 'compacted' || _historyCompactionSummaries.length > 0) {
+      tone = 'compacted';
+      message = 'Older context was compacted for the model.';
+      detail = 'Export the session for exact text.';
+    } else {
+      return;
+    }
+
+    const row = document.createElement('div');
+    row.className = `chat-history-scope chat-history-scope--${tone}`;
+    row.setAttribute('role', tone === 'loading' ? 'status' : 'note');
+    if (tone === 'loading') row.setAttribute('aria-busy', 'true');
+    row.innerHTML = ''
+      + `<span class="chat-history-scope__text">${_esc(message)}</span>`
+      + (detail ? `<span class="chat-history-scope__detail">${_esc(detail)}</span>` : '')
+      + '<span class="chat-history-scope__actions"></span>';
+    const actions = row.querySelector('.chat-history-scope__actions');
+    if (actions && showLoadEarlier) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn btn--sm btn--ghost';
+      btn.textContent = 'Load earlier';
+      btn.disabled = _historyLoadingEarlier;
+      btn.addEventListener('click', () => _loadEarlierHistory());
+      actions.appendChild(btn);
+    }
+    if (actions && showRetry) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn btn--sm btn--ghost';
+      btn.textContent = _historyHasMore && _historyOldestCursor ? 'Retry' : 'Retry history';
+      btn.addEventListener('click', () => {
+        if (_historyHasMore && _historyOldestCursor) {
+          _loadEarlierHistory();
+        } else {
+          _loadHistory();
+        }
+      });
+      actions.appendChild(btn);
+    }
+    _thread.insertBefore(row, _thread.firstChild || null);
+  }
+
+  async function _loadHistory(opts = {}) {
     if (!_sessionKey || !_thread) return;
+    const requestSessionKey = _sessionKey;
+    const requestSeq = ++_historyRequestSeq;
+    _historyHydrating = true;
+    _historyError = '';
+    _chatDiag('history.start', {
+      sessionKey: requestSessionKey,
+      streaming: _isStreaming,
+      hasStreamBubble: !!_streamBubble,
+    });
     try {
       await _rpc.waitForConnection();
       // Wait until router config (tier → model cache) is populated so
-      // historical strips never render with "t1"/"t2"/"t3" placeholders
+      // historical strips never render with "c1"/"c2"/"c3" placeholders
       // just because we raced the config.get response.
       await _routerFxAwaitConfig();
-      const data = await _rpc.call('chat.history', { sessionKey: _sessionKey });
-      const messages = data.messages || [];
-      if (messages.length === 0) {
-        if (_isStreaming && _streamBubble) {
-          _thread.querySelectorAll('.msg').forEach((el) => {
-            if (el !== _streamBubble) el.remove();
-          });
-          _thread.querySelectorAll('.chat-day-sep, .chat-empty').forEach((el) => el.remove());
-          if (!_streamBubble.isConnected) _thread.appendChild(_streamBubble);
-          _scrollToBottom();
-          return;
-        }
-        _thread.innerHTML = '';
-        _messages = [];
-        _lastHeaderRole = '';
-        _lastHeaderDay = '';
-        if (window.SavingsFX) window.SavingsFX.resetStreak();
-        _lastSavingsPopupIdentity = '';
-        _thread.innerHTML = _emptyStateHTML();
+      const data = await _rpc.call('chat.history', {
+        sessionKey: requestSessionKey,
+        limit: CHAT_HISTORY_PAGE_SIZE,
+        includeCanonical: false,
+        includeSummaries: true,
+      });
+      if (requestSessionKey !== _sessionKey || requestSeq !== _historyRequestSeq) {
+        _chatDiag('history.stale_response.drop', { requestSessionKey, requestSeq });
         return;
       }
-      const existingByStableIdentity = new Map();
-      const existingByFallbackIdentity = new Map();
-      _thread.querySelectorAll('.msg').forEach((el) => {
-        const stable = el.getAttribute('data-message-id') || '';
-        if (stable) existingByStableIdentity.set(stable, el);
-        const fallback = el.getAttribute('data-history-fallback-id') || _historyElementFallbackIdentity(el);
-        if (fallback) _pushIdentityElement(existingByFallbackIdentity, fallback, el);
+      const messages = data.messages || [];
+      _historyLoadedMessages = messages.slice();
+      _applyHistoryMetadata(data || {});
+      _chatDiag('history.loaded', {
+        count: messages.length,
+        rolesTail: messages.slice(-8).map((msg) => msg && msg.role).filter(Boolean),
+        streaming: _isStreaming,
+        hasStreamBubble: !!_streamBubble,
+        hasMore: _historyHasMore,
+        historyScope: _historyScope,
       });
-      const empty = _thread.querySelector('.chat-empty');
-      if (empty) empty.remove();
-      _thread.querySelectorAll('.chat-day-sep').forEach((el) => el.remove());
-      // Drop EVERY router strip that isn't currently being animated.
-      // The rebuild loop re-inserts each turn's strip with a seed
-      // resolved from localStorage, so the recreated DOM has the
-      // exact same cell layout — no visible reorder, but every
-      // stale strip (cross-session leftovers, tier-id strips built
-      // before config loaded, half-rebuilt duplicates) is guaranteed
-      // gone. Only the in-flight live animation is preserved.
-      _thread.querySelectorAll('.router-fx').forEach((el) => {
-        if (el.dataset.live === 'true') return;
-        el.remove();
+      _historyHydrating = false;
+      _renderHistoryMessages(messages, opts);
+    } catch (err) {
+      if (requestSessionKey === _sessionKey && requestSeq === _historyRequestSeq) {
+        _historyHydrating = false;
+      }
+      _historyError = 'Could not load chat history.';
+      _chatDiag('history.error', {
+        message: err && err.message ? err.message : String(err),
       });
+      _renderHistoryScopeRow();
+    }
+  }
+
+  async function _loadEarlierHistory() {
+    if (!_sessionKey || !_thread || !_historyOldestCursor || _historyLoadingEarlier) return;
+    const requestSessionKey = _sessionKey;
+    const requestSeq = ++_historyRequestSeq;
+    const previousScrollHeight = _thread.scrollHeight;
+    const previousScrollTop = _thread.scrollTop;
+    _historyLoadingEarlier = true;
+    _historyError = '';
+    _renderHistoryScopeRow();
+    _chatDiag('history.load_earlier.start', {
+      sessionKey: requestSessionKey,
+      before: _historyOldestCursor,
+    });
+    try {
+      await _rpc.waitForConnection();
+      const data = await _rpc.call('chat.history', {
+        sessionKey: requestSessionKey,
+        limit: CHAT_HISTORY_PAGE_SIZE,
+        before: _historyOldestCursor,
+        includeCanonical: false,
+        includeSummaries: true,
+      });
+      if (requestSessionKey !== _sessionKey || requestSeq !== _historyRequestSeq) {
+        _chatDiag('history.load_earlier.stale_response.drop', { requestSessionKey, requestSeq });
+        if (requestSessionKey === _sessionKey) {
+          _historyLoadingEarlier = false;
+          _renderHistoryScopeRow();
+        }
+        return;
+      }
+      const olderMessages = data.messages || [];
+      _historyLoadedMessages = _mergeHistoryMessagePages(olderMessages, _historyLoadedMessages);
+      _applyHistoryMetadata({
+        ...(data || {}),
+        messages: _historyLoadedMessages,
+        newest_cursor: _historyNewestCursor || (data && data.newest_cursor),
+      });
+      _historyLoadingEarlier = false;
+      _chatDiag('history.load_earlier.loaded', {
+        count: olderMessages.length,
+        totalLoaded: _historyLoadedMessages.length,
+        hasMore: _historyHasMore,
+      });
+      _renderHistoryMessages(_historyLoadedMessages, {
+        preserveScroll: true,
+        previousScrollHeight,
+        previousScrollTop,
+      });
+    } catch (err) {
+      _historyLoadingEarlier = false;
+      _historyError = 'Could not load earlier history.';
+      _chatDiag('history.load_earlier.error', {
+        message: err && err.message ? err.message : String(err),
+      });
+      _renderHistoryScopeRow();
+    }
+  }
+
+  function _renderHistoryMessages(messages, opts = {}) {
+    if (!_thread) return;
+    _clearMessageActionFocus('history_rebuild');
+    _removeHistoryScopeRows();
+    if (messages.length === 0) {
+      const liveRouterStrips = _currentSessionLiveRouterStrips(_sessionKey || '');
+      const liveUserAnchor = _currentSessionLiveUserAnchor(_sessionKey || '');
+      const liveThinking = _isCurrentSessionThinkingIndicator(_thinkingEl) ? _thinkingEl : null;
+      if (_isStreaming && (
+        _isCurrentSessionStreamBubble(_streamBubble)
+        || liveRouterStrips.length > 0
+        || liveUserAnchor
+        || liveThinking
+      )) {
+        _thread.querySelectorAll('.msg').forEach((el) => {
+          if (el !== _streamBubble && el !== liveUserAnchor && el !== liveThinking) el.remove();
+        });
+        _thread.querySelectorAll('.chat-day-sep, .chat-empty').forEach((el) => el.remove());
+        if (liveUserAnchor && !liveUserAnchor.isConnected) _thread.appendChild(liveUserAnchor);
+        if (_streamBubble && !_streamBubble.isConnected) _thread.appendChild(_streamBubble);
+        if (liveThinking && !liveThinking.isConnected) _thread.appendChild(liveThinking);
+        liveRouterStrips.forEach((el) => {
+          if (!el.isConnected) _insertLiveRouterStripForAnchor(el, liveUserAnchor, _streamBubble);
+        });
+        _scrollToBottom();
+        _chatDiag('history.empty.keep_live_stream_view', {
+          hasStreamBubble: !!_streamBubble,
+          hasLiveUserAnchor: !!liveUserAnchor,
+          liveRouterCount: liveRouterStrips.length,
+        });
+        return;
+      }
+      if (_pendingFinalizedAssistantBubble && _pendingFinalizedAssistantBubble.isConnected) {
+        _scrollToBottom();
+        _chatDiag('history.empty.keep_pending_finalized_assistant', {
+          bubble: _chatDiagDescribeElement(_pendingFinalizedAssistantBubble),
+        });
+        return;
+      }
+      _thread.innerHTML = '';
       _messages = [];
       _lastHeaderRole = '';
       _lastHeaderDay = '';
       if (window.SavingsFX) window.SavingsFX.resetStreak();
-      let historySavingsIdentity = '';
-      let _histAsstIdx = 0;
-      // 1-indexed running count of user messages seen so far during
-      // this rebuild. The router strip's localStorage seed cache is
-      // keyed by (sessionKey, userMsgIndex, tier); using this counter
-      // (instead of msg.timestamp) means live + history rebuilds for
-      // the same turn always hit the same cache entry.
-      let _histUserIdx = 0;
-      const consumedHistoryElements = new Set();
-      messages.forEach((msg) => {
-        if (msg.role === 'user') _histUserIdx++;
+      _lastSavingsPopupIdentity = '';
+      _thread.innerHTML = _emptyStateHTML();
+      _historyHasRendered = true;
+      _chatDiag('history.empty.rendered_empty_state', {});
+      return;
+    }
+    const existingByStableIdentity = new Map();
+    const existingByFallbackIdentity = new Map();
+    _thread.querySelectorAll('.msg').forEach((el) => {
+      const stable = el.getAttribute('data-message-id') || '';
+      if (stable) existingByStableIdentity.set(stable, el);
+      const fallback = el.getAttribute('data-history-fallback-id') || _historyElementFallbackIdentity(el);
+      if (fallback) _pushIdentityElement(existingByFallbackIdentity, fallback, el);
+    });
+    const empty = _thread.querySelector('.chat-empty');
+    if (empty) empty.remove();
+    _thread.querySelectorAll('.chat-day-sep').forEach((el) => el.remove());
+    // Drop every stale router strip that is not already associated with this
+    // session/turn. Reorder repair below keeps attached strips in place.
+    _thread.querySelectorAll('.router-fx').forEach((el) => {
+      if (el.dataset.sessionKey === (_sessionKey || '') && el.dataset.turnIndex) return;
+      _routerFxRemoveStrip(el);
+    });
+    _messages = [];
+    _lastHeaderRole = '';
+    _lastHeaderDay = '';
+    if (window.SavingsFX) window.SavingsFX.resetStreak();
+    let historySavingsIdentity = '';
+    let _histAsstIdx = 0;
+    // 1-indexed running count of user messages seen so far during
+    // this rebuild. The router strip's localStorage seed cache is
+    // keyed by (sessionKey, userMsgIndex, tier); using this counter
+    // means live + history rebuilds for the same turn reuse the same layout.
+    let _histUserIdx = 0;
+    let _histLastUserRequestKind = 'text';
+    const consumedHistoryElements = new Set();
+    messages.forEach((msg) => {
+        if (msg.role === 'user') {
+          _histUserIdx++;
+          _histLastUserRequestKind = _routerFxRequestKindFromAttachments(msg.attachments || []);
+        }
         const rawText = msg.text || '';
         const displayText = msg.role === 'user' ? _stripTimePrefix(rawText) : rawText;
         const stableIdentity = _historyStableMessageIdentity(msg);
         const fallbackIdentity = _historyFallbackMessageIdentity(msg.role, displayText);
         const msgOptions = {
+          timestamp: msg.timestamp || msg.ts || null,
           provenanceKind: msg.provenance_kind || '',
           provenanceSourceSessionKey: msg.provenance_source_session_key || '',
           provenanceSourceTool: msg.provenance_source_tool || '',
@@ -3771,7 +5599,7 @@ const ChatView = (() => {
           );
           consumedHistoryElements.add(div);
         }
-        _stampHistoryElement(div, stableIdentity, msg.role, displayText);
+        _stampHistoryElement(div, stableIdentity, msg.role, displayText, _messageTranscriptId(msg));
         _appendHistoryElementInOrder(div);
         if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
           _reconstructToolCalls(div, msg.tool_calls);
@@ -3814,32 +5642,59 @@ const ChatView = (() => {
               // user message that triggered this turn — never above
               // it, never with anything wedged in between.
               //
-              // Reuse a persisted/live strip already sitting in that
-              // slot (the just-settled live grid from this session)
-              // instead of rebuilding, so the user doesn't see the
-              // cell order shift after the hammer locked.
+              // Reuse a persisted strip already sitting in that slot instead of
+              // rebuilding, so the user doesn't see the cell order shift after
+              // the hammer locked.
               //
               // Otherwise build a fresh one, seeded off the
               // assistant message's stable timestamp so the layout
               // reproduces deterministically across page refreshes.
-              // Only an in-flight live strip is allowed to short-
-              // circuit rebuild; everything else was already wiped
-              // by the cleanup above and needs to be re-inserted
-              // with the seed-cached layout.
-              const userMsg = _routerFxLastUserMessage();
+              const userMsg = _routerFxUserMessageForAssistant(div);
+              const routerIdentity = _routerFxUsageIdentity(savedUsage);
+              // The message-reorder pass above (_appendHistoryElementInOrder)
+              // moves user .msg elements together with their attached router
+              // strip. Match this turn's remaining strip(s) by (session, turn
+              // index) instead of using a separate live-strip preservation path:
+              // keep the one whose routing identity matches, drop any extras
+              // accumulated across earlier syncs, and let the positional
+              // backstop catch anything that is still detached.
+              if (userMsg && userMsg.parentNode === _thread) {
+                const ownStrips = Array.from(_thread.querySelectorAll('.router-fx')).filter(
+                  (el) => el.dataset.sessionKey === (_sessionKey || '')
+                    && el.dataset.turnIndex === String(_histUserIdx),
+                );
+                const keep = ownStrips.find((el) => el.dataset.routerIdentity === routerIdentity)
+                  || null;
+                ownStrips.forEach((el) => { if (el !== keep) _routerFxRemoveStrip(el); });
+                if (keep) {
+                  if (userMsg.nextSibling !== keep) {
+                    _thread.insertBefore(keep, userMsg.nextSibling);
+                    _chatDiag('history.reanchor_identity_strip', {
+                      user: _chatDiagDescribeElement(userMsg),
+                      strip: _chatDiagDescribeElement(keep),
+                      routerIdentity,
+                    });
+                  }
+                  _routerFxNormalizeSettledStrip(keep, 'history', savedUsage);
+                }
+              }
               const placed = userMsg && userMsg.nextSibling;
               const existingStrip = (placed && placed.classList
                   && placed.classList.contains('router-fx')) ? placed : null;
               const alreadyInPlace = existingStrip
-                && existingStrip.dataset.live === 'true';
+                && existingStrip.dataset.routerIdentity === routerIdentity;
               if (!alreadyInPlace) {
-                const tierForSeed = String(savedUsage.routed_tier || '').toLowerCase();
+                if (existingStrip) _routerFxRemoveStrip(existingStrip);
                 const hint = msg.timestamp || msg.ts || msg.message_id || '';
-                const cachedSeed = _routerFxResolveSeed(
-                  _sessionKey, _histUserIdx, tierForSeed, hint
-                );
-                const routerStrip = _buildRouterFxFromUsage(savedUsage, cachedSeed);
-                if (routerStrip) _routerFxInsertAnchored(routerStrip, div);
+                const cachedSeed = _routerFxResolveLayoutSeed(_sessionKey, hint);
+                const routerStrip = _buildRouterFxFromUsage(savedUsage, cachedSeed, {
+                  requestKind: _histLastUserRequestKind,
+                });
+                if (routerStrip) {
+                  routerStrip.dataset.sessionKey = _sessionKey || '';
+                  routerStrip.dataset.turnIndex = String(_histUserIdx);
+                  _routerFxInsertAnchored(routerStrip, div);
+                }
               }
             } else if (window.SavingsFX) {
               window.SavingsFX.noteTurn(null);
@@ -3850,26 +5705,70 @@ const ChatView = (() => {
           }
         }
       });
+      _historyHasRendered = true;
+      _flushPendingRouterDecisions();
+      const liveUserAnchor = _currentSessionLiveUserAnchor(_sessionKey || '');
       _thread.querySelectorAll('.msg').forEach((el) => {
-        if (_isStreaming && el === _streamBubble) return;
+        if (_isStreaming && _isCurrentSessionStreamBubble(el)) return;
+        if (_isStreaming && _isCurrentSessionThinkingIndicator(el)) return;
+        if (_isStreaming && el === liveUserAnchor) return;
+        if (_isPendingFinalizedAssistantBubble(el) && _historyStillWaitingForAssistant(messages)) return;
         if (!consumedHistoryElements.has(el)) el.remove();
       });
-      // Orphan sweep — a router strip is only valid when its
-      // immediate previous sibling is a user message. Anything else
-      // is leftover (WS replay before history loaded, mistimed event,
-      // dangling DOM from a partial render) and gets removed.
       _thread.querySelectorAll('.router-fx').forEach((el) => {
-        const prev = el.previousElementSibling;
-        const isAnchored = prev && prev.classList
-          && (prev.classList.contains('user')
-              || prev.getAttribute('data-history-role') === 'user');
-        if (!isAnchored) el.remove();
+        const turnIndex = el.dataset.turnIndex || '';
+        if (el.dataset.sessionKey === (_sessionKey || '') && turnIndex) return;
+        _routerFxRemoveStrip(el);
       });
-      _lastSavingsPopupIdentity = historySavingsIdentity;
-      _scrollToBottom();
-    } catch {
-      // History endpoint may not exist yet; silently keep the view empty
-    }
+      // Orphan backstop: outside an active stream every kept strip must sit
+      // immediately beneath its user message; drop any that do not so a stranded
+      // grid can never linger at the top of the thread.
+      if (!_isStreaming) {
+        _thread.querySelectorAll('.router-fx').forEach((el) => {
+          const prev = el.previousElementSibling;
+          const anchored = !!prev && !!prev.classList && prev.classList.contains('msg')
+            && (prev.classList.contains('user')
+              || prev.getAttribute('data-history-role') === 'user');
+          if (!anchored) _routerFxRemoveStrip(el);
+        });
+      }
+      // User-pref disabled-sweep: the viewer has hidden the router-fx
+      // visualisation. New strips are already gated off above; this drops any
+      // strip left from before the toggle flipped.
+      if (!_routerFx.enabled) {
+        _thread.querySelectorAll('.router-fx').forEach((el) => _routerFxRemoveStrip(el));
+      }
+      if (_pendingFinalizedAssistantBubble
+          && (consumedHistoryElements.has(_pendingFinalizedAssistantBubble)
+            || !_pendingFinalizedAssistantBubble.isConnected
+            || !_historyStillWaitingForAssistant(messages))) {
+        _clearPendingFinalizedAssistantBubble();
+      }
+	      _lastSavingsPopupIdentity = historySavingsIdentity;
+	      _renderHistoryScopeRow();
+	      _renderCompactionSummarySeparators(messages);
+	      if (opts.preserveScroll) {
+	        const oldHeight = Number(opts.previousScrollHeight || 0);
+	        const oldTop = Number(opts.previousScrollTop || 0);
+	        _thread.scrollTop = Math.max(0, _thread.scrollHeight - oldHeight + oldTop);
+	      } else {
+	        _scrollToBottom();
+	      }
+	      _chatDiag('history.done', {
+	        count: messages.length,
+	        consumed: consumedHistoryElements.size,
+	        streaming: _isStreaming,
+	        hasStreamBubble: !!_streamBubble,
+	        hasMore: _historyHasMore,
+	        historyScope: _historyScope,
+	      });
+	  }
+
+  function _historyLiveTailAnchor() {
+    if (!_isStreaming) return null;
+    if (_isCurrentSessionStreamBubble(_streamBubble)) return _streamBubble;
+    if (_isCurrentSessionThinkingIndicator(_thinkingEl)) return _thinkingEl;
+    return null;
   }
 
   function _appendHistoryDaySeparator(timestamp) {
@@ -3878,8 +5777,9 @@ const ChatView = (() => {
     const sep = document.createElement('div');
     sep.className = 'chat-day-sep';
     sep.innerHTML = `<span>${_dayLabel(day)}</span>`;
-    if (_isStreaming && _streamBubble) {
-      _thread.insertBefore(sep, _streamBubble);
+    const liveTail = _historyLiveTailAnchor();
+    if (liveTail) {
+      _thread.insertBefore(sep, liveTail);
     } else {
       _thread.appendChild(sep);
     }
@@ -3889,11 +5789,38 @@ const ChatView = (() => {
 
   function _appendHistoryElementInOrder(div) {
     if (!div) return;
-    if (_isStreaming && _streamBubble && div !== _streamBubble) {
-      _thread.insertBefore(div, _streamBubble);
+    // History rebuilds reuse and move .msg nodes. If the user message already
+    // owns a live router strip, move that strip with the user message as one
+    // turn unit; otherwise the DOM reorder can strand the strip above the user
+    // while output is streaming.
+    const attachedRouterStrip = _routerFxStripImmediatelyAfterUser(div);
+    const liveTail = _historyLiveTailAnchor();
+    if (liveTail && div !== liveTail) {
+      _thread.insertBefore(div, liveTail);
+      _restoreRouterFxAfterHistoryUser(div, attachedRouterStrip);
       return;
     }
     _thread.appendChild(div);
+    _restoreRouterFxAfterHistoryUser(div, attachedRouterStrip);
+  }
+
+  function _routerFxStripImmediatelyAfterUser(div) {
+    if (!div || !div.classList) return null;
+    const isUser = div.classList.contains('user')
+      || div.getAttribute('data-history-role') === 'user';
+    if (!isUser) return null;
+    const next = div.nextElementSibling;
+    return (next && next.classList && next.classList.contains('router-fx')) ? next : null;
+  }
+
+  function _restoreRouterFxAfterHistoryUser(div, routerStrip) {
+    if (!div || !routerStrip || routerStrip.parentNode !== _thread) return;
+    if (routerStrip.previousElementSibling === div) return;
+    _thread.insertBefore(routerStrip, div.nextSibling);
+    _chatDiag('history.move_attached_router_strip', {
+      user: _chatDiagDescribeElement(div),
+      strip: _chatDiagDescribeElement(routerStrip),
+    });
   }
 
   function _historyStableMessageIdentity(msg) {
@@ -3951,17 +5878,146 @@ const ChatView = (() => {
     return role || text ? _historyFallbackMessageIdentity(role, text) : '';
   }
 
-  function _stampHistoryElement(div, stableIdentity, role, text) {
+  function _markPendingFinalizedAssistantBubble(bubble, text) {
+    if (!bubble || !text) return;
+    _pendingFinalizedAssistantBubble = bubble;
+    _pendingFinalizedAssistantFallbackId = _historyFallbackMessageIdentity('assistant', text);
+    bubble.dataset.pendingFinalizedAssistant = 'true';
+    bubble.dataset.pendingFinalizedSessionKey = _sessionKey || '';
+    bubble.dataset.pendingFinalizedFallbackId = _pendingFinalizedAssistantFallbackId;
+    _chatDiag('stream.end.pending_finalized_assistant', {
+      fallbackId: _pendingFinalizedAssistantFallbackId,
+      bubble: _chatDiagDescribeElement(bubble),
+    });
+  }
+
+  function _clearPendingFinalizedAssistantBubble() {
+    if (_pendingFinalizedAssistantBubble) {
+      delete _pendingFinalizedAssistantBubble.dataset.pendingFinalizedAssistant;
+      delete _pendingFinalizedAssistantBubble.dataset.pendingFinalizedSessionKey;
+      delete _pendingFinalizedAssistantBubble.dataset.pendingFinalizedFallbackId;
+    }
+    _pendingFinalizedAssistantBubble = null;
+    _pendingFinalizedAssistantFallbackId = '';
+  }
+
+  function _isPendingFinalizedAssistantBubble(el) {
+    return !!el
+      && el === _pendingFinalizedAssistantBubble
+      && el.dataset.pendingFinalizedAssistant === 'true'
+      && el.dataset.pendingFinalizedSessionKey === (_sessionKey || '');
+  }
+
+  function _isCurrentSessionStreamBubble(el) {
+    if (!el || el !== _streamBubble) return false;
+    const currentKey = _sessionKey || '';
+    const streamKey = _streamSessionKey || el.dataset.streamSessionKey || '';
+    return !!currentKey
+      && streamKey === currentKey
+      && (!el.dataset.streamSessionKey || el.dataset.streamSessionKey === currentKey);
+  }
+
+  function _isCurrentSessionThinkingIndicator(el) {
+    if (!el || el !== _thinkingEl) return false;
+    const currentKey = _streamSessionKey || _sessionKey || '';
+    if (!currentKey) return false;
+    const thinkingKey = el.dataset ? (el.dataset.sessionKey || currentKey) : currentKey;
+    return thinkingKey === currentKey;
+  }
+
+  function _historyStillWaitingForAssistant(messages) {
+    if (!Array.isArray(messages) || messages.length === 0) return true;
+    const last = messages[messages.length - 1] || {};
+    return last.role !== 'assistant';
+  }
+
+  function _currentSessionLiveRouterStrips(key = _sessionKey || '') {
+    if (!_thread || !key) return [];
+    return Array.from(_thread.querySelectorAll('.router-fx')).filter((el) => (
+      el.dataset.sessionKey === key
+      && (el.dataset.live === 'true' || el.dataset.scanning === 'true')
+    ));
+  }
+
+  function _isUserMessageElement(el) {
+    return !!el && !!el.classList && (
+      el.classList.contains('user')
+      || el.getAttribute('data-history-role') === 'user'
+    );
+  }
+
+  function _currentSessionLiveUserAnchor(key = _sessionKey || '') {
+    if (!_thread || !key) return null;
+    const routerStrips = _currentSessionLiveRouterStrips(key);
+    for (const strip of routerStrips) {
+      const prev = strip.previousElementSibling;
+      if (_isUserMessageElement(prev)) return prev;
+    }
+    if (_isCurrentSessionStreamBubble(_streamBubble)) {
+      const streamAnchor = _routerFxUserMessageForAssistant(_streamBubble);
+      if (streamAnchor) return streamAnchor;
+    }
+    return _isStreaming ? _routerFxLastUserMessage() : null;
+  }
+
+  function _insertLiveRouterStripForAnchor(strip, userAnchor, streamBubble) {
+    if (!_thread || !strip) return;
+    if (userAnchor && userAnchor.parentNode === _thread) {
+      _thread.insertBefore(strip, userAnchor.nextSibling);
+      return;
+    }
+    if (streamBubble && streamBubble.parentNode === _thread) {
+      _thread.insertBefore(strip, streamBubble);
+      return;
+    }
+    _thread.appendChild(strip);
+  }
+
+  function _stampHistoryElement(div, stableIdentity, role, text, transcriptId = null) {
     if (stableIdentity) div.setAttribute('data-message-id', stableIdentity);
     div.setAttribute('data-history-role', role || '');
     div.setAttribute('data-history-raw-text', text || '');
     div.setAttribute('data-history-fallback-id', _historyFallbackMessageIdentity(role, text));
+    if (transcriptId != null) {
+      div.dataset.transcriptId = String(transcriptId);
+    } else {
+      delete div.dataset.transcriptId;
+    }
+  }
+
+  function _syncMessageHeader(div, displayRole, timestamp, options = {}) {
+    if (!div) return;
+    const day = _dayKey(timestamp);
+    const collapsible = (displayRole === 'user' || displayRole === 'assistant');
+    const sameGroup = collapsible
+      && (displayRole === _lastHeaderRole)
+      && day === _lastHeaderDay
+      && day !== '';
+    if (collapsible) _lastHeaderRole = displayRole;
+    const existing = div.querySelector(':scope > .msg-header');
+    const isoStr = timestamp
+      ? (typeof timestamp === 'string' ? timestamp : new Date(timestamp).toISOString())
+      : '';
+    if (sameGroup) {
+      if (existing) existing.remove();
+      if (isoStr) div.title = new Date(isoStr).toLocaleString();
+      return;
+    }
+    const header = existing || document.createElement('div');
+    header.className = 'msg-header';
+    if (isoStr) {
+      header.title = new Date(isoStr).toLocaleString();
+      div.removeAttribute('title');
+    }
+    header.innerHTML = `<span class="role-label">${_esc(_displayRoleLabel(displayRole))}</span>${_renderMessageTags(options)}<span class="msg-time">${_esc(timestamp ? _relTime(timestamp) : '')}</span>`;
+    if (!existing) div.insertBefore(header, div.firstChild);
   }
 
   function _replaceHistoryMessage(div, role, text, options = {}) {
     const isSubagentCompletion = _isSubagentCompletionMessage(role, text, options);
     const displayRole = isSubagentCompletion ? 'subagent' : role;
     div.className = `msg ${displayRole}`;
+    _syncMessageHeader(div, displayRole, options.timestamp || null, options);
     const body = div.querySelector('.msg-body');
     if (body) {
       _renderMessageBody(body, role, text, options);
@@ -3972,6 +6028,7 @@ const ChatView = (() => {
   function _replaceStreamText(finalText) {
     if (!_isStreaming) _startStreaming();
     _ensureStreamBubble();
+    _markVisibleStreamEvent('text_delta');
     if (!_streamBubble) {
       _streamRaw = finalText;
       return;
@@ -4022,13 +6079,23 @@ const ChatView = (() => {
       text = text.slice(1);
       hasPayload = text || _pendingAttachments.length > 0;
     }
+    const isSlashCommand = !isLiteralSlash && text.startsWith('/')
+      && !!(await _lookupSlashCommand(text));
+    const normalized = await _normalizeOutgoingComposerPayload(
+      text,
+      _pendingAttachments,
+      { allowSlashCommand: isSlashCommand },
+    );
+    if (!normalized) return;
+    text = normalized.text;
+    _pendingAttachments = normalized.attachments;
 
     // While a turn is streaming, Send enqueues. Use ESC or the
     // Stop button to actually halt the current response. Manual compaction uses
     // the same queue: users may keep typing, but the next turn must wait until
     // the transcript maintenance action reaches a terminal state.
     if (_isStreaming || _isCompactInFlightForCurrentSession()) {
-      if (!isLiteralSlash && text.startsWith('/')) {
+      if (isSlashCommand) {
         const waitReason = _isCompactInFlightForCurrentSession()
           ? 'context compaction'
           : 'the current response';
@@ -4044,6 +6111,7 @@ const ChatView = (() => {
         _isCompactInFlightForCurrentSession()
           ? 'context compaction'
           : 'the current response',
+        _pendingAttachments,
       );
       return;
     }
@@ -4101,6 +6169,9 @@ const ChatView = (() => {
         return { type: a.mime || 'image/png', data: a.data, mime: a.mime, name: a.name };
       });
     }
+    const normalizationProvenance = _inputNormalizationProvenanceFromAttachments(_pendingAttachments);
+    if (normalizationProvenance) params.inputProvenance = normalizationProvenance;
+    const routerFxRequestKind = _routerFxRequestKindFromAttachments(params.attachments || []);
 
     // Clear input and attachments
     _textarea.value = '';
@@ -4108,14 +6179,32 @@ const ChatView = (() => {
     _pendingAttachments = [];
     _renderAttachmentPreview();
 
-    // Start streaming UI
+    // Start streaming UI. Delay the routing scan briefly so request-time
+    // compaction can claim the turn without a competing one-frame router flash.
     _startStreaming();
+    const routerScanStarted = _scheduleRouterFxBeginScan(userDiv, _routerFxResolveLayoutSeed(_sessionKey), {
+      requestKind: routerFxRequestKind,
+    });
+    _chatDiag('send.start', {
+      textLen: providerText.length,
+      attachments: params.attachments ? params.attachments.length : 0,
+      routerScanStarted,
+      routerFxEnabled: !!_routerFx.enabled,
+      routerFeatureEnabled: !!_routerFeatureEnabled,
+      user: _chatDiagDescribeElement(userDiv),
+    });
     _showThinkingIndicator();
 
     // Send
     _rpc.call('chat.send', params).then((res) => {
+      _chatDiag('send.rpc.resolved', {
+        responseSessionKey: res && res.sessionKey ? res.sessionKey : '',
+      });
       if (res && res.sessionKey && res.sessionKey !== _sessionKey) _persistSession(res.sessionKey);
     }).catch((err) => {
+      _chatDiag('send.rpc.error', {
+        message: err && err.message ? err.message : String(err),
+      });
       _endStreaming();
       _addMessage('error', 'Send failed: ' + err.message);
     });
@@ -4131,10 +6220,20 @@ const ChatView = (() => {
   }
 
   function _setStreamIdlePausedForApproval(paused) {
-    _streamIdlePausedForApproval = !!paused;
+    const nextPaused = !!paused;
+    const changed = _approvalPendingForCurrentSession !== nextPaused;
+    _streamIdlePausedForApproval = nextPaused;
+    _approvalPendingForCurrentSession = nextPaused;
     if (_streamIdlePausedForApproval) {
       _clearStreamIdleTimer();
+      if (changed || _isStreaming) {
+        _applySessionRunState({
+          run_status: 'approval_pending',
+          active_task: { status: 'approval_pending', terminal_reason: 'tool_approval' },
+        });
+      }
     } else if (_isStreaming) {
+      _applySessionRunState({ run_status: 'running', active_task: { status: 'running' } });
       _resetStreamIdleTimer();
     }
   }
@@ -4166,6 +6265,18 @@ const ChatView = (() => {
     return ['succeeded', 'failed', 'timeout', 'abandoned', 'cancelled'].includes(status)
       ? status
       : '';
+  }
+
+  function _scheduleSucceededTaskTerminalSync(payload = {}) {
+    const streamGeneration = _streamGeneration;
+    setTimeout(() => {
+      if (!_isCurrentSessionPayload(payload) || _isStaleEpoch(payload)) return;
+      _scheduleHistorySync();
+      if (_isStreaming && _streamGeneration === streamGeneration) {
+        _endStreaming();
+        _schedulePendingDrainAfterTerminal();
+      }
+    }, 75);
   }
 
   function _taskTerminalAsSessionEvent(event, payload) {
@@ -4240,9 +6351,27 @@ const ChatView = (() => {
   function _acceptStreamSeq(payload) {
     const seq = payload && payload.stream_seq;
     if (typeof seq !== 'number' || !Number.isFinite(seq)) return true;
-    if (seq <= _lastStreamSeq) return false;
-    _lastStreamSeq = seq;
-    return true;
+    const key = _sessionKeyFromPayload(payload) || _sessionKey || '';
+    return _markSessionStreamSeqSeen(key, seq);
+  }
+
+  function _eventHasSpecificSessionHandler(event) {
+    return [
+      'session.event.state_change',
+      'session.event.text_delta',
+      'session.event.router_decision',
+      'session.event.tool_use_start',
+      'session.event.tool_result',
+      'session.event.artifact',
+      'session.event.compaction',
+      'session.event.subagent_start',
+      'session.event.subagent_progress',
+      'session.event.subagent_result',
+      'session.event.task_group.started',
+      'session.event.task_group.update',
+      'session.event.task_group.completed',
+      'session.event.task_group.failed',
+    ].includes(event);
   }
 
   // Returns true when a session event payload carries an epoch that
@@ -4257,6 +6386,14 @@ const ChatView = (() => {
     // Already scheduled or visible — keep the original timer/element to avoid
     // hide-then-rebuild flicker when send + state_change both fire.
     if (_thinkingEl || _thinkingDelayTimer) return;
+    if (_isCompactInFlightForCurrentSession()) {
+      _chatDiag('thinking.skip.compaction_in_flight', {});
+      return;
+    }
+    // Timer starts at send so "Watching · N.Ns" reads total wait. The indicator
+    // is RETAINED — but _showThinkingIndicatorNow defers it until the router
+    // panel has settled, so routing animates first and "Watching…" only appears
+    // afterwards (while the model is still generating), not before it.
     _thinkingStartTime = Date.now();
 
     // Delay showing the indicator — fast responses won't flash it
@@ -4265,7 +6402,24 @@ const ChatView = (() => {
 
   function _showThinkingIndicatorNow() {
     _thinkingDelayTimer = null;
-    if (_streamBubble) return; // content already arrived, skip
+    if (_streamBubble) {
+      _chatDiag('thinking.skip.stream_bubble', {});
+      return; // content already arrived, skip
+    }
+    if (_isCompactInFlightForCurrentSession()) {
+      _chatDiag('thinking.defer.compaction_in_flight', {});
+      _thinkingDelayTimer = setTimeout(_showThinkingIndicatorNow, 150);
+      return;
+    }
+    // Defer while the router panel is still animating to its final state — the
+    // "Watching…" indicator belongs AFTER routing settles, not during the scan.
+    // Re-check shortly; the panel locks within ~1s, then this shows (with the
+    // elapsed counted from send).
+    if (_thread && _thread.querySelector('.router-fx[data-scanning="true"]')) {
+      _chatDiag('thinking.defer.router_scan', {});
+      _thinkingDelayTimer = setTimeout(_showThinkingIndicatorNow, 150);
+      return;
+    }
 
     const empty = _thread.querySelector('.chat-empty');
     if (empty) empty.remove();
@@ -4274,6 +6428,7 @@ const ChatView = (() => {
     _thinkingEl.className = 'msg assistant thinking';
     _thinkingEl.setAttribute('role', 'status');
     _thinkingEl.setAttribute('aria-live', 'polite');
+    _thinkingEl.dataset.sessionKey = _streamSessionKey || _sessionKey || '';
 
     // Show header only on speaker change (thinking indicator is transient;
     // it will be removed before the real bubble is inserted, so don't update
@@ -4283,7 +6438,7 @@ const ChatView = (() => {
       header.className = 'msg-header';
       const roleLabel = document.createElement('span');
       roleLabel.className = 'role-label';
-      roleLabel.textContent = 'Assistant';
+      roleLabel.textContent = _displayRoleLabel('assistant');
       header.appendChild(roleLabel);
       _thinkingEl.appendChild(header);
     }
@@ -4314,6 +6469,9 @@ const ChatView = (() => {
     body.appendChild(status);
     _thinkingEl.appendChild(body);
     _thread.appendChild(_thinkingEl);
+    _chatDiag('thinking.show', {
+      thinking: _chatDiagDescribeElement(_thinkingEl),
+    });
     if (_autoScroll) _scrollToBottom();
 
     _thinkingTimerInterval = setInterval(() => {
@@ -4332,6 +6490,7 @@ const ChatView = (() => {
   }
 
   function _hideThinkingIndicator() {
+    const hadThinking = !!_thinkingEl || !!_thinkingDelayTimer || !!_thinkingTimerInterval;
     if (_thinkingDelayTimer) {
       clearTimeout(_thinkingDelayTimer);
       _thinkingDelayTimer = null;
@@ -4344,23 +6503,92 @@ const ChatView = (() => {
       _thinkingEl.remove();
       _thinkingEl = null;
     }
+    if (hadThinking) _chatDiag('thinking.hide', {});
+  }
+
+  function _clearAwaitingModelHint() {
+    if (_streamBubble) _streamBubble.classList.remove(_AWAITING_MODEL_CLASS);
+  }
+
+  function _markVisibleStreamEvent(kind) {
+    _lastVisibleStreamEvent = kind || '';
+    if (_lastVisibleStreamEvent !== 'tool_result') _clearAwaitingModelHint();
+  }
+
+  function _showAwaitingModelHintAfterToolResult() {
+    if (!_streamBubble || _lastVisibleStreamEvent !== 'tool_result') return false;
+    if (!_streamBubble.classList.contains(_AWAITING_MODEL_CLASS)) {
+      _streamBubble.classList.add(_AWAITING_MODEL_CLASS);
+      if (_autoScroll) _scrollToBottom();
+    }
+    return true;
+  }
+
+  function _clearStreamActiveMarkReveal() {
+    if (_streamActiveMarkTimer) {
+      clearTimeout(_streamActiveMarkTimer);
+      _streamActiveMarkTimer = null;
+    }
+    _streamActiveMarkVisibleStartedAt = 0;
+    if (_streamBubble) _streamBubble.classList.remove(_STREAM_ACTIVE_MARK_CLASS);
+  }
+
+  function _beginStreamActiveMarkRevealWindow() {
+    _streamActiveMarkVisibleStartedAt = Date.now();
+    _scheduleStreamActiveMarkReveal();
+  }
+
+  function _maybeRevealStreamActiveMark() {
+    if (!_isStreaming || !_streamBubble) return false;
+    const elapsedMs = _streamActiveMarkVisibleStartedAt ? Date.now() - _streamActiveMarkVisibleStartedAt : 0;
+    if (elapsedMs < _STREAM_ACTIVE_MARK_DELAY_MS) return false;
+    _streamBubble.classList.add(_STREAM_ACTIVE_MARK_CLASS);
+    return true;
+  }
+
+  function _scheduleStreamActiveMarkReveal() {
+    if (_streamActiveMarkTimer) clearTimeout(_streamActiveMarkTimer);
+    const generation = _streamGeneration;
+    _streamActiveMarkTimer = setTimeout(() => {
+      _streamActiveMarkTimer = null;
+      if (_streamGeneration !== generation) return;
+      _maybeRevealStreamActiveMark();
+    }, _STREAM_ACTIVE_MARK_DELAY_MS);
   }
 
   function _startStreaming() {
+    _chatDiag('stream.start.before', {
+      wasStreaming: _isStreaming,
+      hadStreamBubble: !!_streamBubble,
+      streamRawLen: _streamRaw.length,
+    });
     _isStreaming = true;
+    _streamSessionKey = _sessionKey || '';
+    if (_streamSessionKey) _liveStreamStateBySession.delete(_streamSessionKey);
+    _streamGeneration += 1;
     _applySessionRunState({ run_status: 'running', active_task: { status: 'running' } });
     _streamRaw = '';
     _segments = []; _activeTextSeg = null; _activeTextRaw = '';
     _streamArtifacts = [];
+    _lastVisibleStreamEvent = '';
     _streamBubble = null;
     _autoScroll = true;
     if (_thread) _thread.setAttribute('aria-busy', 'true');
     _updateSendButton();
     _resetStreamIdleTimer();
+    _chatDiag('stream.start.after', {});
   }
 
   function _ensureStreamBubble() {
+    _chatDiag('stream.ensure.start', {
+      hadStreamBubble: !!_streamBubble,
+      streamRawLen: _streamRaw.length,
+      activeTextRawLen: _activeTextRaw.length,
+    });
     _hideThinkingIndicator();
+    // Output is about to render. Finish any in-flight scan so the router does
+    // not keep roaming, but allow the winner-lock animation to play.
+    _routerFxSettleForOutput();
     if (!_streamBubble) {
       // Remove "No messages yet." placeholder
       const empty = _thread.querySelector('.chat-empty');
@@ -4370,6 +6598,8 @@ const ChatView = (() => {
       _streamBubble.className = 'msg assistant streaming';
       _streamBubble.setAttribute('data-history-role', 'assistant');
       _streamBubble.setAttribute('aria-live', 'polite');
+      _streamBubble.dataset.sessionKey = _streamSessionKey || _sessionKey || '';
+      _streamBubble.dataset.streamSessionKey = _streamSessionKey || _sessionKey || '';
 
       // Day separator for streaming bubbles (use current time as timestamp)
       const now = new Date().toISOString();
@@ -4388,7 +6618,7 @@ const ChatView = (() => {
       if (!sameGroup) {
         _streamBubble.innerHTML = `
           <div class="msg-header">
-            <span class="role-label">Assistant</span>
+            <span class="role-label">${_esc(_displayRoleLabel('assistant'))}</span>
             <span class="savings-indicator"></span>
             <span class="msg-time"></span>
           </div>
@@ -4399,10 +6629,15 @@ const ChatView = (() => {
       }
 
       _thread.appendChild(_streamBubble);
+      _beginStreamActiveMarkRevealWindow();
 
       // Create the first text segment
       _newTextSegment();
+      _chatDiag('stream.bubble.created', {
+        streamBubble: _chatDiagDescribeElement(_streamBubble),
+      });
     }
+    _maybeRevealStreamActiveMark();
     return _streamBubble;
   }
 
@@ -4421,8 +6656,15 @@ const ChatView = (() => {
 
   function _appendDelta(text) {
     if (_aborted) return;
+    _chatDiag('stream.delta.start', {
+      len: text ? text.length : 0,
+      head: _chatDiagShortText(text, 100),
+      wasStreaming: _isStreaming,
+      hasStreamBubble: !!_streamBubble,
+    });
     if (!_isStreaming) _startStreaming();
     _ensureStreamBubble();
+    _markVisibleStreamEvent('text_delta');
     _streamRaw += text;
     _activeTextRaw += text;
     // Keep segment raw in sync for final render
@@ -4439,6 +6681,10 @@ const ChatView = (() => {
         _renderRafId = requestAnimationFrame(_flushRender);
       }
     }
+    _chatDiag('stream.delta.queued', {
+      streamRawLen: _streamRaw.length,
+      activeTextRawLen: _activeTextRaw.length,
+    });
   }
 
   function _flushPendingTextSegment() {
@@ -4452,24 +6698,47 @@ const ChatView = (() => {
 
   function _flushRender() {
     _renderRafId = null;
-    if (!_renderDirty || !_streamBubble) { _renderDirty = false; return; }
+    if (!_renderDirty || !_streamBubble) {
+      _chatDiag('stream.flush.skip', {
+        renderDirty: !!_renderDirty,
+        hasStreamBubble: !!_streamBubble,
+      });
+      _renderDirty = false;
+      return;
+    }
     if (_activeTextSeg && _activeTextRaw) {
       _activeTextSeg.innerHTML = Markdown.render(_stripProtocolTextLeak(_stripDirectiveTags(_stripGeneratedArtifactMarkers(_activeTextRaw))));  // eslint-disable-line no-unsanitized/property
       Markdown.bindCopy(_activeTextSeg);
     }
     _renderDirty = false;
     if (_autoScroll) _scrollToBottom();
+    _chatDiag('stream.flush.done', {
+      streamRawLen: _streamRaw.length,
+      activeTextRawLen: _activeTextRaw.length,
+      activeSeg: _chatDiagDescribeElement(_activeTextSeg),
+    });
   }
 
   function _endStreaming(opts) {
     const reason = opts && opts.reason;
     const wasAborted = reason === 'aborted';
+    _chatDiag('stream.end.start', {
+      reason: reason || '',
+      wasAborted,
+      hasStreamBubble: !!_streamBubble,
+      streamRawLen: _streamRaw.length,
+    });
     _hideThinkingIndicator();
+    _cancelPendingRouterFxScan('stream_end');
+    _clearAwaitingModelHint();
+    _lastVisibleStreamEvent = '';
     if (_historySyncTimer) { clearTimeout(_historySyncTimer); _historySyncTimer = null; }
     if (_renderRafId) { cancelAnimationFrame(_renderRafId); _renderRafId = null; }
     _renderDirty = false;
     _clearStreamIdleTimer();
+    _clearStreamActiveMarkReveal();
     _streamIdlePausedForApproval = false;
+    _approvalPendingForCurrentSession = false;
     if (_streamBubble) {
       _streamBubble.classList.remove('streaming');
       const cleanedText = _stripProtocolTextLeak(_stripDirectiveTags(_stripGeneratedArtifactMarkers(_streamRaw))).trim();
@@ -4479,9 +6748,14 @@ const ChatView = (() => {
       // even if the partial happens to match a sentinel string.
       const _SENTINELS = ['NO_REPLY', 'HEARTBEAT_OK'];
       if (!wasAborted && _SENTINELS.includes(cleanedText)) {
+        _chatDiag('stream.end.remove.sentinel', {
+          cleanedText,
+        });
         _streamBubble.remove();
         _streamBubble = null;
         _isStreaming = false;
+        if (_streamSessionKey) _liveStreamStateBySession.delete(_streamSessionKey);
+        _streamSessionKey = '';
         _streamRaw = '';
         _segments = []; _activeTextSeg = null; _activeTextRaw = '';
         _streamArtifacts = [];
@@ -4492,9 +6766,12 @@ const ChatView = (() => {
       // Aborted with no partial output: drop the empty bubble entirely so
       // the transcript doesn't grow stub assistant messages every ESC.
       if (wasAborted && !cleanedText) {
+        _chatDiag('stream.end.remove.aborted_empty', {});
         _streamBubble.remove();
         _streamBubble = null;
         _isStreaming = false;
+        if (_streamSessionKey) _liveStreamStateBySession.delete(_streamSessionKey);
+        _streamSessionKey = '';
         _streamRaw = '';
         _segments = []; _activeTextSeg = null; _activeTextRaw = '';
         _streamArtifacts = [];
@@ -4503,6 +6780,7 @@ const ChatView = (() => {
         return;
       }
       _stampHistoryElement(_streamBubble, '', 'assistant', cleanedText);
+      _markPendingFinalizedAssistantBubble(_streamBubble, cleanedText);
 
       // Final render: render each text segment with its own content
       for (const seg of _segments) {
@@ -4547,12 +6825,184 @@ const ChatView = (() => {
       _attachHoverActions(_streamBubble, 'assistant');
     }
     _isStreaming = false;
+    _routerFxStaticizeCompletedStrips(_streamSessionKey || _sessionKey || '');
+    if (_streamSessionKey) _liveStreamStateBySession.delete(_streamSessionKey);
     _streamBubble = null;
+    _streamSessionKey = '';
     _streamRaw = '';
     _segments = []; _activeTextSeg = null; _activeTextRaw = '';
     _streamArtifacts = [];
     if (_thread) _thread.setAttribute('aria-busy', 'false');
     _updateSendButton();
+    _chatDiag('stream.end.done', {
+      reason: reason || '',
+      wasAborted,
+    });
+  }
+
+  function _hasViewLocalStreamState() {
+    return !!(
+      _isStreaming
+      || _streamBubble
+      || _streamRaw
+      || _segments.length
+      || _activeTextRaw
+      || _streamArtifacts.length
+      || _currentSessionLiveRouterStrips(_streamSessionKey || _sessionKey || '').length
+      || _thinkingEl
+      || _thinkingDelayTimer
+    );
+  }
+
+  function _parkCurrentSessionStreamState(reason) {
+    const key = _streamSessionKey || _sessionKey || '';
+    const routerStrips = _currentSessionLiveRouterStrips(key);
+    const liveUserAnchor = _currentSessionLiveUserAnchor(key);
+    if (!key || !_hasViewLocalStreamState()) {
+      _clearViewLocalStreamState(reason);
+      return false;
+    }
+    _flushPendingTextSegment();
+    const state = {
+      isStreaming: _isStreaming,
+      streamBubble: _streamBubble,
+      streamSessionKey: key,
+      streamRaw: _streamRaw,
+      liveUserAnchor,
+      segments: _segments,
+      activeTextSeg: _activeTextSeg,
+      activeTextRaw: _activeTextRaw,
+      streamArtifacts: _streamArtifacts.slice(),
+      lastVisibleStreamEvent: _lastVisibleStreamEvent,
+      routerStrips,
+      streamGeneration: _streamGeneration,
+      autoScroll: _autoScroll,
+      pendingFinalizedAssistantBubble: _pendingFinalizedAssistantBubble,
+      pendingFinalizedAssistantFallbackId: _pendingFinalizedAssistantFallbackId,
+    };
+    _liveStreamStateBySession.set(key, state);
+    _hideThinkingIndicator();
+    if (_historySyncTimer) { clearTimeout(_historySyncTimer); _historySyncTimer = null; }
+    if (_renderRafId) { cancelAnimationFrame(_renderRafId); _renderRafId = null; }
+    _renderDirty = false;
+    _clearStreamIdleTimer();
+    _streamIdlePausedForApproval = false;
+    _approvalPendingForCurrentSession = false;
+    if (_streamBubble) _streamBubble.remove();
+    routerStrips.forEach((el) => {
+      _routerFxPauseScanTimers(el);
+      if (el.parentNode) el.remove();
+    });
+    if (liveUserAnchor && liveUserAnchor.parentNode) liveUserAnchor.remove();
+    _isStreaming = false;
+    _streamBubble = null;
+    _streamSessionKey = '';
+    _streamRaw = '';
+    _segments = []; _activeTextSeg = null; _activeTextRaw = '';
+    _streamArtifacts = [];
+    _lastVisibleStreamEvent = '';
+    if (_thread) _thread.setAttribute('aria-busy', 'false');
+    _updateSendButton();
+    _chatDiag('stream.view_state_parked', {
+      reason: reason || '',
+      sessionKey: key,
+      streamRawLen: state.streamRaw.length,
+      hasStreamBubble: !!state.streamBubble,
+      hasLiveUserAnchor: !!state.liveUserAnchor,
+      routerStripCount: routerStrips.length,
+    });
+    return true;
+  }
+
+  function _restoreLiveStreamStateForSession(key) {
+    const sessionKey = key || _sessionKey || '';
+    const state = _liveStreamStateBySession.get(sessionKey);
+    if (!state || state.streamSessionKey !== sessionKey) return false;
+    _liveStreamStateBySession.delete(sessionKey);
+    _isStreaming = !!state.isStreaming;
+    _streamBubble = state.streamBubble || null;
+    _streamSessionKey = state.streamSessionKey || sessionKey;
+    _streamRaw = state.streamRaw || '';
+    _segments = Array.isArray(state.segments) ? state.segments : [];
+    _activeTextSeg = state.activeTextSeg || null;
+    _activeTextRaw = state.activeTextRaw || '';
+    _streamArtifacts = Array.isArray(state.streamArtifacts) ? state.streamArtifacts.slice() : [];
+    _lastVisibleStreamEvent = state.lastVisibleStreamEvent || '';
+    _streamGeneration = Math.max(_streamGeneration, state.streamGeneration || 0);
+    _autoScroll = state.autoScroll !== false;
+    _pendingFinalizedAssistantBubble = state.pendingFinalizedAssistantBubble || null;
+    _pendingFinalizedAssistantFallbackId = state.pendingFinalizedAssistantFallbackId || '';
+    const liveUserAnchor = state.liveUserAnchor || null;
+    const routerStrips = Array.isArray(state.routerStrips) ? state.routerStrips : [];
+    if (_thread && liveUserAnchor && !liveUserAnchor.isConnected) {
+      _thread.appendChild(liveUserAnchor);
+    }
+    if (_streamBubble) {
+      _streamBubble.dataset.sessionKey = sessionKey;
+      _streamBubble.dataset.streamSessionKey = sessionKey;
+      if (_thread && !_streamBubble.isConnected) _thread.appendChild(_streamBubble);
+    }
+    if (_lastVisibleStreamEvent !== 'tool_result') _clearAwaitingModelHint();
+    if (_thread) {
+      routerStrips.forEach((el) => {
+        el.dataset.sessionKey = sessionKey;
+        if (!el.isConnected) {
+          _insertLiveRouterStripForAnchor(el, liveUserAnchor, _streamBubble);
+        }
+        _routerFxResumeLiveStrip(el);
+      });
+    }
+    if (_thread) _thread.setAttribute('aria-busy', _isStreaming ? 'true' : 'false');
+    if (_isStreaming) {
+      _applySessionRunState({ run_status: 'running', active_task: { status: 'running' } });
+      _resetStreamIdleTimer();
+    }
+    _updateSendButton();
+    _chatDiag('stream.view_state_restored', {
+      sessionKey,
+      streamRawLen: _streamRaw.length,
+      hasStreamBubble: !!_streamBubble,
+      hasLiveUserAnchor: !!liveUserAnchor,
+      routerStripCount: routerStrips.length,
+    });
+    return true;
+  }
+
+  function _clearViewLocalStreamState(reason) {
+    const hadStreamBubble = !!_streamBubble;
+    const hadPendingFinalized = !!_pendingFinalizedAssistantBubble;
+    const routerStrips = _currentSessionLiveRouterStrips(_streamSessionKey || _sessionKey || '');
+    _hideThinkingIndicator();
+    _cancelPendingRouterFxScan(reason || 'clear_view_state');
+    if (_historySyncTimer) { clearTimeout(_historySyncTimer); _historySyncTimer = null; }
+    if (_renderRafId) { cancelAnimationFrame(_renderRafId); _renderRafId = null; }
+    _renderDirty = false;
+    _clearStreamIdleTimer();
+    _streamIdlePausedForApproval = false;
+    _approvalPendingForCurrentSession = false;
+    if (_streamBubble) _streamBubble.remove();
+    routerStrips.forEach((el) => {
+      _routerFxPauseScanTimers(el);
+      if (el.parentNode) el.remove();
+    });
+    _clearPendingFinalizedAssistantBubble();
+    if (_streamSessionKey) _liveStreamStateBySession.delete(_streamSessionKey);
+    _isStreaming = false;
+    _streamBubble = null;
+    _streamSessionKey = '';
+    _streamRaw = '';
+    _segments = []; _activeTextSeg = null; _activeTextRaw = '';
+    _streamArtifacts = [];
+    _lastVisibleStreamEvent = '';
+    _streamGeneration += 1;
+    if (_thread) _thread.setAttribute('aria-busy', 'false');
+    _updateSendButton();
+    _chatDiag('stream.view_state_cleared', {
+      reason: reason || '',
+      hadStreamBubble,
+      hadPendingFinalized,
+      routerStripCount: routerStrips.length,
+    });
   }
 
   function _updateSendButton() {
@@ -4607,7 +7057,17 @@ const ChatView = (() => {
       const target = _publishArtifactTargetName(input);
       if (target) return `${name} - ${target}`;
     }
+    // Meta-skill step: render as a clean step name (drop the 'meta-step:'
+    // prefix and replace underscores with spaces).
+    if (name && name.startsWith('meta-step:')) {
+      const stepId = name.slice('meta-step:'.length);
+      return 'Step · ' + stepId.replace(/_/g, ' ');
+    }
     return name || 'tool';
+  }
+
+  function _isControlPlaneToolName(name) {
+    return name === 'router_control';
   }
 
   function _buildToolCallDOM(name, toolId, input, isRunning) {
@@ -4619,6 +7079,10 @@ const ChatView = (() => {
 
     const details = document.createElement('details');
     details.className = 'chat-tools-collapse' + (isRunning ? ' chat-tools-collapse--running' : '');
+    // Auto-open meta-skill step cards so the spinner border + body are
+    // visible while the step is running. (Generic tools stay collapsed
+    // by default to keep the chat tidy.)
+    if (name && name.startsWith('meta-step:')) details.setAttribute('open', '');
     if (toolId) details.setAttribute('data-tool-id', toolId);
     details.setAttribute('data-tool-name', name || 'tool');
 
@@ -4634,6 +7098,10 @@ const ChatView = (() => {
     iconSpan.textContent = _toolEmoji(name);
     summary.appendChild(iconSpan);
     summary.appendChild(document.createTextNode(' ' + displayName));
+    const statusSpan = document.createElement('span');
+    statusSpan.className = 'chat-tools-status';
+    _applyToolSummaryStatus(statusSpan, isRunning ? 'running' : '');
+    summary.appendChild(statusSpan);
 
     const toolsBody = document.createElement('div');
     toolsBody.className = 'chat-tools-body';
@@ -4651,6 +7119,54 @@ const ChatView = (() => {
     return details;
   }
 
+  function _visibleToolSummaryStatus(status) {
+    return status === 'running' ? 'running' : '';
+  }
+
+  function _applyToolSummaryStatus(statusSpan, status) {
+    const visibleStatus = _visibleToolSummaryStatus(status || '');
+    statusSpan.dataset.status = status || '';
+    statusSpan.textContent = visibleStatus;
+    statusSpan.hidden = !visibleStatus;
+  }
+
+  function _setToolSummaryStatus(details, status) {
+    if (!details) return;
+    const summary = details.querySelector('.chat-tools-summary');
+    if (!summary) return;
+    let statusSpan = summary.querySelector('.chat-tools-status');
+    if (!statusSpan) {
+      statusSpan = document.createElement('span');
+      statusSpan.className = 'chat-tools-status';
+      summary.appendChild(statusSpan);
+    }
+    _applyToolSummaryStatus(statusSpan, status || '');
+  }
+
+  function _retitleToolCallDOM(details, name, input) {
+    if (!details || !name) return;
+    const current = details.getAttribute('data-tool-name') || '';
+    if (current === name) return;
+    details.setAttribute('data-tool-name', name);
+    const summary = details.querySelector('.chat-tools-summary');
+    if (!summary) return;
+    const providerBadge = summary.querySelector('.chat-tool-provider');
+    if (providerBadge) providerBadge.remove();
+    const currentStatus = summary.querySelector('.chat-tools-status');
+    const statusText = currentStatus?.dataset?.status || currentStatus?.textContent || '';
+    summary.textContent = '';
+    const iconSpan = document.createElement('span');
+    iconSpan.className = 'chat-tools-icon';
+    iconSpan.textContent = _toolEmoji(name);
+    summary.appendChild(iconSpan);
+    summary.appendChild(document.createTextNode(' ' + _toolDisplayName(name, input)));
+    const statusSpan = document.createElement('span');
+    statusSpan.className = 'chat-tools-status';
+    _applyToolSummaryStatus(statusSpan, statusText);
+    summary.appendChild(statusSpan);
+    if (providerBadge) summary.appendChild(providerBadge);
+  }
+
   function _findToolDetailsById(root, toolId) {
     if (!root || !toolId) return null;
     return Array.from(root.querySelectorAll('[data-tool-id]')).find(
@@ -4663,6 +7179,37 @@ const ChatView = (() => {
     return Array.from(root.querySelectorAll('[data-tool-result-for]')).find(
       (el) => el.getAttribute('data-tool-result-for') === toolId
     ) || null;
+  }
+
+  function _settleToolResultCard(payload, isError) {
+    const toolId = payload && payload.tool_use_id || '';
+    if (!toolId) return null;
+    const bubble = _ensureStreamBubble();
+    const body = bubble && bubble.querySelector('.msg-body');
+    const details = _findToolDetailsById(body, toolId);
+    if (!details) return null;
+    let toolName = payload.name || payload.tool_name || '';
+    if (toolName) _retitleToolCallDOM(details, toolName, payload.arguments || payload.input || '');
+    toolName = toolName || details.getAttribute('data-tool-name') || '';
+    details.classList.remove('chat-tools-collapse--running');
+    details.classList.add(_toolResultStateClass(payload));
+    _setToolSummaryStatus(details, isError ? 'error' : 'done');
+    const summary = details.querySelector('.chat-tools-summary');
+    if (summary) summary.removeAttribute('aria-disabled');
+    return details;
+  }
+
+  function _clarifyArgsFromHistoricalSegment(seg, details) {
+    const input = details && details._opensquillaToolInput;
+    if (!input || typeof input !== 'object') return null;
+    if (
+      input.kind === 'user_input'
+      && input.paused === true
+      && input.clarify_schema
+    ) {
+      return input;
+    }
+    return null;
   }
 
   function _toolExecutionStatus(payload) {
@@ -4688,6 +7235,21 @@ const ChatView = (() => {
   function _toolResultIsTruncated(payload) {
     const status = _toolExecutionStatus(payload);
     return !!(status && status.truncated);
+  }
+
+  function _toolResultContent(payload) {
+    if (!payload) return '';
+    let raw = '';
+    if (Object.prototype.hasOwnProperty.call(payload, 'result')) {
+      raw = payload.result;
+    } else if (Object.prototype.hasOwnProperty.call(payload, 'content')) {
+      raw = payload.content;
+    } else if (Object.prototype.hasOwnProperty.call(payload, 'output')) {
+      raw = payload.output;
+    }
+    if (typeof raw === 'string') return raw;
+    const rendered = JSON.stringify(raw, null, 2);
+    return rendered == null ? '' : rendered;
   }
 
   function _memorySearchSourceRows(content) {
@@ -4755,9 +7317,12 @@ const ChatView = (() => {
     if (content.length > 200) {
       const viewBtn = document.createElement('button');
       viewBtn.className = 'btn btn--sm btn--ghost chat-tool-view-btn';
+      viewBtn.type = 'button';
       viewBtn.textContent = 'View full';
-      viewBtn.addEventListener('click', () => {
-        UI.modal('Tool Result', '<pre style="white-space:pre-wrap;max-height:60vh;overflow:auto;font-size:var(--fs-sm)">' + _esc(content) + '</pre>', [
+      viewBtn.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        UI.modal('Tool Result', '<pre class="chat-tool-result-full">' + _esc(content) + '</pre>', [
           { label: 'Close', cls: 'btn-secondary' },
         ]);
       });
@@ -4768,16 +7333,27 @@ const ChatView = (() => {
 
   function _appendToolCall(payload) {
     if (!payload) return;
+    _chatDiag('tool_call.append.start', _chatDiagSummarizePayload(payload));
     const name = payload.name || payload.tool_name || 'tool';
+    if (_isControlPlaneToolName(name)) {
+      _chatDiag('tool_call.append.skip_control_plane', { name });
+      return;
+    }
+    try { if (name && name.startsWith('meta-step:')) console.log('[meta-step] start', name); } catch (e) {}
     const input = typeof payload.input === 'string'
       ? payload.input
       : JSON.stringify(payload.input || payload.arguments || '', null, 2);
     const toolId = payload.tool_use_id || '';
 
     const bubble = _ensureStreamBubble();
+    _markVisibleStreamEvent('tool_use_start');
     const body = bubble.querySelector('.msg-body');
     const existing = _findToolDetailsById(body, toolId);
     if (existing) {
+      _chatDiag('tool_call.append.reuse_existing', {
+        toolId,
+        name,
+      });
       if (name === 'web_search' && _searchProvider) {
         _injectProviderBadge(existing.querySelector('.chat-tools-summary'), _searchProvider);
       }
@@ -4797,17 +7373,84 @@ const ChatView = (() => {
     _newTextSegment();
 
     if (_autoScroll) _scrollToBottom();
+    _chatDiag('tool_call.append.done', {
+      toolId,
+      name,
+      details: _chatDiagDescribeElement(details),
+    });
   }
 
   function _appendToolResult(payload) {
     if (!payload) return;
-    const raw = payload.result || payload.content || payload.output || '';
-    const content = typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2);
+    _chatDiag('tool_result.append.start', _chatDiagSummarizePayload(payload));
+
+    // PR5: meta-skill user_input paused signal — render a clickable form
+    // instead of a plain tool-result card. The scheduler emits this with
+    // arguments.kind === 'user_input' and arguments.clarify_schema as the
+    // surface protocol payload (see clarify_schema.schema_to_protocol).
+    const _args = payload && payload.arguments;
+    // Diagnostic: log every tool_result event so the form-card branch
+    // can be debugged from the browser console.
+    try {
+      console.log('[clarify-debug] tool_result', {
+        tool_name: payload && payload.tool_name,
+        args_kind: _args && _args.kind,
+        args_paused: _args && _args.paused,
+        has_schema: !!(_args && _args.clarify_schema),
+        payload: payload,
+      });
+    } catch (e) {}
+    if (
+      _args
+      && _args.kind === 'user_input'
+      && _args.paused === true
+      && _args.clarify_schema
+    ) {
+      try { console.log('[clarify-debug] firing _appendClarifyForm'); } catch (e) {}
+      _markVisibleStreamEvent('clarify_form');
+      _settleToolResultCard(payload, false);
+      _appendClarifyForm(payload, _args);
+      _chatDiag('tool_result.append.clarify_form', _chatDiagSummarizePayload(payload));
+      return;
+    }
+
+    // Skipped user_input step with an inferred-context summary —
+    // close the (c)/(d) "trust gap" on the path where the form was
+    // auto-suppressed. The scheduler attaches ``clarify_skip_summary``
+    // whenever a meta author's ``when:`` expression evaluated false
+    // for a user_input step, so the user can still see what the
+    // upstream context-extraction inferred and intervene before the
+    // DAG continues.
+    if (
+      _args
+      && _args.kind === 'user_input'
+      && _args.skipped === true
+      && _args.clarify_skip_summary
+    ) {
+      try { console.log('[clarify-debug] firing _appendClarifySkipSummary'); } catch (e) {}
+      _markVisibleStreamEvent('clarify_skip_summary');
+      _appendClarifySkipSummary(payload, _args);
+      _chatDiag(
+        'tool_result.append.clarify_skip_summary',
+        _chatDiagSummarizePayload(payload),
+      );
+      return;
+    }
+
+    const content = _toolResultContent(payload);
     const isError = _toolResultIsError(payload);
     const toolId = payload.tool_use_id || '';
     let toolName = payload.name || payload.tool_name || '';
+    if (_isControlPlaneToolName(toolName)) {
+      _chatDiag('tool_result.append.skip_control_plane', {
+        toolId,
+        toolName,
+      });
+      return;
+    }
 
     const bubble = _ensureStreamBubble();
+    _markVisibleStreamEvent('tool_result');
     const body = bubble.querySelector('.msg-body');
 
     // Transition tool container from running → success/error and find target container
@@ -4815,9 +7458,11 @@ const ChatView = (() => {
     if (toolId) {
       const details = _findToolDetailsById(body, toolId);
       if (details) {
+        if (toolName) _retitleToolCallDOM(details, toolName, payload.arguments || payload.input || '');
         toolName = toolName || details.getAttribute('data-tool-name') || '';
         details.classList.remove('chat-tools-collapse--running');
         details.classList.add(_toolResultStateClass(payload));
+        _setToolSummaryStatus(details, isError ? 'error' : 'done');
         const summary = details.querySelector('.chat-tools-summary');
         if (summary) summary.removeAttribute('aria-disabled');
         const toolsBody = details.querySelector('.chat-tools-body');
@@ -4835,6 +7480,10 @@ const ChatView = (() => {
     }
     if (toolId && _findToolResultById(resultTarget, toolId)) {
       if (_autoScroll) _scrollToBottom();
+      _chatDiag('tool_result.append.skip_duplicate', {
+        toolId,
+        toolName,
+      });
       return;
     }
 
@@ -4847,21 +7496,496 @@ const ChatView = (() => {
     );
     if (!resultDiv) {
       if (_autoScroll) _scrollToBottom();
+      _chatDiag('tool_result.append.skip_empty_result', {
+        toolId,
+        toolName,
+      });
       return;
     }
 
     if (toolId) resultDiv.setAttribute('data-tool-result-for', toolId);
     resultTarget.appendChild(resultDiv);
     if (_autoScroll) _scrollToBottom();
+    _chatDiag('tool_result.append.done', {
+      toolId,
+      toolName,
+      result: _chatDiagDescribeElement(resultDiv),
+    });
+  }
+
+  // ── PR5: meta-skill user_input form rendering ──
+
+  function _appendClarifyForm(payload, args) {
+    const bubble = _ensureStreamBubble();
+    const body = bubble.querySelector('.msg-body');
+    _appendClarifyFormToBody(body, payload, args);
+  }
+
+  function _appendClarifyFormToBody(body, payload, args) {
+    if (!body) return;
+    // The scheduler payload carries:
+    //   args.clarify_schema = { mode, intro, fields, cancel_keywords,
+    //                            timeout_hours, nl_extract }
+    //   args.run_id         = awaiting run identifier
+    //   args.step           = user_input step id
+    const schema = args.clarify_schema || {};
+    const runId = args.run_id || '';
+    const fields = Array.isArray(schema.fields) ? schema.fields : [];
+    const schemaCopy = [
+      schema.intro || '',
+      ...fields.map((field) => field && field.prompt || ''),
+    ].join('\n');
+    const schemaLang = /[\u4e00-\u9fff]/.test(schemaCopy) ? 'zh' : 'en';
+    const clarifyText = (zh, en) => schemaLang === 'zh' ? zh : en;
+
+    const card = document.createElement('div');
+    card.className = 'clarify-form chat-tools-collapse';
+    card.setAttribute('data-clarify-step', args.step || '');
+    card.setAttribute('data-clarify-run', runId);
+
+    const header = document.createElement('div');
+    header.className = 'clarify-form-header';
+    header.textContent = clarifyText('请确认以下信息', 'Please confirm these details');
+    card.appendChild(header);
+
+    // Dual-channel hint (soft-clarify) — tell the user the main chat
+    // input still works while the form is open, so they can either
+    // type into fields or continue the conversation naturally to
+    // supply / refine answers. Without this line users assume the
+    // form is the only path forward and avoid the message box.
+    const dualChannelHint = document.createElement('div');
+    dualChannelHint.className = 'clarify-form-dual-channel-hint';
+    dualChannelHint.textContent = clarifyText(
+      '✎ 您也可以在下方对话框里继续聊天补充信息，或回复 "开始" 让系统立即执行；说 "算了" 取消。',
+      '✎ You can also keep chatting in the message box below to add or refine info, reply "go ahead" to start, or "cancel" to abort.',
+    );
+    card.appendChild(dualChannelHint);
+
+    if (schema.intro) {
+      const intro = document.createElement('div');
+      intro.className = 'clarify-form-intro';
+      // schema.intro is xml_escape'd server-side; safe as textContent.
+      intro.textContent = schema.intro;
+      card.appendChild(intro);
+    }
+
+    // Step (d) auto-prefill rendering. The server may attach
+    // confirmed_fields / ambiguous_fields / unknown_mentions when
+    // the prefill scan inferred values from the user's earlier
+    // messages. Render a transparency block at the top so the user
+    // sees what was detected and can confirm or override; build a
+    // lookup map so the field rows below can show inline markers.
+    const confirmedFields = Array.isArray(schema.confirmed_fields)
+      ? schema.confirmed_fields : [];
+    const ambiguousFields = Array.isArray(schema.ambiguous_fields)
+      ? schema.ambiguous_fields : [];
+    const unknownMentions = Array.isArray(schema.unknown_mentions)
+      ? schema.unknown_mentions : [];
+    const confirmedByName = {};
+    confirmedFields.forEach((entry) => {
+      if (entry && typeof entry.name === 'string') {
+        confirmedByName[entry.name] = entry;
+      }
+    });
+    const ambiguousByName = {};
+    ambiguousFields.forEach((entry) => {
+      if (entry && typeof entry.name === 'string') {
+        ambiguousByName[entry.name] = entry;
+      }
+    });
+
+    if (
+      confirmedFields.length > 0
+      || ambiguousFields.length > 0
+      || unknownMentions.length > 0
+    ) {
+      const prefill = document.createElement('div');
+      prefill.className = 'clarify-form-prefill';
+      const prefillNote = document.createElement('div');
+      prefillNote.className = 'clarify-form-prefill-note';
+      prefillNote.textContent = clarifyText(
+        '已根据您之前的消息识别出以下信息，请确认或修改：',
+        'We noticed details from your earlier messages — please confirm or override below:',
+      );
+      prefill.appendChild(prefillNote);
+      const prefillList = document.createElement('ul');
+      prefillList.className = 'clarify-form-prefill-list';
+      confirmedFields.forEach((entry) => {
+        if (!entry || typeof entry.name !== 'string') return;
+        const li = document.createElement('li');
+        li.className = 'clarify-form-prefill-confirmed';
+        // Field values may be any JSON type — coerce to a stable
+        // string the user will recognise. Using textContent keeps
+        // angle brackets / quotes safe (server already xml_escaped
+        // free-text fields).
+        const valueRepr = entry.value === null || entry.value === undefined
+          ? ''
+          : String(entry.value);
+        const sourceLabel = entry.source || 'auto_prefill';
+        li.textContent = clarifyText(
+          '✓ ' + entry.name + ' = ' + valueRepr + '(来源: ' + sourceLabel + ')',
+          '✓ ' + entry.name + ' = ' + valueRepr + ' (source: ' + sourceLabel + ')',
+        );
+        prefillList.appendChild(li);
+      });
+      ambiguousFields.forEach((entry) => {
+        if (!entry || typeof entry.name !== 'string') return;
+        const li = document.createElement('li');
+        li.className = 'clarify-form-prefill-ambiguous';
+        const reason = entry.reason ? ' — ' + entry.reason : '';
+        li.textContent = clarifyText(
+          '⚠ ' + entry.name + '：需要您填写' + reason,
+          '⚠ ' + entry.name + ': needs your input' + reason,
+        );
+        prefillList.appendChild(li);
+      });
+      unknownMentions.forEach((entry) => {
+        if (!entry || typeof entry.text !== 'string') return;
+        const li = document.createElement('li');
+        li.className = 'clarify-form-prefill-unknown';
+        const guess = entry.guess
+          ? clarifyText('（推测：' + entry.guess + '）', ' (looked like: ' + entry.guess + ')')
+          : '';
+        li.textContent = clarifyText(
+          '· 我们注意到您还提到了：' + entry.text + guess,
+          '· we also noticed: ' + entry.text + guess,
+        );
+        prefillList.appendChild(li);
+      });
+      prefill.appendChild(prefillList);
+      card.appendChild(prefill);
+    }
+
+    const form = document.createElement('form');
+    form.className = 'clarify-form-fields';
+    form.setAttribute('novalidate', '');
+
+    fields.forEach((field) => {
+      const row = document.createElement('div');
+      row.className = 'clarify-form-row';
+
+      const confirmedEntry = confirmedByName[field.name];
+      const ambiguousEntry = ambiguousByName[field.name];
+
+      const label = document.createElement('label');
+      label.className = 'clarify-form-label';
+      const requiredFlag = field.required ? ' *' : '';
+      label.textContent = (field.prompt || field.name) + requiredFlag;
+      label.setAttribute('for', 'clarify-' + field.name);
+      row.appendChild(label);
+
+      let input;
+      if (field.type === 'enum' && Array.isArray(field.choices)) {
+        input = document.createElement('select');
+        if (!field.required) {
+          const blank = document.createElement('option');
+          blank.value = '';
+          blank.textContent = field.default
+            ? clarifyText('(默认: ' + field.default + ')', '(default: ' + field.default + ')')
+            : clarifyText('(可选)', '(optional)');
+          input.appendChild(blank);
+        }
+        field.choices.forEach((choice) => {
+          const opt = document.createElement('option');
+          opt.value = choice;
+          opt.textContent = choice;
+          if (field.default === choice) opt.selected = true;
+          input.appendChild(opt);
+        });
+      } else if (field.type === 'bool') {
+        input = document.createElement('select');
+        ['', 'true', 'false'].forEach((v) => {
+          const opt = document.createElement('option');
+          opt.value = v;
+          opt.textContent = v === '' ? clarifyText('(未选)', '(not selected)') : v;
+          if (field.default === (v === 'true')) opt.selected = true;
+          input.appendChild(opt);
+        });
+      } else if (field.type === 'int') {
+        input = document.createElement('input');
+        input.type = 'number';
+        if (field.min !== undefined && field.min !== null) input.min = String(field.min);
+        if (field.max !== undefined && field.max !== null) input.max = String(field.max);
+        if (field.default !== undefined && field.default !== null) {
+          input.value = String(field.default);
+        }
+      } else {
+        input = document.createElement('input');
+        input.type = 'text';
+        if (field.max_chars) input.maxLength = field.max_chars;
+        if (field.default) input.value = String(field.default);
+      }
+      input.className = 'clarify-form-input';
+      input.id = 'clarify-' + field.name;
+      input.setAttribute('data-clarify-field', field.name);
+      input.setAttribute('data-clarify-type', field.type);
+      if (field.required) input.setAttribute('data-clarify-required', '1');
+
+      // Auto-prefill: a confirmed value from the prefill scan wins over
+      // any author-supplied default. Mark the field so the user sees
+      // it's a system inference (CSS hook + data attribute) and a
+      // future submit handler could distinguish "user-typed" from
+      // "auto-confirmed". The user can still edit/replace as normal.
+      if (confirmedEntry !== undefined) {
+        const confirmedValue = confirmedEntry.value;
+        if (confirmedValue !== null && confirmedValue !== undefined) {
+          if (field.type === 'bool') {
+            const boolStr = (confirmedValue === true || confirmedValue === 'true')
+              ? 'true' : 'false';
+            input.value = boolStr;
+          } else {
+            input.value = String(confirmedValue);
+          }
+        }
+        input.classList.add('clarify-form-input-confirmed');
+        input.setAttribute('data-clarify-confirmed', '1');
+        input.setAttribute(
+          'data-clarify-source', String(confirmedEntry.source || 'auto_prefill'),
+        );
+      }
+
+      row.appendChild(input);
+
+      // Inline marker line below the input — the per-row hint that
+      // tells the user "we filled this from earlier context, edit
+      // freely if it's wrong" or "we noticed something here but
+      // couldn't pin it down".
+      if (confirmedEntry !== undefined) {
+        const marker = document.createElement('div');
+        marker.className = 'clarify-form-row-marker clarify-form-row-marker-confirmed';
+        marker.textContent = clarifyText(
+          '✓ 已自动识别，可编辑修改',
+          '✓ auto-detected from earlier — edit if needed',
+        );
+        row.appendChild(marker);
+      } else if (ambiguousEntry !== undefined) {
+        const marker = document.createElement('div');
+        marker.className = 'clarify-form-row-marker clarify-form-row-marker-ambiguous';
+        const reason = ambiguousEntry.reason
+          ? clarifyText('（' + ambiguousEntry.reason + '）', ' (' + ambiguousEntry.reason + ')')
+          : '';
+        marker.textContent = clarifyText(
+          '⚠ 不太确定，请填写' + reason,
+          '⚠ unclear, please specify' + reason,
+        );
+        row.appendChild(marker);
+      }
+
+      form.appendChild(row);
+    });
+
+    const actions = document.createElement('div');
+    actions.className = 'clarify-form-actions';
+
+    const submitBtn = document.createElement('button');
+    submitBtn.type = 'submit';
+    submitBtn.className = 'clarify-form-submit';
+    submitBtn.textContent = clarifyText('提交', 'Submit');
+    actions.appendChild(submitBtn);
+
+    const cancelKeyword = (
+      Array.isArray(schema.cancel_keywords) && schema.cancel_keywords.length > 0
+        ? schema.cancel_keywords[0]
+        : ''
+    );
+    if (cancelKeyword) {
+      const cancelBtn = document.createElement('button');
+      cancelBtn.type = 'button';
+      cancelBtn.className = 'clarify-form-cancel';
+      cancelBtn.textContent = clarifyText('取消', 'Cancel');
+      cancelBtn.addEventListener('click', () => {
+        const sessionKey = _currentSessionKey();
+        _rpc.call('chat.send', {
+          message: cancelKeyword,
+          sessionKey: sessionKey,
+          intent: 'clarify_cancel',
+        }).catch((err) => {
+          UI.toast(clarifyText('取消失败: ', 'Cancel failed: ') + (err && err.message || err), 'error');
+        });
+        submitBtn.disabled = true;
+        cancelBtn.disabled = true;
+      });
+      actions.appendChild(cancelBtn);
+    }
+    form.appendChild(actions);
+
+    form.addEventListener('submit', (evt) => {
+      evt.preventDefault();
+      const collected = {};
+      let firstErrorEl = null;
+      form.querySelectorAll('[data-clarify-field]').forEach((el) => {
+        const name = el.getAttribute('data-clarify-field');
+        const type = el.getAttribute('data-clarify-type');
+        const required = el.getAttribute('data-clarify-required') === '1';
+        let value = el.value;
+        if (typeof value === 'string') value = value.trim();
+        if (value === '' || value === null) {
+          if (required && !firstErrorEl) firstErrorEl = el;
+          return; // omit empty (RPC handler skips empties)
+        }
+        if (type === 'int') {
+          const parsed = parseInt(value, 10);
+          if (Number.isNaN(parsed)) {
+            if (!firstErrorEl) firstErrorEl = el;
+            return;
+          }
+          collected[name] = parsed;
+        } else if (type === 'bool') {
+          collected[name] = (value === 'true');
+        } else {
+          collected[name] = value;
+        }
+      });
+      if (firstErrorEl) {
+        firstErrorEl.focus();
+        UI.toast(clarifyText('请检查必填字段', 'Please check required fields'), 'warn');
+        return;
+      }
+      if (Object.keys(collected).length === 0) {
+        UI.toast(clarifyText('请至少填写一个字段', 'Please fill in at least one field'), 'warn');
+        return;
+      }
+      submitBtn.disabled = true;
+      const sessionKey = _currentSessionKey();
+      _rpc.call('chat.clarify_submit', {
+        sessionKey: sessionKey,
+        run_id: runId,
+        fields: collected,
+      }).catch((err) => {
+        submitBtn.disabled = false;
+        UI.toast(clarifyText('提交失败: ', 'Submit failed: ') + (err && err.message || err), 'error');
+      });
+    });
+
+    card.appendChild(form);
+    body.appendChild(card);
+    if (_autoScroll) _scrollToBottom();
+  }
+
+  function _appendClarifySkipSummary(payload, args) {
+    // Render a lightweight "trust gap" card for a user_input step
+    // that was auto-skipped by its ``when:`` expression. The user
+    // sees what the system inferred without the form being forced
+    // back open, but still gets a clear way to undo if the
+    // inference was wrong.
+    const summary = args.clarify_skip_summary || {};
+    const stepId = String(summary.step_id || args.skill || '');
+    const fields = Array.isArray(summary.fields) ? summary.fields : [];
+    const inferredFrom = Array.isArray(summary.inferred_from) ? summary.inferred_from : [];
+    const trigger = String(summary.trigger_message || '');
+    const label = String(summary.label || '');
+
+    // Localise the default label when the page is Chinese.
+    const pageLang = /[一-鿿]/.test(
+      (trigger + ' ' + label + ' ' + (fields[0] && fields[0].prompt || '')),
+    ) ? 'zh' : 'en';
+    const localized = (zh, en) => pageLang === 'zh' ? zh : en;
+
+    const bubble = _ensureStreamBubble();
+    const body = bubble.querySelector('.msg-body');
+
+    const card = document.createElement('div');
+    card.className = 'clarify-skip-summary chat-tools-collapse';
+    card.setAttribute('data-clarify-skip-step', stepId);
+
+    const header = document.createElement('div');
+    header.className = 'clarify-skip-summary-header';
+    header.textContent = localized(
+      '系统已从对话上下文中推断了答案 (' + stepId + ')',
+      'System inferred answers from conversation context (' + stepId + ')',
+    );
+    card.appendChild(header);
+
+    if (label) {
+      const note = document.createElement('div');
+      note.className = 'clarify-skip-summary-note';
+      // ``label`` is server-generated copy, not user content — safe as textContent.
+      note.textContent = label;
+      card.appendChild(note);
+    }
+
+    if (trigger) {
+      const triggerEl = document.createElement('div');
+      triggerEl.className = 'clarify-skip-summary-trigger';
+      triggerEl.textContent = localized('您说: ', 'You said: ') + trigger;
+      card.appendChild(triggerEl);
+    }
+
+    if (fields.length > 0) {
+      const fieldsHeader = document.createElement('div');
+      fieldsHeader.className = 'clarify-skip-summary-fields-header';
+      fieldsHeader.textContent = localized(
+        '系统本可询问以下字段，但已根据上下文推断：',
+        'Fields the system would have asked for, now inferred from context:',
+      );
+      card.appendChild(fieldsHeader);
+      const fieldList = document.createElement('ul');
+      fieldList.className = 'clarify-skip-summary-fields';
+      fields.forEach((field) => {
+        if (!field || typeof field.name !== 'string') return;
+        const li = document.createElement('li');
+        const requiredFlag = field.required
+          ? ' ' + localized('（必填）', '(required)')
+          : '';
+        li.textContent = field.name + requiredFlag + (field.prompt ? ' — ' + field.prompt : '');
+        fieldList.appendChild(li);
+      });
+      card.appendChild(fieldList);
+    }
+
+    if (inferredFrom.length > 0) {
+      const inferHeader = document.createElement('div');
+      inferHeader.className = 'clarify-skip-summary-inferred-header';
+      inferHeader.textContent = localized(
+        '推断依据：',
+        'Inferred from:',
+      );
+      card.appendChild(inferHeader);
+      inferredFrom.forEach((entry) => {
+        if (!entry || typeof entry.excerpt !== 'string') return;
+        const block = document.createElement('div');
+        block.className = 'clarify-skip-summary-inferred-entry';
+        const stepLabel = document.createElement('span');
+        stepLabel.className = 'clarify-skip-summary-inferred-step';
+        stepLabel.textContent = '[' + (entry.step || '') + '] ';
+        block.appendChild(stepLabel);
+        const excerpt = document.createElement('span');
+        excerpt.className = 'clarify-skip-summary-inferred-excerpt';
+        excerpt.textContent = entry.excerpt;
+        block.appendChild(excerpt);
+        card.appendChild(block);
+      });
+    }
+
+    const hint = document.createElement('div');
+    hint.className = 'clarify-skip-summary-hint';
+    hint.textContent = localized(
+      '若发现理解有误，请直接回复 "修改 <字段名>" 或重新描述需求。',
+      'If anything looks wrong, reply "change <field>" or restate your request.',
+    );
+    card.appendChild(hint);
+
+    body.appendChild(card);
+    _maybeScrollToBottom();
+  }
+
+  function _currentSessionKey() {
+    // Read the module-private _sessionKey populated at chat init / nav
+    // (see ~line 12, 890, 933). Fallback to the documented WebChat
+    // default if not yet set (rare race during very first paint).
+    return _sessionKey || 'default';
   }
 
   function _appendArtifact(payload) {
     if (!payload) return;
+    _chatDiag('artifact.append.start', _chatDiagSummarizePayload(payload));
     _streamArtifacts.push(payload);
     const bubble = _ensureStreamBubble();
+    _markVisibleStreamEvent('artifact');
     const body = bubble.querySelector('.msg-body');
     body.insertAdjacentHTML('beforeend', _renderArtifacts([payload]));
     if (_autoScroll) _scrollToBottom();
+    _chatDiag('artifact.append.done', _chatDiagSummarizePayload(payload));
   }
 
   function _renderStreamArtifacts() {
@@ -4936,9 +8060,11 @@ const ChatView = (() => {
   function _artifactCategory(artifact) {
     const mime = _artifactMime(artifact);
     if (mime.startsWith('image/')) return 'visual';
+    if (mime.startsWith('audio/')) return 'audio';
     if (ARTIFACT_MIME_CATEGORIES[mime]) return ARTIFACT_MIME_CATEGORIES[mime];
     if (!mime || mime === 'application/octet-stream' || mime === 'artifact') {
       const ext = _artifactExtension(_artifactName(artifact));
+      if (['mp3', 'wav', 'm4a', 'aac', 'ogg', 'oga', 'opus', 'flac', 'webm'].includes(ext)) return 'audio';
       if (ARTIFACT_EXTENSION_CATEGORIES[ext]) return ARTIFACT_EXTENSION_CATEGORIES[ext];
     }
     return 'file';
@@ -4949,6 +8075,7 @@ const ChatView = (() => {
       case 'data': return 'data';
       case 'document': return 'doc';
       case 'code': return 'code';
+      case 'audio': return 'audio';
       default: return 'file';
     }
   }
@@ -4957,12 +8084,30 @@ const ChatView = (() => {
     return _artifactCategory(artifact) === 'visual';
   }
 
+  function _isAudioArtifact(artifact) {
+    return _artifactCategory(artifact) === 'audio';
+  }
+
   function _artifactPreviewUrl(artifact) {
     const raw = _artifactDownloadUrl(artifact);
     if (!raw) return '';
     try {
       const url = new URL(raw, window.location.origin);
       if (_sessionKey) url.searchParams.set('sessionKey', _sessionKey);
+      const token = (App.getAuthToken && App.getAuthToken()) || '';
+      if (token) url.searchParams.set('token', token);
+      return url.pathname + url.search + url.hash;
+    } catch {
+      return raw;
+    }
+  }
+
+  function _artifactAuthenticatedDownloadUrl(raw, token) {
+    if (!raw) return '';
+    try {
+      const url = new URL(raw, window.location.origin);
+      if (_sessionKey) url.searchParams.set('sessionKey', _sessionKey);
+      if (token) url.searchParams.set('token', token);
       return url.pathname + url.search + url.hash;
     } catch {
       return raw;
@@ -4973,6 +8118,7 @@ const ChatView = (() => {
     if (!Array.isArray(artifacts) || artifacts.length === 0) return '';
     let html = '<div class="msg-artifacts">';
     let openGroup = '';
+    const token = (App.getAuthToken && App.getAuthToken()) || '';
     const closeGroup = () => {
       if (!openGroup) return;
       html += '</div>';
@@ -4992,23 +8138,33 @@ const ChatView = (() => {
       const mime = artifact && artifact.mime ? String(artifact.mime) : 'artifact';
       const size = artifact && artifact.size ? `${Math.max(1, Math.round(Number(artifact.size) / 1024))} KB` : '';
       const downloadUrl = _artifactDownloadUrl(artifact || {});
+      const downloadHref = _artifactAuthenticatedDownloadUrl(downloadUrl, token);
       const meta = [mime, size].filter(Boolean).join(' · ');
       if (_isImageArtifact(artifact)) {
         const previewUrl = _artifactPreviewUrl(artifact || {});
-        html += `<button type="button" class="msg-artifact-card msg-artifact-card--image" data-artifact-category="${_esc(category)}" data-artifact-download="${_esc(downloadUrl)}" data-artifact-id="${_esc(artifact?.id || '')}" data-artifact-name="${_esc(name)}" title="Download ${_esc(name)}">
+        html += `<a class="msg-artifact-card msg-artifact-card--image" href="${_escAttr(downloadHref)}" download="${_escAttr(name)}" data-artifact-category="${_escAttr(category)}" data-artifact-download="${_escAttr(downloadUrl)}" data-artifact-id="${_escAttr(artifact?.id || '')}" data-artifact-name="${_escAttr(name)}" title="Download ${_escAttr(name)}">
           ${previewUrl ? `<img class="msg-artifact-preview" src="${_esc(previewUrl)}" alt="${_esc(name)}" loading="lazy">` : '<span class="msg-artifact-preview msg-artifact-preview--empty" aria-hidden="true"></span>'}
           <span class="msg-artifact-card__body">
             <span class="msg-artifact-card__name">${_esc(name)}</span>
             <span class="msg-artifact-card__meta">${_esc(meta)}</span>
           </span>
           <span class="msg-artifact-card__action" aria-hidden="true">Download</span>
-        </button>`;
+        </a>`;
+      } else if (_isAudioArtifact(artifact)) {
+        html += `<div class="msg-artifact-card msg-artifact-card--audio" data-artifact-category="${_escAttr(category)}" data-artifact-id="${_escAttr(artifact?.id || '')}" data-artifact-name="${_escAttr(name)}">
+          <audio class="msg-artifact-audio" controls preload="metadata" src="${_escAttr(downloadHref)}"></audio>
+          <span class="msg-artifact-card__body">
+            <span class="msg-artifact-card__name">${_esc(name)}</span>
+            <span class="msg-artifact-card__meta">${_esc(meta)}</span>
+          </span>
+          <a class="msg-artifact-card__action" href="${_escAttr(downloadHref)}" download="${_escAttr(name)}" data-artifact-download="${_escAttr(downloadUrl)}">Download</a>
+        </div>`;
       } else {
-        html += `<button type="button" class="msg-artifact-chip" data-artifact-category="${_esc(category)}" data-artifact-download="${_esc(downloadUrl)}" data-artifact-id="${_esc(artifact?.id || '')}" data-artifact-name="${_esc(name)}" title="${_esc(name)}">
+        html += `<a class="msg-artifact-chip" href="${_escAttr(downloadHref)}" download="${_escAttr(name)}" data-artifact-category="${_escAttr(category)}" data-artifact-download="${_escAttr(downloadUrl)}" data-artifact-id="${_escAttr(artifact?.id || '')}" data-artifact-name="${_escAttr(name)}" title="${_escAttr(name)}">
           <span class="msg-file-chip__icon" aria-hidden="true">${_esc(_artifactCategoryLabel(category))}</span>
           <span class="msg-file-chip__name">${_esc(name)}</span>
           <span class="msg-file-chip__meta">${_esc(meta)}</span>
-        </button>`;
+        </a>`;
       }
     });
     closeGroup();
@@ -5017,12 +8173,13 @@ const ChatView = (() => {
   }
 
   async function _downloadArtifact(artifact) {
-    const downloadUrl = _artifactDownloadUrl(artifact);
+    let downloadUrl = _artifactDownloadUrl(artifact);
     if (!downloadUrl) return;
     const headers = {};
     const token = (App.getAuthToken && App.getAuthToken()) || '';
     if (token) headers['Authorization'] = `Bearer ${token}`;
     if (_sessionKey) headers['x-opensquilla-session-key'] = _sessionKey;
+    downloadUrl = _artifactAuthenticatedDownloadUrl(downloadUrl, token);
     const response = await fetch(downloadUrl, {
       method: 'GET',
       headers: headers,
@@ -5053,9 +8210,11 @@ const ChatView = (() => {
 
       // Build tool_use_id → tool name map so tool_result segments can look up the name
       const _toolNameById = {};
+      const _toolInputById = {};
       for (const seg of segments) {
         if (seg.type === 'tool_use' && seg.tool_use_id) {
           _toolNameById[seg.tool_use_id] = seg.name || 'tool';
+          _toolInputById[seg.tool_use_id] = seg.input || null;
         }
       }
 
@@ -5070,27 +8229,38 @@ const ChatView = (() => {
           Markdown.bindHighlight(textDiv);
           body.appendChild(textDiv);
         } else if (seg.type === 'tool_use') {
+          if (_isControlPlaneToolName(seg.name || '')) continue;
           if (_findToolDetailsById(body, seg.tool_use_id || '')) continue;
           const details = _buildToolCallDOM(seg.name || 'tool', seg.tool_use_id || '', seg.input || '', false);
+          details._opensquillaToolInput = seg.input || null;
           body.appendChild(details);
         } else if (seg.type === 'tool_result') {
           const toolId = seg.tool_use_id || '';
           const isError = _toolResultIsError(seg);
-          const content = seg.result || '';
+          const content = _toolResultContent(seg);
+          const resultToolName = seg.name || _toolNameById[toolId] || '';
+          if (_isControlPlaneToolName(resultToolName)) continue;
 
           if (toolId) {
             const details = _findToolDetailsById(body, toolId);
             if (details) {
+              _retitleToolCallDOM(details, resultToolName, seg.input || '');
+              details._opensquillaToolInput = details._opensquillaToolInput || _toolInputById[toolId] || null;
               details.classList.remove('chat-tools-collapse--running');
               details.classList.add(_toolResultStateClass(seg));
               const toolsBody = details.querySelector('.chat-tools-body');
               const resultTarget = toolsBody || details;
               if (_findToolResultById(resultTarget, toolId)) continue;
+              const clarifyArgs = _clarifyArgsFromHistoricalSegment(seg, details);
+              if (clarifyArgs) {
+                _appendClarifyFormToBody(body, seg, clarifyArgs);
+                continue;
+              }
               const resultDiv = _buildToolResultDOM(
                 content,
                 isError,
                 _toolResultIsTruncated(seg),
-                _toolNameById[toolId] || ''
+                resultToolName
               );
               if (resultDiv) {
                 resultDiv.setAttribute('data-tool-result-for', toolId);
@@ -5098,7 +8268,7 @@ const ChatView = (() => {
               }
 
               // web_search: inject provider badge and seed _searchProvider from persisted result
-              if (_toolNameById[toolId] === 'web_search' && content) {
+              if (resultToolName === 'web_search' && content) {
                 const provider = _toolResultProvider(seg, content);
                 if (provider) {
                   _setSearchProvider(provider, { refreshRunning: false });
@@ -5228,10 +8398,7 @@ const ChatView = (() => {
     const div = document.createElement('div');
     div.className = 'msg ' + displayRole;
 
-    const roleText = displayRole === 'user' ? 'You'
-      : displayRole === 'assistant' ? 'Assistant'
-      : displayRole === 'subagent' ? 'Sub-agent'
-      : displayRole.charAt(0).toUpperCase() + displayRole.slice(1);
+    const roleText = _displayRoleLabel(displayRole);
 
     // Collapse header for consecutive same-speaker messages within the same day.
     // Always show for system/error/tool roles.
@@ -5245,7 +8412,7 @@ const ChatView = (() => {
       const header = document.createElement('div');
       header.className = 'msg-header';
       if (isoStr) header.title = new Date(isoStr).toLocaleString();
-      header.innerHTML = `<span class="role-label">${roleText}</span>${_renderMessageTags(options)}<span class="msg-time">${_esc(timeStr)}</span>`;
+      header.innerHTML = `<span class="role-label">${_esc(roleText)}</span>${_renderMessageTags(options)}<span class="msg-time">${_esc(timeStr)}</span>`;
       div.appendChild(header);
     } else {
       // No header; attach ISO timestamp as title on the bubble body for hover tooltip
@@ -5289,16 +8456,136 @@ const ChatView = (() => {
 
   /* ── Attachments ────────────────────────────────────────────────────── */
 
+  function _estimateTextTokens(text) {
+    return text ? Math.max(1, Math.floor(text.length / 4)) : 0;
+  }
+
+  function _pageDumpMarkerScore(text) {
+    const lowered = String(text || '').toLowerCase();
+    return PAGE_DUMP_MARKERS.reduce((score, marker) => (
+      lowered.includes(marker.toLowerCase()) ? score + 1 : score
+    ), 0);
+  }
+
+  function _bytesToBase64(bytes) {
+    const chunkSize = 0x8000;
+    const chunks = [];
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      chunks.push(String.fromCharCode(...bytes.subarray(i, i + chunkSize)));
+    }
+    return btoa(chunks.join(''));
+  }
+
+  function _largePasteAttachmentName(kind) {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '-').replace('Z', '');
+    return `${kind === 'page_dump' ? 'webchat-page-dump' : 'webchat-paste'}-${stamp}.txt`;
+  }
+
+  function _nonNegativeInteger(value) {
+    const number = Number(value);
+    if (!Number.isFinite(number) || number < 0) return 0;
+    return Math.floor(number);
+  }
+
+  function _inputNormalizationProvenanceFromAttachments(attachments) {
+    const generated = (attachments || [])
+      .filter((a) => a && a.generated === true && a.inputNormalization);
+    if (!generated.length) return null;
+    const meta = generated[0].inputNormalization || {};
+    return {
+      kind: 'web_message',
+      source: 'WebChat',
+      input_normalization: {
+        source: 'input_normalization',
+        original_chars: _nonNegativeInteger(meta.originalChars),
+        material_estimated_tokens: _nonNegativeInteger(meta.materialEstimatedTokens),
+        marker_score: _nonNegativeInteger(meta.markerScore),
+        generated_attachment_count: generated.length,
+        guard_action: meta.guardAction || 'generated_text_attachment',
+      },
+    };
+  }
+
+  async function _normalizeOutgoingComposerPayload(text, attachments, options = {}) {
+    const raw = String(text || '');
+    const markerScore = _pageDumpMarkerScore(raw);
+    const isPageDump = raw.length >= PAGE_DUMP_CHARS && markerScore >= PAGE_DUMP_MARKER_MIN_SCORE;
+    const isLargePaste = raw.length >= LARGE_PASTE_CHARS;
+    if (options.allowSlashCommand && raw.startsWith('/')) {
+      return {
+        text: raw,
+        displayText: raw,
+        attachments: attachments.map((a) => ({ ...a })),
+        normalized: null,
+      };
+    }
+    if (!isPageDump && !isLargePaste) {
+      return {
+        text: raw,
+        displayText: raw,
+        attachments: attachments.map((a) => ({ ...a })),
+        normalized: null,
+      };
+    }
+
+    const kind = isPageDump ? 'page_dump' : 'large_paste';
+    const bytes = new TextEncoder().encode(raw);
+    const materialEstimatedTokens = _estimateTextTokens(raw);
+    if (bytes.length > ATTACHMENT_TEXT_HARD_CAP_BYTES) {
+      UI.toast(
+        `Pasted text is too large to attach directly (${Math.round(bytes.length / 1000 / 1000)} MB). Save it as a file or send a shorter summary.`,
+        'warn',
+        6000,
+      );
+      return null;
+    }
+
+    const encoded = _bytesToBase64(bytes);
+    const generatedAttachment = {
+      kind: 'inline',
+      local_id: _nextAttachmentId++,
+      name: _largePasteAttachmentName(kind),
+      mime: 'text/plain',
+      size: bytes.length,
+      data: encoded,
+      dataUrl: `data:text/plain;base64,${encoded}`,
+      generated: true,
+      normalizationKind: kind,
+      inputNormalization: {
+        kind,
+        originalChars: raw.length,
+        markerScore,
+        materialEstimatedTokens,
+        guardAction: 'generated_text_attachment',
+      },
+    };
+    const message = kind === 'page_dump'
+      ? 'Please process the attached WebChat page dump.'
+      : 'Please process the attached pasted text.';
+    UI.toast('Large pasted text was attached as a .txt file.', 'info', 2500);
+    return {
+      text: message,
+      displayText: message,
+      attachments: [...attachments.map((a) => ({ ...a })), generatedAttachment],
+      normalized: {
+        kind,
+        originalChars: raw.length,
+        markerScore,
+        materialEstimatedTokens,
+      },
+    };
+  }
+
   function _addAttachment(file) {
     const mime = _resolveAttachmentMime(file);
     if (!_isAllowedAttachmentMime(mime)) {
       UI.toast(`Unsupported file: ${file.name || 'attachment'} (${mime}). Allowed: ${ATTACHMENT_ALLOWED_LABEL}`, 'warn', 4500);
-      return;
+      return false;
     }
     const hardCap = _attachmentHardCapBytes(mime);
     if (file.size > hardCap) {
       UI.toast(`File too large: ${file.name || 'attachment'} (max ${Math.round(hardCap / 1024 / 1024)} MB)`, 'warn');
-      return;
+      return false;
     }
 
     const localId = _nextAttachmentId++;
@@ -5337,7 +8624,7 @@ const ChatView = (() => {
         UI.toast(`Could not read file: ${file.name || 'attachment'}`, 'warn');
       };
       reader.readAsDataURL(file);
-      return;
+      return true;
     }
 
     if (!_canStageAttachmentMime(mime)) {
@@ -5346,7 +8633,7 @@ const ChatView = (() => {
         'warn',
         4500,
       );
-      return;
+      return false;
     }
 
     _pendingAttachments.push({
@@ -5361,6 +8648,7 @@ const ChatView = (() => {
       _removeAttachmentByLocalId(localId);
       UI.toast(`Upload failed for ${file.name || 'attachment'}: ${err && err.message || err}`, 'warn', 4500);
     });
+    return true;
   }
 
   async function _uploadAttachmentStaged(file, mime, localId) {
@@ -5399,6 +8687,134 @@ const ChatView = (() => {
     _renderAttachmentPreview();
   }
 
+  async function _onVoiceInputToggle() {
+    if (_voiceInputBusy) return;
+    if (_mediaRecorder && _mediaRecorder.state === 'recording') {
+      _mediaRecorder.stop();
+      return;
+    }
+    await _startVoiceInputRecording();
+  }
+
+  async function _startVoiceInputRecording() {
+    if (!window.isSecureContext && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+      UI.toast('Voice input requires HTTPS on public URLs.', 'warn', 4500);
+      return;
+    }
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') {
+      UI.toast('Voice input is not available in this browser.', 'warn', 3500);
+      return;
+    }
+    try {
+      _voiceInputBusy = true;
+      _setVoiceInputState('requesting');
+      _recordedAudioChunks = [];
+      _recordingStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mimeType = MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported('audio/webm')
+        ? 'audio/webm'
+        : '';
+      _mediaRecorder = mimeType
+        ? new MediaRecorder(_recordingStream, { mimeType })
+        : new MediaRecorder(_recordingStream);
+      _mediaRecorder.addEventListener('dataavailable', (event) => {
+        if (event.data && event.data.size > 0) _recordedAudioChunks.push(event.data);
+      });
+      _mediaRecorder.addEventListener('stop', () => {
+        _finishVoiceInputRecording().catch((err) => {
+          UI.toast(`Voice transcription failed: ${err && err.message || err}`, 'warn', 4500);
+          _setVoiceInputState('idle');
+        });
+      }, { once: true });
+      _mediaRecorder.start();
+      _setVoiceInputState('recording');
+      UI.toast('Recording voice input...', 'info', 1600);
+    } catch (err) {
+      UI.toast(`Could not start voice input: ${err && err.message || err}`, 'warn', 4500);
+      _stopVoiceInputTracks();
+      _setVoiceInputState('idle');
+    } finally {
+      _voiceInputBusy = false;
+    }
+  }
+
+  async function _finishVoiceInputRecording() {
+    _stopVoiceInputTracks();
+    const mime = (_mediaRecorder && _mediaRecorder.mimeType) || 'audio/webm';
+    _mediaRecorder = null;
+    if (!_recordedAudioChunks.length) {
+      _setVoiceInputState('idle');
+      UI.toast('No voice audio was recorded.', 'warn', 2500);
+      return;
+    }
+    _setVoiceInputState('transcribing');
+    _voiceInputBusy = true;
+    try {
+      const blob = new Blob(_recordedAudioChunks, { type: mime });
+      const text = await _transcribeVoiceInput(blob, mime);
+      if (!text) {
+        UI.toast('Voice transcription returned no text.', 'warn', 3000);
+        return;
+      }
+      _appendTranscribedText(text);
+      UI.toast('Voice input transcribed.', 'info', 2200);
+    } finally {
+      _recordedAudioChunks = [];
+      _voiceInputBusy = false;
+      _setVoiceInputState('idle');
+    }
+  }
+
+  async function _transcribeVoiceInput(blob, mime) {
+    const ext = mime.includes('mp4') ? 'm4a' : mime.includes('wav') ? 'wav' : 'webm';
+    const form = new FormData();
+    form.append('file', blob, `voice_input.${ext}`);
+    const headers = {};
+    const token = (App.getAuthToken && App.getAuthToken()) || '';
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const response = await fetch('/api/audio/transcribe', {
+      method: 'POST',
+      body: form,
+      headers: headers,
+      credentials: 'same-origin',
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error || `HTTP ${response.status}`);
+    }
+    return String(payload.text || '').trim();
+  }
+
+  function _appendTranscribedText(text) {
+    if (!_textarea) return;
+    const current = _textarea.value.trim();
+    const next = current ? `${current}\n${text}` : text;
+    _textarea.value = next;
+    _textarea.dispatchEvent(new Event('input', { bubbles: true }));
+    _textarea.focus();
+    _textarea.setSelectionRange(next.length, next.length);
+  }
+
+  function _setVoiceInputState(state) {
+    if (!_micBtn) return;
+    const recording = state === 'recording';
+    const busy = state === 'requesting' || state === 'transcribing';
+    _micBtn.classList.toggle('chat-mic-recording', recording);
+    _micBtn.disabled = busy;
+    _micBtn.title = recording
+      ? 'Stop recording'
+      : state === 'transcribing'
+        ? 'Transcribing voice input'
+        : 'Record voice input';
+    _micBtn.setAttribute('aria-label', recording ? 'Stop recording voice input' : 'Record voice input');
+  }
+
+  function _stopVoiceInputTracks() {
+    if (_recordingStream && _recordingStream.getTracks) {
+      _recordingStream.getTracks().forEach((track) => track.stop());
+    }
+    _recordingStream = null;
+  }
+
   function _resolveAttachmentMime(file) {
     const name = file && file.name ? String(file.name) : '';
     const ext = name.includes('.') ? name.split('.').pop().toLowerCase() : '';
@@ -5416,6 +8832,25 @@ const ChatView = (() => {
     _renderAttachmentPreview();
   }
 
+  function _attachmentDownloadName(att) {
+    const raw = String(att && att.name || 'attachment').trim();
+    return raw || 'attachment';
+  }
+
+  function _attachmentDownloadHref(att, mime) {
+    if (!att) return '';
+    if (att.dataUrl) {
+      const dataUrl = String(att.dataUrl).trim();
+      return /^javascript:/i.test(dataUrl) ? '' : dataUrl;
+    }
+    if (att.data) {
+      return `data:${_escAttr(mime || 'application/octet-stream')};base64,${String(att.data)}`;
+    }
+    const url = String(att.url || att.download_url || att.downloadUrl || '').trim();
+    if (url && !/^javascript:/i.test(url)) return url;
+    return '';
+  }
+
   function _renderMessageAttachmentHtml(att) {
     const mime = att.type || att.mime || '';
     const name = att.name || 'attachment';
@@ -5423,11 +8858,16 @@ const ChatView = (() => {
       const src = att.dataUrl || `data:${_esc(mime || 'image/png')};base64,${att.data}`;
       return `<img class="msg-thumb" src="${src}" alt="${_esc(name)}">`;
     }
-    return `<span class="msg-file-chip" title="${_esc(name)}">
+    const downloadName = _attachmentDownloadName(att);
+    const downloadHref = _attachmentDownloadHref(att, mime);
+    const inner = `
       <span class="msg-file-chip__icon" aria-hidden="true">file</span>
       <span class="msg-file-chip__name">${_esc(name)}</span>
-      <span class="msg-file-chip__meta">${_esc(mime || 'attachment')}</span>
-    </span>`;
+      <span class="msg-file-chip__meta">${_esc(mime || 'attachment')}</span>`;
+    if (downloadHref) {
+      return `<a class="msg-file-chip msg-file-chip--download" title="${_escAttr(name)}" href="${_escAttr(downloadHref)}" download="${_escAttr(downloadName)}">${inner}</a>`;
+    }
+    return `<span class="msg-file-chip msg-file-chip--disabled" title="${_escAttr(name)}">${inner}</span>`;
   }
 
   function _renderAttachmentPreview() {
@@ -5446,7 +8886,7 @@ const ChatView = (() => {
       if (isImage && att.dataUrl) {
         html += `<div class="attachment-thumb">
           <img src="${att.dataUrl}" alt="${_esc(att.name)}">
-          <button class="attachment-remove" data-idx="${i}">&times;</button>
+          <button class="attachment-remove" data-idx="${i}" aria-label="Remove attachment ${_esc(att.name)}">&times;</button>
           <span class="attachment-name">${_esc(att.name)}</span>
         </div>`;
       } else {
@@ -5458,7 +8898,7 @@ const ChatView = (() => {
           <span class="attachment-chip__icon" aria-hidden="true">${isBusy ? '<span class="spinner attachment-chip__spinner"></span>' : 'file'}</span>
           <span class="attachment-chip__name">${_esc(att.name)}</span>
           <span class="attachment-chip__meta">${_esc(meta)}</span>
-          <button class="attachment-remove" data-idx="${i}" title="Remove">&times;</button>
+          <button class="attachment-remove" data-idx="${i}" title="Remove" aria-label="Remove attachment ${_esc(att.name)}">&times;</button>
         </div>`;
       }
     });
@@ -5481,7 +8921,7 @@ const ChatView = (() => {
     let md = `# Chat Export \u2014 ${_sessionKey}\n\n`;
     md += `Exported: ${new Date().toISOString()}\n\n---\n\n`;
     _messages.forEach((msg) => {
-      const role = msg.role === 'user' ? 'You' : msg.role === 'assistant' ? 'Assistant' : msg.role;
+      const role = _displayRoleLabel(msg.role) || msg.role;
       const time = msg.ts ? ` _(${new Date(msg.ts).toLocaleString()})_` : '';
       md += `### ${role}${time}\n\n${msg.text}${_artifactMarkdownLines(msg.artifacts || [])}\n\n---\n\n`;
     });
@@ -5523,11 +8963,12 @@ const ChatView = (() => {
 
   /* ── Pending Queue ──────────────────────────────────────────────────── */
 
-  function _onStop() {
+  function _onStop(source = 'webui_stop_button') {
     if (!_isStreaming) return;
+    if (typeof source !== 'string' || !source) source = 'webui_stop_button';
     _stopRequestedByUser = true;
     _aborted = true;
-    _rpc.call('chat.abort', { sessionKey: _sessionKey }).catch(() => {});
+    _rpc.call('chat.abort', { sessionKey: _sessionKey, source }).catch(() => {});
     _endStreaming({ reason: 'aborted' });
     // Recover queued messages back into the composer so the user can edit
     // and resend rather than losing them. Idempotent on empty queue.
@@ -5588,7 +9029,12 @@ const ChatView = (() => {
     _pendingArea.innerHTML = html;
   }
 
-  function _enqueuePendingInput(text, toastMessage = null, waitReason = 'the current response') {
+  function _enqueuePendingInput(
+    text,
+    toastMessage = null,
+    waitReason = 'the current response',
+    attachmentsOverride = null,
+  ) {
     if (_pendingQueue.length >= _MAX_PENDING) {
       UI.toast(
         `Pending queue full (${_MAX_PENDING}). Wait for ${waitReason} or clear.`,
@@ -5597,9 +9043,10 @@ const ChatView = (() => {
       );
       return false;
     }
+    const queuedAttachments = attachmentsOverride || _pendingAttachments;
     _pendingQueue.push({
       text,
-      attachments: _pendingAttachments.map((a) => ({ ...a })),
+      attachments: queuedAttachments.map((a) => ({ ...a })),
       intent: _pendingSessionIntent,
     });
     _textarea.value = '';
@@ -5705,6 +9152,15 @@ const ChatView = (() => {
     return true;
   }
 
+  function _recoverPendingAfterTerminal(status = 'failed') {
+    const recovered = _popAllPendingIntoComposer();
+    if (recovered) {
+      const label = _runStatusLabel(_normalizeRunStatus(status)).toLowerCase();
+      UI.toast(`Pending message recovered after ${label}`, 'warn', 2500);
+    }
+    return recovered;
+  }
+
   function _clearPendingDrainAfterTerminalTimer() {
     if (_pendingDrainAfterTerminalTimer) {
       clearTimeout(_pendingDrainAfterTerminalTimer);
@@ -5755,6 +9211,7 @@ const ChatView = (() => {
     } else if (options && options.recoverPending) {
       recovered = _popAllPendingIntoComposer();
     }
+    if (_isStreaming && !_streamBubble) _showThinkingIndicator();
     return recovered;
   }
 
@@ -5813,11 +9270,27 @@ const ChatView = (() => {
   // Enqueue the current textarea content into _pendingQueue. Mirrors the
   // streaming-branch logic in _onSend so Alt+↓ produces the same shape of
   // entry as "Send during streaming".
-  function _enqueueCurrentInput() {
-    const text = _textarea.value.trim();
-    const hasPayload = text || _pendingAttachments.length > 0;
+  async function _enqueueCurrentInput() {
+    let text = _textarea.value.trim();
+    let hasPayload = text || _pendingAttachments.length > 0;
+    let isLiteralSlash = false;
+    if (text.startsWith('//')) {
+      isLiteralSlash = true;
+      text = text.slice(1);
+      hasPayload = text || _pendingAttachments.length > 0;
+    }
+    const isSlashCommand = !isLiteralSlash && text.startsWith('/')
+      && !!(await _lookupSlashCommand(text));
     if (!hasPayload) return false;
-    return _enqueuePendingInput(text);
+    const normalized = await _normalizeOutgoingComposerPayload(
+      text,
+      _pendingAttachments,
+      { allowSlashCommand: isSlashCommand },
+    );
+    if (!normalized) return false;
+    text = normalized.text;
+    _pendingAttachments = normalized.attachments;
+    return _enqueuePendingInput(text, null, 'the current response', normalized.attachments);
   }
 
   function _updateStopButton() {
@@ -5828,6 +9301,7 @@ const ChatView = (() => {
   /* ── Destroy ────────────────────────────────────────────────────────── */
 
   function destroy() {
+    if (App.clearTopbarCenter) App.clearTopbarCenter();
     _viz.destroy();
     _clearActiveTaskGroups();
     _unsubscribeSession();
@@ -5839,13 +9313,15 @@ const ChatView = (() => {
     // Clear the root --composer-h so other views' toasts don't keep that offset.
     document.documentElement.style.removeProperty('--composer-h');
     if (_isStreaming) _endStreaming();
+    _clearStreamActiveMarkReveal();
     _hideThinkingIndicator();
+    _cancelPendingRouterFxScan('destroy');
     if (_renderRafId) { cancelAnimationFrame(_renderRafId); _renderRafId = null; }
     _renderDirty = false;
     _closeSlashMenu();
     _clearPendingDrainAfterTerminalTimer();
     _setCompactInFlight(false);
-    _hideCompactStatus();
+    _hideCompactionSeparator();
     _pendingAttachments = [];
     _pendingQueue = [];
     _stopRequestedByUser = false;
@@ -5870,9 +9346,14 @@ const ChatView = (() => {
     _elevatedPill = null;
     _composer = null;
     _streamBubble = null;
+    _streamSessionKey = '';
     _streamRaw = '';
     _segments = []; _activeTextSeg = null; _activeTextRaw = '';
     _streamArtifacts = [];
+    _lastVisibleStreamEvent = '';
+    _liveStreamStateBySession.clear();
+    _streamSeqBySession.clear();
+    _lastStreamSeq = 0;
     _el = null;
     _rpc = null;
   }

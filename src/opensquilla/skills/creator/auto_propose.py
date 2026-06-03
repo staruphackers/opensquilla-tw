@@ -149,10 +149,20 @@ class AutoProposeResult:
         )
 
 
+def _chain_signature(skills: list[str], intent_digest: str = "") -> str:
+    """Stable identifier for a chain including order and intent context."""
+    payload = {
+        "skills": list(skills),
+        "intent_digest": str(intent_digest or "").strip(),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()[:16]
+
+
 def _chain_hash(skills: list[str]) -> str:
-    """Stable identifier for a co-occurrence chain (order-insensitive)."""
-    joined = "|".join(sorted(skills))
-    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+    """Backward-compatible ordered chain identifier without intent context."""
+    return _chain_signature(skills, "")
 
 
 def _existing_chain_hashes(proposals_dir: Path) -> set[str]:
@@ -171,9 +181,10 @@ def _existing_chain_hashes(proposals_dir: Path) -> set[str]:
         except (json.JSONDecodeError, OSError):
             continue
         prov = gates.get("provenance") or {}
-        ch = prov.get("chain_hash")
-        if isinstance(ch, str) and ch:
-            hashes.add(ch)
+        for key in ("proposal_signature", "chain_hash"):
+            ch = prov.get(key)
+            if isinstance(ch, str) and ch:
+                hashes.add(ch)
     return hashes
 
 
@@ -213,28 +224,57 @@ def _meta_skill_names(skill_loader: SkillLoader) -> set[str]:
     return {spec.name for spec in skill_loader.list_meta_specs()}
 
 
+def _available_skill_names(skill_loader: SkillLoader) -> set[str]:
+    """Names currently resolvable by the loader."""
+
+    try:
+        return {
+            spec.name
+            for spec in skill_loader.load_all()
+            if getattr(spec, "name", None)
+        }
+    except Exception:
+        return set()
+
+
 def _pattern_already_covered(skills: list[str], coverage: list[set[str]]) -> bool:
     pattern_set = set(skills)
     return any(pattern_set <= covered for covered in coverage)
 
 
-def _synthesise_user_message(skills: list[str], freq: int, window_days: int) -> str:
+def _synthesise_user_message(
+    skills: list[str],
+    freq: int,
+    window_days: int,
+    *,
+    intent_digest: str = "",
+) -> str:
     """Build a user_message string for the DAG that does NOT contain any
     meta-skill-creator trigger phrase (regression-tested)."""
     skill_list = ", ".join(skills)
     msg = (
         f"auto-proposal: candidate skill chain {{{skill_list}}} observed "
         f"{freq} times in last {window_days}d. Wrap as a new bundled "
-        f"meta-skill."
+        f"meta-skill. This unattended proposal requires FULL_GATED validation: "
+        f"run acceptance comparison, runtime E2E comparison against the "
+        f"highest-tier no-meta baseline, lint, smoke, risk checks, and proposal "
+        f"persistence before any auto-enable decision."
     )
-    # Loop-safety assertion — promoted to a hard check because the
-    # consequence of regression is real recursion in the resolver.
+    if intent_digest:
+        msg += f" Observed user-intent digest: {intent_digest[:500]}"
+    # Loop-safety check. The earlier ``assert`` form was a real safety
+    # gate, but ``python -O`` strips assertions, so a production build
+    # silently lost the recursion guard. ``raise`` keeps the check
+    # active in every build and lets the caller see a structured error
+    # instead of a silent recursion.
     lower = msg.lower()
     for trig in _META_SKILL_CREATOR_TRIGGERS:
-        assert trig.lower() not in lower, (
-            f"synthesised user_message contains meta-skill-creator trigger "
-            f"{trig!r}; auto_propose would recursively trigger itself"
-        )
+        if trig.lower() in lower:
+            raise RuntimeError(
+                f"synthesised user_message contains meta-skill-creator "
+                f"trigger {trig!r}; auto_propose would recursively trigger "
+                f"itself if this message reached the resolver",
+            )
     return msg
 
 
@@ -246,6 +286,9 @@ def _patch_gates_provenance(
     freq: int,
     window_days: int,
     chain_hash: str,
+    proposal_signature: str,
+    intent_digest: str = "",
+    source_context: str = "",
 ) -> None:
     """Add an additive ``provenance`` key to gates.json without touching
     the existing lint / smoke / auto_enable_eligible payload."""
@@ -260,10 +303,13 @@ def _patch_gates_provenance(
     gates["provenance"] = {
         "triggered_by": f"auto_{triggered_by}",
         "chain_hash": chain_hash,
+        "proposal_signature": proposal_signature,
         "auto_propose_meta": {
             "skills": list(skills),
             "freq": freq,
             "window_days": window_days,
+            "intent_digest": intent_digest,
+            "source_context": source_context,
         },
     }
     try:
@@ -433,7 +479,6 @@ def _evaluate_auto_enable_risk(
         for route in step.route:
             referenced_skills.add(route.to)
         if step.kind == "skill_exec":
-            raise_risk("medium", "direct_skill_exec")
             spec = skill_loader.get_by_name(step.skill)
             if spec is not None and not getattr(spec, "entrypoint", None):
                 raise_risk("high", f"skill_exec_without_entrypoint:{step.skill}")
@@ -578,7 +623,27 @@ def try_auto_enable_proposal(
     triggered_by: str,
     max_risk: str,
 ) -> dict[str, object]:
-    """Public wrapper used by cron/dream and manual creator persist paths."""
+    """Public wrapper used by cron/dream and manual creator persist paths.
+
+    The operator kill switch is honoured at this boundary so that
+    ``OPENSQUILLA_AUTO_PROPOSE_DISABLED=1`` halts auto-enable from
+    every call site — cron, dream, and manual creator persist —
+    without each caller having to remember to gate itself.
+    """
+    if is_auto_propose_disabled():
+        _log.info(
+            "auto_propose.kill_switch",
+            extra={
+                "proposal_id": proposal_id,
+                "triggered_by": triggered_by,
+                "path": "try_auto_enable_proposal",
+            },
+        )
+        return {
+            "decision": "refused",
+            "reason": "kill_switch_disabled",
+            "kill_switch": True,
+        }
     return _try_auto_enable_proposal(
         proposals_dir=proposals_dir,
         proposal_id=proposal_id,
@@ -586,6 +651,24 @@ def try_auto_enable_proposal(
         triggered_by=triggered_by,
         max_risk=max_risk,
     )
+
+
+# Centralised operator kill switch. Setting this env var to ``"1"``
+# halts every auto-propose entry point (cron, dream, manual creator
+# persist) so operators get a single point of control without each
+# call site having to remember to inline the check.
+_AUTO_PROPOSE_KILL_SWITCH_ENV = "OPENSQUILLA_AUTO_PROPOSE_DISABLED"
+
+
+def is_auto_propose_disabled() -> bool:
+    """Return True when the operator-controlled kill switch is set.
+
+    Both the synthesis pipeline (``auto_propose``) and the auto-enable
+    wrapper (``try_auto_enable_proposal``) consult this helper at
+    their entry points. Callers (cron handler, dream callback) may
+    pre-check it to skip building expensive context objects.
+    """
+    return os.getenv(_AUTO_PROPOSE_KILL_SWITCH_ENV) == "1"
 
 
 def _resolve_proposals_dir(proposals_dir: Path | None) -> Path:
@@ -608,6 +691,7 @@ async def auto_propose(
     proposals_dir: Path | None = None,
     auto_enable: bool = False,
     auto_enable_max_risk: str = "low",
+    source_context: str = "",
 ) -> AutoProposeResult:
     """Drive meta-skill-creator once per qualifying co-occurrence pattern.
 
@@ -630,6 +714,20 @@ async def auto_propose(
         AutoProposeResult capturing proposals_created / skipped /
         errors. NEVER raises — every exception is collected.
     """
+    # Honour the operator kill switch at the source so that every
+    # entry point — cron, dream callback, manual creator
+    # auto-enable, future call sites — observes the same disabled
+    # state. Pre-checks in the cron handler stay as fast paths but
+    # this guard is the load-bearing one.
+    if is_auto_propose_disabled():
+        _log.info(
+            "auto_propose.kill_switch",
+            extra={"triggered_by": triggered_by, "path": "auto_propose"},
+        )
+        return AutoProposeResult(
+            skipped=[{"reason": "kill_switch_disabled"}],
+            triggered_by=triggered_by,
+        )
     proposals_dir = _resolve_proposals_dir(proposals_dir)
     proposals_created: list[str] = []
     proposals_enabled: list[str] = []
@@ -690,11 +788,16 @@ async def auto_propose(
 
     coverage = _meta_skill_coverage(skill_loader)
     meta_names = _meta_skill_names(skill_loader)
+    available_names = _available_skill_names(skill_loader)
     existing_hashes = _existing_chain_hashes(proposals_dir)
 
     for pattern in patterns:
         raw_skills = list(pattern.get("skills") or [])
         freq = int(pattern.get("freq") or 0)
+        sample_intents = pattern.get("sample_intents") or []
+        intent_digest = " | ".join(
+            str(item).strip() for item in sample_intents if str(item).strip()
+        )[:800]
         if not raw_skills:
             continue
         if freq < min_freq:
@@ -707,6 +810,13 @@ async def auto_propose(
         # so leaving them in the seed shown to the LLM only invites
         # invalid proposals that G1.2 lint will reject.
         skills = [s for s in raw_skills if s not in meta_names]
+        if available_names:
+            missing = [s for s in skills if s not in available_names]
+            if missing:
+                skipped.append(asdict(_SkippedPattern(
+                    skills=raw_skills, freq=freq, reason="unknown_skill",
+                )))
+                continue
         if len(skills) < 2:
             skipped.append(asdict(_SkippedPattern(
                 skills=raw_skills, freq=freq, reason="only_meta_after_filter",
@@ -718,16 +828,31 @@ async def auto_propose(
             )))
             continue
         chain_hash = _chain_hash(skills)
-        if chain_hash in existing_hashes:
+        proposal_signature = _chain_signature(skills, intent_digest)
+        if chain_hash in existing_hashes or proposal_signature in existing_hashes:
             skipped.append(asdict(_SkippedPattern(
                 skills=skills, freq=freq, reason="duplicate_pending",
             )))
             continue
 
-        msg = _synthesise_user_message(skills, freq, window_days)
+        msg = _synthesise_user_message(
+            skills, freq, window_days, intent_digest=intent_digest,
+        )
+        system_prompt = (
+            "Unattended meta-skill auto-propose run. Synthesize a "
+            "low-risk reusable meta-skill from observed skill co-occurrence "
+            "evidence and preserve all creator gates."
+        )
+        if source_context:
+            system_prompt += f"\n\nScheduler source context:\n{source_context[:1200]}"
+        if intent_digest:
+            system_prompt += f"\n\nObserved user-intent digest:\n{intent_digest}"
         match = MetaMatch(
             plan=creator_plan,
-            inputs={"user_message": msg},
+            inputs={
+                "user_message": msg,
+                "system_prompt": system_prompt,
+            },
         )
         before = {p.name for p in proposals_dir.iterdir()} if proposals_dir.is_dir() else set()
         try:
@@ -753,6 +878,7 @@ async def auto_propose(
         for proposal_id in new_ids:
             proposals_created.append(proposal_id)
             existing_hashes.add(chain_hash)
+            existing_hashes.add(proposal_signature)
             _patch_gates_provenance(
                 proposals_dir / proposal_id,
                 triggered_by=triggered_by,
@@ -760,6 +886,9 @@ async def auto_propose(
                 freq=freq,
                 window_days=window_days,
                 chain_hash=chain_hash,
+                proposal_signature=proposal_signature,
+                intent_digest=intent_digest,
+                source_context=source_context,
             )
             if auto_enable:
                 try:
@@ -791,4 +920,9 @@ async def auto_propose(
     )
 
 
-__all__ = ["auto_propose", "AutoProposeResult", "try_auto_enable_proposal"]
+__all__ = [
+    "auto_propose",
+    "AutoProposeResult",
+    "try_auto_enable_proposal",
+    "_chain_signature",
+]

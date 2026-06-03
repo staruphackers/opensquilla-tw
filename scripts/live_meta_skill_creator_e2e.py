@@ -56,8 +56,8 @@ def run_live_meta_skill_creator_e2e(
     auto_enable_max_risk: str = "low",
 ) -> dict[str, Any]:
     """Run fill_slots -> assemble -> lint -> smoke -> persist/auto-enable."""
-    old_provider = os.environ.get("OPENSQUILLA_LLM_PROVIDER")
-    old_model = os.environ.get("OPENSQUILLA_LLM_MODEL")
+    previous_provider = os.environ.get("OPENSQUILLA_LLM_PROVIDER")
+    previous_model = os.environ.get("OPENSQUILLA_LLM_MODEL")
     if provider:
         os.environ["OPENSQUILLA_LLM_PROVIDER"] = provider
     if model:
@@ -121,14 +121,14 @@ def run_live_meta_skill_creator_e2e(
             "pending": pending,
         }
     finally:
-        if old_provider is None:
+        if previous_provider is None:
             os.environ.pop("OPENSQUILLA_LLM_PROVIDER", None)
         else:
-            os.environ["OPENSQUILLA_LLM_PROVIDER"] = old_provider
-        if old_model is None:
+            os.environ["OPENSQUILLA_LLM_PROVIDER"] = previous_provider
+        if previous_model is None:
             os.environ.pop("OPENSQUILLA_LLM_MODEL", None)
         else:
-            os.environ["OPENSQUILLA_LLM_MODEL"] = old_model
+            os.environ["OPENSQUILLA_LLM_MODEL"] = previous_model
 
 
 def _parser() -> argparse.ArgumentParser:

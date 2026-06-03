@@ -14,8 +14,15 @@ from opensquilla.skills.loader import SkillLoader
 
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLED = ROOT / "src" / "opensquilla" / "skills" / "bundled"
+AUDIO_DEFAULTS = {
+    "advanced-dubbing-studio",
+    "music-and-singing-studio",
+    "voice-clone-lab",
+    "voice-conversion-studio",
+    "voiceover-studio",
+}
 DEFAULTS = {
-    "sub-agent",
+    "ai-video-script",
     "cron",
     "deep-research",
     "docx",
@@ -26,33 +33,21 @@ DEFAULTS = {
     "http-fetch",
     "latex-compile",
     "memory",
-    "meta-compliance-audit-bundle",
-    "meta-github-pr-watch-digest",
-    "meta-issue-to-pr-autopilot",
-    "meta-knowledge-base-bootstrap",
-    "meta-long-running-build-watchdog",
-    "meta-migration-assistant",
-    "meta-multi-format-export-pack",
+    "meta-competitive-intel",
+    "meta-daily-operator-brief",
+    "meta-document-to-decision",
+    "meta-job-search-pipeline",
+    "meta-kid-project-planner",
     "meta-paper-write",
-    "meta-pdf-intelligence",
-    "meta-pdf-reformat-pipeline",
-    "meta-scheduled-morning-digest",
-    "meta-arxiv-daily-digest-deck",
-    "meta-codereview-current-diff",
-    "meta-diagram-triangulation",
-    "meta-pre-commit-quality-gate",
-    "meta-security-review-bundle",
+    "meta-short-drama",
     "meta-skill-creator",
-    "meta-spreadsheet-insight",
-    "meta-stack-trace-investigator",
-    "meta-travel-planner",
     "meta-web-research-to-report",
-    "meta-web-to-pdf-briefing",
     "multi-search-engine",
+    "nano-banana-pro",
     "nano-pdf",
-    "paper-experiment-stub",
     "paper-abstract-author",
     "paper-citation-planner",
+    "paper-experiment-stub",
     "paper-outline-author",
     "paper-plot-stub",
     "paper-preference-planner",
@@ -62,12 +57,21 @@ DEFAULTS = {
     "paper-source-curator",
     "pdf-toolkit",
     "pptx",
+    "seedance-2-prompt",
     "skill-creator",
+    "srt-from-script",
+    "sub-agent",
+    "subtitle-burner",
     "summarize",
+    "text-file-read",
+    "title-card-image",
     "tmux",
+    "video-merger",
+    "video-still-animator",
     "weather",
     "xlsx",
-}
+} | AUDIO_DEFAULTS
+PROMPT_DEFAULTS_WITHOUT_AUDIO_TOOLS = DEFAULTS - AUDIO_DEFAULTS
 INTERNAL_HELPERS = {
     "skill-creator-linter",
     "skill-creator-proposals",
@@ -154,10 +158,16 @@ async def test_default_prompt_only_injects_retained_bundled_skills(
         EligibilityContext(
             os_name="linux",
             has_bin_cache={
+                "bibtex": True,
                 "codex": True,
                 "curl": True,
+                "ffmpeg": True,
+                "ffprobe": True,
                 "xelatex": True,
+                "bibtex": True,
                 "nano-pdf": True,
+                "python": True,
+                "python3": True,
                 "tmux": True,
             },
         ),
@@ -167,8 +177,10 @@ async def test_default_prompt_only_injects_retained_bundled_skills(
     ctx = await filter_skills(_ctx(loader))
 
     prompt = ctx.system_prompt[1]
-    for name in DEFAULTS:
+    for name in PROMPT_DEFAULTS_WITHOUT_AUDIO_TOOLS:
         assert f"<name>{name}</name>" in prompt
+    for name in AUDIO_DEFAULTS:
+        assert f"<name>{name}</name>" not in prompt
     for name in INTERNAL_HELPERS:
         assert f"<name>{name}</name>" not in prompt
     assert "<name>healthcheck</name>" not in prompt
@@ -185,7 +197,25 @@ async def test_default_prompt_prefers_matching_meta_skills_over_direct_answers(
     prompt = ctx.system_prompt[1]
     assert "When a kind=\"meta\" entry clearly matches" in prompt
     assert "prefer `meta_invoke(name=\"<name>\")` over answering directly" in prompt
+    assert "Do not call `skill_view` for kind=\"meta\" entries" in prompt
     assert "multi-skill orchestration" in prompt
+
+
+@pytest.mark.asyncio
+async def test_meta_skill_disabled_hides_meta_prompt_without_hiding_normal_skills(
+    tmp_path: Path,
+) -> None:
+    loader = SkillLoader(bundled_dir=BUNDLED, snapshot_path=tmp_path / "snapshot.json")
+    ctx = _ctx(loader)
+    ctx.config.meta_skill = SimpleNamespace(enabled=False)
+
+    ctx = await filter_skills(ctx)
+    prompt = ctx.system_prompt[1]
+
+    assert "When a kind=\"meta\" entry clearly matches" not in prompt
+    assert "prefer `meta_invoke(name=\"<name>\")` over answering directly" not in prompt
+    assert "multi-skill orchestration" not in prompt
+    assert "<available_skills>" in prompt
 
 
 @pytest.mark.asyncio

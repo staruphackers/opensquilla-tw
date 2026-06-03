@@ -35,9 +35,96 @@ from opensquilla.skills.meta.templating import (
     render_with_args,
     resolve_route,
 )
-from opensquilla.skills.meta.types import MetaMatch, MetaResult, MetaStep
+from opensquilla.skills.meta.types import MetaMatch, MetaPaused, MetaResult, MetaStep
 
 log = structlog.get_logger(__name__)
+
+
+# Surface-side hint copy that ships in every clarify_skip_summary so a
+# renderer always has a sensible default label. Surfaces are free to
+# replace it with localised copy via the ``label`` key.
+_CLARIFY_SKIP_DEFAULT_LABEL = (
+    "We inferred the answers below from earlier context. "
+    "Confirm to continue, or reply 'change <field>' to redo."
+)
+
+# How many characters of each upstream context excerpt to ship to the
+# surface. Bounded so a 4 KB step output doesn't bloat every tool
+# result. Surfaces can still request more via a follow-up if needed.
+_CLARIFY_SKIP_EXCERPT_CHARS = 600
+
+
+def _build_clarify_skip_summary(
+    step: MetaStep,
+    inputs: dict[str, Any],
+    outputs: dict[str, str],
+) -> dict[str, Any] | None:
+    """Build a transparency payload for a ``when:``-skipped user_input
+    step (the "trust gap" close-out from the (c)/(d) protocol).
+
+    Returns ``None`` for non-user_input skipped steps so the surface
+    only renders a card when the gap is real. The payload includes:
+
+    * ``label``           — default copy the surface can localise.
+    * ``step_id``         — the skipped step's id so the surface can
+                            attribute the card.
+    * ``fields``          — the field names the user *would* have been
+                            asked for, including each field's prompt
+                            and required flag. Lets the surface render
+                            "destination (required): city" rows even
+                            though no values were collected.
+    * ``inferred_from``   — bounded excerpts of the upstream step
+                            outputs the meta author's ``when:``
+                            expression keyed off. The user can read
+                            these to verify the system inferred their
+                            intent correctly.
+    * ``trigger_message`` — the original user message that launched
+                            the meta-skill (capped). Lets the surface
+                            show "you said: ..." attribution.
+    * ``hint_action``     — short ``"reply: change"`` snippet a CLI
+                            surface can echo as a one-liner.
+    """
+    if step.kind != "user_input":
+        return None
+    cfg = getattr(step, "clarify_config", None)
+    if cfg is None:
+        return None
+
+    field_payload: list[dict[str, Any]] = []
+    for field in cfg.fields:
+        entry: dict[str, Any] = {
+            "name": field.name,
+            "required": bool(field.required),
+        }
+        if getattr(field, "prompt", None):
+            entry["prompt"] = field.prompt
+        field_payload.append(entry)
+
+    inferred_from: list[dict[str, str]] = []
+    for upstream_id in step.depends_on:
+        text = outputs.get(upstream_id, "")
+        if not isinstance(text, str) or not text.strip():
+            continue
+        excerpt = text.strip()
+        if len(excerpt) > _CLARIFY_SKIP_EXCERPT_CHARS:
+            excerpt = excerpt[:_CLARIFY_SKIP_EXCERPT_CHARS] + "...[truncated]"
+        inferred_from.append({"step": upstream_id, "excerpt": excerpt})
+
+    trigger_message = ""
+    raw_message = inputs.get("user_message")
+    if isinstance(raw_message, str) and raw_message.strip():
+        trigger_message = raw_message.strip()
+        if len(trigger_message) > _CLARIFY_SKIP_EXCERPT_CHARS:
+            trigger_message = trigger_message[:_CLARIFY_SKIP_EXCERPT_CHARS] + "...[truncated]"
+
+    return {
+        "label": _CLARIFY_SKIP_DEFAULT_LABEL,
+        "step_id": step.id,
+        "fields": field_payload,
+        "inferred_from": inferred_from,
+        "trigger_message": trigger_message,
+        "hint_action": "reply 'change' to redo",
+    }
 
 
 async def run_dag(
@@ -61,6 +148,7 @@ async def run_dag(
     usage_tracker: Any | None = None,
     session_key: str | None = None,
     usage_scope_prefix: str | None = None,
+    seed_outputs: dict[str, str] | None = None,
 ) -> AsyncIterator[AgentEvent | MetaResult]:
     """Run the plan and stream a flat sequence of events for the UI.
 
@@ -98,7 +186,7 @@ async def run_dag(
     Callback exceptions are swallowed and logged at warning level —
     observer bugs must never break the scheduler.
     """
-    outputs: dict[str, str] = {}
+    outputs: dict[str, str] = dict(seed_outputs) if seed_outputs else {}
     try:
         ordered = list(topological_order(match.plan.steps))
     except Exception as exc:  # noqa: BLE001
@@ -112,7 +200,7 @@ async def run_dag(
 
     steps_by_id: dict[str, MetaStep] = {s.id: s for s in ordered}
     pending_deps: dict[str, set[str]] = {
-        s.id: set(s.depends_on) for s in ordered
+        s.id: set(s.depends_on) - set(outputs.keys()) for s in ordered
     }
     # Steps that are *only* reachable as another step's ``on_failure``
     # substitute must not run autonomously — they exist on the DAG so
@@ -123,7 +211,9 @@ async def run_dag(
     substitute_only: set[str] = {
         s.on_failure for s in ordered if s.on_failure
     }
-    unstarted: set[str] = set(steps_by_id.keys()) - substitute_only
+    unstarted: set[str] = (
+        set(steps_by_id.keys()) - substitute_only - set(outputs.keys())
+    )
     running: dict[str, asyncio.Task[None]] = {}
     # Aliases populated when a step fails over: maps the substitute step
     # id to the original failed step id. On the substitute's ``_StepDone``
@@ -139,7 +229,7 @@ async def run_dag(
     event_queue: asyncio.Queue[
         tuple[
             str,
-            AgentEvent | MetaResult | _StepDone | _FailoverTriggered | Exception,
+            AgentEvent | MetaResult | _StepDone | _FailoverTriggered | MetaPaused | Exception,
         ]
     ] = asyncio.Queue()
     scope_prefix = usage_scope_prefix or f"meta:{match.plan.name}:{id(match)}"
@@ -157,6 +247,10 @@ async def run_dag(
         output_tokens = int(getattr(scoped, "output_tokens", 0) or 0)
         cache_read_tokens = int(getattr(scoped, "cache_read_tokens", 0) or 0)
         cache_write_tokens = int(getattr(scoped, "cache_write_tokens", 0) or 0)
+        cost_usd = float(getattr(scoped, "total_cost", 0.0) or 0.0)
+        estimated_cost = float(getattr(scoped, "cost", 0.0) or 0.0)
+        billed_cost = float(getattr(scoped, "billed_cost", 0.0) or 0.0)
+        cost_source = str(getattr(scoped, "cost_source", "") or "")
         if not (
             input_tokens
             or output_tokens
@@ -171,7 +265,12 @@ async def run_dag(
                 "total_tokens": input_tokens + output_tokens,
                 "cache_read_tokens": cache_read_tokens,
                 "cache_write_tokens": cache_write_tokens,
-                "cost_usd": round(float(getattr(scoped, "cost", 0.0) or 0.0), 6),
+                "cost_usd": round(cost_usd, 6),
+                "billed_cost": round(billed_cost, 6),
+                "billed_cost_usd": round(billed_cost, 6),
+                "estimated_cost_usd": round(estimated_cost, 6),
+                "cost_source": cost_source,
+                "is_provider_billed": cost_source == "provider_billed",
                 "model": str(getattr(scoped, "model_id", "") or ""),
             }
         }
@@ -201,6 +300,30 @@ async def run_dag(
                     ),
                 )
                 outputs[step.id] = ""
+                # Step-(c)/(d) follow-up — close the "trust gap" the
+                # skipped user_input path used to open. When a meta
+                # author writes ``when: 'NEEDS_CLARIFICATION: yes' in
+                # outputs.x`` to suppress an unnecessary clarify form,
+                # the user never sees what the system inferred —
+                # confirmed_fields / ambiguous_fields / unknown_mentions
+                # only fire on the MetaPaused path. Attach a
+                # ``clarify_skip_summary`` payload here so the surface
+                # can render a "we inferred this — confirm / change"
+                # card without forcing the form back open.
+                clarify_skip_summary = _build_clarify_skip_summary(
+                    step, match.inputs, outputs,
+                )
+                arguments: dict[str, Any] = {
+                    "kind": step.kind,
+                    "skill": step.skill,
+                    "default_skill": step.skill,
+                    "routed": False,
+                    "skipped": True,
+                    "when": step.when,
+                    "output_chars": 0,
+                }
+                if clarify_skip_summary is not None:
+                    arguments["clarify_skip_summary"] = clarify_skip_summary
                 await event_queue.put(
                     (
                         step.id,
@@ -209,15 +332,7 @@ async def run_dag(
                             tool_name=step_tool_name,
                             result="skipped: condition evaluated false",
                             is_error=False,
-                            arguments={
-                                "kind": step.kind,
-                                "skill": step.skill,
-                                "default_skill": step.skill,
-                                "routed": False,
-                                "skipped": True,
-                                "when": step.when,
-                                "output_chars": 0,
-                            },
+                            arguments=arguments,
                         ),
                     ),
                 )
@@ -320,6 +435,13 @@ async def run_dag(
                 ),
             )
             await event_queue.put((step.id, _StepDone(text=final_text)))
+        except MetaPaused as paused:
+            # Pause is not failure. Stash on the queue so the main loop
+            # can shut down siblings cleanly and emit a single terminal
+            # MetaResult(paused=True). on_failure substitute is intentionally
+            # NOT triggered (design §8.1).
+            await event_queue.put((step.id, paused))
+            return
         except asyncio.CancelledError:
             # Re-raise so gather/wait see the cancellation, but the
             # queue drain in iter_events will not see a _StepDone for
@@ -477,10 +599,57 @@ async def run_dag(
                     unstarted.add(item.substitute_step_id)
                 _spawn_ready()
                 continue
+            if isinstance(item, MetaPaused):
+                # The per-step task already emitted a ToolUseStartEvent
+                # before invoking dispatch_step_stream. Without a matching
+                # ToolResultEvent, Web UI tool cards stay "in flight" forever.
+                # Emit a synthetic paused ToolResultEvent first so the card
+                # closes cleanly.
+                #
+                # The ``arguments`` payload carries the surface-agnostic
+                # schema protocol (PR5 ``clarify_schema.schema_to_protocol``)
+                # so Web/CLI/IM surfaces can render a clickable form. The
+                # ``paused`` flag remains the cheap signal for surfaces that
+                # don't render forms.
+                paused_use_id = f"meta_step_{item.step_id}"
+                paused_tool_name = f"meta-step:{item.step_id}"
+                from opensquilla.skills.meta.clarify_schema import schema_to_protocol
+                clarify_protocol = schema_to_protocol(
+                    item.schema,
+                    intro_override=item.intro,
+                    confirmed_fields=item.confirmed_fields,
+                    prefill_audit=item.prefill_audit,
+                )
+                yield ToolResultEvent(
+                    tool_use_id=paused_use_id,
+                    tool_name=paused_tool_name,
+                    result=f"paused: awaiting user input (step {item.step_id!r})",
+                    is_error=False,
+                    arguments={
+                        "kind": "user_input",
+                        "paused": True,
+                        "step": item.step_id,
+                        "run_id": item.run_id,
+                        "clarify_schema": clarify_protocol,
+                    },
+                )
+                # Cancel all in-flight sibling tasks.
+                for task in running.values():
+                    if not task.done():
+                        task.cancel()
+                if running:
+                    await asyncio.gather(*running.values(), return_exceptions=True)
+                yield MetaResult(
+                    ok=False,
+                    paused=True,
+                    paused_payload=item,
+                    step_outputs=dict(outputs),
+                )
+                return
             if isinstance(item, Exception):
                 failure = item
                 failed_step_id = step_id
-                # codex-a P2 fix #3: mark the step row as ``failed`` so
+                # Mark the step row as ``failed`` so
                 # ``skills meta runs steps <id>`` does not show a stale
                 # ``running`` row after the run finalises. The failover
                 # path (``_FailoverTriggered``) is unchanged and still

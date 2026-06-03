@@ -25,7 +25,10 @@ from typing import Any
 import pytest
 
 from opensquilla.engine.runtime import TurnRunner
-from opensquilla.engine.types import ErrorEvent
+from opensquilla.engine.turn_runner.harness import _TurnRunnerAgentFactoryAdapter
+from opensquilla.engine.types import AgentConfig, ErrorEvent
+from opensquilla.tools.registry import ToolRegistry
+from opensquilla.tools.types import ToolContext
 
 # ---------------------------------------------------------------------------
 # Shared stubs
@@ -209,6 +212,7 @@ def _patch_assemble_prompt(runner, base_prompt, prompt_metadata):
     def _assemble_prompt(
         self, agent_id, tool_defs, *, session_key=None, semantic_message=None,
         extra_context=None, prompt_metadata=None, bootstrap_context_mode=None,
+        fresh_user_session=False,
     ):  # noqa: ARG001
         if prompt_metadata is not None:
             prompt_metadata.update(pm_to_emit)
@@ -224,6 +228,7 @@ def _patch_run_pipeline(runner, turn_factory, provider):
         semantic_message=None, ingress_pipeline_steps=None,
         prev_assistant_text=None, prev_assistant_usage=None,
         history_user_texts=None, flags_text_override=None, tool_context=None,
+        normalization_metadata=None,
     ):  # noqa: ARG001
         return turn_factory(), provider
 
@@ -426,7 +431,7 @@ _CORPUS: list[tuple[str, dict[str, Any]]] = [
     _case(
         "no_model_catalog",
         model_catalog_present=False,
-        catalog_max_tokens=8192,
+        catalog_max_tokens=16384,
         catalog_context_window=200_000,
     ),
     _case(
@@ -595,7 +600,7 @@ async def test_agent_bootstrap_stage_snapshot(
         "agent_config_cache_mode": "off",
         "agent_config_thinking": case["thinking"],
         "agent_config_tool_result_projection_max_inline_chars": 60_000,
-        "agent_config_flush_enabled": True,
+        "agent_config_flush_enabled": False,
         "effective_runtime_timeout": expected_runtime_timeout,
         "effective_max_iterations": expected_max_iterations,
         "effective_iteration_timeout": case["iteration_timeout"],
@@ -639,3 +644,28 @@ async def test_sync_manager_warm_called(monkeypatch: pytest.MonkeyPatch) -> None
     assert sync_manager.warmed_keys == ["agent:main:s1"]
     assert captured is not None
     assert captured["sync_manager_label"] == "syncmgr"
+
+
+def test_agent_factory_forwards_registry_and_tool_context() -> None:
+    """meta_invoke dispatch needs the Agent to retain registry/context wiring."""
+
+    registry = ToolRegistry()
+    tool_context = ToolContext(is_owner=True, workspace_dir="/tmp")
+    runner = TurnRunner(
+        provider_selector=None,
+        tool_registry=registry,
+    )
+
+    agent = _TurnRunnerAgentFactoryAdapter(runner).build(
+        provider=_StubProvider("p"),
+        config=AgentConfig(),
+        tool_definitions=[],
+        tool_handler=None,
+        session_key="agent:main:s1",
+        turn_call_logger=None,
+        memory_sync_manager=None,
+        tool_context=tool_context,
+    )
+
+    assert agent._tool_registry is registry
+    assert agent._tool_context is tool_context

@@ -68,7 +68,7 @@ async def test_meta_invoke_handler_raises_routing_error() -> None:
 
 # ---------------------------------------------------------------------------
 # Task 3: ToolResult.terminates_turn field + preservation through
-# Agent._canonicalize_tool_result rebuild sites.
+# Agent._compress_tool_result rebuild sites.
 # ---------------------------------------------------------------------------
 
 
@@ -86,32 +86,24 @@ def test_tool_result_has_terminates_turn_field() -> None:
 
 
 class _NullProvider:
-    """Minimal LLMProvider stand-in: never called by tool-result canonicalization."""
+    """Minimal LLMProvider stand-in: never called by _compress_tool_result."""
 
     provider_name = "null"
 
     def chat(self, *args: object, **kwargs: object) -> object:  # pragma: no cover
-        raise AssertionError("provider.chat must not be called by tool-result canonicalization")
+        raise AssertionError("provider.chat must not be called by _compress_tool_result")
 
     async def list_models(self) -> list[object]:  # pragma: no cover
         return []
 
 
 @pytest.mark.asyncio
-async def test_canonicalize_tool_result_preserves_terminates_turn_when_noop(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When tokenjuice leaves content unchanged, terminates_turn must survive."""
-    import opensquilla.engine.agent as agent_mod
+async def test_compress_tool_result_preserves_terminates_turn_when_short() -> None:
+    """When content is short enough to not need compression, the rebuild
+    must still carry terminates_turn through."""
     from opensquilla.engine import Agent, AgentConfig
     from opensquilla.tool_boundary import ToolResult
 
-    monkeypatch.setattr(
-        agent_mod,
-        "reduce_tool_result_with_tokenjuice",
-        lambda **kwargs: None,
-        raising=False,
-    )
     agent = Agent(provider=_NullProvider(), config=AgentConfig())
 
     original = ToolResult(
@@ -121,26 +113,26 @@ async def test_canonicalize_tool_result_preserves_terminates_turn_when_noop(
         is_error=False,
         terminates_turn=True,
     )
-    canonical = await agent._canonicalize_tool_result(original)
-    assert canonical.terminates_turn is True
+    compressed = await agent._compress_tool_result(original)
+    assert compressed.terminates_turn is True
 
 
 @pytest.mark.asyncio
-async def test_canonicalize_tool_result_preserves_terminates_turn_when_projected(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """When canonicalization rebuilds the result, terminates_turn must survive."""
-    import opensquilla.engine.agent as agent_mod
+async def test_compress_tool_result_preserves_terminates_turn_when_compressed() -> None:
+    """When content IS large enough to trigger compression, the rebuild
+    must STILL carry terminates_turn through (the other code path)."""
     from opensquilla.engine import Agent, AgentConfig
     from opensquilla.tool_boundary import ToolResult
 
-    monkeypatch.setattr(
-        agent_mod,
-        "reduce_tool_result_with_tokenjuice",
-        lambda **kwargs: None,
-        raising=False,
+    # Shrink context_window_tokens so 50_000 chars (~12500 tokens) exceeds
+    # the compression budget (context_window_tokens * max_share = 1000 * 0.25
+    # = 250 tokens). truncate mode keeps compression purely local — no
+    # provider call needed.
+    config = AgentConfig(
+        context_window_tokens=1000,
+        tool_result_compression_enabled=True,
+        tool_result_compression_mode="truncate",
     )
-    config = AgentConfig(tool_result_projection_max_inline_chars=1000)
     agent = Agent(provider=_NullProvider(), config=config)
 
     big_content = "x" * 50_000
@@ -151,13 +143,15 @@ async def test_canonicalize_tool_result_preserves_terminates_turn_when_projected
         is_error=False,
         terminates_turn=True,
     )
-    canonical = await agent._canonicalize_tool_result(original)
-    assert len(canonical.content) < len(big_content), (
-        "test setup error: fallback projection did not trigger"
+    compressed = await agent._compress_tool_result(original)
+    # Sanity-check the compression path actually fired (content shrunk).
+    assert len(compressed.content) < len(big_content), (
+        "test setup error: compression did not trigger; "
+        "second rebuild site would not be exercised"
     )
     # The FLAG must survive the rebuild.
-    assert canonical.terminates_turn is True, (
-        "terminates_turn lost during ToolResult canonicalization rebuild"
+    assert compressed.terminates_turn is True, (
+        "terminates_turn lost during ToolResult compression rebuild"
     )
 
 
@@ -500,6 +494,88 @@ async def test_run_one_streaming_rejects_disabled_meta_skill(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_one_streaming_rejects_meta_invoke_when_meta_skill_config_disabled(
+    tmp_path,
+) -> None:
+    """meta_invoke must not bypass the global meta-skill switch."""
+    from opensquilla.engine.agent import Agent
+    from opensquilla.engine.types import AgentConfig
+    from opensquilla.skills.loader import SkillLoader
+    from opensquilla.tool_boundary import ToolCall, ToolResult
+    from opensquilla.tools.builtin import meta_tools  # noqa: F401
+    from opensquilla.tools.registry import get_default_registry
+    from opensquilla.tools.types import ToolContext
+
+    bundled = tmp_path / "skills" / "bundled"
+    skill_dir = bundled / "meta-visible"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: meta-visible\n"
+        "kind: meta\n"
+        "description: visible meta-skill\n"
+        "triggers: [visible trigger]\n"
+        "composition:\n"
+        "  steps:\n"
+        "    - id: c\n"
+        "      kind: llm_classify\n"
+        "      output_choices: [A, B]\n"
+        "      with: {text: \"x\"}\n"
+        "---\n"
+        "# meta-visible\n",
+        encoding="utf-8",
+    )
+    loader = SkillLoader(bundled_dir=bundled, snapshot_path=tmp_path / "snap.json")
+    loader.invalidate_cache()
+    loader.load_all()
+
+    class _NullProvider:
+        provider_name = "null"
+
+        async def chat(self, *_args, **_kwargs):
+            raise AssertionError("globally disabled meta-skill must not execute")
+
+        async def list_models(self):
+            return []
+
+    agent = Agent(
+        provider=_NullProvider(),  # type: ignore[arg-type]
+        config=AgentConfig(
+            model_id="stub",
+            metadata={
+                "skill_loader": loader,
+                "bootstrap_workspace_dir": str(tmp_path),
+                "meta_skill_enabled": False,
+            },
+        ),
+        tool_definitions=[],
+        tool_handler=None,
+        tool_registry=get_default_registry(),
+    )
+    tc = ToolCall(
+        tool_use_id="u1",
+        tool_name="meta_invoke",
+        arguments={"name": "meta-visible"},
+    )
+    tool_ctx = ToolContext(
+        workspace_dir=str(tmp_path),
+        is_owner=True,
+        allowed_tools={"meta_invoke"},
+        surfaced_tools={"meta_invoke"},
+    )
+
+    final = None
+    async for ev in agent._run_one_streaming(tc, tool_ctx):
+        if isinstance(ev, ToolResult):
+            final = ev
+
+    assert final is not None
+    assert final.is_error is True
+    assert "meta-skill is disabled" in final.content
+    assert final.terminates_turn is False
+
+
+@pytest.mark.asyncio
 async def test_run_one_streaming_propagates_current_turn_message_to_inputs(
     tmp_path,
 ) -> None:
@@ -599,7 +675,7 @@ async def test_run_one_streaming_propagates_current_turn_message_to_inputs(
 
     assert final is not None
     assert final.is_error is False
-    assert final.content == "meta-skill 'meta-tiny' completed; final answer streamed separately."
+    assert final.content == "meta-skill 'meta-tiny' completed."
     assert captured.get("inputs", {}).get("user_message") == "RAG in low-resource settings", (
         f"expected user_message to propagate from _current_turn_message; got {captured!r}"
     )
@@ -779,7 +855,7 @@ async def test_dispatch_intercepts_meta_invoke_and_terminates_turn(
         f"got: {streamed_text[:300]!r}"
     )
     success_contents = " | ".join(r.result or "" for r in meta_invoke_results)
-    assert "final answer streamed separately" in success_contents
+    assert "meta-skill 'meta-tiny' completed." in success_contents
 
     # The orchestrator emits ToolUseStartEvent / ToolResultEvent for each
     # meta-step (tool_name="meta-step:<step_id>"). The dispatch interceptor
@@ -907,8 +983,208 @@ async def test_dispatch_coerces_meta_skill_view_to_meta_invoke(
         "skill_view(name=<meta-skill>) must be coerced into meta_invoke"
     )
     assert all(not r.is_error for r in meta_invoke_results)
-    assert any("final answer streamed separately" in (r.result or "") for r in meta_invoke_results)
+    assert any(
+        "meta-skill 'meta-tiny' completed." in (r.result or "")
+        for r in meta_invoke_results
+    )
     assert "A" in "".join(e.text for e in events if isinstance(e, TextDeltaEvent))
+
+
+@pytest.mark.asyncio
+async def test_dispatch_repairs_malformed_meta_invoke_from_matched_meta_skill(
+    tmp_path,
+) -> None:
+    """A deterministic meta match may force ``meta_invoke`` on small models
+    that emit raw/non-JSON arguments. Repair that to the matched skill name
+    instead of letting dispatch reject the tool call."""
+    from collections.abc import AsyncIterator
+    from types import SimpleNamespace
+
+    from opensquilla.engine.agent import Agent
+    from opensquilla.engine.types import AgentConfig, DoneEvent, TextDeltaEvent, ToolResultEvent
+    from opensquilla.provider.types import DoneEvent as ProviderDoneEvent
+    from opensquilla.provider.types import ToolUseEndEvent as ProviderToolUseEnd
+    from opensquilla.provider.types import ToolUseStartEvent as ProviderToolUseStart
+    from opensquilla.skills.loader import SkillLoader
+    from opensquilla.tools.builtin import meta_tools  # noqa: F401
+    from opensquilla.tools.registry import get_default_registry
+    from opensquilla.tools.types import ToolContext
+
+    bundled = tmp_path / "skills" / "bundled"
+    skill_dir = bundled / "meta-tiny"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: meta-tiny\n"
+        "kind: meta\n"
+        "description: tiny meta-skill for malformed meta_invoke coercion\n"
+        "triggers: [tiny-meta-trigger]\n"
+        "composition:\n"
+        "  steps:\n"
+        "    - id: c\n"
+        "      kind: llm_classify\n"
+        "      output_choices: [A, B]\n"
+        "      with: {text: \"x\"}\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    loader = SkillLoader(bundled_dir=bundled, snapshot_path=tmp_path / "snap.json")
+    loader.invalidate_cache()
+    loader.load_all()
+
+    class _StubProvider:
+        provider_name = "stub"
+
+        async def chat(self, messages, tools=None, config=None) -> AsyncIterator:
+            yield ProviderToolUseStart(tool_use_id="tu_1", tool_name="meta_invoke")
+            yield ProviderToolUseEnd(
+                tool_use_id="tu_1",
+                tool_name="meta_invoke",
+                arguments={"_raw": "meta-tiny"},
+            )
+            yield ProviderDoneEvent(stop_reason="tool_use")
+
+        async def list_models(self):
+            return []
+
+    agent = Agent(
+        provider=_StubProvider(),  # type: ignore[arg-type]
+        config=AgentConfig(
+            model_id="stub",
+            max_iterations=4,
+            system_prompt="",
+            metadata={
+                "skill_loader": loader,
+                "bootstrap_workspace_dir": str(tmp_path),
+                "meta_match": SimpleNamespace(
+                    plan=SimpleNamespace(name="meta-tiny"),
+                ),
+                "meta_match_tool_choice": {
+                    "type": "function",
+                    "function": {"name": "meta_invoke"},
+                },
+            },
+        ),
+        tool_definitions=[],
+        tool_handler=None,
+        tool_registry=get_default_registry(),
+        tool_context=ToolContext(workspace_dir=str(tmp_path), is_owner=True),
+    )
+
+    async def fake_llm_chat(_s: str, _u: str) -> str:
+        return "A"
+
+    agent._test_llm_chat_override = fake_llm_chat  # type: ignore[attr-defined]
+
+    events = [ev async for ev in agent.run_turn("tiny-meta-trigger")]
+
+    assert any(isinstance(e, DoneEvent) for e in events)
+    meta_invoke_results = [
+        e for e in events
+        if isinstance(e, ToolResultEvent) and e.tool_name == "meta_invoke"
+    ]
+    assert meta_invoke_results
+    assert all(not r.is_error for r in meta_invoke_results)
+    assert "A" in "".join(e.text for e in events if isinstance(e, TextDeltaEvent))
+
+
+@pytest.mark.asyncio
+async def test_dispatch_rewrites_other_tool_after_forced_meta_match(
+    tmp_path,
+) -> None:
+    """If a forced deterministic meta match is present, do not let an ordinary
+    tool call bypass the matched meta DAG."""
+    from collections.abc import AsyncIterator
+    from types import SimpleNamespace
+
+    from opensquilla.engine.agent import Agent
+    from opensquilla.engine.types import AgentConfig, ToolResultEvent
+    from opensquilla.provider.types import DoneEvent as ProviderDoneEvent
+    from opensquilla.provider.types import ToolUseEndEvent as ProviderToolUseEnd
+    from opensquilla.provider.types import ToolUseStartEvent as ProviderToolUseStart
+    from opensquilla.skills.loader import SkillLoader
+    from opensquilla.tools.builtin import meta_tools  # noqa: F401
+    from opensquilla.tools.registry import get_default_registry
+    from opensquilla.tools.types import ToolContext
+
+    bundled = tmp_path / "skills" / "bundled"
+    skill_dir = bundled / "meta-tiny"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: meta-tiny\n"
+        "kind: meta\n"
+        "description: tiny meta-skill for forced rewrite\n"
+        "triggers: [tiny-meta-trigger]\n"
+        "composition:\n"
+        "  steps:\n"
+        "    - id: c\n"
+        "      kind: llm_classify\n"
+        "      output_choices: [A, B]\n"
+        "      with: {text: \"x\"}\n"
+        "---\n",
+        encoding="utf-8",
+    )
+    loader = SkillLoader(bundled_dir=bundled, snapshot_path=tmp_path / "snap.json")
+    loader.invalidate_cache()
+    loader.load_all()
+
+    class _StubProvider:
+        provider_name = "stub"
+
+        async def chat(self, messages, tools=None, config=None) -> AsyncIterator:
+            yield ProviderToolUseStart(tool_use_id="tu_1", tool_name="memory_search")
+            yield ProviderToolUseEnd(
+                tool_use_id="tu_1",
+                tool_name="memory_search",
+                arguments={"query": "x"},
+            )
+            yield ProviderDoneEvent(stop_reason="tool_use")
+
+        async def list_models(self):
+            return []
+
+    agent = Agent(
+        provider=_StubProvider(),  # type: ignore[arg-type]
+        config=AgentConfig(
+            model_id="stub",
+            max_iterations=4,
+            system_prompt="",
+            metadata={
+                "skill_loader": loader,
+                "bootstrap_workspace_dir": str(tmp_path),
+                "meta_match": SimpleNamespace(
+                    plan=SimpleNamespace(name="meta-tiny"),
+                ),
+                "meta_match_tool_choice": {
+                    "type": "function",
+                    "function": {"name": "meta_invoke"},
+                },
+            },
+        ),
+        tool_definitions=[],
+        tool_handler=None,
+        tool_registry=get_default_registry(),
+        tool_context=ToolContext(workspace_dir=str(tmp_path), is_owner=True),
+    )
+
+    async def fake_llm_chat(_s: str, _u: str) -> str:
+        return "A"
+
+    agent._test_llm_chat_override = fake_llm_chat  # type: ignore[attr-defined]
+
+    events = [ev async for ev in agent.run_turn("tiny-meta-trigger")]
+    meta_invoke_results = [
+        e for e in events
+        if isinstance(e, ToolResultEvent) and e.tool_name == "meta_invoke"
+    ]
+
+    assert meta_invoke_results
+    assert all(not r.is_error for r in meta_invoke_results)
+    assert not any(
+        isinstance(e, ToolResultEvent) and e.tool_name == "memory_search"
+        for e in events
+    )
 
 
 # ---------------------------------------------------------------------------

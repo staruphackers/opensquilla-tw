@@ -69,41 +69,27 @@ SOFTWARE.
 These bundled skill descriptors are authored and maintained by OpenSquilla and
 are released under OpenSquilla's repository license (Apache-2.0; see `LICENSE`):
 
+- `cron`
+- `deep-research`
+- `docx`
 - `git-diff`
+- `github`
 - `history-explorer`
+- `html-to-pdf`
 - `http-fetch`
 - `latex-compile`
 - `memory`
-- `meta-arxiv-daily-digest-deck`
-- `meta-codereview-current-diff`
-- `meta-compliance-audit-bundle`
-- `meta-diagram-triangulation`
-- `meta-github-pr-watch-digest`
-- `meta-issue-to-pr-autopilot`
-- `meta-knowledge-base-bootstrap`
-- `meta-long-running-build-watchdog`
-- `meta-migration-assistant`
-- `meta-multi-format-export-pack`
+- `meta-competitive-intel`
+- `meta-daily-operator-brief`
+- `meta-document-to-decision`
+- `meta-job-search-pipeline`
+- `meta-kid-project-planner`
 - `meta-paper-write`
-- `meta-pdf-intelligence`
-- `meta-pdf-reformat-pipeline`
-- `meta-pre-commit-quality-gate`
-- `meta-scheduled-morning-digest`
-- `meta-security-review-bundle`
+- `meta-short-drama`
 - `meta-skill-creator`
-- `skill-creator-linter`
-- `skill-creator-proposals`
-- `skill-creator-smoke-test`
-- `stack-trace-generic-probe`
-- `stack-trace-go-probe`
-- `stack-trace-js-probe`
-- `stack-trace-python-probe`
-- `stack-trace-rust-probe`
-- `meta-spreadsheet-insight`
-- `meta-stack-trace-investigator`
-- `meta-travel-planner`
 - `meta-web-research-to-report`
-- `meta-web-to-pdf-briefing`
+- `multi-search-engine`
+- `nano-pdf`
 - `paper-abstract-author`
 - `paper-citation-planner`
 - `paper-experiment-stub`
@@ -114,6 +100,32 @@ are released under OpenSquilla's repository license (Apache-2.0; see `LICENSE`):
 - `paper-revision-author`
 - `paper-section-author`
 - `paper-source-curator`
+- `pdf-toolkit`
+- `pptx`
+- `skill-creator`
+- `skill-creator-linter`
+- `skill-creator-proposals`
+- `skill-creator-smoke-test`
+- `stack-trace-generic-probe`
+- `stack-trace-go-probe`
+- `stack-trace-js-probe`
+- `stack-trace-python-probe`
+- `stack-trace-rust-probe`
+- `sub-agent`
+- `srt-from-script`
+- `subtitle-burner`
+- `summarize`
+- `text-file-read`
+- `title-card-image`
+- `tmux`
+- `video-still-animator`
+- `weather`
+- `xlsx`
+- `advanced-dubbing-studio`
+- `music-and-singing-studio`
+- `voice-clone-lab`
+- `voice-conversion-studio`
+- `voiceover-studio`
 
 ## tokenjuice adapted reduction rules
 
@@ -192,12 +204,16 @@ SOFTWARE.
 ## ClawHub-derived bundled skill descriptors
 
 - Component: SKILL.md frontmatter and instruction text for these bundled skills:
+  - `ai-video-script`
   - `deep-research`
   - `docx`
   - `html-to-pdf`
   - `multi-search-engine`
+  - `nano-banana-pro`
   - `pdf-toolkit`
   - `pptx`
+  - `seedance-2-prompt`
+  - `video-merger`
   - `xlsx`
 - Upstream registry: https://clawhub.ai
 - License: MIT-0 (Public-domain-equivalent; no attribution required, but

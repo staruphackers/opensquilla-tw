@@ -15,6 +15,7 @@ network egress) need intent-level memory.
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import threading
@@ -25,7 +26,7 @@ _DEFAULT_TTL_SECONDS = 30 * 60
 _ALWAYS_TTL_SECONDS = 365 * 24 * 3600  # effectively never expires within a session
 
 
-def _norm_path(raw: str) -> str:
+def _norm_path(raw: str, *, base_dir: str | Path | None = None) -> str:
     """Best-effort absolute-path normalization.
 
     Leaves non-path tokens alone (so ``*`` or variable references don't get
@@ -34,7 +35,10 @@ def _norm_path(raw: str) -> str:
     if not raw or raw.startswith(("$", "`")) or raw in {"*", "-"}:
         return raw
     try:
-        return str(Path(raw).expanduser().resolve(strict=False))
+        path = Path(raw).expanduser()
+        if base_dir is not None and not path.is_absolute():
+            path = Path(base_dir).expanduser() / path
+        return str(path.resolve(strict=False))
     except (OSError, ValueError):
         return raw
 
@@ -76,15 +80,33 @@ def _extract_rm_targets(command: str) -> list[str]:
     if not tail:
         return []
 
+    token_sets: list[list[str]] = []
     try:
-        tokens = shlex.split(tail)
+        token_sets.append(shlex.split(tail))
     except ValueError:
-        tokens = tail.split()
+        token_sets.append(tail.split())
+    if "\\" in tail and (os.name == "nt" or re.search(r"(?:^|\s)\\[^\s]", tail)):
+        try:
+            token_sets.append(shlex.split(tail, posix=False))
+        except ValueError:
+            token_sets.append(tail.split())
 
-    return [t for t in tokens if t and not t.startswith("-")]
+    targets: list[str] = []
+    seen: set[str] = set()
+    for tokens in token_sets:
+        for token in tokens:
+            if not token or token.startswith("-") or token in seen:
+                continue
+            seen.add(token)
+            targets.append(token)
+    return targets
 
 
-def _extract_intents(command: str) -> list[tuple[str, str]]:
+def _extract_intents(
+    command: str,
+    *,
+    base_dir: str | Path | None = None,
+) -> list[tuple[str, str]]:
     """Return every recognized destructive intent, deduped and normalized.
 
     ``rm /a /b /c`` -> three tuples; ``shutil.rmtree('a'); os.remove('b')`` ->
@@ -100,7 +122,7 @@ def _extract_intents(command: str) -> list[tuple[str, str]]:
     result: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for raw in paths:
-        intent = ("delete", _norm_path(raw))
+        intent = ("delete", _norm_path(raw, base_dir=base_dir))
         if intent in seen:
             continue
         seen.add(intent)

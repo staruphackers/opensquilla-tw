@@ -107,6 +107,206 @@ def test_sub_agent_tool_list_excludes_meta_invoke() -> None:
     )
 
 
+def test_sub_agent_tool_list_excludes_openai_function_wrapped_meta_invoke() -> None:
+    """OpenAI-compatible providers (and OpenRouter/DeepSeek/Gemini) emit
+    tool definitions in the function-wrapped shape::
+
+        {"type": "function", "function": {"name": "meta_invoke", ...}}
+
+    A naive ``td.get("name")`` check misses this layout, leaving
+    ``meta_invoke`` on the sub-Agent's tool surface and reopening the
+    recursive meta-A → meta-B → meta-A loop that the guard exists to
+    close. This test pins the function-wrapped shape so the filter
+    cannot regress."""
+    from opensquilla.engine.types import AgentConfig
+    from opensquilla.skills.meta.orchestrator import make_agent_runner_from_parent
+
+    function_wrapped_meta = {
+        "type": "function",
+        "function": {
+            "name": "meta_invoke",
+            "description": "Run a meta-skill end-to-end.",
+            "parameters": {"type": "object"},
+        },
+    }
+    function_wrapped_other = {
+        "type": "function",
+        "function": {"name": "bash", "parameters": {"type": "object"}},
+    }
+
+    tool_definitions = [function_wrapped_meta, function_wrapped_other]
+    captured: dict[str, Any] = {}
+
+    def agent_factory(**kwargs):  # type: ignore[no-untyped-def]
+        captured.update(kwargs)
+
+        class _DummyAgent:
+            async def run_turn(self, _msg: str):
+                if False:
+                    yield None  # pragma: no cover
+
+        return _DummyAgent()
+
+    runner = make_agent_runner_from_parent(
+        provider=None,  # type: ignore[arg-type]
+        base_config=AgentConfig(model_id="stub"),
+        tool_definitions=tool_definitions,
+        tool_handler=None,
+        agent_factory=agent_factory,
+    )
+
+    import asyncio
+
+    async def _drive() -> None:
+        async for _ in runner("sys", "user"):
+            pass
+
+    asyncio.run(_drive())
+
+    filtered = captured["tool_definitions"]
+    names = [
+        td.get("function", {}).get("name") if isinstance(td, dict) else None
+        for td in filtered
+    ]
+    assert "meta_invoke" not in names, (
+        f"meta_invoke must be filtered from OpenAI function-wrapped tool "
+        f"definitions; got {names!r}"
+    )
+    assert "bash" in names, (
+        f"non-meta_invoke function-wrapped tools must be preserved; got {names!r}"
+    )
+
+
+def test_sub_agent_tool_list_filter_handles_mixed_shapes() -> None:
+    """Mixed tool definition shapes in the same list must all be filtered.
+
+    Realistic catalogs combine attribute-style, flat-dict, and OpenAI
+    function-wrapped entries depending on provider and registration
+    path. The filter must remove every meta_invoke variant in one
+    pass."""
+    from opensquilla.engine.types import AgentConfig
+    from opensquilla.skills.meta.orchestrator import make_agent_runner_from_parent
+
+    tool_definitions = [
+        SimpleNamespace(name="meta_invoke"),               # attribute-style
+        {"name": "meta_invoke"},                            # flat-dict
+        {"type": "function", "function": {"name": "meta_invoke"}},  # wrapped
+        SimpleNamespace(name="read_file"),                  # legit attr
+        {"name": "write_file"},                             # legit flat
+        {"type": "function", "function": {"name": "bash"}}, # legit wrapped
+    ]
+    captured: dict[str, Any] = {}
+
+    def agent_factory(**kwargs):  # type: ignore[no-untyped-def]
+        captured.update(kwargs)
+
+        class _DummyAgent:
+            async def run_turn(self, _msg: str):
+                if False:
+                    yield None  # pragma: no cover
+
+        return _DummyAgent()
+
+    runner = make_agent_runner_from_parent(
+        provider=None,  # type: ignore[arg-type]
+        base_config=AgentConfig(model_id="stub"),
+        tool_definitions=tool_definitions,
+        tool_handler=None,
+        agent_factory=agent_factory,
+    )
+
+    import asyncio
+
+    async def _drive() -> None:
+        async for _ in runner("sys", "user"):
+            pass
+
+    asyncio.run(_drive())
+
+    filtered = captured["tool_definitions"]
+
+    def _name_of(td: Any) -> str | None:
+        attr = getattr(td, "name", None)
+        if attr is not None:
+            return attr
+        if isinstance(td, dict):
+            if "name" in td:
+                return td["name"]
+            function = td.get("function")
+            if isinstance(function, dict):
+                return function.get("name")
+        return None
+
+    names = [_name_of(td) for td in filtered]
+    assert "meta_invoke" not in names, (
+        f"meta_invoke must be filtered across all definition shapes; got {names!r}"
+    )
+    assert {"read_file", "write_file", "bash"}.issubset(set(names)), (
+        f"legitimate tools across shapes must be preserved; got {names!r}"
+    )
+
+
+def test_sub_agent_metadata_excludes_outer_meta_activation_controls() -> None:
+    """Outer-turn meta activation controls must not leak into sub-Agents.
+
+    The parent Agent can force the first LLM call to choose meta_invoke after a
+    deterministic trigger match. Meta sub-Agents intentionally have meta_invoke
+    removed from their tool surface, so inheriting that tool_choice makes
+    providers reject otherwise valid agent steps.
+    """
+    from opensquilla.engine.types import AgentConfig
+    from opensquilla.skills.meta.orchestrator import make_agent_runner_from_parent
+
+    captured: dict[str, Any] = {}
+
+    def agent_factory(**kwargs):  # type: ignore[no-untyped-def]
+        captured.update(kwargs)
+
+        class _DummyAgent:
+            async def run_turn(self, _msg: str):
+                if False:
+                    yield None  # pragma: no cover
+
+        return _DummyAgent()
+
+    runner = make_agent_runner_from_parent(
+        provider=None,  # type: ignore[arg-type]
+        base_config=AgentConfig(
+            model_id="stub",
+            metadata={
+                "skill_loader": object(),
+                "bootstrap_workspace_dir": "/tmp/workspace",
+                "meta_match": object(),
+                "meta_match_tool_choice": {
+                    "type": "function",
+                    "function": {"name": "meta_invoke"},
+                },
+                "meta_match_tool_surface_restricted": True,
+                "keep": "yes",
+            },
+        ),
+        tool_definitions=[SimpleNamespace(name="bash")],
+        tool_handler=None,
+        agent_factory=agent_factory,
+    )
+
+    import asyncio
+
+    async def _drive() -> None:
+        async for _ in runner("sys", "user"):
+            pass
+
+    asyncio.run(_drive())
+
+    metadata = captured["config"].metadata
+    assert metadata["skill_loader"] is not None
+    assert metadata["bootstrap_workspace_dir"] == "/tmp/workspace"
+    assert metadata["keep"] == "yes"
+    assert "meta_match" not in metadata
+    assert "meta_match_tool_choice" not in metadata
+    assert "meta_match_tool_surface_restricted" not in metadata
+
+
 # ---------------------------------------------------------------------------
 # Change 2: depth + per-turn cap enforcement in _run_one_streaming
 # ---------------------------------------------------------------------------

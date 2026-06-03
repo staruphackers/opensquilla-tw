@@ -15,7 +15,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 # Operator escape hatch — set OPENSQUILLA_SENSITIVE_PATHS_DISABLED=1 to no-op
 # the entire sensitive-path block layer. ONLY for trusted single-operator
@@ -72,6 +72,8 @@ _SENSITIVE_SUFFIXES: tuple[str, ...] = (
     "/.psql_history",
 )
 
+_WORKSPACE_PARENT_EXCEPTION_MARKERS: tuple[str, ...] = ("/root",)
+
 _TOKEN_EDGE_CHARS = " \t\r\n'\"`$(){}[]<>;,|&"
 _ABSOLUTE_OR_TILDE_PATH_RE = re.compile(r"(?:~)?/(?:[^\s'\"`$(){}\[\]<>;,|&]+)")
 _DOTENV_LITERAL_RE = re.compile(
@@ -94,6 +96,37 @@ def _comparison_path(path: str) -> str:
     return normalized.casefold() if os.name == "nt" else normalized
 
 
+def _comparison_path_candidates(path: str) -> list[str]:
+    candidates = [_comparison_path(path)]
+    raw = str(path).strip().replace("\\", "/")
+    if raw:
+        candidates.append(raw.casefold() if os.name == "nt" else raw)
+    if raw.startswith("~/"):
+        expanded_home = str(Path.home()).replace("\\", "/") + raw[1:]
+        candidates.append(expanded_home.casefold() if os.name == "nt" else expanded_home)
+    return list(dict.fromkeys(candidates))
+
+
+def _looks_like_rooted_path_text(path: str) -> bool:
+    normalized = str(path).strip().replace("\\", "/")
+    return normalized.startswith(("/", "~/")) and not normalized.startswith("//")
+
+
+def _path_name(path: str) -> str:
+    normalized = str(path).strip().replace("\\", "/").rstrip("/")
+    return PurePosixPath(normalized).name.lower()
+
+
+def _path_contains(path: str, root: str) -> bool:
+    if not path or not root:
+        return False
+    normalized_path = path.rstrip("/")
+    normalized_root = root.rstrip("/")
+    return normalized_path == normalized_root or normalized_path.startswith(
+        normalized_root + "/"
+    )
+
+
 def is_sensitive_path(path: str) -> str | None:
     """Return the matched sensitive marker, or None.
 
@@ -106,24 +139,125 @@ def is_sensitive_path(path: str) -> str | None:
         return None
     if not path:
         return None
-    expanded = _comparison_path(path)
+    candidates = _comparison_path_candidates(path)
+    for expanded in candidates:
+        if (
+            expanded == "/root/.ssh"
+            or expanded.startswith("/root/.ssh/")
+            or expanded.endswith("/root/.ssh")
+            or "/root/.ssh/" in expanded
+        ):
+            return "~/.ssh"
     for prefix in _SENSITIVE_PREFIXES:
-        normalized = _comparison_path(prefix)
-        if expanded == normalized or expanded.startswith(normalized + "/"):
-            return prefix
+        for expanded in candidates:
+            for normalized in _comparison_path_candidates(prefix):
+                if expanded == normalized or expanded.startswith(normalized + "/"):
+                    return prefix
     for suffix in _SENSITIVE_SUFFIXES:
         normalized_suffix = suffix.replace("\\", "/")
         if os.name == "nt":
             normalized_suffix = normalized_suffix.casefold()
-        if expanded.endswith(normalized_suffix):
+        if any(expanded.endswith(normalized_suffix) for expanded in candidates):
             return suffix
-    name = Path(expanded).name.lower()
+    name = _path_name(path)
     if name == ".env" or name.startswith(".env."):
         return "/.env*"
     return None
 
 
-def sensitive_path_in_text(text: str) -> str | None:
+def _workspace_contains(path: str, workspace: str | Path | None) -> bool:
+    if workspace is None:
+        return False
+    try:
+        candidate = Path(path).expanduser().resolve(strict=False)
+        root = Path(workspace).expanduser().resolve(strict=False)
+        candidate.relative_to(root)
+        return True
+    except (OSError, RuntimeError, ValueError):
+        pass
+    candidate_paths = _comparison_path_candidates(str(path))
+    workspace_paths = _comparison_path_candidates(str(workspace))
+    return any(
+        _path_contains(candidate, root)
+        for candidate in candidate_paths
+        for root in workspace_paths
+    )
+
+
+def _workspace_nested_under_marker(workspace: str | Path | None, marker: str) -> bool:
+    if workspace is None or marker not in _WORKSPACE_PARENT_EXCEPTION_MARKERS:
+        return False
+    try:
+        root = Path(workspace).expanduser().resolve(strict=False)
+        marker_root = Path(marker).expanduser().resolve(strict=False)
+        if root == marker_root:
+            return False
+        root.relative_to(marker_root)
+        return True
+    except (OSError, RuntimeError, ValueError):
+        pass
+    for workspace_text in _comparison_path_candidates(str(workspace)):
+        for marker_text in _comparison_path_candidates(marker):
+            if workspace_text != marker_text and _path_contains(
+                workspace_text, marker_text
+            ):
+                return True
+    return False
+
+
+def _sensitive_leaf_marker(path: str) -> str | None:
+    candidates = _comparison_path_candidates(path)
+    for suffix in _SENSITIVE_SUFFIXES:
+        normalized_suffix = suffix.replace("\\", "/")
+        if os.name == "nt":
+            normalized_suffix = normalized_suffix.casefold()
+        if any(expanded.endswith(normalized_suffix) for expanded in candidates):
+            return suffix
+    name = _path_name(path)
+    if name == ".env" or name.startswith(".env."):
+        return "/.env*"
+    return None
+
+
+def sensitive_path_marker(
+    path: str,
+    *,
+    workspace: str | Path | None = None,
+) -> str | None:
+    """Return a sensitive marker, honoring the active workspace boundary.
+
+    Container deployments commonly place OpenSquilla's default workspace under
+    ``/root/.opensquilla/workspace``. The broad ``/root`` deny prefix should not
+    make that configured workspace unusable, but credential-like leaf files
+    such as ``.env`` and private-key names remain blocked.
+    """
+
+    text = str(path).strip()
+    raw = Path(text).expanduser()
+    if (
+        text
+        and not text.startswith("~")
+        and not raw.is_absolute()
+        and not _looks_like_rooted_path_text(text)
+    ):
+        return _sensitive_leaf_marker(text)
+
+    marker = is_sensitive_path(path)
+    if marker is None:
+        return None
+    if _workspace_contains(path, workspace) and _workspace_nested_under_marker(
+        workspace, marker
+    ):
+        leaf_marker = _sensitive_leaf_marker(path)
+        return leaf_marker
+    return marker
+
+
+def sensitive_path_in_text(
+    text: str,
+    *,
+    workspace: str | Path | None = None,
+) -> str | None:
     """Return the first sensitive path marker appearing in free-form text.
 
     This is intentionally conservative glue for shell/Python-code scanners.
@@ -158,7 +292,7 @@ def sensitive_path_in_text(text: str) -> str | None:
         candidate = raw.strip(_TOKEN_EDGE_CHARS)
         if not candidate:
             continue
-        marker = is_sensitive_path(candidate)
+        marker = sensitive_path_marker(candidate, workspace=workspace)
         if marker is not None:
             return marker
 
@@ -168,14 +302,19 @@ def sensitive_path_in_text(text: str) -> str | None:
             continue
         if start >= 2 and text[max(0, start - 3) : start] == "://":
             continue
-        marker = is_sensitive_path(candidate)
+        marker = sensitive_path_marker(candidate, workspace=workspace)
         if marker is not None:
             return marker
 
     return None
 
 
-def sensitive_target_in_command(command: str) -> str | None:
+def sensitive_target_in_command(
+    command: str,
+    *,
+    workspace: str | Path | None = None,
+    cwd: str | Path | None = None,
+) -> str | None:
     """Return the first sensitive marker for any destructive target, or None.
 
     Multi-target commands (``rm /tmp/ok /etc/bad``) are each checked — the
@@ -187,8 +326,12 @@ def sensitive_target_in_command(command: str) -> str | None:
         return None
     from opensquilla.sandbox.intent_cache import _extract_intents
 
-    for _kind, target in _extract_intents(command):
-        marker = is_sensitive_path(target)
+    effective_workspace = workspace
+    if effective_workspace is None:
+        effective_workspace = cwd if cwd is not None else Path.cwd()
+
+    for _kind, target in _extract_intents(command, base_dir=effective_workspace):
+        marker = sensitive_path_marker(target, workspace=effective_workspace)
         if marker is not None:
             return marker
     return None

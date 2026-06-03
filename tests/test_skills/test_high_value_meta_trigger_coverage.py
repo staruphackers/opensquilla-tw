@@ -5,11 +5,17 @@ from pathlib import Path
 from opensquilla.skills.loader import SkillLoader
 from opensquilla.skills.meta.trigger_accuracy import TriggerCase, evaluate_trigger_cases
 
-BUNDLED = Path(__file__).resolve().parents[2] / "src" / "opensquilla" / "skills" / "bundled"
+SKILLS_DIR = Path(__file__).resolve().parents[2] / "src" / "opensquilla" / "skills"
+BUNDLED = SKILLS_DIR / "bundled"
+EXP = SKILLS_DIR / "exp"
 
 
 def test_high_value_meta_skills_match_natural_user_prompts(tmp_path: Path) -> None:
-    loader = SkillLoader(bundled_dir=BUNDLED, snapshot_path=tmp_path / "snap.json")
+    loader = SkillLoader(
+        bundled_dir=BUNDLED,
+        extra_dirs=[EXP],
+        snapshot_path=tmp_path / "snap.json",
+    )
     loader.invalidate_cache()
 
     report = evaluate_trigger_cases(
@@ -60,6 +66,15 @@ def test_high_value_meta_skills_match_natural_user_prompts(tmp_path: Path) -> No
                     "and report writing into one workflow."
                 ),
                 expected_meta_skill="meta-skill-creator",
+            ),
+            TriggerCase(
+                name="migration_cjs_to_esm_natural",
+                user_message=(
+                    "We're planning to migrate a small frontend package from "
+                    "CommonJS to native ESM next sprint. Please give me a "
+                    "practical migration checklist with rollout risks."
+                ),
+                expected_meta_skill="meta-migration-assistant",
             ),
         ],
     )

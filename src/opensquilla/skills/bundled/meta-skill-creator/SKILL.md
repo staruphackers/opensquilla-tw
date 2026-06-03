@@ -1,10 +1,10 @@
 ---
 name: meta-skill-creator
-description: "Use this meta-skill instead of answering directly when the user explicitly asks to create, compose, or synthesize a new meta-skill that benefits from multi-skill orchestration across intent clarification, history mining, collision checks, linting, smoke tests, and proposal persistence."
+description: "Use this meta-skill instead of answering directly only when the current user explicitly asks to create, compose, synthesize, or propose a new meta-skill that orchestrates multiple existing skills. It uses multi-skill orchestration for intent clarification, optional history mining, trigger-collision checks, linting, smoke/runtime gates, preview, and optional proposal persistence. Do not use it for creating a normal standalone skill, asking how meta-skills work, analyzing pasted skill lists, or discussing existing meta-skills."
 kind: meta
 meta_priority: 90
 always: false
-final_text_mode: "step:preview"
+final_text_mode: "step:final_response"
 triggers:
   - "新增 meta 技能"
   - "组合现有 skill 成 meta-skill"
@@ -21,23 +21,87 @@ provenance:
 composition:
   steps:
     - id: clarify_intent
-      kind: agent
-      skill: sub-agent
+      kind: llm_chat
       with:
+        system: |
+          You are the intent gate for meta-skill-creator. Do not inspect
+          workspace files, history, memory, or external sources. Decide only
+          from the explicit user request and activation context.
         task: |
           Clarify whether the user wants a meta-skill, not a normal standalone
           skill. If the request is generic skill creation, return
           ROUTE: normal-skill. If it requires orchestrating multiple existing
           skills, return ROUTE: meta-skill. Also summarize desired inputs,
           outputs, trigger phrases, and whether a human preference branch is
-          needed.
+          needed. Set NEEDS_CLARIFICATION: yes only when the workflow goal,
+          output shape, trigger boundary, or human preference branch is
+          genuinely ambiguous and the request is an interactive user request.
+          For unattended auto-propose, dream, or cron activation, set
+          NEEDS_CLARIFICATION: no and continue from available context.
 
           User request:
           {{ inputs.user_message | xml_escape | truncate(1200) }}
 
+          Outer system / activation context:
+          {{ inputs.system_prompt | default("") | xml_escape | truncate(1200) }}
+
+          Return:
+          ROUTE: <normal-skill|meta-skill>
+          WORKFLOW_GOAL: <goal or unclear>
+          OUTPUT_SHAPE: <deliverable or unclear>
+          TRIGGERS: <phrases or unclear>
+          HUMAN_PREFERENCE_BRANCH: <yes|no|unclear>
+          NEEDS_CLARIFICATION: <yes|no>
+          MISSING_FIELDS:
+            - <workflow_goal|output_shape|trigger_boundary|human_preference_branch|none>
+          CLARIFY_REASON: <one concise reason, or none>
+
+    - id: creator_clarify
+      kind: user_input
+      depends_on: [clarify_intent]
+      when: "'route: meta-skill' in (outputs.clarify_intent | lower) and 'needs_clarification: yes' in (outputs.clarify_intent | lower)"
+      clarify:
+        mode: form
+        intro: |
+          新 meta-skill 的边界还不够明确。请补齐目标和输出形态，避免生成过宽的触发词。
+        nl_extract: true
+        fields:
+          - name: workflow_goal
+            type: string
+            required: true
+            prompt: "工作流目标 / Workflow goal"
+            max_chars: 300
+          - name: output_shape
+            type: string
+            required: true
+            prompt: "最终输出形态 / Output shape"
+            max_chars: 200
+          - name: trigger_boundary
+            type: string
+            prompt: "触发边界或不要覆盖的场景 / Trigger boundary"
+            max_chars: 300
+          - name: human_preference_branch
+            type: bool
+            default: false
+            prompt: "是否需要运行中让用户选择偏好 / Need human preference branch?"
+        cancel_keywords: ["算了", "取消", "cancel", "stop", "abort"]
+        timeout_hours: 24
+
+    - id: normal_skill_exit
+      kind: tool_call
+      depends_on: [clarify_intent]
+      when: "'route: normal-skill' in (outputs.clarify_intent | lower)"
+      tool: emit_text
+      tool_args:
+        text: |
+          This request was classified as a normal standalone skill request, not
+          a meta-skill composition request. The meta-skill creator stopped
+          before proposal assembly or persistence.
+
     - id: creator_mode
       kind: llm_classify
-      depends_on: [clarify_intent]
+      depends_on: [clarify_intent, creator_clarify]
+      when: "'route: meta-skill' in (outputs.clarify_intent | lower)"
       output_choices:
         - PREVIEW_ONLY
         - PERSISTED_PROPOSAL
@@ -49,8 +113,14 @@ composition:
           User request:
           {{ inputs.user_message | xml_escape | truncate(1200) }}
 
+          Outer system / activation context:
+          {{ inputs.system_prompt | default("") | xml_escape | truncate(1200) }}
+
           Clarified intent:
           {{ outputs.clarify_intent | truncate(1200) }}
+
+          Clarification answers (may be empty when not needed):
+          {{ inputs.get('collected', {}).get('creator_clarify', {}) | tojson }}
 
           Decision rules:
           - PREVIEW_ONLY: user asks for an example, template, plan, draft,
@@ -59,15 +129,21 @@ composition:
             meta-skill but does not ask for exhaustive smoke testing.
           - FULL_GATED: user asks for a production-ready, accepted, tested,
             validated, or fully gated meta-skill.
+          - FULL_GATED: unattended auto-propose, dream, or cron activation
+            requires preserving all creator gates before any auto-enable
+            decision.
 
     - id: harvest
       kind: skill_exec
       skill: history-explorer
-      depends_on: [clarify_intent]
+      depends_on: [clarify_intent, creator_clarify]
+      when: "'route: meta-skill' in (outputs.clarify_intent | lower) and 'Unattended meta-skill auto-propose run' in inputs.get('system_prompt', '')"
       on_failure: harvest_empty
       with:
         query: |
           Co-occurring skill chains and meta-skill usage for: {{ outputs.clarify_intent | truncate(1000) }}
+          Clarification answers:
+          {{ inputs.get('collected', {}).get('creator_clarify', {}) | tojson }}
         window_days: 30
         include: [co_occurrences, meta_usage, router_fixtures]
 
@@ -80,33 +156,50 @@ composition:
     - id: pick_pattern
       kind: llm_classify
       depends_on: [creator_mode, harvest]
-      output_choices: [p1_sequential, p2_fan_out_merge]
+      when: "'route: meta-skill' in (outputs.clarify_intent | lower)"
+      output_choices: [p1_sequential, p2_fan_out_merge, p3_condition_gated]
       with:
         history_summary: "{{ outputs.harvest | truncate(2000) }}"
-        user_intent: "{{ outputs.clarify_intent | truncate(1000) }}"
+        user_intent: |
+          Raw user request:
+          {{ inputs.user_message | xml_escape | truncate(1200) }}
+
+          Clarified intent:
+          {{ outputs.clarify_intent | truncate(1000) }}
 
     - id: fill_slots
       kind: tool_call
       depends_on: [pick_pattern]
+      when: "'route: meta-skill' in (outputs.clarify_intent | lower)"
       tool: meta_skill_fill_slots
       tool_args:
         pattern_id: "{{ outputs.pick_pattern }}"
         history_summary: "{{ outputs.harvest | truncate(2000) }}"
-        user_intent: "{{ outputs.clarify_intent | truncate(1000) }}"
+        user_intent: |
+          Raw user request:
+          {{ inputs.user_message | xml_escape | truncate(1200) }}
+
+          Clarified intent:
+          {{ outputs.clarify_intent | truncate(1000) }}
 
     - id: assemble
       kind: tool_call
       depends_on: [fill_slots]
+      when: "'route: meta-skill' in (outputs.clarify_intent | lower)"
       tool: meta_skill_assemble
       tool_args:
         pattern_id: "{{ outputs.pick_pattern }}"
         slots_json: "{{ outputs.fill_slots }}"
 
     - id: collision_check
-      kind: agent
-      skill: sub-agent
+      kind: llm_chat
       depends_on: [assemble]
+      when: "'route: meta-skill' in (outputs.clarify_intent | lower)"
       with:
+        system: |
+          You are a trigger-collision reviewer for meta-skill-creator. Use only
+          the candidate SKILL.md provided in the task and the bundled creator
+          boundaries named there. Do not call tools or inspect the workspace.
         task: |
           Review this generated meta-skill proposal for trigger collisions with
           existing bundled skills. Flag generic triggers, overlaps with
@@ -119,16 +212,21 @@ composition:
     - id: lint
       kind: tool_call
       depends_on: [collision_check]
+      when: "'route: meta-skill' in (outputs.clarify_intent | lower)"
       tool: meta_skill_lint_run
       tool_args:
         skill_md: "{{ outputs.assemble }}"
         gates: "G1,G2"
 
     - id: risk_classify
-      kind: agent
-      skill: sub-agent
+      kind: llm_chat
       depends_on: [lint]
+      when: "'route: meta-skill' in (outputs.clarify_intent | lower)"
       with:
+        system: |
+          You are an operational-risk classifier for generated meta-skills. Use
+          only the candidate SKILL.md and lint result in the task. Do not call
+          tools or inspect the workspace.
         task: |
           Classify operational risk for the generated meta-skill. Consider file
           writes, network access, GitHub/gh actions, shell commands, memory
@@ -148,7 +246,7 @@ composition:
     - id: single_model_baseline
       kind: llm_chat
       depends_on: [creator_mode]
-      when: "outputs.creator_mode == 'FULL_GATED'"
+      when: "'route: meta-skill' in (outputs.clarify_intent | lower) and outputs.creator_mode == 'FULL_GATED'"
       with:
         system: |
           You are the highest-tier baseline model for meta-skill authoring.
@@ -179,16 +277,30 @@ composition:
           - collision risks
           - SKILL.md preview
 
+          Boundary rule:
+          Creator validation, proposal persistence, auto-enable decisions,
+          and gate execution are handled by the outer meta-skill-creator
+          workflow. Do not require the generated candidate SKILL.md itself to
+          contain steps for saving proposals, running creator gates, comparing
+          against baselines, or deciding auto-enable. The candidate SKILL.md
+          should describe only the reusable business workflow that will run
+          later when the new meta-skill is invoked.
+
     - id: acceptance_compare
       kind: llm_chat
       depends_on: [assemble, single_model_baseline]
-      when: "outputs.creator_mode == 'FULL_GATED'"
+      when: "'route: meta-skill' in (outputs.clarify_intent | lower) and outputs.creator_mode == 'FULL_GATED'"
       with:
         system: |
           You are an acceptance reviewer. Compare an orchestrated candidate
           against a single-model baseline that used the highest-tier model on
           the same task. Reward verifiable skill composition, trigger safety,
           gates, operational risk handling, and reusable SKILL.md quality.
+          Keep the boundary strict: proposal persistence, gate execution,
+          runtime E2E, acceptance comparison, and auto-enable decisions belong
+          to the outer meta-skill-creator workflow. Do not penalize a candidate
+          SKILL.md for omitting creator-workflow steps that should not run when
+          the generated meta-skill is invoked later.
         task: |
           User request:
           {{ inputs.user_message | xml_escape | truncate(1200) }}
@@ -201,28 +313,61 @@ composition:
 
           Return this exact structure:
           WINNER: orchestrated|single-model|tie
+          QUALITY_SCORE: <0.00-1.00 weighted final product quality score>
           REASONS:
           - <specific evidence>
           REGRESSIONS:
           - <what the orchestrated candidate lacks versus the baseline>
           REQUIRED_IMPROVEMENTS:
-          - <concrete edit before acceptance, or "none">
+          - <blocking edit required before acceptance, or "none">
+
+          Treat REQUIRED_IMPROVEMENTS as a hard acceptance gate. Do not list
+          optional nice-to-have enhancements there. If the orchestrated
+          candidate is production-acceptable and any baseline advantages are
+          non-blocking, put those advantages under REGRESSIONS and set
+          REQUIRED_IMPROVEMENTS to "none".
+          Score final product quality with high weight: 40% usefulness and
+          completeness of the generated SKILL.md, 25% trigger/input/output
+          specificity, 20% gate/risk/collision coverage, and 15% reusable
+          workflow generality. Scores below 0.80 are not acceptable for
+          FULL_GATED persistence even when WINNER is orchestrated.
+          Never make proposal persistence, auto-enable state, acceptance
+          comparison, or runtime E2E execution a REQUIRED_IMPROVEMENT for the
+          candidate SKILL.md; those are already performed by this outer creator
+          workflow and are evaluated from the creator's gate outputs.
 
     - id: smoke
       kind: tool_call
       depends_on: [risk_classify]
-      when: "outputs.creator_mode != 'PREVIEW_ONLY'"
+      when: "'route: meta-skill' in (outputs.clarify_intent | lower) and outputs.creator_mode != 'PREVIEW_ONLY'"
       tool: meta_skill_smoke_run
       tool_args:
         skill_md: "{{ outputs.assemble }}"
         fixture_gen_model: openai/gpt-4o-mini
-        classifier_model: anthropic/claude-3.5-haiku
+        classifier_model: openrouter/auto
+
+    - id: runtime_e2e
+      kind: tool_call
+      depends_on: [assemble, smoke]
+      when: "'route: meta-skill' in (outputs.clarify_intent | lower) and outputs.creator_mode == 'FULL_GATED'"
+      tool: meta_skill_runtime_e2e_run
+      tool_args:
+        skill_md: "{{ outputs.assemble }}"
+        # Leave eval_prompts empty so the runtime gate derives an operational
+        # positive prompt from the candidate skill's own trigger. The outer
+        # creator request asks for a meta-skill proposal; using it here would
+        # incorrectly compare a candidate workflow run against proposal prose.
+        eval_prompts: ""
 
     - id: preview
-      kind: agent
-      skill: sub-agent
-      depends_on: [smoke, acceptance_compare]
+      kind: llm_chat
+      depends_on: [smoke, acceptance_compare, runtime_e2e]
+      when: "'route: meta-skill' in (outputs.clarify_intent | lower)"
       with:
+        system: |
+          You are the final preview writer for meta-skill-creator. Produce only
+          a concise operator-facing proposal preview from the supplied step
+          outputs. Do not call tools, inspect files, or invent persistence IDs.
         task: |
           Produce a concise proposal preview for the user/operator before
           persistence. Include proposed name, triggers, DAG summary, collision
@@ -251,15 +396,35 @@ composition:
           Baseline comparison:
           {{ outputs.acceptance_compare | truncate(2000) }}
 
+          Runtime E2E:
+          {{ outputs.runtime_e2e | truncate(2000) }}
+
     - id: persist
       kind: tool_call
       depends_on: [preview]
-      when: "outputs.creator_mode != 'PREVIEW_ONLY'"
+      when: "'route: meta-skill' in (outputs.clarify_intent | lower) and outputs.creator_mode != 'PREVIEW_ONLY'"
       tool: meta_skill_persist_proposal
       tool_args:
         skill_md: "{{ outputs.assemble }}"
         lint_result: "{{ outputs.lint }}"
         smoke_result: "{{ outputs.smoke }}"
+        creator_mode: "{{ outputs.creator_mode }}"
+        acceptance_result: "{{ outputs.acceptance_compare }}"
+        runtime_e2e_result: "{{ outputs.runtime_e2e }}"
+        collision_result: "{{ outputs.collision_check }}"
+        risk_result: "{{ outputs.risk_classify }}"
+
+    - id: final_response
+      kind: tool_call
+      depends_on: [preview, normal_skill_exit]
+      tool: emit_text
+      tool_args:
+        text: |
+          {% if outputs.normal_skill_exit %}
+          {{ outputs.normal_skill_exit }}
+          {% else %}
+          {{ outputs.preview }}
+          {% endif %}
 ---
 
 # Meta-Skill Creator

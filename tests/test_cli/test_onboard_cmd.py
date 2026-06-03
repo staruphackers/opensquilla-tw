@@ -55,7 +55,7 @@ def test_onboard_noninteractive_provider(tmp_path, monkeypatch):
     assert "openrouter ·" not in result.stdout
     assert "OpenSquilla Setup Handoff" in result.stdout
     assert "Provider Configured" not in result.stdout
-    assert "LLM: openrouter / deepseek/deepseek-v4-flash" in result.stdout
+    assert "LLM: openrouter / deepseek/deepseek-v4-pro" in result.stdout
 
 
 def test_onboard_finish_commands_remain_copyable_with_long_config_path(
@@ -829,8 +829,8 @@ def test_onboard_catalog_accepts_short_capability_section_aliases(
 @pytest.mark.parametrize(
     ("section", "expected"),
     [
-        ("providers", ["openrouter", "OPENROUTER_API_KEY", "deepseek/deepseek-v4-flash"]),
-        ("router", ["recommended", "openrouter-mix", "t0", "t3"]),
+        ("providers", ["openrouter", "OPENROUTER_API_KEY", "deepseek/deepseek-v4-pro"]),
+        ("router", ["recommended", "openrouter-mix", "c0", "c3"]),
         ("search", ["duckduckgo", "brave", "BRAVE_SEARCH_API_KEY"]),
         ("channels", ["discord", "Bot token", "opensquilla channels describe discord --json"]),
         ("image-generation", ["openrouter", "openrouter/google/gemini", "OPENROUTER_API_KEY"]),
@@ -925,7 +925,7 @@ def test_onboard_catalog_router_focus_offers_a_real_recipe(tmp_path, monkeypatch
     result = runner.invoke(app, ["onboard", "catalog", "router", "--config", str(target)])
 
     assert result.exit_code == 0, result.stdout
-    assert "Try: opensquilla onboard configure router --router recommended --default-tier t1" in (
+    assert "Try: opensquilla onboard configure router --router recommended --default-tier c1" in (
         result.stdout
     )
     assert "Configure with:" not in result.stdout
@@ -948,7 +948,7 @@ def test_onboard_catalog_focused_provider_examples_match_key_requirements(
     assert result.exit_code == 0, result.stdout
     assert (
         "Try: opensquilla onboard configure provider --provider openrouter "
-        "--model deepseek/deepseek-v4-flash --api-key-env OPENROUTER_API_KEY "
+        "--model deepseek/deepseek-v4-pro --api-key-env OPENROUTER_API_KEY "
         f"--config {_config_arg(target)}"
     ) in result.stdout
     assert (
@@ -1337,7 +1337,7 @@ def test_onboard_status_table_names_missing_env_keys_for_optional_capabilities(
     summary = _status_cockpit_summary(get_onboarding_status(load_config(target)))
     assert summary == (
         "Blocking setup: Memory embedding"
-        " · Optional later: Web search, Channels, Image generation"
+        " · Optional later: Web search, Channels, Image generation, Voice audio"
     )
 
 
@@ -1397,7 +1397,13 @@ def test_onboard_status_offers_ready_next_moves_when_all_sections_ready(
         "[[channels.channels]]\n"
         'type = "slack"\n'
         'name = "w"\n'
-        'token = "xoxb-test"\n',
+        'token = "xoxb-test"\n'
+        "\n"
+        "[audio]\n"
+        "enabled = true\n"
+        "\n"
+        "[audio.providers.elevenlabs]\n"
+        'api_key = "el-test"\n',
         encoding="utf-8",
     )
 
@@ -1538,7 +1544,7 @@ def test_onboard_if_needed_non_tty_hint_targets_blocking_memory_section(
         (
             "router",
             "Headless router:",
-            "opensquilla onboard configure router --router recommended --default-tier t1",
+            "opensquilla onboard configure router --router recommended --default-tier c1",
         ),
         (
             "channels",
@@ -1810,14 +1816,14 @@ def test_configure_router_noninteractive_can_set_default_tier(tmp_path, monkeypa
 
     result = runner.invoke(
         app,
-        ["configure", "router", "--router", "recommended", "--default-tier", "t2"],
+        ["configure", "router", "--router", "recommended", "--default-tier", "c2"],
     )
 
     assert result.exit_code == 0, result.stdout
     data = tomllib.loads(target.read_text())
     assert data["squilla_router"]["enabled"] is True
     assert data["squilla_router"]["tier_profile"] == "deepseek"
-    assert data["squilla_router"]["default_tier"] == "t2"
+    assert data["squilla_router"]["default_tier"] == "c2"
 
 
 def test_configure_router_rejects_invalid_default_tier_without_writing(
@@ -1954,6 +1960,8 @@ def test_configure_channel_noninteractive_adds_slack(tmp_path, monkeypatch):
             "work",
             "--token",
             "xoxb-secret",
+            "--field",
+            "signing_secret=ss",
         ],
     )
 

@@ -73,10 +73,14 @@ def test_chat_input_accept_attribute_matches_allowlist() -> None:
 def test_chat_permission_pill_distinguishes_global_and_session_modes() -> None:
     source = _read_chat_js()
 
+    assert '<span class="chat-toolbar-row-label">Execution mode</span>' in source
+    assert '<span class="chat-toolbar-row-label">Approvals</span>' not in source
     assert "cfg?.permissions?.default_mode" in source
     assert "Global ${_globalElevatedMode.toUpperCase()}" in source
     assert "Session ${_elevatedMode.toUpperCase()}" in source
+    assert "Approval prompts are active" in source
     assert "opensquilla sandbox on|bypass|full|reset" in source
+    assert "Bypass Off" not in source
 
     # The legacy image-only `accept="image/*" multiple` literal must be gone:
     assert 'accept="image/*" multiple' not in source
@@ -125,6 +129,62 @@ def test_app_preserves_explicit_mobile_routes_instead_of_forcing_chat() -> None:
     assert "window.matchMedia('(max-width: 768px)').matches ? '/chat' : '/overview'" in router
 
 
+def test_chat_session_controls_mount_in_topbar_center_slot() -> None:
+    app = _read_app_js()
+    chat = _read_chat_js()
+    base_css = _read_base_css()
+    chat_css = _read_chat_css()
+    approval_monitor = _read_approval_monitor_js()
+
+    assert 'id="topbar-center"' in app
+    assert "function getTopbarCenter()" in app
+    assert "function clearTopbarCenter()" in app
+    assert "clearTopbarCenter();" in app
+    export_start = app.index("return {")
+    export_body = app[export_start:]
+    assert "getTopbarCenter" in export_body
+    assert "clearTopbarCenter" in export_body
+
+    assert 'class="chat-header"' not in chat
+    assert "App.getTopbarCenter" in chat
+    assert "App.clearTopbarCenter" in chat
+    assert 'id="chat-session-chip"' in chat
+    assert 'id="chat-session-chip-key"' in chat
+    assert 'id="chat-session-copy"' in chat
+    assert 'id="chat-run-status"' in chat
+    assert 'id="chat-ctx-warn"' in chat
+
+    destroy_start = chat.index("function destroy()")
+    destroy_body = chat[destroy_start:]
+    assert "App.clearTopbarCenter" in destroy_body
+
+    topbar_center_rule = base_css[
+        base_css.index(".topbar-center {") : base_css.index("}", base_css.index(".topbar-center {"))
+    ]
+    assert "min-width: 0" in topbar_center_rule
+    assert "overflow: hidden" in topbar_center_rule
+
+    approval_start = base_css.index(".approval-inline {")
+    approval_rule = base_css[approval_start : base_css.index("}", approval_start)]
+    assert "flex-shrink: 0" in approval_rule
+    assert "@media (max-width: 768px)" in base_css
+    assert "width: 34px" in base_css
+    assert "font-size: 0" in base_css
+    assert "inline.setAttribute('aria-label', inlineText);" in approval_monitor
+
+    session_chip_start = chat_css.index(".chat-session-chip {")
+    session_chip_rule = chat_css[
+        session_chip_start : chat_css.index("}", session_chip_start)
+    ]
+    assert "min-width: 0" in session_chip_rule
+    assert "clamp(180px, 34vw, 720px)" in session_chip_rule
+
+    for selector in ("#chat-run-status", ".chat-session-copy-btn", ".chat-ctx-warn"):
+        start = chat_css.index(selector)
+        rule = chat_css[start : chat_css.index("}", start)]
+        assert "flex-shrink: 0" in rule
+
+
 def test_chat_composer_autofocus_is_desktop_only() -> None:
     source = _read_chat_js()
 
@@ -133,6 +193,21 @@ def test_chat_composer_autofocus_is_desktop_only() -> None:
     assert "window.matchMedia('(pointer: coarse)')" in source
     assert "if (_textarea && _shouldAutofocusComposer()) _textarea.focus();" in source
     assert "// Autofocus chat input\n    if (_textarea) _textarea.focus();" not in source
+
+
+def test_chat_composer_has_microphone_transcription_flow() -> None:
+    source = _read_chat_js()
+    css = _read_chat_css()
+
+    assert 'id="chat-btn-mic"' in source
+    assert 'aria-label="Record voice input"' in source
+    assert "navigator.mediaDevices.getUserMedia" in source
+    assert "new MediaRecorder" in source
+    assert "/api/audio/transcribe" in source
+    assert "Authorization" in source
+    assert "Bearer ${token}" in source
+    assert "voice_input" in source
+    assert "chat-mic-recording" in css
 
 
 def test_mobile_sidebar_closed_state_leaves_focus_order() -> None:
@@ -330,7 +405,7 @@ def test_chat_attachment_hard_cap_is_category_specific() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 8 — ESC has a document-level handler so abort works regardless of focus.
+# Test 8 — ESC has a document-level handler with overlay/editable guards.
 # ---------------------------------------------------------------------------
 
 def test_chat_js_has_document_level_escape_handler() -> None:
@@ -348,6 +423,32 @@ def test_chat_js_has_document_level_escape_handler() -> None:
     # also abort the streaming turn behind it.
     assert "if (e.defaultPrevented) return;" in source
     assert "if (_chatOverlayVisible()) return;" in source
+
+
+def test_chat_escape_aborts_from_composer_but_not_other_editable_targets() -> None:
+    source = _read_chat_js()
+    handler_start = source.index("function _onDocKeydown(e) {")
+    handler_end = source.index("document.addEventListener('keydown', _onDocKeydown)", handler_start)
+    handler = source[handler_start:handler_end]
+
+    other_editable_idx = handler.index(
+        "const inOtherEditable = target && target !== _textarea && ("
+    )
+    streaming_idx = handler.index("if (_isStreaming) {")
+    assert other_editable_idx < streaming_idx
+    assert "if (inOtherEditable) return;" in handler
+    assert "target !== _textarea" in handler
+    assert "_onStop('webui_escape')" in handler
+
+
+def test_chat_stop_sends_abort_source() -> None:
+    source = _read_chat_js()
+    stop_start = source.index("function _onStop(")
+    stop_end = source.index("// Delegated click handler", stop_start)
+    stop_body = source[stop_start:stop_end]
+
+    assert "function _onStop(source = 'webui_stop_button')" in stop_body
+    assert "_rpc.call('chat.abort', { sessionKey: _sessionKey, source })" in stop_body
     assert "function _chatOverlayVisible" in source
 
 
@@ -395,7 +496,10 @@ def test_chat_js_has_history_navigation_and_alt_pending_shortcuts() -> None:
     enqueue_start = source.index("function _enqueueCurrentInput")
     enqueue_end = source.index("  function _updateStopButton", enqueue_start)
     enqueue_body = source[enqueue_start:enqueue_end]
-    assert "return _enqueuePendingInput(text);" in enqueue_body
+    assert (
+        "return _enqueuePendingInput(text, null, 'the current response', "
+        "normalized.attachments);"
+    ) in enqueue_body
     assert "_pendingQueue.push" not in enqueue_body
     assert "_inputHistoryIdx" in source
     assert "_inputHistoryDraft" in source

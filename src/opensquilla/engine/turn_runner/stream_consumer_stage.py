@@ -368,6 +368,7 @@ class _ToolResultHandler:
                     segment.get("type") == "tool_use"
                     and segment.get("tool_use_id") == event.tool_use_id
                 ):
+                    segment["name"] = event.tool_name
                     segment["input"] = _persisted_tool_use_input(
                         event.tool_name,
                         event.tool_use_id,
@@ -740,6 +741,7 @@ class _CompactionHandler:
                 from opensquilla.engine.cache_break_monitor import notify_compaction
                 from opensquilla.session.compaction_lifecycle import (
                     COMPACTION_TRIGGERED_EVENT,
+                    compaction_effect_payload,
                     compaction_lifecycle_payload,
                     new_compaction_id,
                 )
@@ -755,6 +757,7 @@ class _CompactionHandler:
                     message=str(exc),
                     kept_count=len(event.kept_entries),
                     summary_len=len(event.summary or ""),
+                    **compaction_effect_payload(status="failed", reason="persist_failed"),
                     **compaction_lifecycle_payload(
                         compaction_id,
                         COMPACTION_TRIGGERED_EVENT,

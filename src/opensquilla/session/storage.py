@@ -12,6 +12,7 @@ from opensquilla.session.keys import canonicalize_session_key, normalize_agent_i
 from opensquilla.session.models import (
     AgentTaskRecord,
     AgentTaskStatus,
+    MemoryDurableReceipt,
     SessionContextState,
     SessionNode,
     SessionSummary,
@@ -282,6 +283,43 @@ CREATE INDEX IF NOT EXISTS idx_agent_tasks_status_updated
 ON agent_tasks(status, updated_at)
 """
 
+_CREATE_MEMORY_DURABLE_RECEIPTS = """
+CREATE TABLE IF NOT EXISTS memory_durable_receipts (
+    receipt_id TEXT PRIMARY KEY,
+    session_key TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    turn_id TEXT,
+    scope TEXT NOT NULL,
+    source_path TEXT,
+    target_path TEXT,
+    content_hash TEXT,
+    coverage_turn_id TEXT,
+    coverage_hash TEXT,
+    coverage_entry_count INTEGER,
+    idempotency_key TEXT NOT NULL UNIQUE,
+    status TEXT NOT NULL,
+    reason TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    next_retry_at_ms INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    schema_version INTEGER NOT NULL DEFAULT 1
+)
+"""
+
+_CREATE_IDX_MEMORY_DURABLE_RECEIPTS_SESSION = (
+    "CREATE INDEX IF NOT EXISTS idx_memory_durable_receipts_session "
+    "ON memory_durable_receipts(session_key, status, created_at)"
+)
+
+_CREATE_IDX_MEMORY_DURABLE_RECEIPTS_COVERAGE = (
+    "CREATE INDEX IF NOT EXISTS idx_memory_durable_receipts_coverage "
+    "ON memory_durable_receipts("
+    "session_key, session_id, scope, status, coverage_turn_id, coverage_hash, "
+    "coverage_entry_count"
+    ")"
+)
+
 _CREATE_EPOCH_ROLLBACK_TRIGGER = """
 CREATE TRIGGER IF NOT EXISTS prevent_epoch_rollback
 BEFORE UPDATE OF epoch ON sessions
@@ -362,6 +400,12 @@ class SessionStorage:
         await self._conn.execute("PRAGMA foreign_keys=ON")
         await self._initialize_schema()
 
+    @classmethod
+    async def open(cls, db_path: str) -> SessionStorage:
+        storage = cls(str(db_path))
+        await storage.connect()
+        return storage
+
     async def close(self) -> None:
         if self._conn:
             await self._conn.close()
@@ -384,6 +428,8 @@ class SessionStorage:
         await self._conn.execute(_CREATE_AGENT_TASKS)
         await self._conn.execute(_CREATE_IDX_AGENT_TASKS_SESSION_STATUS)
         await self._conn.execute(_CREATE_IDX_AGENT_TASKS_STATUS_UPDATED)
+        await self._conn.execute(_CREATE_MEMORY_DURABLE_RECEIPTS)
+        await self._conn.execute(_CREATE_IDX_MEMORY_DURABLE_RECEIPTS_SESSION)
         # FTS5 full-text search index + auto-sync triggers
         await self._conn.execute(_CREATE_TRANSCRIPT_FTS)
         await self._conn.execute(_CREATE_FTS_TRIGGER_INSERT)
@@ -397,6 +443,9 @@ class SessionStorage:
         await self._migrate_transcript_reasoning_content_column()
         await self._migrate_transcript_turn_usage_column()
         await self._migrate_summary_metadata_columns()
+        await self._migrate_memory_durable_receipt_coverage_columns()
+        await self._conn.execute(_CREATE_IDX_MEMORY_DURABLE_RECEIPTS_COVERAGE)
+        await self._conn.commit()
         await self.mark_abandoned_agent_tasks()
 
     async def _migrate_epoch_column(self) -> None:
@@ -490,6 +539,30 @@ class SessionStorage:
             "flush_receipt_status": (
                 "ALTER TABLE session_summaries ADD COLUMN "
                 "flush_receipt_status TEXT NOT NULL DEFAULT 'unknown'"
+            ),
+        }
+        changed = False
+        for column, sql in additions.items():
+            if column not in columns:
+                await self._conn.execute(sql)
+                changed = True
+        if changed:
+            await self._conn.commit()
+
+    async def _migrate_memory_durable_receipt_coverage_columns(self) -> None:
+        """Idempotently add deterministic checkpoint coverage metadata columns."""
+        assert self._conn is not None
+        async with self._conn.execute("PRAGMA table_info(memory_durable_receipts)") as cur:
+            columns = {row[1] for row in await cur.fetchall()}
+        additions = {
+            "coverage_turn_id": (
+                "ALTER TABLE memory_durable_receipts ADD COLUMN coverage_turn_id TEXT"
+            ),
+            "coverage_hash": (
+                "ALTER TABLE memory_durable_receipts ADD COLUMN coverage_hash TEXT"
+            ),
+            "coverage_entry_count": (
+                "ALTER TABLE memory_durable_receipts ADD COLUMN coverage_entry_count INTEGER"
             ),
         }
         changed = False
@@ -719,6 +792,120 @@ class SessionStorage:
         async with self.conn.execute(sql, params) as cur:
             rows = await cur.fetchall()
         return [AgentTaskRecord(**_deserialize_row(dict(row))) for row in rows]
+
+    async def upsert_memory_durable_receipt(
+        self,
+        receipt: MemoryDurableReceipt,
+    ) -> MemoryDurableReceipt:
+        receipt.session_key = canonicalize_session_key(receipt.session_key)
+        receipt.updated_at = _now_ms()
+        data = receipt.model_dump()
+        cols = list(data.keys())
+        placeholders = ", ".join("?" for _ in cols)
+        updates = ", ".join(
+            f"{col}=excluded.{col}"
+            for col in cols
+            if col not in {"receipt_id", "idempotency_key", "created_at"}
+        )
+        values = [_serialize(data[col]) for col in cols]
+        await self.conn.execute(
+            f"""
+            INSERT INTO memory_durable_receipts ({", ".join(cols)})
+            VALUES ({placeholders})
+            ON CONFLICT(idempotency_key) DO UPDATE SET {updates}
+            """,
+            values,
+        )
+        await self.conn.commit()
+        rows = await self.list_memory_durable_receipts(
+            session_key=receipt.session_key,
+            idempotency_key=receipt.idempotency_key,
+            limit=1,
+        )
+        return rows[0]
+
+    async def list_memory_durable_receipts(
+        self,
+        session_key: str | None = None,
+        session_id: str | None = None,
+        scope: str | None = None,
+        status: str | None = None,
+        coverage_turn_id: str | None = None,
+        coverage_hash: str | None = None,
+        coverage_entry_count: int | None = None,
+        idempotency_key: str | None = None,
+        limit: int = 100,
+    ) -> list[MemoryDurableReceipt]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if session_key is not None:
+            clauses.append("session_key = ?")
+            params.append(canonicalize_session_key(session_key))
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        if scope is not None:
+            clauses.append("scope = ?")
+            params.append(scope)
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        if coverage_turn_id is not None:
+            clauses.append("coverage_turn_id = ?")
+            params.append(coverage_turn_id)
+        if coverage_hash is not None:
+            clauses.append("coverage_hash = ?")
+            params.append(coverage_hash)
+        if coverage_entry_count is not None:
+            clauses.append("coverage_entry_count = ?")
+            params.append(coverage_entry_count)
+        if idempotency_key is not None:
+            clauses.append("idempotency_key = ?")
+            params.append(idempotency_key)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        async with self.conn.execute(
+            f"""
+            SELECT * FROM memory_durable_receipts
+            {where}
+            ORDER BY created_at ASC, rowid ASC
+            LIMIT ?
+            """,
+            params,
+        ) as cur:
+            rows = await cur.fetchall()
+        return [MemoryDurableReceipt(**_deserialize_row(dict(row))) for row in rows]
+
+    async def update_memory_durable_receipt(
+        self,
+        receipt_id: str,
+        **fields: Any,
+    ) -> MemoryDurableReceipt:
+        allowed = set(MemoryDurableReceipt.model_fields) - {"receipt_id", "created_at"}
+        unknown = sorted(set(fields) - allowed)
+        if unknown:
+            raise ValueError(
+                f"Unknown memory durable receipt fields: {', '.join(unknown)}"
+            )
+        if "session_key" in fields:
+            fields["session_key"] = canonicalize_session_key(fields["session_key"])
+        fields.setdefault("updated_at", _now_ms())
+        assignments = ", ".join(f"{name} = ?" for name in fields)
+        values = [_serialize(value) for value in fields.values()]
+        values.append(receipt_id)
+        await self.conn.execute(
+            f"UPDATE memory_durable_receipts SET {assignments} WHERE receipt_id = ?",
+            values,
+        )
+        await self.conn.commit()
+        async with self.conn.execute(
+            "SELECT * FROM memory_durable_receipts WHERE receipt_id = ?",
+            (receipt_id,),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            raise KeyError(f"Memory durable receipt not found: {receipt_id}")
+        return MemoryDurableReceipt(**_deserialize_row(dict(row)))
 
     async def list_agent_tasks_for_sessions(
         self,
@@ -1280,6 +1467,24 @@ class SessionStorage:
             (status, summary_id),
         )
         await self.conn.commit()
+
+    async def update_summary_flush_receipt_status_by_compaction(
+        self,
+        *,
+        session_key: str,
+        compaction_id: str,
+        status: str,
+    ) -> int:
+        cur = await self.conn.execute(
+            """
+            UPDATE session_summaries
+            SET flush_receipt_status = ?
+            WHERE session_key = ? AND compaction_id = ?
+            """,
+            (status, canonicalize_session_key(session_key), compaction_id),
+        )
+        await self.conn.commit()
+        return int(cur.rowcount or 0)
 
     # ── SessionContextState CRUD ─────────────────────────────────────────────
 

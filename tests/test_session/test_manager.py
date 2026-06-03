@@ -1,5 +1,6 @@
 """Tests for SessionManager lifecycle operations."""
 
+import contextlib
 import json
 import sqlite3
 from pathlib import Path
@@ -279,6 +280,20 @@ async def test_append_message_updates_tokens(manager):
     await manager.append_message("agent:main:main", "user", "hi", token_count=10)
     node = await manager._storage.get_session("agent:main:main")
     assert node.total_tokens == 10
+
+
+@pytest.mark.asyncio
+async def test_append_message_with_turn_usage_does_not_double_count_output_tokens(manager):
+    await manager.create("agent:main:main")
+    await manager.append_message(
+        "agent:main:main",
+        "assistant",
+        "hi",
+        turn_usage={"model": "gpt-test", "input_tokens": 10, "output_tokens": 3},
+        token_count=3,
+    )
+    node = await manager._storage.get_session("agent:main:main")
+    assert node.total_tokens == 0
 
 
 @pytest.mark.asyncio
@@ -702,6 +717,49 @@ async def test_compact_with_result_returns_source_and_persists(manager):
 
 
 @pytest.mark.asyncio
+async def test_compact_with_result_skips_rewrite_when_transcript_changes(manager):
+    await manager.create("agent:main:main")
+    for i in range(20):
+        await manager.append_message(
+            "agent:main:main",
+            "user",
+            f"msg {i} " + ("x" * 500),
+            token_count=200,
+        )
+    original_contents = [entry.content for entry in await manager.get_transcript("agent:main:main")]
+    context_entries = 0
+
+    @contextlib.asynccontextmanager
+    async def mutation_context():
+        nonlocal context_entries
+        context_entries += 1
+        if context_entries == 2:
+            await manager.append_message(
+                "agent:main:main",
+                "user",
+                "late queued followup",
+                token_count=3,
+            )
+        yield
+
+    result = await manager.compact_with_result(
+        "agent:main:main",
+        context_window_tokens=1000,
+        mutation_context=mutation_context,
+    )
+
+    assert result.summary == ""
+    assert result.summary_source == "skipped"
+    assert result.skip_reason == "stale_preimage"
+    assert result.removed_count == 0
+    node = await manager._storage.get_session("agent:main:main")
+    assert node.compaction_count == 0
+    assert await manager.get_summaries("agent:main:main") == []
+    transcript = await manager.get_transcript("agent:main:main")
+    assert [entry.content for entry in transcript] == original_contents + ["late queued followup"]
+
+
+@pytest.mark.asyncio
 async def test_compact_with_result_marks_unsafe_receipt_as_degraded_forensic(manager):
     await manager.create("agent:main:main")
     for i in range(20):
@@ -752,6 +810,36 @@ async def test_degraded_compaction_preimage_can_be_listed_for_repair(manager):
     assert preimage
     assert preimage[0].content.startswith("repair msg 0")
     await manager.mark_compaction_repair_status(pending[0], "repaired")
+    assert await manager.list_degraded_compactions(agent_id="main") == []
+
+
+@pytest.mark.asyncio
+async def test_compaction_flush_status_can_be_backfilled_by_compaction_id(manager):
+    await manager.create("agent:main:main")
+    for i in range(20):
+        await manager.append_message(
+            "agent:main:main",
+            "user",
+            f"background flush msg {i} " + ("x" * 500),
+            token_count=200,
+        )
+
+    await manager.compact_with_result(
+        "agent:main:main",
+        context_window_tokens=1000,
+        compaction_id="cmp-bg-flush",
+        flush_receipt_status="degraded_forensic",
+    )
+
+    updated = await manager.mark_compaction_flush_receipt_status(
+        "agent:main:main",
+        "cmp-bg-flush",
+        "safe",
+    )
+
+    assert updated == 1
+    summaries = await manager.get_summaries("agent:main:main")
+    assert summaries[0].flush_receipt_status == "safe"
     assert await manager.list_degraded_compactions(agent_id="main") == []
 
 
@@ -886,6 +974,7 @@ async def test_compact_with_result_strict_coverage_blocks_destructive_rewrite(ma
     )
 
     assert result.removed_count == 0
+    assert result.skip_reason == "coverage_blocked"
     assert result.coverage_status == "fail_blocked"
     assert any(late_critical_path in item for item in result.missing_obligations or [])
     assert await manager.get_transcript("agent:main:main") == original_transcript

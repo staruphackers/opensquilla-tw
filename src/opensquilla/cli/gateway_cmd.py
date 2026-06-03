@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import shlex
 
 import typer
 
@@ -33,21 +32,11 @@ def gateway_startup_guidance(host: str, port: int, scheme: str = "http") -> tupl
 
 
 def run_gateway(
-    port: int | None = typer.Option(
-        None,
-        "--port",
-        "-p",
-        help="Port to bind (default: config port, usually 18791)",
-    ),
-    bind: str | None = typer.Option(
-        None,
-        "--bind",
-        "-b",
-        help="Host to bind (default: config host, usually 127.0.0.1)",
-    ),
+    port: int | None = typer.Option(18791, "--port", "-p", help="Port to bind"),
+    bind: str | None = typer.Option("127.0.0.1", "--bind", "-b", help="Host to bind"),
     listen: str = typer.Option("", "--listen", help="Host to bind (wins over --bind)"),
     debug: bool = typer.Option(False, "--debug", help="Enable debug mode"),
-    config_path: str | None = typer.Option(None, "--config", help="Override config path."),
+    config_path: str | None = typer.Option(None, "--config", help="Override config path"),
 ) -> None:
     """Start the ASGI gateway server.
 
@@ -60,24 +49,26 @@ def run_gateway(
     honoured as the fallback when no CLI flag or env var is supplied,
     matching what the field name promises.
     """
-    effective_config_path = config_path or os.environ.get("OPENSQUILLA_GATEWAY_CONFIG_PATH")
-    config = GatewayConfig.load(effective_config_path)
-    host = _resolve_lifecycle_host(
-        bind=bind,
-        listen=listen,
-        default_host=config.host,
-    )
-    effective_port = port if port is not None else config.port
-    config = config.model_copy(
-        update={"host": host, "port": effective_port, "debug": debug}
-    )
+    # Load config FIRST so its ``host`` field can act as the final
+    # fallback below ``OPENSQUILLA_GATEWAY_HOST``.
+    config = GatewayConfig.load(config_path or os.environ.get("OPENSQUILLA_GATEWAY_CONFIG_PATH"))
+    if config_path and not config.config_path:
+        config.config_path = str(config_path)
+    # Treat the CLI ``--bind`` default as "not explicitly supplied" so the
+    # env vars + toml get a chance to participate when the operator only
+    # sets one of them.
+    explicit_flag: str | None = listen or (bind if bind and bind != "127.0.0.1" else None)
+    host = resolve_listen_address(explicit_flag, default=config.host or "127.0.0.1")
+    resolved_port = port if port is not None else config.port
+    config = config.model_copy(update={"host": host, "port": resolved_port, "debug": debug})
 
     banner_host = f"[red]{host}[/red]" if is_public_bind(host) else f"[{ACCENT_MARKUP}]{host}[/]"
     console.print(
-        f"[bold green]Starting OpenSquilla gateway[/bold green] "
-        f"on {banner_host}:{effective_port}"
+        f"[bold green]Starting OpenSquilla gateway[/bold green] on {banner_host}:{resolved_port}"
     )
     scheme = "https" if (config.tls.keyfile and config.tls.certfile) else "http"
+    for line in gateway_startup_guidance(host, resolved_port, scheme=scheme):
+        console.print(line)
     if is_public_bind(host):
         # Use ASCII-only glyphs here so the warning still prints on Windows
         # consoles configured for legacy GBK code pages (where U+26A0 / em-dash
@@ -112,8 +103,6 @@ def run_gateway(
             subscription_manager=subscription_mgr,
             run=True,
         )
-        for line in gateway_startup_guidance(host, effective_port, scheme=scheme):
-            console.print(line)
         assert server._task is not None
         try:
             await server._task
@@ -122,83 +111,52 @@ def run_gateway(
 
     try:
         asyncio.run(_run())
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Gateway stopped.[/yellow]")
     except ValueError as exc:
-        _print_gateway_startup_recovery(
-            exc,
-            config=config,
-            config_path=effective_config_path,
-        )
-        raise typer.Exit(1) from exc
-
-
-def _print_gateway_startup_recovery(
-    exc: ValueError,
-    *,
-    config: GatewayConfig,
-    config_path: str | None,
-) -> None:
-    console.print(f"[bold red]Gateway could not start:[/bold red] {exc}")
-    try:
         from opensquilla.onboarding.next_steps import env_recovery_commands
         from opensquilla.onboarding.status import get_onboarding_status
 
-        commands = env_recovery_commands(get_onboarding_status(config))
-    except Exception as recovery_exc:
-        console.print(
-            "[dim]Onboarding recovery details unavailable: "
-            f"{recovery_exc}[/dim]"
-        )
-        return
-    if not commands:
-        return
-    config_arg = _gateway_config_cli_arg(config_path)
-    console.print("[bold yellow]Fix onboarding environment first:[/bold yellow]")
-    for entry in commands:
-        label = str(entry.get("label") or "Set key")
-        command = str(entry.get("command") or "").strip()
-        if command:
-            console.print(f"  {label}: {command}")
-    console.print(f"  Check status: opensquilla onboard status{config_arg}")
-    console.print(f"  Guided CLI: opensquilla onboard --if-needed{config_arg}")
-    console.print(f"  Then rerun: opensquilla gateway run{config_arg}")
+        console.print(f"[red]Gateway could not start:[/red] {exc}")
+        status = get_onboarding_status(config)
+        recovery_entries = env_recovery_commands(status)
+        if not recovery_entries:
+            embedding = getattr(getattr(config, "memory", None), "embedding", None)
+            remote = getattr(embedding, "remote", None)
+            env_key = str(getattr(remote, "api_key_env", "") or "").strip()
+            if not env_key and config.config_path:
+                try:
+                    import tomllib
+
+                    with open(config.config_path, "rb") as f:
+                        raw_config = tomllib.load(f)
+                    env_key = str(
+                        raw_config.get("memory", {})
+                        .get("embedding", {})
+                        .get("remote", {})
+                        .get("api_key_env", "")
+                        or ""
+                    ).strip()
+                except (OSError, tomllib.TOMLDecodeError):
+                    env_key = ""
+            if env_key and not os.environ.get(env_key):
+                from opensquilla.onboarding.next_steps import set_env_hint
+
+                recovery_entries.append(
+                    {"label": "Set memory key", "command": set_env_hint(env_key)}
+                )
+        for entry in recovery_entries:
+            console.print(f"{entry['label']}: {entry['command']}")
+        if config.config_path:
+            console.print(
+                f"Inspect onboarding: opensquilla onboard status --config {config.config_path}"
+            )
+        raise typer.Exit(code=1) from exc
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Gateway stopped.[/yellow]")
 
 
-def _gateway_config_cli_arg(config_path: str | None) -> str:
-    if not config_path:
-        return ""
-    return f" --config {shlex.quote(str(config_path))}"
-
-
-def _resolve_lifecycle_host(
-    *,
-    bind: str | None,
-    listen: str,
-    default_host: str = "127.0.0.1",
-) -> str:
-    explicit_flag: str | None = listen or bind
-    return resolve_listen_address(explicit_flag, default=default_host)
-
-
-def _resolve_lifecycle_target(
-    *,
-    port: int | None,
-    bind: str | None,
-    listen: str,
-    config_path: str | None = None,
-) -> tuple[str, int, str | None]:
-    effective_config_path = config_path or os.environ.get("OPENSQUILLA_GATEWAY_CONFIG_PATH")
-    config = GatewayConfig.load(effective_config_path)
-    return (
-        _resolve_lifecycle_host(
-            bind=bind,
-            listen=listen,
-            default_host=config.host,
-        ),
-        port if port is not None else config.port,
-        effective_config_path or None,
-    )
+def _resolve_lifecycle_host(*, bind: str, listen: str) -> str:
+    explicit_flag: str | None = listen or (bind if bind and bind != "127.0.0.1" else None)
+    return resolve_listen_address(explicit_flag)
 
 
 def _lifecycle_manager(
@@ -210,16 +168,15 @@ def _lifecycle_manager(
     health_timeout: float = 60.0,
     shutdown_timeout: float = 10.0,
 ) -> GatewayLifecycleManager:
-    host, effective_port, effective_config_path = _resolve_lifecycle_target(
-        port=port,
-        bind=bind,
-        listen=listen,
-        config_path=config_path,
-    )
+    config = GatewayConfig.load(config_path or os.environ.get("OPENSQUILLA_GATEWAY_CONFIG_PATH"))
+    host = _resolve_lifecycle_host(bind=bind or "127.0.0.1", listen=listen)
+    if not listen and (bind is None or bind == "127.0.0.1"):
+        host = resolve_listen_address(None, default=config.host or "127.0.0.1")
+    resolved_port = port if port is not None else config.port
     return GatewayLifecycleManager(
         host=host,
-        port=effective_port,
-        config_path=effective_config_path or None,
+        port=resolved_port,
+        config_path=config_path or os.environ.get("OPENSQUILLA_GATEWAY_CONFIG_PATH") or None,
         health_timeout=health_timeout,
         shutdown_timeout=shutdown_timeout,
     )
@@ -238,20 +195,10 @@ def _emit_lifecycle_result(result: GatewayLifecycleResult, *, json_output: bool)
 
 
 def start_gateway(
-    port: int | None = typer.Option(
-        None,
-        "--port",
-        "-p",
-        help="Port to bind (default: config port, usually 18791)",
-    ),
-    bind: str | None = typer.Option(
-        None,
-        "--bind",
-        "-b",
-        help="Host to bind (default: config host, usually 127.0.0.1)",
-    ),
+    port: int | None = typer.Option(18791, "--port", "-p", help="Port to bind"),
+    bind: str | None = typer.Option("127.0.0.1", "--bind", "-b", help="Host to bind"),
     listen: str = typer.Option("", "--listen", help="Host to bind (wins over --bind)"),
-    config_path: str | None = typer.Option(None, "--config", help="Override config path."),
+    config_path: str | None = typer.Option(None, "--config", help="Override config path"),
     health_timeout: float = typer.Option(60.0, "--timeout", help="Readiness wait timeout"),
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
 ) -> None:
@@ -268,25 +215,11 @@ def start_gateway(
 
 
 def status_gateway(
-    port: int | None = typer.Option(
-        None,
-        "--port",
-        "-p",
-        help="Port to inspect (default: config port, usually 18791)",
-    ),
-    bind: str | None = typer.Option(
-        None,
-        "--bind",
-        "-b",
-        help="Host to inspect (default: config host, usually 127.0.0.1)",
-    ),
+    port: int | None = typer.Option(18791, "--port", "-p", help="Port to inspect"),
+    bind: str | None = typer.Option("127.0.0.1", "--bind", "-b", help="Host to inspect"),
     listen: str = typer.Option("", "--listen", help="Host to inspect (wins over --bind)"),
-    config_path: str | None = typer.Option(None, "--config", help="Override config path."),
-    gateway_url: str | None = typer.Option(
-        None,
-        "--gateway",
-        help="Remote gateway URL to inspect instead of local lifecycle state.",
-    ),
+    config_path: str | None = typer.Option(None, "--config", help="Override config path"),
+    gateway_url: str | None = typer.Option(None, "--gateway", help="Remote gateway URL"),
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
 ) -> None:
     """Inspect the managed gateway process without mutating state."""
@@ -295,30 +228,15 @@ def status_gateway(
         _emit_lifecycle_result(remote_gateway_status(gateway_url), json_output=json_output)
         return
 
-    manager = _lifecycle_manager(
-        port=port,
-        bind=bind,
-        listen=listen,
-        config_path=config_path,
-    )
+    manager = _lifecycle_manager(port=port, bind=bind, listen=listen, config_path=config_path)
     _emit_lifecycle_result(manager.status(), json_output=json_output)
 
 
 def stop_gateway(
-    port: int | None = typer.Option(
-        None,
-        "--port",
-        "-p",
-        help="Port to stop (default: config port, usually 18791)",
-    ),
-    bind: str | None = typer.Option(
-        None,
-        "--bind",
-        "-b",
-        help="Host to stop (default: config host, usually 127.0.0.1)",
-    ),
+    port: int | None = typer.Option(18791, "--port", "-p", help="Port to stop"),
+    bind: str | None = typer.Option("127.0.0.1", "--bind", "-b", help="Host to stop"),
     listen: str = typer.Option("", "--listen", help="Host to stop (wins over --bind)"),
-    config_path: str | None = typer.Option(None, "--config", help="Override config path."),
+    config_path: str | None = typer.Option(None, "--config", help="Override config path"),
     shutdown_timeout: float = typer.Option(10.0, "--timeout", help="Shutdown wait timeout"),
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
 ) -> None:
@@ -335,20 +253,10 @@ def stop_gateway(
 
 
 def restart_gateway(
-    port: int | None = typer.Option(
-        None,
-        "--port",
-        "-p",
-        help="Port to restart (default: config port, usually 18791)",
-    ),
-    bind: str | None = typer.Option(
-        None,
-        "--bind",
-        "-b",
-        help="Host to restart (default: config host, usually 127.0.0.1)",
-    ),
+    port: int | None = typer.Option(18791, "--port", "-p", help="Port to restart"),
+    bind: str | None = typer.Option("127.0.0.1", "--bind", "-b", help="Host to restart"),
     listen: str = typer.Option("", "--listen", help="Host to restart (wins over --bind)"),
-    config_path: str | None = typer.Option(None, "--config", help="Override config path."),
+    config_path: str | None = typer.Option(None, "--config", help="Override config path"),
     health_timeout: float = typer.Option(60.0, "--timeout", help="Readiness wait timeout"),
     shutdown_timeout: float = typer.Option(
         10.0, "--shutdown-timeout", help="Shutdown wait timeout"

@@ -19,44 +19,7 @@
   outline-offset: -4px;
 }
 
-/* ─── Chat Header ──────────────────────────────────────────────────────── */
-
-.chat-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--sp-2) var(--sp-4);
-  border-bottom: 1px solid var(--border);
-  background: var(--bg-surface);
-  min-height: 48px;
-  gap: var(--sp-3);
-  flex-shrink: 0;
-}
-
-.chat-header-left {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  flex: 1;
-  min-width: 0;
-}
-
-.chat-header-right {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  flex-shrink: 0;
-}
-
-#chat-run-status {
-  display: inline-flex;
-  align-items: center;
-  min-height: 28px;
-  padding-inline: 10px;
-  line-height: 1;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
+/* ─── Chat Topbar Session Controls ─────────────────────────────────────── */
 
 .chat-label {
   font-size: var(--fs-sm);
@@ -73,7 +36,6 @@
   align-items: center;
   gap: var(--sp-2);
   padding: var(--sp-1) var(--sp-3);
-  min-height: 40px;
   font-size: var(--fs-sm);
   font-family: var(--font-mono);
   background: var(--bg);
@@ -82,13 +44,17 @@
   color: var(--text);
   flex: 0 1 auto;
   min-width: 0;
-  max-width: 720px;
+  max-width: clamp(180px, 34vw, 720px);
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
   cursor: pointer;
   transition: border-color 140ms ease, background 140ms ease;
   user-select: none;
+}
+
+#chat-run-status {
+  flex-shrink: 0;
 }
 
 .chat-session-chip:hover,
@@ -133,12 +99,12 @@
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  width: 40px;
-  height: 40px;
+  width: 22px;
+  height: 22px;
   padding: 0;
   color: var(--text-muted);
-  background: var(--bg);
-  border: 1px solid var(--border);
+  background: none;
+  border: none;
   border-radius: var(--radius-sm);
   cursor: pointer;
 }
@@ -314,6 +280,50 @@
   padding: var(--sp-1) var(--sp-2);
   border-radius: var(--radius-md);
   white-space: nowrap;
+  flex-shrink: 0;
+  max-width: min(260px, 24vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 1199px) {
+  .chat-session-chip {
+    max-width: clamp(160px, 28vw, 420px);
+  }
+
+  .chat-ctx-warn {
+    max-width: 180px;
+  }
+}
+
+@media (max-width: 768px) {
+  .topbar-center .chat-label {
+    display: none;
+  }
+
+  .topbar-center .chat-session-chip {
+    flex: 1 1 auto;
+    max-width: none;
+  }
+
+  .topbar-center .chat-ctx-warn {
+    display: none;
+  }
+}
+
+@media (max-width: 480px) {
+  .topbar-center {
+    gap: var(--sp-1);
+  }
+
+  .topbar-center .chat-session-chip {
+    padding-inline: var(--sp-2);
+    font-size: var(--fs-xs);
+  }
+
+  .topbar-center #chat-run-status {
+    padding-inline: var(--sp-2);
+  }
 }
 
 /* ─── Chat Body + Thread ───────────────────────────────────────────────── */
@@ -335,6 +345,19 @@
   flex-direction: column;
   gap: var(--sp-5);
 }
+/* The scroll container stays full-width so its scrollbar sits at the window
+   edge; the CONTENT is what's constrained to the reading measure and centered.
+   This is the same decisive column the dashboards use and the composer shares,
+   without stranding the scrollbar in the middle of the screen. */
+.chat-thread > * {
+  width: 100%;
+  max-width: var(--chat-measure);
+  margin-inline: auto;
+}
+/* The router panel keeps its own comfortable width (still centered). */
+.chat-thread > .router-fx {
+  max-width: min(100%, 620px);
+}
 
 .chat-thread.drag-over {
   outline: 2px dashed var(--accent);
@@ -355,11 +378,13 @@
   display: flex;
   align-items: center;
   gap: var(--sp-3);
+  width: 100%;
+  max-width: var(--chat-measure);
   color: var(--text-dim);
   font-size: var(--fs-xs);
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  margin: var(--sp-2) 0;
+  margin: var(--sp-2) auto;
   user-select: none;
 }
 .chat-day-sep::before,
@@ -436,15 +461,25 @@
 
 .chat-msg--user .chat-msg-text,
 .msg.user .msg-body {
-  background: var(--accent);
-  color: #fff;
+  /* Low-tint surface, not a saturated-orange fill: keeps orange as signal and
+     clears WCAG AA (>7:1 in both themes via color-mix) where #fff-on-#F56600
+     measured only 3.10:1. */
+  background: color-mix(in srgb, var(--accent) 12%, var(--bg-surface));
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--border));
+  color: var(--text);
   border-radius: var(--radius-md);
   padding: var(--sp-2) var(--sp-4);
   box-shadow: var(--shadow-sm);
   font-size: var(--fs-sm);
   line-height: 1.6;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  text-align: start;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   word-break: break-word;
-  max-width: 70%;
+  max-width: 78%;
   min-width: 56px;
   min-height: 32px;
   margin-left: auto;
@@ -459,13 +494,13 @@
 .chat-msg--assistant .chat-msg-text,
 .msg.assistant .msg-body {
   background: var(--bg-surface);
-  border-radius: var(--radius-lg);
+  border-radius: var(--radius-md);
   padding: var(--sp-2) var(--sp-4);
   box-shadow: var(--shadow-sm);
   font-size: var(--fs-sm);
   line-height: 1.7;
   word-break: break-word;
-  max-width: 85%;
+  max-width: 88%;
   min-width: 56px;
   min-height: 32px;
 }
@@ -560,14 +595,95 @@
   position: relative;
 }
 
-.chat-msg--streaming .chat-msg-text::after,
-.msg.streaming .msg-body:not(:has(.msg-text-seg:not(:empty)))::after,
-.msg.streaming .msg-text-seg:not(:empty):last-of-type::after {
-  content: '\25CD';
-  display: inline-block;
-  color: var(--accent);
-  animation: blink 1.2s ease-in-out infinite;
-  margin-left: 2px;
+/* Streaming active mark — delayed bottom dock. The mark appears only after
+   short turns have had time to finish, then sits in the bubble's bottom-left
+   corner, aligned with the content-left edge (the tool-card / text icon
+   column) so it reads as part of that column rather than an orphaned dot.
+   It sits centered in the reserved footer band (padding-bottom below), which
+   gives the orbiting ring a clear gap from the last tool card above and the
+   bubble's bottom edge — earlier the mark was lifted 8px, which pushed the
+   ring up into the card and caused a visible overlap. */
+.msg.streaming.streaming-active-mark:not(.awaiting-model) .msg-body {
+  padding-bottom: calc(var(--sp-2) + 24px);
+}
+
+.msg.streaming.streaming-active-mark:not(.awaiting-model) .msg-body::after {
+  content: '';
+  display: block;
+  position: absolute;
+  left: var(--sp-4);
+  bottom: var(--sp-2);
+  width: 16px;
+  height: 16px;
+  pointer-events: none;
+  border-radius: 50%;
+  background-color: color-mix(in srgb, var(--bg-surface) 90%, var(--bg) 10%);
+  background-image: url('../../img/opensquilla-mark.png');
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 11px 11px;
+  /* The mark stays UPRIGHT and legible — it is a figurative, directional
+     squilla, so it must never tumble. The motion lives in the orbiting
+     ring below (::before), not in the brand mark itself. */
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+/* Orbital sweep — a conic highlight rides a hairline ring around the mark.
+   This is the element that animates; circles are built to rotate, the
+   shrimp is not. Reuses --accent / --accent-secondary so it auto-themes. */
+.msg.streaming.streaming-active-mark:not(.awaiting-model) .msg-body::before {
+  content: '';
+  display: block;
+  position: absolute;
+  left: calc(var(--sp-4) - 4px);
+  bottom: calc(var(--sp-2) - 4px);
+  width: 24px;
+  height: 24px;
+  pointer-events: none;
+  border-radius: 50%;
+  background: conic-gradient(from 0deg,
+    transparent 200deg,
+    var(--accent-secondary) 320deg,
+    var(--accent) 350deg,
+    transparent 360deg);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+          mask: radial-gradient(farthest-side, transparent calc(100% - 2px), #000 calc(100% - 2px));
+  animation: squilla-activity-spin 1.15s linear infinite;
+}
+
+.msg.streaming.awaiting-model::after {
+  content: 'waiting for model response...';
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  margin-top: 2px;
+  padding: 0 var(--sp-2);
+  border-left: 2px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+  letter-spacing: 0;
+  opacity: 0.82;
+  animation: awaitingModelPulse 1.6s ease-in-out infinite;
+}
+
+@keyframes awaitingModelPulse {
+  0%, 100% { opacity: 0.82; }
+  50%      { opacity: 0.48; }
+}
+
+@keyframes squilla-activity-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Freeze the orbiting ring into a static arc so the indicator is still
+     legibly "active" without motion. The mark itself is already static. */
+  .msg.streaming.streaming-active-mark:not(.awaiting-model) .msg-body::before {
+    animation: none;
+    background: conic-gradient(from 0deg,
+      var(--accent) 90deg, transparent 90deg);
+  }
 }
 
 @keyframes blink {
@@ -650,7 +766,7 @@
   padding: 0 var(--sp-1);
 }
 .chat-msg--user .chat-msg-time,
-.msg.user .msg-time { text-align: right; color: rgba(255,255,255,0.6); }
+.msg.user .msg-time { text-align: right; }
 
 /* ─── Per-turn metadata footer (model + session tokens + combo) ─────── */
 .msg-meta {
@@ -659,8 +775,9 @@
   flex-wrap: wrap;
   gap: 4px 8px;
   font-size: var(--fs-xs);
-  color: var(--text-muted);
-  opacity: 0.75;
+  /* --text-dim directly (4.98:1 dark / 5.69:1 light) instead of muted@0.75,
+     which dropped light theme to ~4.39:1 and forced calc(1/0.75) lift hacks. */
+  color: var(--text-dim);
   padding: 0 2px;
   user-select: none;
   /* Cap the row width to the bubble so long model names break cleanly
@@ -705,7 +822,8 @@
   font-size: var(--fs-xs);
 }
 
-.msg.user .msg-body pre { background: rgba(0,0,0,0.2); border-color: rgba(255,255,255,0.2); }
+/* User bubble is now a light tint with normal text — code/pre inherit the
+   base surface treatment (was a dark overlay tuned for white-on-orange). */
 
 .msg .msg-body code,
 .chat-msg-text code {
@@ -714,7 +832,6 @@
   border-radius: var(--radius-sm);
   font-size: 0.9em;
 }
-.msg.user .msg-body code { background: rgba(0,0,0,0.2); }
 
 .msg .msg-body blockquote {
   border-left: 3px solid var(--border-focus);
@@ -723,9 +840,24 @@
   color: var(--text-muted);
 }
 
-.msg.assistant .msg-body h2,
-.msg.assistant .msg-body h3 {
-  color: var(--accent);
+/* In-bubble markdown headings — sized + weighted so the UA fallback can't
+   blow them up inside 13px bubbles, and painted as text (orange stays signal,
+   not routine body decoration). */
+.msg.assistant .msg-body h1,
+.msg.assistant .msg-body h2 {
+  font-size: var(--fs-md);
+  font-weight: 700;
+  line-height: 1.3;
+  margin: var(--sp-3) 0 var(--sp-1);
+  color: var(--text);
+}
+.msg.assistant .msg-body h3,
+.msg.assistant .msg-body h4 {
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  margin: var(--sp-3) 0 var(--sp-1);
+  color: var(--text-muted);
 }
 
 /* ─── Thinking / Typing indicator ──────────────────────────────────────── */
@@ -948,13 +1080,45 @@
   margin-top: var(--sp-1);
 }
 
+.chat-tool-result-full {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: min(76vw, 1120px);
+  max-height: 62vh;
+  margin: 0;
+  padding: var(--sp-3);
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+@media (max-width: 640px) {
+  .chat-tool-result-full {
+    max-width: calc(100vw - 48px);
+    max-height: 64vh;
+    padding: var(--sp-2);
+  }
+}
+
 /* ─── Attachments Preview ──────────────────────────────────────────────── */
 
 .chat-attachments {
   display: flex;
   gap: var(--sp-2);
+  box-sizing: border-box;
+  width: min(calc(100% - var(--sp-8)), var(--chat-measure));
+  margin: 0 auto var(--sp-2);
   padding: var(--sp-2) var(--sp-4);
-  border-top: 1px solid var(--border);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   flex-shrink: 0;
   overflow-x: auto;
   background: var(--bg-surface);
@@ -1097,6 +1261,23 @@
   border-radius: var(--radius-md);
   background: var(--bg-surface);
   color: var(--text);
+  cursor: default;
+  text-decoration: none;
+}
+
+.msg-file-chip--download {
+  cursor: pointer;
+}
+
+.msg-file-chip--download:hover,
+.msg-file-chip--download:focus-visible {
+  background: var(--bg-hover);
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--border));
+  outline: none;
+}
+
+.msg-file-chip--disabled {
+  opacity: 0.78;
 }
 
 .msg-file-chip__icon {
@@ -1159,6 +1340,7 @@
   max-width: min(520px, 100%);
   padding: var(--sp-2) var(--sp-3);
   text-align: left;
+  text-decoration: none;
   width: 100%;
 }
 
@@ -1181,6 +1363,7 @@
   min-width: min(300px, 78vw);
   padding: var(--sp-2);
   text-align: left;
+  text-decoration: none;
   transition: border-color var(--transition), transform var(--transition), background var(--transition);
 }
 
@@ -1194,6 +1377,24 @@
 
 .msg-artifact-card--image {
   overflow: hidden;
+}
+
+.msg-artifact-card--audio {
+  cursor: default;
+  max-width: min(520px, 100%);
+  min-width: min(320px, 78vw);
+}
+
+.msg-artifact-card--audio:hover,
+.msg-artifact-card--audio:focus-visible {
+  background: var(--bg-surface);
+  border-color: var(--border);
+  transform: none;
+}
+
+.msg-artifact-audio {
+  display: block;
+  width: 100%;
 }
 
 .msg-artifact-preview {
@@ -1248,13 +1449,14 @@
 .msg.user .msg-body.msg-body--has-attachments {
   align-items: flex-end;
   background: transparent;
+  border: 0;
   border-radius: 0;
   box-shadow: none;
   color: var(--text);
   display: flex;
   flex-direction: column;
   gap: var(--sp-2);
-  max-width: min(360px, 72%);
+  max-width: min(360px, 78%);
   padding: 0;
 }
 
@@ -1265,21 +1467,32 @@
   box-shadow: var(--shadow-sm);
   color: #fff;
   line-height: 1.6;
-  max-width: 100%;
+  max-width: min(360px, 100%);
   min-height: 32px;
   min-width: 56px;
   padding: var(--sp-2) var(--sp-4);
+  text-align: start;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   word-break: break-word;
 }
 
 .msg.user .msg-body--has-attachments .msg-attachments {
   justify-content: flex-end;
+  max-width: 100%;
   margin: 0;
+  user-select: text;
 }
 
 .msg.user .msg-body--has-attachments .msg-thumb {
-  max-width: min(280px, 65vw);
-  max-height: 260px;
+  width: min(260px, 42vw);
+  height: auto;
+  max-width: 100%;
+  max-height: 160px;
+  object-fit: contain;
+  background: transparent;
+  border-color: color-mix(in srgb, var(--border) 65%, transparent);
+  box-shadow: none;
 }
 
 /* ─── Pending Queue (Bug 2c / Proposal C) ──────────────────────────────── */
@@ -1353,73 +1566,187 @@
 }
 .chat-pending-chip-remove:hover { color: var(--danger); }
 
-.chat-compact-status {
-  margin: 0 var(--sp-4) var(--sp-2);
-  padding: var(--sp-2) var(--sp-3);
+.chat-context-separator {
+  --separator-tone: var(--accent);
+  width: min(820px, 100%);
+  align-self: center;
   display: flex;
   align-items: center;
-  gap: var(--sp-2);
-  min-height: 36px;
-  background: color-mix(in srgb, var(--accent) 5%, var(--bg-surface));
-  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
-  border-radius: var(--radius-md);
-  color: var(--text);
-  font-size: var(--fs-sm);
-}
-.chat-compact-status.hidden { display: none; }
-
-.chat-compact-status--ok {
-  background: color-mix(in srgb, var(--ok) 8%, var(--bg-surface));
-  border-color: color-mix(in srgb, var(--ok) 28%, var(--border));
-}
-.chat-compact-status--warn {
-  background: color-mix(in srgb, var(--warn) 8%, var(--bg-surface));
-  border-color: color-mix(in srgb, var(--warn) 28%, var(--border));
-}
-.chat-compact-status--err {
-  background: color-mix(in srgb, var(--danger) 8%, var(--bg-surface));
-  border-color: color-mix(in srgb, var(--danger) 32%, var(--border));
+  gap: 12px;
+  margin: 8px 0 10px;
+  color: color-mix(in srgb, var(--separator-tone) 68%, var(--text-muted));
+  font-family: Bahnschrift, Aptos, "Segoe UI Variable", "Segoe UI", sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0;
+  line-height: 1.2;
+  text-transform: uppercase;
 }
 
-.chat-compact-status__spinner,
-.chat-compact-status__dot {
-  width: 12px;
-  height: 12px;
-  flex: 0 0 12px;
-  border-radius: 999px;
+.chat-context-separator::before,
+.chat-context-separator::after {
+  content: "";
+  height: 1px;
+  flex: 1 1 auto;
+  min-width: 24px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--separator-tone) 30%, var(--border))
+  );
 }
-.chat-compact-status__spinner {
-  border: 2px solid color-mix(in srgb, var(--accent) 35%, transparent);
-  border-top-color: var(--accent);
-  animation: chat-compact-spin 900ms linear infinite;
-}
-.chat-compact-status__dot {
-  background: currentColor;
-  opacity: 0.72;
-}
-.chat-compact-status--ok .chat-compact-status__dot { color: var(--ok); }
-.chat-compact-status--warn .chat-compact-status__dot { color: var(--warn); }
-.chat-compact-status--err .chat-compact-status__dot { color: var(--danger); }
 
-.chat-compact-status__text {
+.chat-context-separator::after {
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--separator-tone) 30%, var(--border)),
+    transparent
+  );
+}
+
+.chat-context-separator span {
+  flex: 0 1 auto;
   min-width: 0;
+  max-width: 56ch;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.chat-compact-status__detail {
-  color: var(--text-muted);
-  font-size: var(--fs-xs);
-  white-space: nowrap;
+
+.chat-context-separator--session {
+  margin-top: auto;
 }
 
-@keyframes chat-compact-spin {
-  to { transform: rotate(360deg); }
+.chat-context-separator--live span {
+  --separator-shimmer-base: color-mix(
+    in srgb,
+    var(--separator-tone) 62%,
+    var(--text-muted)
+  );
+  --separator-shimmer-glint: color-mix(
+    in srgb,
+    var(--separator-tone) 28%,
+    var(--text)
+  );
+  color: transparent;
+  background: linear-gradient(
+    100deg,
+    var(--separator-shimmer-base) 0%,
+    var(--separator-shimmer-base) 38%,
+    var(--separator-shimmer-glint) 50%,
+    var(--separator-shimmer-base) 62%,
+    var(--separator-shimmer-base) 100%
+  );
+  background-size: 220% 100%;
+  background-position: 140% 0;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: contextSeparatorShimmer 2.2s linear infinite;
+}
+
+.chat-context-separator--ok { --separator-tone: var(--ok); }
+.chat-context-separator--warn { --separator-tone: var(--warn); }
+.chat-context-separator--err { --separator-tone: var(--danger); }
+.chat-context-separator--history {
+  color: var(--text-dim);
+  opacity: 0.82;
+}
+
+@keyframes contextSeparatorShimmer {
+  from { background-position: 140% 0; }
+  to { background-position: -140% 0; }
+}
+
+@media (max-width: 760px) {
+  .chat-context-separator {
+    width: 100%;
+    gap: 8px;
+  }
+
+  .chat-context-separator span {
+    max-width: 34ch;
+  }
+}
+
+.chat-history-scope {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-3);
+  margin: 0 0 var(--sp-2);
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, var(--border));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--accent) 5%, var(--bg-surface));
+  color: var(--text);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+}
+
+.chat-history-scope--loading {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+}
+
+.chat-history-scope--partial {
+  border-color: color-mix(in srgb, var(--warn) 28%, var(--border));
+  background: color-mix(in srgb, var(--warn) 7%, var(--bg-surface));
+}
+
+.chat-history-scope--compacted {
+  border-color: color-mix(in srgb, var(--accent) 24%, var(--border));
+}
+
+.chat-history-scope--error {
+  border-color: color-mix(in srgb, var(--danger) 32%, var(--border));
+  background: color-mix(in srgb, var(--danger) 7%, var(--bg-surface));
+}
+
+.chat-history-scope__text {
+  min-width: 0;
+  font-weight: 600;
+}
+
+.chat-history-scope__detail {
+  min-width: 0;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+
+.chat-history-scope__actions {
+  margin-left: auto;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+@media (max-width: 720px) {
+  .chat-history-scope {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .chat-history-scope__actions {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .chat-history-scope__actions .btn {
+    width: 100%;
+    justify-content: center;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .chat-compact-status__spinner {
+  .chat-context-separator {
     animation: none;
+    transition: none;
+  }
+
+  .chat-context-separator--live span {
+    animation: none;
+    background: none;
+    color: color-mix(in srgb, var(--separator-tone) 68%, var(--text-muted));
   }
 }
 
@@ -1432,10 +1759,13 @@
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--bg-surface);
-  margin: 0 var(--sp-4);
+  box-sizing: border-box;
+  width: min(calc(100% - var(--sp-8)), var(--chat-measure));
+  margin: 0 auto var(--sp-2);
   max-height: 200px;
   overflow-y: auto;
   flex-shrink: 0;
+  box-shadow: var(--shadow-md);
 }
 
 .chat-slash-item {
@@ -1443,6 +1773,8 @@
   align-items: center;
   gap: var(--sp-3);
   padding: var(--sp-2) var(--sp-3);
+  min-width: 0;
+  min-height: 42px;
   cursor: pointer;
   font-size: var(--fs-sm);
   transition: background var(--transition);
@@ -1457,7 +1789,8 @@
 .chat-slash-cmd {
   font-family: var(--font-mono);
   font-weight: 500;
-  min-width: 80px;
+  flex: 0 0 96px;
+  min-width: 0;
   color: var(--accent);
 }
 
@@ -1468,7 +1801,27 @@
 }
 
 .chat-slash-desc {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--text-muted);
+}
+
+@media (max-width: 480px) {
+  .chat-slash {
+    width: calc(100% - var(--sp-4));
+    margin-bottom: 6px;
+    max-height: 168px;
+  }
+
+  .chat-slash-cmd {
+    flex-basis: 84px;
+  }
+
+  .chat-slash-desc {
+    font-size: var(--fs-xs);
+  }
 }
 
 /* ─── Per-bubble hover affordances ────────────────────────────────────── */
@@ -1707,35 +2060,6 @@
 @media (max-width: 480px) {
   #chat-btn-export { display: none !important; }
 
-  .chat-header {
-    gap: var(--sp-2);
-  }
-
-  .chat-label {
-    display: none;
-  }
-
-  .chat-session-chip {
-    flex: 1 1 auto;
-    max-width: none;
-    min-height: 40px;
-    padding-inline: var(--sp-2);
-  }
-
-  .chat-session-copy-btn {
-    width: 40px;
-    height: 40px;
-    border: 1px solid var(--border);
-    background: var(--bg);
-  }
-
-  .chat-session-popover {
-    left: 12px !important;
-    right: 12px;
-    width: auto;
-    max-width: none;
-  }
-
   /* On narrow phones the input was getting squeezed to ~80px. Tighten icon
      targets to the touch minimum (40px instead of 44px) so the input gets
      back enough width to read its own placeholder. */
@@ -1767,54 +2091,29 @@
     max-width: none;
     z-index: 2500;
   }
-  /* When the run-modes popover is open, mute non-critical toasts so transient
-     "Squilla Router: ON/OFF" confirmations don't cover the popover content.
-     Error toasts stay visible because they may be the only failure feedback. */
+  /* When the run-modes popover is open, mute the toast stack so transient
+     "Squilla Router: ON/OFF" confirmations don't cover the popover content
+     the user is still interacting with. The toggle's own visible state is
+     the canonical feedback in this moment. */
   body:has(.chat-toolbar-popover.is-open) .toast-stack {
-    pointer-events: none;
-  }
-  body:has(.chat-toolbar-popover.is-open) .toast:not(.err) {
     opacity: 0;
     pointer-events: none;
     transition: opacity 120ms ease;
-  }
-  body:has(.chat-toolbar-popover.is-open) .toast.err {
-    opacity: 1;
-    pointer-events: auto;
   }
   /* Hide the desktop arrow notch — it can't reliably point at the trigger
      once we're using viewport-anchored positioning on phone. */
   .chat-toolbar-popover-arrow { display: none; }
 }
 
-/* Tiny phones only (iPhone SE 1st-gen, etc). Most modern iPhones are
-   375-393px, so they keep the standard compact header. */
+/* Tiny phones only (iPhone SE 1st-gen, etc) — hide the "+" new-chat button.
+   Most modern iPhones are 375–393px so they keep it. New chat is reachable
+   from the session chip dropdown either way. */
 @media (max-width: 360px) {
-  .chat-header {
-    flex-wrap: wrap;
-    align-items: flex-start;
-  }
-
-  .chat-header-left {
-    flex: 1 1 100%;
-  }
-
-  .chat-session-chip {
-    gap: var(--sp-1);
-    padding-inline: 4px;
-  }
-
-  .chat-header-right {
-    margin-left: 0;
-  }
+  #chat-btn-new { display: none !important; }
 }
 
 .chat-pill {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 40px;
-  padding: 6px 12px;
+  padding: 2px 10px;
   border-radius: 12px;
   border: 1px solid var(--border);
   background: transparent;
@@ -1881,7 +2180,6 @@
   font-size: var(--fs-xs);
   color: var(--text-muted);
   cursor: pointer;
-  min-height: 40px;
   user-select: none;
 }
 
@@ -1893,8 +2191,8 @@
 .toggle-switch {
   position: relative;
   display: inline-block;
-  width: 40px;
-  height: 22px;
+  width: 32px;
+  height: 18px;
   flex-shrink: 0;
 }
 
@@ -1919,10 +2217,10 @@
 
 .toggle-thumb {
   position: absolute;
-  top: 1px;
-  left: 1px;
-  width: 18px;
-  height: 18px;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
   background: var(--text-dim);
   border-radius: 50%;
   transition: transform 0.2s, background 0.2s;
@@ -1935,7 +2233,7 @@
 }
 
 .toggle-switch input:checked + .toggle-track .toggle-thumb {
-  transform: translateX(18px);
+  transform: translateX(14px);
   background: #fff;
 }
 
@@ -1954,9 +2252,20 @@
   border-top: 1px solid var(--border);
   background: var(--bg);
   flex-shrink: 0;
+  /* Share the thread's reading axis so input and conversation align. */
+  max-width: var(--chat-measure);
+  width: 100%;
+  margin: 0 auto;
 }
 
 @media (max-width: 480px) {
+  .chat-attachments {
+    width: calc(100% - var(--sp-4));
+    margin-bottom: 6px;
+    padding-left: var(--sp-2);
+    padding-right: var(--sp-2);
+  }
+
   .chat-input-bar {
     gap: 4px;
     padding-left: var(--sp-3);
@@ -1973,15 +2282,18 @@
 
 .chat-textarea {
   width: 100%;
+  box-sizing: border-box;
+  display: block;
   resize: none;
   border: 1px solid var(--border);
-  border-radius: 20px;
+  border-radius: 22px;
   background: var(--bg-surface);
   color: var(--text);
-  padding: 8px var(--sp-3);
+  padding: 10px var(--sp-3);
   font-family: inherit;
   font-size: var(--fs-sm);
-  line-height: 1.4;
+  line-height: 22px;
+  height: 44px;
   min-height: 40px;
   max-height: 150px;
   overflow-y: auto;
@@ -2005,28 +2317,20 @@
   transform: scale(0.92);
 }
 
-@media (max-width: 480px) {
-  .chat-input-bar {
-    flex-wrap: wrap;
-    align-items: center;
-    row-gap: 6px;
-  }
+#chat-btn-mic.chat-mic-recording {
+  color: #b91c1c;
+  background: #fee2e2;
+  border-color: #fecaca;
+  box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.14);
+}
 
-  #chat-btn-attach,
-  .chat-toolbar-wrap,
-  #chat-btn-new {
-    order: 0;
-  }
+#chat-btn-mic.chat-mic-recording svg {
+  animation: mic-pulse 1.2s ease-in-out infinite;
+}
 
-  .chat-input-wrap {
-    order: 1;
-    flex: 1 1 calc(100% - 44px);
-  }
-
-  #chat-btn-send,
-  #chat-btn-stop {
-    order: 2;
-  }
+@keyframes mic-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(0.86); }
 }
 
 /* Stop button pulse animation during streaming */
@@ -2072,28 +2376,72 @@
   to   { opacity: 1; transform: scale(1); }
 }
 
-/* Squilla router tier routing — amber */
+/* Squilla router tier routing — amber. Token-based: color-mix(var(--warn))
+   resolves per theme, so the hand-written [data-theme] twins are gone. */
 .savings-chip--tier {
-  background: rgba(234, 140, 0, 0.1);
-  border: 1px solid rgba(234, 140, 0, 0.28);
-  color: #b36b00;
-}
-[data-theme="dark"] .savings-chip--tier {
-  background: rgba(251, 191, 36, 0.1);
-  border-color: rgba(251, 191, 36, 0.28);
-  color: #fbbf24;
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 32%, transparent);
+  color: var(--warn);
 }
 
-/* Prompt cache hit — green */
+/* Prompt cache hit — green (same green the dashboards use). */
 .savings-chip--cache {
-  background: rgba(34, 197, 94, 0.08);
-  border: 1px solid rgba(34, 197, 94, 0.22);
-  color: #166534;
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ok) 28%, transparent);
+  color: var(--ok);
 }
-[data-theme="dark"] .savings-chip--cache {
-  background: rgba(34, 197, 94, 0.08);
-  border-color: rgba(34, 197, 94, 0.22);
-  color: #4ade80;
+
+/* ─── Per-turn saved chip (inline in .msg-meta, persistent) ──────────── */
+/*
+ * Stays attached to each assistant turn that produced a savings event
+ * (cache hit OR squilla-router routed). Shows the bucketed savings %
+ * and a small flame next to the model+tokens row. Distinct from the
+ * COMBO chip: amber palette here, red palette there — at-a-glance
+ * separation between "this turn saved tokens" and "this is run #N".
+ */
+
+/* Amber (warn) tier; escalates by raising the accent mix, not by swapping
+   hand-picked hues or animating. color-mix resolves per theme. */
+.msg-meta__saved {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 8px 1px 6px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--border));
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  color: var(--warn);
+  font-family: var(--font-mono);
+  font-size: 0.95em;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: default;
+  user-select: none;
+  transition: border-color 200ms ease, background 200ms ease, color 200ms ease;
+}
+.msg-meta__saved--high {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+.msg-meta__saved--peak {
+  border-color: color-mix(in srgb, var(--accent) 70%, var(--border));
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+}
+
+/* Flame — inherits the chip's token color (currentColor); static. */
+.msg-meta__saved-flame {
+  display: inline-block;
+  flex-shrink: 0;
+  width: 1em;
+  height: 1em;
+  transform-origin: 50% 85%;
+}
+
+.msg-meta__saved-label {
+  letter-spacing: 0.01em;
 }
 
 /* ─── "Saved ~X%" floating label — viewport-centered, headline weight ── */
@@ -2171,96 +2519,6 @@
   }
 }
 
-/* ─── Per-turn saved chip (inline in .msg-meta, persistent) ──────────── */
-/*
- * Stays attached to each assistant turn that produced a savings event
- * (cache hit OR squilla-router routed). Shows the bucketed savings %
- * and a small flame next to the model+tokens row. Distinct from the
- * COMBO chip: amber palette here, red palette there — at-a-glance
- * separation between "this turn saved tokens" and "this is run #N".
- */
-
-.msg-meta__saved {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 1px 8px 1px 6px;
-  border-radius: 999px;
-  border: 1px solid rgba(245, 158, 11, 0.45);
-  background: rgba(245, 158, 11, 0.10);
-  color: #b45309; /* amber-700 */
-  font-family: var(--font-mono);
-  font-size: 0.95em;
-  font-weight: 600;
-  line-height: 1.2;
-  white-space: nowrap;
-  cursor: default;
-  user-select: none;
-  /* Lift past the parent's opacity so the savings figure reads */
-  opacity: calc(1 / 0.75);
-  transition: border-color 200ms ease, background 200ms ease, color 200ms ease;
-}
-[data-theme="dark"] .msg-meta__saved {
-  color: #fbbf24;
-  border-color: rgba(245, 158, 11, 0.55);
-  background: rgba(245, 158, 11, 0.14);
-}
-
-.msg-meta__saved--high {
-  border-color: rgba(234, 88, 12, 0.6);
-  background: rgba(234, 88, 12, 0.14);
-  color: #9a3412;
-}
-[data-theme="dark"] .msg-meta__saved--high {
-  color: #fdba74;
-  border-color: rgba(234, 88, 12, 0.7);
-  background: rgba(234, 88, 12, 0.18);
-}
-
-.msg-meta__saved--peak {
-  border-color: rgba(220, 38, 38, 0.7);
-  background: rgba(220, 38, 38, 0.16);
-  color: #7f1d1d;
-  box-shadow: 0 0 10px rgba(220, 38, 38, 0.25);
-}
-[data-theme="dark"] .msg-meta__saved--peak {
-  color: #fca5a5;
-  border-color: rgba(239, 68, 68, 0.85);
-  background: rgba(239, 68, 68, 0.20);
-  box-shadow: 0 0 14px rgba(239, 68, 68, 0.45);
-}
-
-/* Flame — saturated red so it reads as fire regardless of OS emoji
-   palette and clearly distinguishes the saved-chip from plain text. */
-.msg-meta__saved-flame {
-  display: inline-block;
-  flex-shrink: 0;
-  width: 1em;
-  height: 1em;
-  color: #ef4444; /* red-500 */
-  filter: drop-shadow(0 0 3px rgba(239, 68, 68, 0.55));
-  transform-origin: 50% 85%;
-  animation: msg-saved-flicker 2.4s ease-in-out infinite;
-}
-.msg-meta__saved--peak .msg-meta__saved-flame {
-  color: #dc2626;
-  filter: drop-shadow(0 0 6px rgba(220, 38, 38, 0.85));
-  animation-duration: 1.4s;
-}
-
-.msg-meta__saved-label {
-  letter-spacing: 0.01em;
-}
-
-@keyframes msg-saved-flicker {
-  0%, 100% { transform: rotate(-2deg) scale(1); }
-  50%      { transform: rotate(2deg)  scale(1.06); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .msg-meta__saved-flame { animation: none; }
-}
-
 /* ─── Per-turn combo (inline with model + tokens in .msg-meta) ────────── */
 /*
  * The combo lives inside the per-turn meta footer beneath each assistant
@@ -2272,15 +2530,18 @@
  * emoji palette.
  */
 
+/* Three intensity tiers expressed as ONE var(--danger) ramped by mix %
+   (16 → 22 → 30) — no hand-picked reds, no perpetual flicker, no glow pulse.
+   Brief entrance only. color-mix resolves per theme. */
 .msg-meta__combo {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   padding: 2px 8px 2px 6px;
   border-radius: 999px;
-  border: 1px solid rgba(220, 38, 38, 0.45);
-  background: rgba(220, 38, 38, 0.10);
-  color: #b91c1c; /* red-700 */
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
+  color: var(--danger);
   font-family: var(--font-mono);
   font-size: 0.95em;
   font-weight: 700;
@@ -2289,68 +2550,25 @@
   white-space: nowrap;
   cursor: default;
   user-select: none;
-  /* The parent .msg-meta uses opacity:0.75; lift the combo back to full
-     so the celebration reads against the muted model/tokens text. */
-  opacity: calc(1 / 0.75);
   animation: msg-combo-in 320ms cubic-bezier(0.34, 1.56, 0.64, 1);
-  transition: border-color 200ms ease, background 200ms ease, color 200ms ease, box-shadow 200ms ease;
+  transition: border-color 200ms ease, background 200ms ease, color 200ms ease;
 }
-[data-theme="dark"] .msg-meta__combo {
-  color: #fca5a5; /* red-300 */
-  border-color: rgba(220, 38, 38, 0.55);
-  background: rgba(220, 38, 38, 0.14);
-}
-
 .msg-meta__combo--hot {
-  border-color: rgba(220, 38, 38, 0.7);
-  background: rgba(220, 38, 38, 0.16);
-  color: #991b1b; /* red-800 */
-  box-shadow: 0 0 8px rgba(220, 38, 38, 0.30);
+  border-color: color-mix(in srgb, var(--danger) 60%, var(--border));
+  background: color-mix(in srgb, var(--danger) 22%, transparent);
 }
-[data-theme="dark"] .msg-meta__combo--hot {
-  color: #fca5a5;
-  border-color: rgba(239, 68, 68, 0.75);
-  background: rgba(239, 68, 68, 0.18);
-  box-shadow: 0 0 10px rgba(239, 68, 68, 0.45);
-}
-
 .msg-meta__combo--blaze {
-  border-color: rgba(239, 68, 68, 0.85);
-  background: rgba(239, 68, 68, 0.22);
-  color: #7f1d1d; /* red-900 */
-  box-shadow: 0 0 14px rgba(239, 68, 68, 0.55);
-  animation:
-    msg-combo-in 320ms cubic-bezier(0.34, 1.56, 0.64, 1),
-    msg-combo-blaze-pulse 1.6s ease-in-out 320ms infinite;
-}
-[data-theme="dark"] .msg-meta__combo--blaze {
-  color: #fecaca; /* red-200 */
-  border-color: rgba(239, 68, 68, 0.95);
-  background: rgba(239, 68, 68, 0.28);
-  box-shadow: 0 0 18px rgba(239, 68, 68, 0.70);
+  border-color: color-mix(in srgb, var(--danger) 75%, var(--border));
+  background: color-mix(in srgb, var(--danger) 30%, transparent);
 }
 
-/* Flame icon — always saturated red so the visual cue is unmistakable.
-   Tier intensity is conveyed through the chip's border/background, not
-   by changing the flame color. */
+/* Flame icon — inherits currentColor (the chip's danger token); static. */
 .msg-meta__combo-flame {
   display: inline-block;
   flex-shrink: 0;
   width: 1.05em;
   height: 1.05em;
-  color: #ef4444; /* red-500 — flame fill via currentColor */
-  filter: drop-shadow(0 0 4px rgba(239, 68, 68, 0.65));
   transform-origin: 50% 85%;
-  animation: msg-combo-flicker 1.7s ease-in-out infinite;
-}
-.msg-meta__combo--hot .msg-meta__combo-flame {
-  color: #dc2626; /* red-600 */
-  filter: drop-shadow(0 0 6px rgba(220, 38, 38, 0.85));
-}
-.msg-meta__combo--blaze .msg-meta__combo-flame {
-  color: #dc2626;
-  filter: drop-shadow(0 0 8px rgba(220, 38, 38, 0.95));
-  animation-duration: 1.0s;
 }
 
 .msg-meta__combo-label {
@@ -2365,26 +2583,13 @@
 }
 
 @keyframes msg-combo-in {
-  0%   { opacity: 0;              transform: scale(0.6); }
-  60%  { opacity: calc(1 / 0.75); transform: scale(1.15); }
-  100% { opacity: calc(1 / 0.75); transform: scale(1); }
-}
-
-@keyframes msg-combo-flicker {
-  0%, 100% { transform: rotate(-4deg) scale(1); }
-  35%      { transform: rotate(3deg)  scale(1.10); }
-  70%      { transform: rotate(-1deg) scale(0.95); }
-}
-
-@keyframes msg-combo-blaze-pulse {
-  0%, 100% { box-shadow: 0 0 14px rgba(239, 68, 68, 0.55); }
-  50%      { box-shadow: 0 0 24px rgba(239, 68, 68, 0.85); }
+  0%   { opacity: 0; transform: scale(0.6); }
+  60%  { opacity: 1; transform: scale(1.12); }
+  100% { opacity: 1; transform: scale(1); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .msg-meta__combo,
-  .msg-meta__combo-flame,
-  .msg-meta__combo--blaze { animation: none; }
+  .msg-meta__combo { animation: none; }
 }
 
 .savings-indicator {
@@ -2407,31 +2612,357 @@
 }
 
 
+/* ── Clarify form (PR5 meta-skill user_input pause) ───────────────── */
+
+.clarify-form {
+  margin-top: var(--sp-3);
+  background: var(--bg-surface);
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+  border-radius: var(--radius-md);
+  padding: var(--sp-3) var(--sp-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+}
+
+.clarify-form-header {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding-bottom: var(--sp-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.clarify-form-header::before {
+  content: '📝';
+}
+
+.clarify-form-intro {
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
+
+.clarify-form-fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  margin-top: var(--sp-2);
+}
+
+.clarify-form-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.clarify-form-label {
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+.clarify-form-input {
+  font-size: var(--fs-sm);
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--bg-base);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  outline: none;
+  transition: border-color var(--transition), box-shadow var(--transition);
+  font-family: inherit;
+}
+
+.clarify-form-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.clarify-form-input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+select.clarify-form-input {
+  appearance: auto;
+  cursor: pointer;
+}
+
+.clarify-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--border);
+  margin-top: var(--sp-2);
+}
+
+.clarify-form-submit,
+.clarify-form-cancel {
+  padding: var(--sp-2) var(--sp-4);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background-color var(--transition),
+              border-color var(--transition),
+              opacity var(--transition);
+  font-family: inherit;
+}
+
+.clarify-form-submit {
+  background: var(--accent);
+  color: var(--accent-contrast, white);
+  border-color: var(--accent);
+}
+
+.clarify-form-submit:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 88%, black);
+}
+
+.clarify-form-cancel {
+  background: transparent;
+  color: var(--text-muted);
+  border-color: var(--border);
+}
+
+.clarify-form-cancel:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--text-muted);
+  background: color-mix(in srgb, var(--text-muted) 8%, transparent);
+}
+
+.clarify-form-submit:disabled,
+.clarify-form-cancel:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.clarify-form-error {
+  font-size: var(--fs-xs);
+  color: #c53030;
+  margin-top: var(--sp-1);
+}
+
+.clarify-form--submitted {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+
+/* ──────────────────────────────────────────────────────────────────
+ * Auto-prefill transparency block (step (d) of the clarify rebuild).
+ *
+ * When the prefill scan inferred values from the user's earlier
+ * messages, the server attaches confirmed_fields / ambiguous_fields /
+ * unknown_mentions to the form payload. The renderer surfaces them at
+ * the top of the form so the user knows what was detected and can
+ * confirm or override per-field. The styling stays visually quiet —
+ * a translucent panel above the form fields rather than a competing
+ * primary surface — because these are *system inferences* the user
+ * is reviewing, not new prompts to act on.
+ * ────────────────────────────────────────────────────────────────── */
+.clarify-form-prefill {
+  margin: 8px 0 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(80, 130, 200, 0.25);
+  border-radius: 6px;
+  background: rgba(80, 130, 200, 0.05);
+  font-size: 0.9em;
+}
+
+.clarify-form-prefill-note {
+  font-weight: 500;
+  margin-bottom: 6px;
+  opacity: 0.85;
+}
+
+.clarify-form-prefill-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.clarify-form-prefill-list li {
+  padding: 2px 0;
+  line-height: 1.45;
+  font-family: inherit;
+}
+
+.clarify-form-prefill-confirmed {
+  color: rgba(60, 130, 70, 0.95);
+}
+
+.clarify-form-prefill-ambiguous {
+  color: rgba(180, 110, 30, 0.95);
+}
+
+.clarify-form-prefill-unknown {
+  color: rgba(80, 80, 80, 0.85);
+  font-style: italic;
+}
+
+/* Per-row markers attached below the input itself — the local
+ * counterpart of the top-of-form summary so each field shows where
+ * its current value came from without forcing the user to scroll. */
+.clarify-form-row-marker {
+  margin-top: 4px;
+  font-size: 0.85em;
+  line-height: 1.35;
+  opacity: 0.85;
+}
+
+.clarify-form-row-marker-confirmed {
+  color: rgba(60, 130, 70, 0.9);
+}
+
+.clarify-form-row-marker-ambiguous {
+  color: rgba(180, 110, 30, 0.9);
+}
+
+.clarify-form-input-confirmed {
+  /* Visual cue that the input was auto-filled — a subtle left border
+   * accent. Users can still edit/clear normally; the cue just
+   * disambiguates "system inferred this" from "I typed this". */
+  border-left: 3px solid rgba(60, 130, 70, 0.6);
+  background-color: rgba(60, 130, 70, 0.04);
+}
+
+.clarify-form-dual-channel-hint {
+  /* Soft, low-key callout right under the form header that tells the
+   * user the main chat input still works while the form is open.
+   * Quiet styling on purpose — this is a permission marker, not a
+   * call to action. */
+  margin: 2px 0 10px;
+  padding: 6px 10px;
+  font-size: 0.85em;
+  line-height: 1.45;
+  color: rgba(80, 80, 120, 0.85);
+  background: rgba(120, 100, 200, 0.04);
+  border-left: 2px solid rgba(120, 100, 200, 0.35);
+  border-radius: 3px;
+}
+
+
+/* ──────────────────────────────────────────────────────────────────
+ * Clarify-skip transparency card.
+ *
+ * When a meta author's ``when:`` expression suppresses an otherwise-
+ * required user_input step (because the upstream context-extraction
+ * already filled the answers), the scheduler attaches a
+ * ``clarify_skip_summary`` so the user sees what was inferred
+ * without the form being forced back open. The card sits inline in
+ * the assistant stream — quieter than the active form, louder than a
+ * passive log entry, and always offers an undo path.
+ * ────────────────────────────────────────────────────────────────── */
+.clarify-skip-summary {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px dashed rgba(120, 100, 200, 0.35);
+  border-radius: 6px;
+  background: rgba(120, 100, 200, 0.05);
+  font-size: 0.9em;
+}
+
+.clarify-skip-summary-header {
+  font-weight: 500;
+  margin-bottom: 6px;
+  color: rgba(100, 80, 180, 0.95);
+}
+
+.clarify-skip-summary-note {
+  opacity: 0.85;
+  margin-bottom: 6px;
+}
+
+.clarify-skip-summary-trigger {
+  margin-bottom: 6px;
+  font-style: italic;
+  opacity: 0.8;
+}
+
+.clarify-skip-summary-fields-header,
+.clarify-skip-summary-inferred-header {
+  margin-top: 6px;
+  margin-bottom: 4px;
+  font-weight: 500;
+  opacity: 0.85;
+}
+
+.clarify-skip-summary-fields {
+  list-style: none;
+  padding-left: 12px;
+  margin: 0 0 6px;
+}
+
+.clarify-skip-summary-fields li {
+  padding: 1px 0;
+  line-height: 1.4;
+}
+
+.clarify-skip-summary-inferred-entry {
+  margin: 2px 0;
+  padding: 4px 8px;
+  border-left: 2px solid rgba(120, 100, 200, 0.35);
+  background: rgba(120, 100, 200, 0.03);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.85em;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.clarify-skip-summary-inferred-step {
+  font-weight: 500;
+  opacity: 0.75;
+}
+
+.clarify-skip-summary-hint {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px dotted rgba(120, 100, 200, 0.25);
+  opacity: 0.8;
+  font-size: 0.85em;
+}
+
+
 /* ──────────────────────────────────────────────────────────────────
  * Router slider — arcade-brutalist whac-a-mole grid that fires when
  * the squilla router lands a tier.
  *
- * The strip is a 3 × 4 grid of cells: the operator's real configured
- * tiers (deduped by model) sit in the top rows, padded with popular
- * decoy model names so the grid feels populated. A square hammer-
- * selector hops between cells with bouncy easing and locks onto the
- * routed cell — each visited cell does a quick mole-pop, the winner
- * cell additionally fires a particle burst.
+ * The strip is a compact grid of real candidates for the current
+ * request kind. A square hammer-selector hops between cells with
+ * bouncy easing and locks onto the routed cell — each visited cell
+ * does a quick mole-pop, the winner cell additionally fires a
+ * particle burst.
  *
  * Aesthetic: hairline mantis-brutalist. Orange is the only colour
- * that signals; decoys read dim. Live and history-loaded renders
- * share the same component (history skips the hop animation and
- * settles immediately on the winner cell). ─────────────────────── */
+ * that signals. Live and history-loaded renders share the same
+ * component (history skips the hop animation and settles immediately
+ * on the winner cell). ─────────────────────────────────────────── */
 .router-fx {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  /* Centered, prominent panel within the reading column. The column (P0-1)
+     already keeps it from stranding in a dead band on wide screens, so the
+     full AI-model-router grid stays a deliberate centerpiece. */
   margin: var(--sp-3) auto 4px;
   padding: 0;
   user-select: none;
   align-self: center;
   width: 100%;
-  max-width: 560px;
+  max-width: min(100%, 620px);
 }
 
 .router-fx-header {
@@ -2466,8 +2997,14 @@
   0%, 100% { transform: translateX(0); }
   50%      { transform: translateX(3px); }
 }
+/* Settled header — keeps a faint accent tint so the strip reads "dial
+   locked on a tier" rather than "abandoned." Glyph arrows go translucent
+   accent so the "← MODEL ROUTER →" line continues to point at the pick. */
 .router-fx[data-state="settled"] .router-fx-header {
-  color: var(--text-dim);
+  color: color-mix(in srgb, var(--accent) 38%, var(--text-dim));
+}
+.router-fx[data-state="settled"] .router-fx-header .glyph {
+  color: color-mix(in srgb, var(--accent) 70%, transparent);
 }
 
 /* The grid surface — circuit-board hairlines with a faint dot field
@@ -2476,8 +3013,9 @@
 .router-fx-grid {
   position: relative;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  grid-template-rows: repeat(3, 30px);
+  grid-template-columns: repeat(var(--router-fx-cols, 2), 1fr);
+  grid-template-rows: none;
+  grid-auto-rows: 34px;
   gap: 4px;
   padding: 8px;
   background:
@@ -2497,12 +3035,15 @@
   border: 1px solid var(--hairline);
   border-radius: var(--radius-sm);
   font-family: var(--font-mono);
-  font-size: 10.5px;
-  letter-spacing: 0.01em;
-  white-space: nowrap;
+  font-size: 10px;
+  color: var(--text);
+  letter-spacing: 0;
+  /* Allow the inner .nm label to shrink/ellipsize inside the grid track —
+     a flex container ignores its own text-overflow, so the actual clamp
+     lives on .nm below. min-width:0 lets the cell yield to the track. */
+  min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
-  padding: 0 6px;
+  padding: 0 5px;
   transition:
     transform 220ms cubic-bezier(.34,1.65,.5,1),
     background 240ms ease,
@@ -2511,32 +3052,19 @@
     box-shadow 240ms ease;
 }
 
-/* Real (operator-configured) cells: brighter type only — the accent
- * dot in the top-right corner is the sole "this is on the dial"
- * marker; the cell border stays neutral hairline so the grid reads
- * as one field, not as two segregated zones. */
-.router-fx-cell[data-kind="real"] {
-  color: var(--text);
-}
-.router-fx-cell[data-kind="real"]::after {
-  content: '';
-  position: absolute;
-  top: 3px;
-  right: 3px;
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: var(--accent);
-  opacity: 0.7;
+/* The label itself owns the truncation. Any model name longer than the
+   grid track (e.g. "gemini-3.1-flash-lite") ellipsizes here instead of
+   bleeding past the cell edge; the full name stays on the `title` tooltip. */
+.router-fx-cell .nm {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-/* Decoy cells: dim, italic, no dot — clearly "not on the dial" but
- * present to make the routing space feel real. */
-.router-fx-cell[data-kind="decoy"] {
-  color: var(--text-dim);
-  font-style: italic;
-  opacity: 0.78;
-}
+/* Equal prominence: every candidate cell renders identically at rest. Only
+ * the routing RESULT (.win, below) is emphasised. */
 
 /* Mole-pop: scale up + tiny lift + accent tint as the hammer arrives. */
 @keyframes router-fx-mole-pop {
@@ -2548,34 +3076,93 @@
   animation: router-fx-mole-pop 200ms cubic-bezier(.34,1.7,.5,1) both;
   z-index: 3;
 }
-.router-fx-cell.pinging[data-kind="decoy"] {
-  /* Decoy gets a subtler pop than real cells. */
-  animation-duration: 170ms;
-}
-
-/* Winner: solid orange border, accent text, gentle lift. */
+/* Winner: solid orange border, accent text, with a soft outer halo +
+ * inner top-edge highlight + a one-shot scan-line that sweeps top-to-
+ * bottom on landing. Reads as the locked pick, not just "selected".
+ * A lock dot in the corner pulses to confirm the lock (the only dot in
+ * the grid now that idle cells carry none). */
 .router-fx-cell.win {
   color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 9%, var(--bg));
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--accent) 14%, var(--bg)) 0%,
+      color-mix(in srgb, var(--accent) 7%, var(--bg)) 100%);
   border-color: var(--accent);
-  font-weight: 600;
+  font-weight: 700;
   font-style: normal;
-  transform: translateY(-1px);
-  box-shadow: 0 1px 0 color-mix(in srgb, var(--accent) 35%, transparent);
+  transform: translateY(-2px);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 35%, transparent),
+    0 8px 22px -8px color-mix(in srgb, var(--accent) 55%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--accent) 40%, transparent);
+  z-index: 4;
 }
 .router-fx-cell.win::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--accent);
   opacity: 1;
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 75%, transparent);
+  animation: router-fx-dot-locked 1.4s ease-in-out infinite;
 }
-
-/* Fallback variant — chosen tier was the safe net, not the routed pick. */
+/* Scan-line sweep — fires once when .win lands. Sits above the cell
+   surface but below text via z-index management. Pointer-events stay
+   off so it never interferes with click/copy on the model name. */
+.router-fx-cell.win::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 1px;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--accent) 90%, transparent) 50%,
+    transparent 100%);
+  pointer-events: none;
+  opacity: 0;
+  animation: router-fx-scan 720ms cubic-bezier(.4,0,.2,1) 1 forwards;
+  z-index: 1;
+}
+@keyframes router-fx-scan {
+  0%   { opacity: 0;    top: 0;    }
+  20%  { opacity: 1;    top: 10%;  }
+  80%  { opacity: 0.85; top: 90%;  }
+  100% { opacity: 0;    top: 100%; }
+}
+@keyframes router-fx-dot-locked {
+  0%, 100% { opacity: 0.9; box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 50%, transparent); }
+  50%      { opacity: 1;   box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 85%, transparent); }
+}
+/* Fallback variant — chosen tier was the safe net, not the routed pick.
+   Mirrors the locked-winner treatment but in the danger palette so the
+   shape is the same and the colour change carries the signal. */
 .router-fx[data-source="fallback"] .router-fx-cell.win {
   color: var(--danger);
   border-color: var(--danger);
-  background: color-mix(in srgb, var(--danger) 9%, var(--bg));
-  box-shadow: 0 1px 0 color-mix(in srgb, var(--danger) 35%, transparent);
+  background:
+    linear-gradient(180deg,
+      color-mix(in srgb, var(--danger) 14%, var(--bg)) 0%,
+      color-mix(in srgb, var(--danger) 7%, var(--bg)) 100%);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--danger) 35%, transparent),
+    0 8px 22px -8px color-mix(in srgb, var(--danger) 55%, transparent),
+    inset 0 1px 0 color-mix(in srgb, var(--danger) 40%, transparent);
 }
 .router-fx[data-source="fallback"] .router-fx-cell.win::after {
   background: var(--danger);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--danger) 75%, transparent);
+}
+.router-fx[data-source="fallback"] .router-fx-cell.win::before {
+  background: linear-gradient(90deg,
+    transparent 0%,
+    color-mix(in srgb, var(--danger) 90%, transparent) 50%,
+    transparent 100%);
 }
 
 /* Hammer selector — absolutely positioned, JS sets transform per hop.
@@ -2690,23 +3277,16 @@
   background: var(--text-muted);
 }
 
-/* Reduced motion: kill the chase, render the settled board only. */
-@media (prefers-reduced-motion: reduce) {
-  .router-fx-cell, .router-fx-selector { transition: none !important; }
-  .router-fx-cell.pinging,
-  .router-fx-selector.lock-impact,
-  .router-fx-burst i,
-  .router-fx[data-state="playing"] .router-fx-header .glyph {
-    animation: none !important;
-  }
-}
+/* NOTE: the router grid deliberately does NOT honour prefers-reduced-motion:
+ * the "Visual effects" switch is the explicit opt-in, so OS reduce-motion
+ * does not suppress the chase. */
 
-/* Mobile: collapse to 3 columns x 4 rows + smaller type. The hammer
- * still hops; the grid just gets denser. */
+/* Mobile: keep the same real-candidate roster, but wrap compactly. */
 @media (max-width: 640px) {
   .router-fx-grid {
-    grid-template-columns: repeat(3, 1fr);
-    grid-template-rows: repeat(4, 28px);
+    grid-template-columns: repeat(var(--router-fx-mobile-cols, var(--router-fx-cols, 2)), 1fr);
+    grid-template-rows: none;
+    grid-auto-rows: 30px;
     padding: 6px;
     gap: 3px;
   }
@@ -2715,8 +3295,37 @@
 }
 @media (max-width: 380px) {
   .router-fx-grid {
-    grid-template-columns: repeat(2, 1fr);
-    grid-template-rows: repeat(6, 26px);
+    grid-template-columns: repeat(var(--router-fx-mobile-cols, 2), 1fr);
+    grid-template-rows: none;
+    grid-auto-rows: 28px;
   }
-  .router-fx-cell { font-size: 9.5px; }
+  .router-fx-cell { font-size: 9.5px; padding: 0 4px; }
 }
+
+/* Once settled, the chase hammer is gone — the .win cell is the marker. */
+.router-fx[data-state="settled"] .router-fx-selector { opacity: 0 !important; }
+
+/* History/reopened strips are records, not live routing moments. Keep the
+   selected look, but suppress every motion affordance that would read like
+   the model is being chosen again after refresh or session reopen. */
+.router-fx[data-render-mode="history"],
+.router-fx[data-render-mode="history"] *,
+.router-fx[data-render-mode="history"] *::before,
+.router-fx[data-render-mode="history"] *::after {
+  animation: none !important;
+  transition: none !important;
+}
+
+/* ── Router-fx style variants ────────────────────────────────────────────
+ * Groundwork for future frontend experiments. The visible style today is the
+ * BASE look above, rendered when no data-variant attribute is present. JS
+ * (_buildRouterFxElement) stamps data-variant="<name>" on the .router-fx root
+ * only for non-'default' variants, so adding a skin is purely additive here.
+ *
+ * To add a variant:
+ *   .router-fx[data-variant="<name>"] { --accent: …; --danger: …; }
+ * Prefer redefining the custom properties the strip already consumes (--accent,
+ * --danger, --text*, --bg*, --hairline, --radius-*). Keep variants
+ * palette-only unless the router contract changes to support a second visual
+ * grammar for real candidates.
+ */

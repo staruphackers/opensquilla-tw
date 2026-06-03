@@ -21,8 +21,11 @@ import pytest
 from opensquilla.skills.creator.auto_propose import (
     _META_SKILL_CREATOR_TRIGGERS,
     AutoProposeResult,
+    _chain_signature,
     _synthesise_user_message,
     auto_propose,
+    is_auto_propose_disabled,
+    try_auto_enable_proposal,
 )
 
 # ---------------------------------------------------------------------------
@@ -35,6 +38,7 @@ def _seed_decision_log(
     *,
     count: int,
     when: datetime | None = None,
+    intent: str = "",
 ) -> None:
     """Append ``count`` decision entries with the given skills chain."""
     when = when or datetime.now(UTC)
@@ -46,6 +50,7 @@ def _seed_decision_log(
             fh.write(json.dumps({
                 "ts": when.isoformat(),
                 "skills_invoked": list(chain),
+                "user_message": intent,
             }) + "\n")
 
 
@@ -121,6 +126,49 @@ def _write_managed_skill(home: Path, name: str, skill_md: str) -> None:
     (skill_dir / "SKILL.md").write_text(skill_md, encoding="utf-8")
 
 
+def test_chain_signature_keeps_order_and_intent_separate() -> None:
+    assert _chain_signature(["a", "b"], "invoice cleanup") != _chain_signature(
+        ["b", "a"], "invoice cleanup",
+    )
+    assert _chain_signature(["a", "b"], "invoice cleanup") != _chain_signature(
+        ["a", "b"], "travel planning",
+    )
+
+
+def test_unknown_historical_skills_are_skipped_before_creator_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    log_dir = tmp_path / "logs"
+    proposals_dir = tmp_path / "proposals"
+    _seed_decision_log(
+        log_dir,
+        ["removed-old-skill", "summarize"],
+        count=5,
+        intent="summarize old workflow output",
+    )
+    loader = _stub_loader_with_creator(monkeypatch)
+    orch = _make_proposer_orchestrator(proposals_dir, proposal_ids=["aaaaaaaa"])
+
+    result = asyncio.run(auto_propose(
+        orchestrator=orch,
+        skill_loader=loader,
+        log_dir=log_dir,
+        min_freq=3,
+        proposals_dir=proposals_dir,
+    ))
+
+    assert result.proposals_created == []
+    assert result.errors == []
+    assert result.skipped == [
+        {
+            "skills": ["removed-old-skill", "summarize"],
+            "freq": 5,
+            "reason": "unknown_skill",
+        }
+    ]
+    orch.run.assert_not_called()
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -175,7 +223,12 @@ async def test_pattern_at_threshold_creates_proposal_with_provenance(
 ) -> None:
     log_dir = tmp_path / "logs"
     proposals_dir = tmp_path / "proposals"
-    _seed_decision_log(log_dir, ["nano-pdf", "memory"], count=5)
+    _seed_decision_log(
+        log_dir,
+        ["nano-pdf", "memory"],
+        count=5,
+        intent="summarize a PDF and save the digest",
+    )
     loader = _stub_loader_with_creator(monkeypatch)
     orch = _make_proposer_orchestrator(proposals_dir, proposal_ids=["cafe1234"])
 
@@ -197,9 +250,17 @@ async def test_pattern_at_threshold_creates_proposal_with_provenance(
     assert gates["provenance"]["auto_propose_meta"]["skills"] == ["nano-pdf", "memory"]
     assert gates["provenance"]["auto_propose_meta"]["freq"] == 5
     assert isinstance(gates["provenance"]["chain_hash"], str)
+    assert gates["provenance"]["auto_propose_meta"]["intent_digest"]
     # Lint / smoke payload preserved (provenance is additive, not destructive)
     assert gates["lint"]["G1"]["passed"] is True
     assert gates["auto_enable_eligible"] is True
+
+    match = orch.run.call_args.args[0]
+    assert match.inputs["user_message"].startswith("auto-proposal:")
+    assert "FULL_GATED validation" in match.inputs["user_message"]
+    assert "runtime E2E comparison" in match.inputs["user_message"]
+    assert "summarize a PDF and save the digest" in match.inputs["system_prompt"]
+    assert match.inputs["system_prompt"].startswith("Unattended meta-skill auto-propose run.")
 
 
 @pytest.mark.asyncio
@@ -602,8 +663,13 @@ async def test_pattern_fully_covered_by_existing_meta_skill_is_skipped(
 ) -> None:
     log_dir = tmp_path / "logs"
     proposals_dir = tmp_path / "proposals"
-    # meta-paper-write already composes paper-experiment-stub + paper-plot-stub
-    _seed_decision_log(log_dir, ["paper-experiment-stub", "paper-plot-stub"], count=5)
+    # meta-paper-write composes multi-search-engine + paper-refbib-stub.
+    # (The previous paper-experiment-stub + paper-plot-stub pair was
+    # removed from the meta-skill after the experiment_design pipeline
+    # rewrite, so we use the search→refbib pair which is still there.)
+    _seed_decision_log(
+        log_dir, ["multi-search-engine", "paper-refbib-stub"], count=5,
+    )
     loader = _stub_loader_with_creator(monkeypatch)
     orch = _make_proposer_orchestrator(proposals_dir, proposal_ids=["aaaaaaaa"])
 
@@ -790,6 +856,25 @@ def test_synthesised_user_message_avoids_meta_skill_creator_triggers() -> None:
         )
 
 
+def test_synthesise_user_message_raises_on_trigger_substring() -> None:
+    """D6: the recursion guard inside ``_synthesise_user_message`` must
+    fire even when ``python -O`` strips ``assert`` statements. Pass a
+    skill list whose name interpolates one of the meta-skill-creator
+    triggers into the synth message body and assert that
+    ``RuntimeError`` is raised rather than the message silently being
+    returned to the caller. A regression would let auto_propose
+    re-fire the resolver against its own output."""
+    # Use a real trigger phrase verbatim as a skill name. The synth
+    # message concatenates ``", ".join(skills)`` into its body, so the
+    # trigger substring will end up in the output unless the guard
+    # rejects it. ``python -O`` would strip the prior ``assert`` form
+    # and let the message through — the ``raise`` form keeps the
+    # check active in every build.
+    trigger_phrase = _META_SKILL_CREATOR_TRIGGERS[0]
+    with pytest.raises(RuntimeError, match="recursively trigger"):
+        _synthesise_user_message([trigger_phrase, "summarize"], 5, 30)
+
+
 def test_summary_string_shape() -> None:
     result = AutoProposeResult(
         proposals_created=["a", "b"],
@@ -802,3 +887,86 @@ def test_summary_string_shape() -> None:
     assert "skipped=1" in s
     assert "errors=1" in s
     assert "via=dream" in s
+
+
+# ── D8: operator kill switch is honoured from every entry point ──
+
+
+def test_is_auto_propose_disabled_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The shared kill switch predicate reads
+    ``OPENSQUILLA_AUTO_PROPOSE_DISABLED`` and only treats the literal
+    value ``"1"`` as off — any other value (including ``"true"``,
+    ``""``, ``"0"``) leaves auto-propose enabled."""
+    monkeypatch.delenv("OPENSQUILLA_AUTO_PROPOSE_DISABLED", raising=False)
+    assert is_auto_propose_disabled() is False
+
+    monkeypatch.setenv("OPENSQUILLA_AUTO_PROPOSE_DISABLED", "1")
+    assert is_auto_propose_disabled() is True
+
+    monkeypatch.setenv("OPENSQUILLA_AUTO_PROPOSE_DISABLED", "true")
+    assert is_auto_propose_disabled() is False
+
+    monkeypatch.setenv("OPENSQUILLA_AUTO_PROPOSE_DISABLED", "0")
+    assert is_auto_propose_disabled() is False
+
+
+@pytest.mark.asyncio
+async def test_auto_propose_short_circuits_on_kill_switch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """D8: the kill switch must halt ``auto_propose`` itself, not just
+    the cron pre-check. Without the source-level guard, the dream
+    callback (which bypasses the cron handler) would silently run the
+    full pipeline. Pass mocks that would raise if invoked to prove the
+    pipeline never starts."""
+    monkeypatch.setenv("OPENSQUILLA_AUTO_PROPOSE_DISABLED", "1")
+    loader = MagicMock()
+    loader.get_by_name.side_effect = AssertionError(
+        "skill_loader must not be touched once the kill switch is on",
+    )
+    orch = MagicMock()
+    orch.run.side_effect = AssertionError(
+        "orchestrator must not be invoked once the kill switch is on",
+    )
+
+    result = await auto_propose(
+        orchestrator=orch,
+        skill_loader=loader,
+        log_dir=tmp_path / "logs",
+        proposals_dir=tmp_path / "proposals",
+        triggered_by="dream",
+    )
+
+    assert result.proposals_created == []
+    assert result.proposals_enabled == []
+    assert result.errors == []
+    assert len(result.skipped) == 1
+    assert result.skipped[0]["reason"] == "kill_switch_disabled"
+    assert result.triggered_by == "dream"
+
+
+def test_try_auto_enable_proposal_refuses_under_kill_switch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """D8: the manual creator persist path calls
+    ``try_auto_enable_proposal`` directly (not the cron handler) and
+    must also honour the kill switch. The wrapper returns a
+    structured ``refused`` decision so the caller still sees a
+    well-formed payload."""
+    monkeypatch.setenv("OPENSQUILLA_AUTO_PROPOSE_DISABLED", "1")
+    loader = MagicMock()
+    loader.get_by_name.side_effect = AssertionError(
+        "skill_loader must not be touched once the kill switch is on",
+    )
+
+    decision = try_auto_enable_proposal(
+        proposals_dir=tmp_path / "proposals",
+        proposal_id="abcd1234",
+        skill_loader=loader,
+        triggered_by="manual_persist",
+        max_risk="low",
+    )
+
+    assert decision["decision"] == "refused"
+    assert decision["reason"] == "kill_switch_disabled"
+    assert decision["kill_switch"] is True

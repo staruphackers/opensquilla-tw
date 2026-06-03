@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import functools
 from collections.abc import Mapping
 from dataclasses import replace
@@ -100,10 +101,13 @@ class ToolRegistry:
 
     @staticmethod
     def _parameters_for(rt: RegisteredTool, ctx: ToolContext) -> dict[str, Any]:
-        parameters = {
-            key: dict(value) if isinstance(value, Mapping) else value
-            for key, value in rt.spec.parameters.items()
-        }
+        raw_parameters = rt.spec.parameters
+        if (
+            raw_parameters.get("type") == "object"
+            and isinstance(raw_parameters.get("properties"), Mapping)
+        ):
+            raw_parameters = raw_parameters["properties"]
+        parameters = copy.deepcopy(raw_parameters)
         if rt.spec.name != "router_control":
             return parameters
         router_cfg = getattr(ctx, "router_control_config", None)
@@ -113,11 +117,13 @@ class ToolRegistry:
             from opensquilla.router_control import build_router_control_targets
 
             target_ids = [
-                target.target_id for target in build_router_control_targets(router_cfg)
+                target.target_id
+                for target in build_router_control_targets(router_cfg)
+                if target.target_type == "tier"
             ]
         except Exception:  # noqa: BLE001 - schema enrichment must not hide the tool
             return parameters
-        if target_ids and "target_id" in parameters and isinstance(parameters["target_id"], dict):
+        if target_ids and "target_id" in parameters:
             parameters["target_id"]["enum"] = target_ids
         return parameters
 

@@ -18,6 +18,7 @@ import re
 from typing import Any
 
 import jinja2
+import jinja2.sandbox
 
 from opensquilla.skills.meta.types import MetaStep, RouteCase
 
@@ -26,6 +27,14 @@ from opensquilla.skills.meta.types import MetaStep, RouteCase
 # ---------------------------------------------------------------------------
 
 _SLUG_RE = re.compile(r"[^a-zA-Z0-9_-]+")
+_PATH_TOKEN_RE = re.compile(
+    r"(?<![\w.-])"
+    r"(?:/[\w./@%+\-=]+|[\w./@%+\-=]+?\."
+    r"(?:md|txt|csv|tsv|json|yaml|yml|xlsx))"
+    r"(?![\w.-])",
+    re.IGNORECASE,
+)
+_PATH_TRAILING_PUNCT = "`\"'，。；;,)）]】"
 
 
 def _filter_xml_escape(value: object) -> str:
@@ -43,8 +52,54 @@ def _filter_slugify(value: object) -> str:
     return _SLUG_RE.sub("-", str(value)).strip("-").lower()[:128]
 
 
-def _build_jinja_env() -> jinja2.Environment:
-    env = jinja2.Environment(
+def _filter_extract_path(value: object, suffix: str = "") -> str:
+    wanted = str(suffix or "").strip().lower().lstrip(".")
+    for match in _PATH_TOKEN_RE.findall(str(value)):
+        token = match.strip().strip(_PATH_TRAILING_PUNCT)
+        if not token:
+            continue
+        if not wanted or token.lower().endswith(f".{wanted}"):
+            return str(token)
+    return ""
+
+
+def _filter_contains_cjk(value: object) -> bool:
+    return bool(re.search(r"[\u3400-\u9fff\uf900-\ufaff]", str(value or "")))
+
+
+def _filter_int(value: object, default: int = 0) -> int:
+    """Parse ``value`` as an integer, returning ``default`` on failure."""
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    text = str(value or "").strip()
+    if not text:
+        return default
+    try:
+        return int(text)
+    except ValueError:
+        match = re.search(r"-?\d+", text)
+        if match:
+            try:
+                return int(match.group(0))
+            except ValueError:
+                return default
+        return default
+
+
+def _build_jinja_env() -> jinja2.sandbox.ImmutableSandboxedEnvironment:
+    # ``ImmutableSandboxedEnvironment`` blocks Python attribute introspection
+    # (``__class__`` / ``__mro__`` / ``__subclasses__``) and mutation
+    # operations on inputs. The previous ``jinja2.Environment`` cleared
+    # globals and installed a filter allowlist, but left attribute access
+    # open — a SKILL.md author could escape via
+    # ``{{ inputs.__class__.__mro__[1].__subclasses__() }}``. Sandboxing
+    # at the env level keeps ``inputs.get(...)`` / ``inputs['x']`` /
+    # ``outputs.prev`` working for legitimate templates.
+    env = jinja2.sandbox.ImmutableSandboxedEnvironment(
         undefined=jinja2.StrictUndefined,
         autoescape=False,
         extensions=[],
@@ -61,6 +116,9 @@ def _build_jinja_env() -> jinja2.Environment:
         "length": len,
         "join": jinja2.filters.do_join,
         "lower": lambda value: str(value).lower(),
+        "extract_path": _filter_extract_path,
+        "contains_cjk": _filter_contains_cjk,
+        "int": _filter_int,
     }
     return env
 
@@ -94,6 +152,10 @@ def render_with_args(
                 raise ValueError(f"undefined template variable: {exc}") from exc
             except jinja2.TemplateSyntaxError as exc:
                 raise ValueError(f"template syntax error: {exc}") from exc
+            except jinja2.sandbox.SecurityError as exc:
+                raise ValueError(
+                    f"template security violation: {exc}",
+                ) from exc
         if isinstance(value, dict):
             return {k: _render(v) for k, v in value.items()}
         if isinstance(value, list):
@@ -137,6 +199,10 @@ def resolve_route(
             raise ValueError(
                 f"route[{index}] when references undefined variable: {exc}",
             ) from exc
+        except jinja2.sandbox.SecurityError as exc:
+            raise ValueError(
+                f"route[{index}] when security violation: {exc}",
+            ) from exc
         if value:
             return case.to
     return None
@@ -161,16 +227,26 @@ def evaluate_when(
         return bool(expr(**context))
     except jinja2.UndefinedError as exc:
         raise ValueError(f"when references undefined variable: {exc}") from exc
+    except jinja2.sandbox.SecurityError as exc:
+        raise ValueError(f"when security violation: {exc}") from exc
 
 
-def format_step_prompt(skill_name: str, args: dict[str, Any]) -> str:
+def format_step_prompt(
+    skill_name: str,
+    args: dict[str, Any],
+    *,
+    language_instruction: str = "",
+) -> str:
     """Render the user-message payload that drives one sub-Agent turn."""
 
     if not args:
-        return (
+        prompt = (
             f"Run the {skill_name} skill with no arguments. "
             "Produce the deliverable described in its SKILL.md."
         )
+        if language_instruction.strip():
+            prompt = f"{prompt}\n\n{language_instruction.strip()}"
+        return prompt
 
     lines = [f"Invoke the {skill_name} skill with the following arguments:"]
     for key, value in args.items():
@@ -182,6 +258,8 @@ def format_step_prompt(skill_name: str, args: dict[str, Any]) -> str:
         "\nWhen the work is complete, reply with the final deliverable as plain text. "
         "If the skill produced a file, include the absolute path on the last line.",
     )
+    if language_instruction.strip():
+        lines.append(f"\n{language_instruction.strip()}")
     return "\n".join(lines)
 
 

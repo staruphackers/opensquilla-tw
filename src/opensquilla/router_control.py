@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import asdict, dataclass, is_dataclass
-from typing import Any, cast
+from dataclasses import dataclass, fields, is_dataclass
+from typing import Any
 
-DEFAULT_HOLD_TURNS = 4
+from opensquilla.router_tiers import (
+    normalize_target_id,
+    normalize_tier_mapping,
+)
+
+# Zero means no turn-count cap; the hold expires after an idle TTL.
+DEFAULT_HOLD_TURNS = 0
 DEFAULT_HOLD_TTL_SECONDS = 600.0
 
 
@@ -24,7 +30,6 @@ class RouterControlTarget:
     provider: str | None = None
     description: str | None = None
     thinking_level: str | None = None
-    duplicate_model_resolution: bool = False
 
 
 @dataclass
@@ -35,15 +40,18 @@ class RouterControlHold:
     target_id: str
     evidence: str
     started_at_monotonic: float
+    last_activity_at_monotonic: float | None = None
     turns_remaining: int = DEFAULT_HOLD_TURNS
     ttl_seconds: float = DEFAULT_HOLD_TTL_SECONDS
     source: str = "router_control_tool"
-    duplicate_model_resolution: bool = False
 
     def is_expired(self, now_monotonic: float) -> tuple[bool, str | None]:
-        if self.turns_remaining <= 0:
+        if self.turns_remaining < 0:
             return True, "turn_count"
-        if now_monotonic - self.started_at_monotonic >= self.ttl_seconds:
+        last_activity = self.last_activity_at_monotonic
+        if last_activity is None:
+            last_activity = self.started_at_monotonic
+        if now_monotonic - last_activity >= self.ttl_seconds:
             return True, "ttl"
         return False, None
 
@@ -59,19 +67,10 @@ def _router_tiers(router_cfg: object | None) -> dict[str, dict[str, Any]]:
     }
 
 
-def _tier_strength(tier: str) -> tuple[int, str]:
-    lowered = tier.lower()
-    if lowered.startswith("t") and lowered[1:].isdigit():
-        return int(lowered[1:]), lowered
-    if lowered == "image_model":
-        return -1, lowered
-    return 0, lowered
-
-
 def _text_tiers(router_cfg: object | None) -> dict[str, dict[str, Any]]:
     return {
         name: cfg
-        for name, cfg in _router_tiers(router_cfg).items()
+        for name, cfg in normalize_tier_mapping(_router_tiers(router_cfg)).items()
         if not bool(cfg.get("image_only", False))
     }
 
@@ -99,23 +98,6 @@ def build_router_control_targets(router_cfg: object | None) -> list[RouterContro
             )
         )
 
-    by_model: dict[str, list[RouterControlTarget]] = {}
-    for target in targets:
-        by_model.setdefault(target.model, []).append(target)
-    for model, tier_targets in by_model.items():
-        strongest = max(tier_targets, key=lambda target: _tier_strength(target.tier))
-        targets.append(
-            RouterControlTarget(
-                target_id=f"model:{model}",
-                target_type="model",
-                tier=strongest.tier,
-                model=model,
-                provider=strongest.provider,
-                description=strongest.description,
-                thinking_level=strongest.thinking_level,
-                duplicate_model_resolution=len(tier_targets) > 1,
-            )
-        )
     return targets
 
 
@@ -123,7 +105,7 @@ def resolve_router_control_target(
     router_cfg: object | None,
     target_id: str,
 ) -> RouterControlTarget:
-    normalized = str(target_id or "").strip()
+    normalized = normalize_target_id(target_id)
     if not normalized:
         raise RouterControlValidationError("router_control target_id is required")
     targets = {target.target_id: target for target in build_router_control_targets(router_cfg)}
@@ -136,24 +118,23 @@ def resolve_router_control_target(
 
 
 def render_router_control_prompt_block(router_cfg: object | None) -> str:
-    targets = build_router_control_targets(router_cfg)
+    targets = [
+        target
+        for target in build_router_control_targets(router_cfg)
+        if target.target_type == "tier"
+    ]
     if not targets:
         return ""
     rows = [
         {
             "target_id": target.target_id,
-            "tier": target.tier,
-            "model": target.model,
-            "provider": target.provider,
-            "description": target.description,
-            "thinking_level": target.thinking_level,
         }
         for target in targets
     ]
     menu = json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
     return (
-        "Use `router_control` when the user semantically asks to upgrade, "
-        "downgrade, use a configured tier/model, or restore automatic routing. "
+        "Use `router_control` only when the user explicitly asks to use a "
+        "configured route or restore automatic routing. "
         "For set_hold, you must choose one target_id exactly from this menu; "
         "do not invent aliases or model ids. The menu is operational context, "
         "not a user-facing recommendation list.\n\n"
@@ -166,6 +147,13 @@ class RouterControlHoldStore:
 
     def __init__(self) -> None:
         self._holds: dict[str, RouterControlHold] = {}
+
+    def __deepcopy__(self, memo: dict[int, object]) -> RouterControlHoldStore:
+        # TurnRunner copies routing metadata before running the bounded router step,
+        # but the hold store is session state and must preserve identity so applying
+        # a hold can refresh its idle TTL for follow-up turns.
+        memo[id(self)] = self
+        return self
 
     def build_targets(self, router_cfg: object | None) -> list[RouterControlTarget]:
         return build_router_control_targets(router_cfg)
@@ -180,16 +168,17 @@ class RouterControlHoldStore:
         turns_remaining: int = DEFAULT_HOLD_TURNS,
         ttl_seconds: float = DEFAULT_HOLD_TTL_SECONDS,
     ) -> RouterControlHold:
+        now = time.monotonic() if now_monotonic is None else now_monotonic
         hold = RouterControlHold(
             tier=target.tier,
             model=target.model,
             provider=target.provider,
             target_id=target.target_id,
             evidence=str(evidence or "").strip(),
-            started_at_monotonic=time.monotonic() if now_monotonic is None else now_monotonic,
+            started_at_monotonic=now,
+            last_activity_at_monotonic=now,
             turns_remaining=turns_remaining,
             ttl_seconds=ttl_seconds,
-            duplicate_model_resolution=target.duplicate_model_resolution,
         )
         self._holds[session_key] = hold
         return hold
@@ -213,8 +202,11 @@ class RouterControlHoldStore:
             self._holds.pop(session_key, None)
             return None
         if decrement:
-            hold.turns_remaining -= 1
-            if hold.turns_remaining <= 0:
+            hold.last_activity_at_monotonic = now
+            had_turn_limit = hold.turns_remaining > 0
+            if hold.turns_remaining > 0:
+                hold.turns_remaining -= 1
+            if hold.turns_remaining < 0 or (had_turn_limit and hold.turns_remaining == 0):
                 self._holds.pop(session_key, None)
         return hold
 
@@ -237,8 +229,6 @@ def router_control_success_payload(
         "replay_required": replay_required,
         "evidence": evidence,
     }
-    if target and target.duplicate_model_resolution:
-        payload["duplicate_model_resolution"] = True
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -276,11 +266,24 @@ def router_control_payload_terminates_turn(content: object) -> bool:
     return bool(payload and payload.get("accepted") is True and payload.get("replay_required"))
 
 
-def router_control_replay_payload(content: object) -> dict[str, Any] | None:
+def router_control_replay_event_from_payload(
+    content: object,
+    *,
+    replay_depth: int = 0,
+) -> Any | None:
     payload = router_control_payload(content)
     if not payload or payload.get("accepted") is not True or not payload.get("replay_required"):
         return None
-    return payload
+    from opensquilla.engine.types import RouterControlReplayEvent
+
+    return RouterControlReplayEvent(
+        action=str(payload.get("action") or ""),
+        target_tier=payload.get("target_tier"),
+        target_model=payload.get("target_model"),
+        target_provider=payload.get("target_provider"),
+        target_id=payload.get("target_id"),
+        replay_depth=replay_depth,
+    )
 
 
 def router_control_payload_asdict(content: object) -> dict[str, Any]:
@@ -288,5 +291,5 @@ def router_control_payload_asdict(content: object) -> dict[str, Any]:
     if payload is not None:
         return payload
     if is_dataclass(content) and not isinstance(content, type):
-        return cast(dict[str, Any], asdict(content))
+        return {field.name: getattr(content, field.name) for field in fields(content)}
     return {}

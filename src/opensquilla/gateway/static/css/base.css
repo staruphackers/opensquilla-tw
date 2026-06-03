@@ -10,15 +10,17 @@
   --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --font-mono: "JetBrains Mono", "SF Mono", "Fira Code", "Fira Mono", Menlo, Consolas, monospace;
   --font-display: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --fs-2xs: 0.6875rem;
   --fs-xs: 0.75rem;
   --fs-sm: 0.8125rem;
   --fs-md: 0.9375rem;
   --fs-lg: 1.125rem;
   --fs-xl: 1.5rem;
   --fs-2xl: 2rem;
+  /* Display rung — the dashboard view-title size, tokenized (was hand-typed in 10 views). */
+  --fs-display: clamp(1.625rem, 1.2rem + 1vw, 2.25rem);
+  --lh-display: 1.05;
 
-  /* Display tracking stays neutral to keep compact WebUI labels readable. */
-  --track-display: 0;
   --track-tabular: 0.01em;
 
   /* Radius */
@@ -36,9 +38,15 @@
   --sp-6: 24px;
   --sp-8: 32px;
 
+  /* Layout */
+  --chat-measure: clamp(40rem, 70vw, 51.25rem);
+
   /* Transitions */
   --transition: 150ms ease;
   --ease-press: cubic-bezier(.2,.7,.2,1);
+  --dur-entrance: 340ms;
+  --stagger-step: 40ms;
+  --focus-ring: color-mix(in srgb, var(--accent) 22%, transparent);
 
   /* Shadows */
   --shadow-color: rgba(0,0,0,0.1);
@@ -193,10 +201,18 @@ pre {
 }
 
 /* Scrollbar */
-::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 4px;
+  /* Floor the thumb so a long thread can't shrink it to an ungrabbable sliver. */
+  min-height: 48px;
+  min-width: 48px;
+}
 ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+/* Firefox */
+* { scrollbar-width: thin; scrollbar-color: var(--border-strong) transparent; }
 
 /* Layout */
 #app {
@@ -224,12 +240,14 @@ pre {
 }
 /* Sidebar — kept clean; the active-nav accent rail does the heavy lifting. */
 
-.main {
+.main {  /* Tier A: rounded top-left shoulder */
   flex: 1;
   display: flex;
   flex-direction: column;
   overflow: hidden;
   min-width: 0;
+  /* Tier A: rounded top-left shoulder */
+  border-top-left-radius: var(--radius-lg);
 }
 
 .topbar {
@@ -256,13 +274,35 @@ pre {
   pointer-events: none;
 }
 
-.topbar-left { display: flex; align-items: center; gap: 10px; }
-.topbar-right { display: flex; align-items: center; gap: 10px; }
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+.topbar-center {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+.topbar-center.hidden { display: none !important; }
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  min-width: 0;
+}
 
 .approval-inline {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0;
   border: 1px solid color-mix(in srgb, var(--warn) 55%, var(--border));
   background: color-mix(in srgb, var(--warn) 16%, var(--bg-surface));
   color: var(--warn);
@@ -296,6 +336,18 @@ pre {
   50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--warn) 12%, transparent); }
 }
 
+@media (max-width: 768px) {
+  .approval-inline {
+    justify-content: center;
+    gap: 0;
+    width: 34px;
+    min-width: 34px;
+    padding: 0;
+    overflow: hidden;
+    font-size: 0;
+  }
+}
+
 .content {
   flex: 1;
   overflow-y: auto;
@@ -314,37 +366,61 @@ pre {
   height: 48px;
   min-height: 48px;
   padding: 0 var(--sp-4);
-  font-size: var(--fs-lg);
-  font-weight: 800;
   color: var(--text);
   border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
-  gap: 10px;
-  letter-spacing: var(--track-display);
+  gap: 11px;
   position: relative;
   z-index: 1;
   box-sizing: border-box;
 }
 .nav-brand .brand-mark {
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   display: block;
   flex: 0 0 auto;
-  filter: drop-shadow(0 0 12px color-mix(in srgb, var(--accent) 28%, transparent));
+  filter: drop-shadow(0 1px 5px color-mix(in srgb, var(--accent) 24%, transparent));
+}
+/* Hairline divider that doubles as an orange "signal" thread — echoes the
+   topbar accent rail and the nav-foot dot, per the mantis-brutalist palette. */
+.nav-brand__div {
+  flex: 0 0 auto;
+  width: 1px;
+  height: 26px;
+  background: linear-gradient(
+    180deg,
+    transparent,
+    color-mix(in srgb, var(--accent) 55%, var(--border)),
+    transparent
+  );
+}
+/* Weight-split wordmark: "Open" recedes, "Squilla" (the species) anchors. */
+.nav-brand__wm {
+  font-size: 1.14rem;
+  letter-spacing: 0;
+  line-height: 1;
+}
+.nav-brand__pre {
+  font-weight: 520;
+  color: var(--text-muted);
+}
+.nav-brand__name {
+  font-weight: 760;
+  color: var(--text);
 }
 
 .nav-group-label {
   padding: var(--sp-2) var(--sp-4) 4px;
   font-size: 10px;
-  font-weight: 700;
+  font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.18em;
+  letter-spacing: 0.08em;
   color: var(--text-dim);
   margin-top: var(--sp-3);
   position: relative;
   z-index: 1;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
 }
 .nav-group-label:first-of-type { margin-top: var(--sp-2); }
 
@@ -354,11 +430,12 @@ pre {
   gap: 10px;
   min-height: 40px;
   padding: 7px var(--sp-3);
-  color: var(--text-muted);
+  color: var(--text-dim);
   cursor: pointer;
   border-radius: var(--radius-md);
   margin: 1px var(--sp-2);
   font-size: var(--fs-sm);
+  font-weight: 500;
   position: relative;
   z-index: 1;
   letter-spacing: 0;
@@ -419,6 +496,45 @@ pre {
   }
 }
 
+/* Sidebar brand footer — small identity anchor at the bottom of the rail.
+   margin-top: auto pushes it to the bottom whether the nav list is long or
+   short; the small accent dot doubles as a discreet liveness cue so the
+   brand reads alive without competing with the nav-active accent rail. */
+.nav-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: auto;
+  padding: var(--sp-3) var(--sp-4) calc(var(--sp-3) + env(safe-area-inset-bottom, 0px));
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  border-top: 1px solid var(--border);
+  background: linear-gradient(180deg, transparent 0%, color-mix(in srgb, var(--accent) 4%, transparent) 100%);
+  user-select: none;
+}
+.nav-foot__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 50%, transparent);
+  flex-shrink: 0;
+  animation: nav-foot-pulse 2.4s ease-in-out infinite;
+}
+.nav-foot__ver {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+@keyframes nav-foot-pulse {
+  0%, 100% { box-shadow: 0 0 4px color-mix(in srgb, var(--accent) 35%, transparent); }
+  50%      { box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 65%, transparent); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .nav-foot__dot { animation: none; }
+}
+
 /* Approval count badge */
 .nav-badge {
   margin-left: auto;
@@ -447,13 +563,7 @@ pre {
   --text-dim: #82828A;
 }
 
-/* View headers — display weight, very tight tracking, baseline accent rule. */
-.view-title {
-  font-family: var(--font-display);
-  font-weight: 800;
-  letter-spacing: var(--track-display);
-  font-feature-settings: "ss01", "cv11";
-}
+/* View headers — baseline accent rule. */
 .view-header {
   display: flex;
   align-items: center;

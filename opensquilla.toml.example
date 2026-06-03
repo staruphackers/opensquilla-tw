@@ -56,7 +56,7 @@
 
 [llm]
 provider = "openrouter"
-model = "deepseek/deepseek-v4-flash"
+model = "deepseek/deepseek-v4-pro"
 # api_key = ""          # OpenRouter API key; env OPENROUTER_API_KEY also works
 base_url = "https://openrouter.ai/api/v1"
 # proxy = ""            # e.g. http://127.0.0.1:7890
@@ -182,7 +182,7 @@ strategy = "v4_phase3"
 #   1. install with `uv sync --extra model-router` or `uv sync --extra recommended`
 #   2. hydrate model assets via:
 #      git lfs pull --include="src/opensquilla/squilla_router/models/**"
-default_tier = "t1"
+default_tier = "c1"
 confidence_threshold = 0.5
 v4_use_aux_head = true
 kv_cache_anti_downgrade_enabled = true
@@ -192,33 +192,33 @@ complaint_upgrade_steps = 1
 complaint_upgrade_max_chars = 160
 require_router_runtime = true
 estimated_output_savings_pct = 0.03
-upgrade_to_t3_compaction_enabled = true
+upgrade_to_c3_compaction_enabled = true
 
-[squilla_router.tiers.t0]
+[squilla_router.tiers.c0]
 provider = "openrouter"
 model = "deepseek/deepseek-v4-flash"
-description = "S tier: fast DeepSeek V4 Flash route for trivial chat, short rewrites, extraction, and low-risk simple Q&A"
+description = "Fast DeepSeek V4 Flash route for trivial chat, short rewrites, extraction, and low-risk simple Q&A"
 supports_image = false
 thinking_level = "high"
 
-[squilla_router.tiers.t1]
+[squilla_router.tiers.c1]
 provider = "openrouter"
-model = "deepseek/deepseek-v4-flash"
-description = "M tier: default balanced text model for normal agent work, coding assistance, debugging, and moderate analysis"
+model = "deepseek/deepseek-v4-pro"
+description = "Default balanced text route for normal agent work, coding assistance, debugging, and moderate analysis"
 supports_image = false
 thinking_level = "high"
 
-[squilla_router.tiers.t2]
+[squilla_router.tiers.c2]
 provider = "openrouter"
 model = "z-ai/glm-5.1"
-description = "L tier: stronger text model for multi-step coding, structured reasoning, larger context synthesis, and harder analysis"
+description = "Stronger text route for multi-step coding, structured reasoning, larger context synthesis, and harder analysis"
 supports_image = false
 thinking_level = "high"
 
-[squilla_router.tiers.t3]
+[squilla_router.tiers.c3]
 provider = "openrouter"
 model = "anthropic/claude-opus-4.7"
-description = "XL tier: highest-quality text reasoning model for difficult planning, deep review, complex debugging, and high-stakes synthesis"
+description = "Highest-quality text reasoning route for difficult planning, deep review, complex debugging, and high-stakes synthesis"
 supports_image = false
 thinking_level = "high"
 
@@ -241,9 +241,13 @@ thinking_level = "medium"
 # tier_profile = "dashscope"
 
 [agent_token_saving]
-# Canonicalize tool results with the built-in tokenjuice reducer immediately
-# after tool execution. Raw tool responses are transient and are not stored.
+# Project fresh tool results with the built-in tokenjuice reducer before they
+# are fed back into the model. Raw tool responses remain available through the
+# tool-result store when configured by the gateway runtime.
 tool_result_projection_max_inline_chars = 60000
+tool_result_store_max_bytes = 8388608
+tool_result_store_disk_budget_bytes = 268435456
+tool_result_store_retention_seconds = 604800
 
 [compaction]
 enabled = true
@@ -289,11 +293,22 @@ default_mode = "bypass"                 # off | on | bypass | full
 # name = "my-slack"
 # type = "slack"
 # token = "xoxb-..."
+# connection_mode = "socket"  # socket = no public URL; webhook = Events API
+# app_token = "xapp-..."      # required for Slack Socket Mode
+# signing_secret = ""         # required for Slack webhook mode
 # slack_channel_id = "C12345"
+# reply_in_thread = false
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Meta-Skill subsystem
 # ─────────────────────────────────────────────────────────────────────────────
+
+[meta_skill]
+# Global runtime gate for model-visible meta-skill behavior. When false,
+# meta-skills stay installed for inventory/history tooling, but are not injected
+# into prompts, `meta_invoke` is not surfaced, and explicit `meta_invoke` calls
+# are rejected. Default: true.
+# enabled = true
 
 [meta_skill.persistence]
 # Whether to write meta-skill execution traces to SQLite (G4 traceable audit).

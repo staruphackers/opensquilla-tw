@@ -33,7 +33,7 @@ OpenRouter, OpenAI, Anthropic, Ollama, DeepSeek, Gemini, Qwen/DashScope,
 and 20+ other LLM providers with no change to your code or config
 schema.
 
-OpenSquilla 0.2.1 is the current release.
+OpenSquilla 0.3.1 is the current release.
 
 For task-oriented product documentation, start with the
 [OpenSquilla Product Guide](README.product.md) or the
@@ -160,7 +160,7 @@ $env:Path = "$env:USERPROFILE\.local\bin;" + $env:Path
 **2. Install OpenSquilla** — the same command on every platform.
 
 ```sh
-uv tool install --python 3.12 "opensquilla[recommended] @ https://github.com/opensquilla/opensquilla/releases/download/v0.2.1/opensquilla-0.2.1-py3-none-any.whl"
+uv tool install --python 3.12 "opensquilla[recommended] @ https://github.com/opensquilla/opensquilla/releases/download/v0.3.1/opensquilla-0.3.1-py3-none-any.whl"
 ```
 
 This installs the OpenSquilla wheel from the release URL, then lets
@@ -181,7 +181,7 @@ opensquilla gateway run
 > a new terminal, or re-run the PATH line from step 1.
 
 For a fully pinned install, use the versioned wheel URL:
-`https://github.com/opensquilla/opensquilla/releases/download/v0.2.1/opensquilla-0.2.1-py3-none-any.whl`.
+`https://github.com/opensquilla/opensquilla/releases/download/v0.3.1/opensquilla-0.3.1-py3-none-any.whl`.
 
 ### Install from source
 
@@ -439,9 +439,10 @@ opensquilla channels status <name> --json
 
 Treat a channel as connected only when the status payload reports
 `enabled=true`, `configured=true`, and `connected=true`. Feishu
-defaults to websocket mode and Telegram to polling — neither needs a
-public URL. Feishu webhook mode, Telegram webhook mode, Slack, and
-WeCom require a public, provider-reachable URL.
+defaults to websocket mode, Telegram to polling, and Slack can use
+Socket Mode — none of those modes needs a public URL. Feishu webhook
+mode, Telegram webhook mode, Slack webhook mode, and WeCom require a
+public, provider-reachable URL.
 
 **Public network binding**
 
@@ -478,6 +479,28 @@ Provider tiers, sandbox tuning, image generation, and concurrency
 settings live in `opensquilla.toml.example`.
 
 ---
+
+## What's New in 0.3.1
+
+OpenSquilla 0.3.1 is a maintenance release for the 0.3 line. It updates the
+stable install metadata and brings selected channel, chat, provider, and
+workflow fixes from the integration branch onto the stable release line:
+
+- **Channel setup and replies** — Slack Socket Mode, app mentions, signing
+  secrets, and threaded replies preserve the channel context needed for setup
+  and replies.
+- **Media and voice workflow handoffs** — short-drama/video helper workflows
+  remain bundled, generated media flows have clearer review pauses, and
+  voice/audio handoffs are usable end to end.
+- **Chat formatting** — user message bubbles preserve multiline text and read
+  like authored messages instead of compressed UI labels.
+- **Provider request hardening** — malformed tool-call history is kept away
+  from providers before it becomes invalid request state.
+- **Install and release checks** — installer URLs, release metadata, version
+  consistency tests, and CI impact gates are updated for 0.3.1.
+
+Full notes: [`CHANGELOG.md`](CHANGELOG.md) ·
+[`docs/releases/0.3.1.md`](docs/releases/0.3.1.md).
 
 ## What's New in 0.2.1
 
@@ -546,7 +569,9 @@ Full notes: [`CHANGELOG.md`](CHANGELOG.md) ·
 | **Durable sessions, subagents, and scheduling** | SQLite-backed session, transcript, and replay storage with per-agent workspaces. Agents spawn depth-bounded subagents, and a `SchedulerEngine` with an in-tree cron parser runs recurring jobs via `opensquilla cron`. |
 | **Operator controls** | Human-in-the-loop approvals can pause sensitive tool calls for a decision; per-turn and per-session token and cost rollups (`opensquilla cost`) and diagnostics are available from the CLI and Web UI. |
 
-Meta-skills authoring guide: [`META_SKILL_GUIDE.md`](META_SKILL_GUIDE.md).
+MetaSkill docs: [`docs/features/meta-skills.md`](docs/features/meta-skills.md),
+[`docs/features/meta-skill-user-guide.md`](docs/features/meta-skill-user-guide.md),
+and [`docs/authoring/meta-skills.md`](docs/authoring/meta-skills.md).
 
 ---
 
@@ -596,6 +621,10 @@ OpenSquilla is inspired by
 [OpenClaw](https://github.com/openclaw/openclaw). Bundled third-party
 content is attributed in
 [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).
+
+Community contributors are acknowledged in
+[`CONTRIBUTORS.md`](CONTRIBUTORS.md), including release-specific attribution
+notes for squash-merged or replayed work.
 
 ---
 

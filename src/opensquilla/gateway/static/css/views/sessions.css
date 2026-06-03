@@ -31,17 +31,17 @@
   min-width: 0;
 }
 .sess-stage__eyebrow {
-  font-size: 11px;
+  font-size: var(--fs-2xs);
   font-weight: 700;
   letter-spacing: 0.16em;
   text-transform: uppercase;
   color: var(--text-dim);
 }
 .sess-stage__title {
-  font-size: clamp(1.625rem, 1.2rem + 1vw, 2.25rem);
+  font-size: var(--fs-display);
   font-weight: 700;
   letter-spacing: 0;
-  line-height: 1.05;
+  line-height: var(--lh-display);
   position: relative;
 }
 .sess-stage__title::after {
@@ -206,8 +206,22 @@
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
 }
-.sess-th-sort { cursor: pointer; user-select: none; }
+.sess-th-sort { user-select: none; }
 .sess-th-sort:hover { color: var(--text); }
+.sess-th-sort__btn {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+.sess-th-sort__btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .sess-table__arrow { color: var(--accent); font-size: 9px; margin-left: 4px; }
 
 .sess-table tbody td {

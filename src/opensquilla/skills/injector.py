@@ -41,10 +41,12 @@ class SkillInjector:
             lines.append(
                 'Meta-skills (kind="meta"): When a kind="meta" entry clearly matches '
                 'and the task benefits from multi-skill orchestration, prefer '
-                '`meta_invoke(name="<name>")` over answering directly. The framework '
-                "drives the multi-step DAG; do NOT call skill_view for sub-skills "
-                "inside. On success the meta-skill's deliverable IS the assistant's "
-                "reply for this turn — no further commentary needed."
+                '`meta_invoke(name="<name>")` over answering directly. Do not call '
+                '`skill_view` for kind="meta" entries; call `meta_invoke` directly '
+                "without preamble. The framework drives the multi-step DAG; do NOT "
+                "call skill_view for sub-skills inside. On success the meta-skill's "
+                "deliverable IS the assistant's reply for this turn — no further "
+                "commentary needed."
             )
         lines.extend(
             [
@@ -82,8 +84,10 @@ class SkillInjector:
             lines.append(
                 'For kind="meta" entries: When a kind="meta" entry clearly matches '
                 'and the task benefits from multi-skill orchestration, prefer '
-                '`meta_invoke(name="<name>")` over answering directly; the framework '
-                "runs the DAG and the deliverable is the turn reply."
+                '`meta_invoke(name="<name>")` over answering directly. Do not call '
+                '`skill_view` for kind="meta" entries; call `meta_invoke` directly '
+                "without preamble. "
+                "The framework runs the DAG and the deliverable is the turn reply."
             )
         lines.extend(["", "<available_skills>"])
         for s in visible:

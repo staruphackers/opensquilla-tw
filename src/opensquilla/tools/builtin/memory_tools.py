@@ -110,35 +110,21 @@ def _is_memory_source_path(path: str) -> bool:
     return is_memory_source_path(path)
 
 
-def _is_raw_fallback_save_path(path: str) -> bool:
-    """Return True for paths under the ``memory/.raw_fallbacks/`` sidecar.
-
-    Raw-dump fallback files (written by ``SessionFlushService._raw_dump_fallback``
-    when both LLM flush and the curated path fail) live under a dot-prefix
-    sidecar so the memory sync_manager scanner skips them — but the writer
-    itself still goes through ``memory_save`` for unified file-write
-    semantics. This predicate carves a narrow exception in the source-path
-    gate for that single sidecar; nothing else dot-prefixed is writable.
-    """
+def _is_checkpoint_sidecar_path(path: str) -> bool:
+    """Return True for durable checkpoint sidecar JSONL paths."""
     rel = Path(path)
     return (
         not rel.is_absolute()
         and not any(part in {"", ".", ".."} for part in rel.parts)
-        and len(rel.parts) >= 3
-        and rel.parts[:2] == ("memory", ".raw_fallbacks")
-        and rel.suffix == ".md"
+        and len(rel.parts) >= 4
+        and rel.parts[:2] == ("memory", ".checkpoints")
+        and rel.suffix == ".jsonl"
     )
 
 
 def _is_memory_save_path(path: str) -> bool:
-    """Return True for writable memory files.
-
-    Save targets must be readable/searchable memory sources OR the raw-dump
-    fallback sidecar (``memory/.raw_fallbacks/``). Bootstrap profile files
-    such as USER.md and AGENTS.md are edited through agent-file or
-    filesystem surfaces, not memory_save.
-    """
-    return _is_memory_source_path(path) or _is_raw_fallback_save_path(path)
+    """Return True for model-callable writable memory files."""
+    return _is_memory_source_path(path)
 
 
 _MEMORY_SEARCH_DEFAULT_RESULTS: Final[int] = DEFAULT_MEMORY_SEARCH_RESULTS
@@ -430,9 +416,7 @@ def create_memory_tools(
 
     def _validate_memory_save_target(path: str, mode: str) -> None:
         if not _is_memory_save_path(path):
-            raise ToolError(
-                "invalid memory path. Use a memory source file: MEMORY.md or memory/**/*.md."
-            )
+            raise ToolError(f"invalid memory path. {_MEMORY_SOURCE_PATH_HINT}")
         if path == "MEMORY.md" and mode != "replace":
             raise ToolError(
                 "MEMORY.md must use mode='replace'. "
@@ -543,12 +527,6 @@ def create_memory_tools(
                 continue
 
             try:
-                if _is_raw_fallback_save_path(snapshot.path):
-                    # Raw-dump sidecar paths are never indexed (F2); rollback
-                    # only needs to restore disk content, which already
-                    # happened above.
-                    statuses.append("restored")
-                    continue
                 if snapshot.existed:
                     await r.store.index_file(
                         path=snapshot.path,
@@ -605,19 +583,11 @@ def create_memory_tools(
                 _write_content(mem_path, content, plan.mode)
                 written_content = mem_path.read_text(encoding="utf-8")
                 touched_paths.add(plan.path)
-                is_raw_fallback = _is_raw_fallback_save_path(plan.path)
-                if is_raw_fallback:
-                    # Raw-dump fallback files live under ``memory/.raw_fallbacks/``
-                    # explicitly to escape retrieval. Skipping inline indexing
-                    # here matches the sync_manager dot-prefix exclusion so the
-                    # file never enters the store at write-time either. (F2)
-                    chunks_by_path[plan.path] = 0
-                else:
-                    chunks_by_path[plan.path] = await r.store.index_file(
-                        path=plan.path,
-                        content=written_content,
-                        source=MemorySource.memory,
-                    )
+                chunks_by_path[plan.path] = await r.store.index_file(
+                    path=plan.path,
+                    content=written_content,
+                    source=MemorySource.memory,
+                )
             return chunks_by_path
         except Exception as exc:
             rollback_status = await _rollback_snapshots(r, snapshots, touched_paths)
@@ -682,7 +652,9 @@ def create_memory_tools(
         results = [
             result
             for result in await r.retriever.search(query, opts, intent=SearchIntent.TOOL)
-            if is_searchable_source_path(result.source, str(result.path))
+            if (source_filter is None or result.source == source_filter)
+            and is_searchable_source_path(result.source, str(result.path))
+            and not _is_checkpoint_sidecar_path(str(result.path))
         ]
         if not results:
             return "No results found."
