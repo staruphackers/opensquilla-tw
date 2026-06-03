@@ -100,6 +100,6 @@ class NativeRendererBackend:
         return RendererBackendAvailability(available=True)
 
     def create_renderer(self, **kwargs: Any) -> Any:
-        from opensquilla.cli.tui.opentui.renderer import OpenTuiStreamRenderer
+        from opensquilla.cli.tui.native.renderer import NativeStreamRenderer
 
-        return OpenTuiStreamRenderer(**kwargs)
+        return NativeStreamRenderer(**kwargs)

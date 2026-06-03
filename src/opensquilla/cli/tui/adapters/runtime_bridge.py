@@ -119,11 +119,15 @@ def standalone_slash_services_from_runtime(
 
 def _turn_stream_dependencies() -> Any:
     from opensquilla.cli.tui import turn_bridge as _turn_bridge
+    from opensquilla.cli.tui.native.renderer import NativeStreamRenderer
     from opensquilla.cli.tui.opentui.renderer import OpenTuiStreamRenderer
 
-    validate_tui_backend_selection()
+    backend_id = validate_tui_backend_selection()
+    renderer_factory = (
+        OpenTuiStreamRenderer if backend_id == "opentui" else NativeStreamRenderer
+    )
     return _turn_bridge.default_turn_stream_dependencies(
-        renderer_factory=OpenTuiStreamRenderer
+        renderer_factory=renderer_factory
     )
 
 

@@ -328,6 +328,36 @@ async def test_run_concurrent_repl_uses_opentui_bridge_when_selected(
     ]
 
 
+def test_turn_stream_dependencies_use_native_renderer_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from opensquilla.cli.repl import runtime_bridge
+    from opensquilla.cli.tui.native.renderer import NativeStreamRenderer
+
+    monkeypatch.delenv("OPENSQUILLA_TUI_BACKEND", raising=False)
+
+    deps = runtime_bridge._turn_stream_dependencies()
+
+    assert deps.renderer_factory is NativeStreamRenderer
+
+
+def test_turn_stream_dependencies_use_opentui_renderer_when_selected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from opensquilla.cli.repl import runtime_bridge
+    from opensquilla.cli.tui.opentui.renderer import OpenTuiStreamRenderer
+
+    monkeypatch.setattr(
+        runtime_bridge,
+        "validate_tui_backend_selection",
+        lambda env=None: "opentui",
+    )
+
+    deps = runtime_bridge._turn_stream_dependencies()
+
+    assert deps.renderer_factory is OpenTuiStreamRenderer
+
+
 @pytest.mark.asyncio
 async def test_opentui_chat_runtime_exposes_launch_scoped_plugin_manager(
     monkeypatch: pytest.MonkeyPatch,
