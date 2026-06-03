@@ -237,7 +237,7 @@ async def test_gateway_runtime_bridge_owns_default_turn_callbacks(
 
 
 @pytest.mark.asyncio
-async def test_run_concurrent_repl_defaults_to_opentui_bridge(
+async def test_run_concurrent_repl_defaults_to_native_bridge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from opensquilla.cli.repl import runtime_bridge
@@ -245,14 +245,14 @@ async def test_run_concurrent_repl_defaults_to_opentui_bridge(
     monkeypatch.delenv("OPENSQUILLA_TUI_BACKEND", raising=False)
     calls: list[dict[str, Any]] = []
 
-    async def fake_opentui_repl(**kwargs: Any) -> None:
+    async def fake_native_repl(**kwargs: Any) -> None:
         calls.append(kwargs)
 
     async def fake_dispatch(_value: str) -> bool:
         return True
 
     scope: dict[str, Any] = {}
-    monkeypatch.setattr(runtime_bridge._opentui_bridge, "run_concurrent_repl", fake_opentui_repl)
+    monkeypatch.setattr(runtime_bridge._native_bridge, "run_concurrent_repl", fake_native_repl)
 
     await runtime_bridge.run_concurrent_repl(
         surface=Surface.CLI_GATEWAY,
@@ -283,7 +283,7 @@ def test_validate_tui_backend_selection_rejects_removed_backends(
     with pytest.raises(ValueError) as exc_info:
         runtime_bridge.validate_tui_backend_selection()
 
-    assert "Only OpenTUI is supported" in str(exc_info.value)
+    assert "Unsupported TUI backend" in str(exc_info.value)
     assert backend_id in str(exc_info.value)
 
 
@@ -303,6 +303,11 @@ async def test_run_concurrent_repl_uses_opentui_bridge_when_selected(
         return True
 
     scope: dict[str, Any] = {}
+    monkeypatch.setattr(
+        runtime_bridge,
+        "validate_tui_backend_selection",
+        lambda env=None: "opentui",
+    )
     monkeypatch.setattr(runtime_bridge._opentui_bridge, "run_concurrent_repl", fake_opentui_repl)
 
     await runtime_bridge.run_concurrent_repl(

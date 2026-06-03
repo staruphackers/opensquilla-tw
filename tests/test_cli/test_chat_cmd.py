@@ -34,10 +34,10 @@ runner = CliRunner()
 
 
 def _install_fake_inputs(monkeypatch, inputs: Iterable[str]) -> None:
-    """Install a fake OpenTUI surface that yields lines from *inputs*.
+    """Install a fake TUI surface that yields lines from *inputs*.
 
     The chat command reaches input through the selected TUI runtime. Patch the
-    OpenTUI surface seam so these command tests stay behind the same boundary as
+    TUI surface seam so these command tests stay behind the same boundary as
     production code.
     """
 
@@ -95,6 +95,10 @@ def _install_fake_inputs(monkeypatch, inputs: Iterable[str]) -> None:
 
     monkeypatch.setattr(
         "opensquilla.cli.tui.opentui.runtime.open_opentui_surface",
+        _fake_session,
+    )
+    monkeypatch.setattr(
+        "opensquilla.cli.tui.adapters.native_bridge.open_native_terminal_surface",
         _fake_session,
     )
 
@@ -324,7 +328,7 @@ class TestChatCommand:
         )
 
         assert result.exit_code == 2
-        assert "Only OpenTUI is supported" in result.output
+        assert "Unsupported TUI backend" in result.output
         assert "bogus" in result.output
         assert "opentui" in result.output
 

@@ -113,7 +113,7 @@ git commit -m "Plan live Textual TUI delivery around runtime reuse" \
   -m "Not-tested: Implementation and runtime matrix are planned in later commits."
 ```
 
-Expected: new commit created on `codex/tui-frontend`.
+Expected: new commit created on the implementation branch.
 
 ---
 
@@ -1500,7 +1500,7 @@ Expected: `git diff --check` passes. Diff shows only planned live Textual, harne
 Dispatch a `code-reviewer` subagent with this scope:
 
 ```text
-Review the live Textual TUI implementation on /Users/cwan0785/opensquilla branch codex/tui-frontend. Focus on: no second chat runtime, TextualReplayRenderer separation, terminal default preserved, harness skip removed, production Textual selected only explicitly, and acceptance matrix adequacy. Do not edit files. Return findings with file/line references.
+Review the live Textual TUI implementation on /workspace/opensquilla. Focus on: no second chat runtime, TextualReplayRenderer separation, terminal default preserved, harness skip removed, production Textual selected only explicitly, and acceptance matrix adequacy. Do not edit files. Return findings with file/line references.
 ```
 
 Expected: reviewer returns no blocking findings, or returns concrete fixes.
@@ -1551,7 +1551,7 @@ Expected:
 
 - All pytest, ruff, and mypy commands pass.
 - The skip-text scan has no matches and exits `1`.
-- Git status is clean on `codex/tui-frontend` after the final commit.
+- Git status is clean on the implementation branch after the final commit.
 
 ## Self-Review
 

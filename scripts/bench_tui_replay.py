@@ -252,29 +252,6 @@ async def run_replay(renderer: str, fixture: str, *, repeat: int = 1) -> ReplayS
     if repeat < 1:
         raise ValueError("--repeat must be >= 1")
     backend = get_renderer_backend(renderer)
-    availability = backend.is_available()
-    if not availability.available:
-        return ReplaySummary(
-            renderer=renderer,
-            fixture=fixture,
-            event_count=0,
-            text_chars=0,
-            tool_count=0,
-            router_decision_count=0,
-            wall_ms=0.0,
-            flush_count=0,
-            max_buffer_chars=0,
-            coalescing_ratio=0.0,
-            transcript_items=0,
-            visible_items=0,
-            expanded_tools=0,
-            projection_wall_ms=0.0,
-            available=False,
-            skip_reason=availability.reason,
-            rendered_text_matches=False,
-            plugin_error_count=0,
-            errors=[],
-        )
 
     errors: list[str] = []
     event_count = 0

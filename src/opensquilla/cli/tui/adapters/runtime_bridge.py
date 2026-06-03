@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from rich.panel import Panel
 
+import opensquilla.cli.tui.adapters.native_bridge as _native_bridge
 import opensquilla.cli.tui.adapters.opentui_bridge as _opentui_bridge
 from opensquilla.cli.chat import gateway_runtime as _gateway_runtime
 from opensquilla.cli.chat.session_context import (
@@ -47,8 +48,10 @@ def validate_tui_backend_selection(env: Mapping[str, str] | None = None) -> str:
 
 
 def _runtime_bridge_for_selected_backend() -> Any:
-    validate_tui_backend_selection()
-    return _opentui_bridge
+    backend_id = validate_tui_backend_selection()
+    if backend_id == "opentui":
+        return _opentui_bridge
+    return _native_bridge
 
 
 class GatewayTerminalReplRunner(Protocol):

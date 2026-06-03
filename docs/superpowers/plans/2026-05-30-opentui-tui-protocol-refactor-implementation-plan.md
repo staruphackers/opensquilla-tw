@@ -980,7 +980,7 @@ def _live_opentui_target(context: TargetContext) -> TuiTarget:
                 ScenarioStep(
                     "send-message",
                     "send_text",
-                    "帮我分析这个代码长的架构 /Users/cwan0785/opensquilla",
+                    "帮我分析这个代码长的架构 /workspace/opensquilla",
                     "after-input",
                 ),
                 ScenarioStep(

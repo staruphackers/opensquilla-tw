@@ -1,7 +1,7 @@
 # TUI Frontend
 
-OpenSquilla terminal chat uses the OpenTUI frontend built around two separate
-planes:
+OpenSquilla terminal chat uses renderer-independent TUI contracts built around
+two separate planes:
 
 - **Streaming plane:** batches token deltas before writing to the terminal, so
   long answers do not redraw the whole interface for every token.
@@ -9,9 +9,9 @@ planes:
   snapshots can be rendered by the current terminal backend and by future
   renderer.
 
-OpenTUI is the production and default backend. Unset or empty
-`OPENSQUILLA_TUI_BACKEND` selects OpenTUI, and the only explicit supported value
-is `opentui`.
+The stable default terminal chat is Python-native and does not require Bun,
+npm, or OpenTUI node modules. OpenTUI is a preview backend selected explicitly
+with `OPENSQUILLA_TUI_BACKEND=opentui`.
 
 ## Plugin Slots
 
@@ -26,7 +26,7 @@ named slots. Current slots include:
 | `usage` | Token, cache, and cost summary. |
 | `inspector` | Optional detail panel state for selected items. |
 
-The first production plugin is `RouterHudPlugin`. It listens for
+The first plugin is `RouterHudPlugin`. It listens for
 `router_decision` events and updates the bottom toolbar without changing router
 selection behavior.
 
@@ -51,14 +51,20 @@ routes use warning styling.
 
 ## Backend Selection
 
-The default backend is `opentui`.
+The default backend is stable terminal chat.
 
 The internal backend selector reads `OPENSQUILLA_TUI_BACKEND`. Unset or empty
-values select OpenTUI. Legacy values fail before chat launch with a clear
-OpenTUI-only error.
+values select stable terminal chat. Legacy values fail before chat launch with
+a clear unsupported-backend error.
 
 ```sh
 OPENSQUILLA_TUI_BACKEND=opentui opensquilla chat
+```
+
+The preview backend requires Bun and the local OpenTUI package dependencies:
+
+```sh
+npm install --prefix src/opensquilla/cli/tui/opentui/package
 ```
 
 Do not add parallel terminal/frontend implementations without fresh product
@@ -79,4 +85,4 @@ Summary fields include `renderer`, `fixture`, `available`, `skip_reason`,
 `visible_items`, `expanded_tools`, `projection_wall_ms`,
 `rendered_text_matches`, `plugin_error_count`, and `errors`.
 
-Use the OpenTUI results as the production baseline.
+Use the OpenTUI results as preview backend evidence.

@@ -9,7 +9,7 @@ import signal
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +26,6 @@ from opensquilla.cli.tui.opentui.messages import (
 )
 from opensquilla.cli.tui.renderers.selection import (
     RendererBackendAvailability,
-    RendererBackendUnavailableError,
 )
 
 DEFAULT_HOST_PACKAGE_DIR = Path(__file__).resolve().parent / "package"
@@ -156,7 +155,7 @@ class OpenTuiBridge:
         script = self.paths.main_script
         try:
             mtime = script.stat().st_mtime
-            mtime_iso = datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat()
+            mtime_iso = datetime.fromtimestamp(mtime, tz=UTC).isoformat()
         except OSError:
             mtime_iso = "unknown"
         pid = self._process.pid if self._process is not None else None
@@ -303,9 +302,4 @@ class OpenTuiRendererBackend:
 
     def create_renderer(self, **kwargs: Any) -> OpenTuiReplayRenderer:
         del kwargs
-        availability = self.is_available()
-        if not availability.available:
-            raise RendererBackendUnavailableError(
-                availability.reason or "OpenTUI host unavailable"
-            )
         return OpenTuiReplayRenderer()
