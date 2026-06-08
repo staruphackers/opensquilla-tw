@@ -249,7 +249,76 @@ def test_plan_edited_closed_pr_does_not_readd_open_pr_label() -> None:
     assert actions == ()
 
 
-def test_plan_merged_main_pr_removes_linked_pr_label_without_dev_status() -> None:
+def test_plan_edited_pr_retargeted_from_final_base_removes_linked_labels() -> None:
+    sync = _load_sync_module()
+
+    actions = sync.plan_issue_sync_actions(
+        {
+            "action": "edited",
+            "changes": {
+                "base": {
+                    "ref": {
+                        "from": "dev",
+                    },
+                },
+                "body": {
+                    "from": "Fixes #100",
+                },
+            },
+            "pull_request": {
+                "number": DUMMY_OPEN_PR,
+                "state": "open",
+                "merged": False,
+                "body": "Refs #200",
+                "base": {"ref": "sandbox-optimization"},
+                "html_url": DUMMY_OPEN_PR_URL,
+            },
+            "repository": {
+                "full_name": "opensquilla/opensquilla",
+            },
+        }
+    )
+
+    assert actions == (
+        sync.IssueSyncAction(
+            issue_number=200,
+            kind="remove_linked_pr",
+            pr_number=DUMMY_OPEN_PR,
+            pr_url=DUMMY_OPEN_PR_URL,
+        ),
+        sync.IssueSyncAction(
+            issue_number=100,
+            kind="remove_linked_pr",
+            pr_number=DUMMY_OPEN_PR,
+            pr_url=DUMMY_OPEN_PR_URL,
+        ),
+    )
+
+
+def test_plan_open_staging_pr_does_not_add_linked_pr_label() -> None:
+    sync = _load_sync_module()
+
+    actions = sync.plan_issue_sync_actions(
+        {
+            "action": "opened",
+            "pull_request": {
+                "number": DUMMY_OPEN_PR,
+                "state": "open",
+                "merged": False,
+                "body": "Fixes #100",
+                "base": {"ref": "sandbox-optimization"},
+                "html_url": DUMMY_OPEN_PR_URL,
+            },
+            "repository": {
+                "full_name": "opensquilla/opensquilla",
+            },
+        }
+    )
+
+    assert actions == ()
+
+
+def test_plan_merged_main_pr_releases_closing_issues_and_removes_open_labels() -> None:
     sync = _load_sync_module()
 
     actions = sync.plan_issue_sync_actions(
@@ -271,7 +340,7 @@ def test_plan_merged_main_pr_removes_linked_pr_label_without_dev_status() -> Non
     assert actions == (
         sync.IssueSyncAction(
             issue_number=100,
-            kind="remove_linked_pr",
+            kind="merged_to_main",
             pr_number=DUMMY_MERGED_MAIN_PR,
             pr_url=DUMMY_MERGED_MAIN_PR_URL,
         ),
@@ -464,6 +533,45 @@ def test_apply_remove_action_keeps_label_when_another_open_pr_links_issue() -> N
 
     assert client.calls == [
         ("has_other_open_linked_pull_request", 200, DUMMY_CLOSED_PR),
+    ]
+
+
+def test_apply_merged_main_action_clears_dev_verification_labels() -> None:
+    sync = _load_sync_module()
+    action = sync.IssueSyncAction(
+        issue_number=100,
+        kind="merged_to_main",
+        pr_number=DUMMY_MERGED_MAIN_PR,
+        pr_url=DUMMY_MERGED_MAIN_PR_URL,
+    )
+    client = RecordingClient()
+
+    sync.apply_action(client, action)
+
+    assert client.calls == [
+        ("has_other_open_linked_pull_request", 100, DUMMY_MERGED_MAIN_PR),
+        ("remove_label", 100, "has-linked-pr"),
+        ("remove_label", 100, "merged-to-dev"),
+        ("remove_label", 100, "needs-verification"),
+    ]
+
+
+def test_apply_merged_main_action_keeps_open_label_when_another_pr_remains() -> None:
+    sync = _load_sync_module()
+    action = sync.IssueSyncAction(
+        issue_number=100,
+        kind="merged_to_main",
+        pr_number=DUMMY_MERGED_MAIN_PR,
+        pr_url=DUMMY_MERGED_MAIN_PR_URL,
+    )
+    client = RecordingClient(other_open_linked_issues={100})
+
+    sync.apply_action(client, action)
+
+    assert client.calls == [
+        ("has_other_open_linked_pull_request", 100, DUMMY_MERGED_MAIN_PR),
+        ("remove_label", 100, "merged-to-dev"),
+        ("remove_label", 100, "needs-verification"),
     ]
 
 

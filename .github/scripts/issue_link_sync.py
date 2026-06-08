@@ -50,6 +50,7 @@ CLOSING_KEYWORDS = frozenset(
 )
 REFERENCE_KEYWORDS = frozenset({"ref", "refs", "reference", "references"})
 OPEN_PR_ACTIONS = frozenset({"opened", "reopened", "edited"})
+FINAL_BASE_REFS = frozenset({"main", "dev"})
 KEYWORD_RE = re.compile(
     r"\b(?P<keyword>close|closes|closed|fix|fixes|fixed|resolve|resolves|"
     r"resolved|ref|refs|reference|references)\s*:?\s+(?P<ref>"
@@ -268,6 +269,15 @@ def parse_linked_issues(body: str | None, *, owner: str, repo: str) -> ParsedIss
     )
 
 
+def _previous_base_ref(event: dict[str, Any]) -> str | None:
+    base_change = (event.get("changes") or {}).get("base") or {}
+    ref_change = base_change.get("ref") or {}
+    previous_ref = ref_change.get("from")
+    if previous_ref is None:
+        return None
+    return str(previous_ref)
+
+
 def plan_issue_sync_actions(event: dict[str, Any]) -> tuple[IssueSyncAction, ...]:
     action = event.get("action")
     pr = event.get("pull_request") or {}
@@ -279,11 +289,27 @@ def plan_issue_sync_actions(event: dict[str, Any]) -> tuple[IssueSyncAction, ...
 
     pr_number = int(pr["number"])
     pr_url = str(pr.get("html_url") or "")
+    base_ref = str((pr.get("base") or {}).get("ref") or "")
     parsed = parse_linked_issues(pr.get("body"), owner=owner, repo=repo)
 
     if action in OPEN_PR_ACTIONS:
         if pr.get("state") != "open":
             return ()
+        previous_body = ((event.get("changes") or {}).get("body") or {}).get("from")
+        previous = parse_linked_issues(previous_body, owner=owner, repo=repo)
+        if base_ref not in FINAL_BASE_REFS:
+            if action != "edited" or _previous_base_ref(event) not in FINAL_BASE_REFS:
+                return ()
+            issue_numbers = tuple(dict.fromkeys((*parsed.all, *previous.all)))
+            return tuple(
+                IssueSyncAction(
+                    issue_number=issue_number,
+                    kind="remove_linked_pr",
+                    pr_number=pr_number,
+                    pr_url=pr_url,
+                )
+                for issue_number in issue_numbers
+            )
         open_actions = tuple(
             IssueSyncAction(
                 issue_number=issue_number,
@@ -296,8 +322,6 @@ def plan_issue_sync_actions(event: dict[str, Any]) -> tuple[IssueSyncAction, ...
         if action != "edited":
             return open_actions
 
-        previous_body = ((event.get("changes") or {}).get("body") or {}).get("from")
-        previous = parse_linked_issues(previous_body, owner=owner, repo=repo)
         current_issue_numbers = set(parsed.all)
         remove_actions = tuple(
             IssueSyncAction(
@@ -314,11 +338,34 @@ def plan_issue_sync_actions(event: dict[str, Any]) -> tuple[IssueSyncAction, ...
     if action != "closed":
         return ()
 
-    if pr.get("merged") is True and (pr.get("base") or {}).get("ref") == "dev":
+    if pr.get("merged") is True and base_ref == "dev":
         closing_actions = tuple(
             IssueSyncAction(
                 issue_number=issue_number,
                 kind="merged_to_dev",
+                pr_number=pr_number,
+                pr_url=pr_url,
+            )
+            for issue_number in parsed.closing
+        )
+        closing_issue_numbers = set(parsed.closing)
+        reference_cleanup_actions = tuple(
+            IssueSyncAction(
+                issue_number=issue_number,
+                kind="remove_linked_pr",
+                pr_number=pr_number,
+                pr_url=pr_url,
+            )
+            for issue_number in parsed.references
+            if issue_number not in closing_issue_numbers
+        )
+        return (*closing_actions, *reference_cleanup_actions)
+
+    if pr.get("merged") is True and base_ref == "main":
+        closing_actions = tuple(
+            IssueSyncAction(
+                issue_number=issue_number,
+                kind="merged_to_main",
                 pr_number=pr_number,
                 pr_url=pr_url,
             )
@@ -403,6 +450,16 @@ def apply_action(client: GitHubClient, action: IssueSyncAction) -> None:
             action.pr_number,
         ):
             client.remove_label(action.issue_number, HAS_LINKED_PR_LABEL)
+        return
+
+    if action.kind == "merged_to_main":
+        if not client.has_other_open_linked_pull_request(
+            action.issue_number,
+            action.pr_number,
+        ):
+            client.remove_label(action.issue_number, HAS_LINKED_PR_LABEL)
+        client.remove_label(action.issue_number, MERGED_TO_DEV_LABEL)
+        client.remove_label(action.issue_number, NEEDS_VERIFICATION_LABEL)
         return
 
     raise ValueError(f"Unsupported issue sync action: {action.kind}")

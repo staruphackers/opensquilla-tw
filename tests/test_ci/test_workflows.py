@@ -360,10 +360,18 @@ def test_issue_link_sync_tracks_open_and_closed_final_prs_from_trusted_base() ->
 
     pull_request_target = data["on"]["pull_request_target"]
     assert set(pull_request_target["types"]) == {"opened", "reopened", "edited", "closed"}
-    assert pull_request_target["branches"] == ["main", "dev"]
+    assert pull_request_target["branches"] == [
+        "main",
+        "dev",
+        "sandbox-*",
+        "integration/*",
+        "staging/*",
+        "release/*",
+    ]
     assert "ref: ${{ github.event.pull_request.base.sha }}" in text
     assert "persist-credentials: false" in text
     assert "issues: write" in text
+    assert "pull-requests: read" in text
     assert ".github/scripts/issue_link_sync.py" in text
 
 
