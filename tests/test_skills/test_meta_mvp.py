@@ -27,7 +27,7 @@ from opensquilla.skills.meta.orchestrator import (
 )
 from opensquilla.skills.meta.parser import MetaPlanError, parse_meta_plan
 from opensquilla.skills.meta.types import MetaMatch, MetaResult, RouteCase
-from opensquilla.skills.types import SkillLayer, SkillSpec
+from opensquilla.skills.types import SkillLayer, SkillProvenance, SkillSpec
 
 # ---------------------------------------------------------------------------
 # Parser tests
@@ -43,6 +43,8 @@ def _make_meta_spec(
     priority: int = 0,
     content: str = "fallback body text",
     final_text_mode: str = "raw",
+    layer: SkillLayer = SkillLayer.BUNDLED,
+    provenance: SkillProvenance | None = None,
 ) -> SkillSpec:
     # Default to "raw" in the test fixture so legacy unit tests that
     # count llm_chat calls don't get an extra invocation from the auto
@@ -51,10 +53,11 @@ def _make_meta_spec(
     return SkillSpec(
         name=name,
         description="test meta skill",
-        layer=SkillLayer.BUNDLED,
+        layer=layer,
         always=False,
         triggers=triggers or ["test trigger"],
         content=content,
+        provenance=provenance or SkillProvenance(origin="opensquilla-original"),
         kind=kind,
         meta_priority=priority,
         composition_raw=composition,
@@ -414,6 +417,59 @@ async def test_meta_resolution_semantic_fallback_matches_without_trigger(
     assert 'meta_invoke(name="meta-pdf-intelligence")' in hint
     assert "Do not answer directly" in hint
     assert "Do not call ordinary tools before `meta_invoke`" in hint
+
+
+@pytest.mark.asyncio
+async def test_semantic_fallback_ignores_user_managed_proposal_for_report_intent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import importlib
+    meta_resolution_module = importlib.import_module(
+        "opensquilla.engine.steps.meta_resolution",
+    )
+
+    web_report = _make_meta_spec(
+        name="meta-web-research-to-report",
+        composition={"steps": [{"id": "a", "skill": "summarize"}]},
+        triggers=["调研报告"],
+        priority=80,
+    )
+    managed_plot_proposal = _make_meta_spec(
+        name="research-plot-pipeline",
+        composition={"steps": [{"id": "a", "skill": "paper-plot-stub"}]},
+        triggers=["科研作图"],
+        priority=50,
+        layer=SkillLayer.MANAGED,
+        provenance=SkillProvenance(origin="opensquilla-user"),
+    )
+    loader = _FakeLoader([web_report, managed_plot_proposal])
+
+    class FakeRetriever:
+        def __init__(self, **kwargs: Any) -> None:
+            assert kwargs["strategy"] == "hybrid"
+
+        def retrieve(self, skills: list[SkillSpec], query: str, top_k: int = 1) -> list[SkillSpec]:
+            assert query == "帮我生成深度研究报告，探究鲨鱼的进化"
+            assert top_k == 1
+            by_name = {spec.name: spec for spec in skills}
+            return [by_name.get("research-plot-pipeline") or by_name["meta-web-research-to-report"]]
+
+    monkeypatch.setattr(meta_resolution_module, "HybridRetriever", FakeRetriever)
+
+    ctx = SimpleNamespace(
+        message="帮我生成深度研究报告，探究鲨鱼的进化",
+        semantic_message="帮我生成深度研究报告，探究鲨鱼的进化",
+        session_key="semantic-user-proposal-session",
+        metadata={"skill_loader": loader},
+        system_prompt=("base prompt", ""),
+        config=SimpleNamespace(skills=SimpleNamespace(filter_strategy="lexical")),
+    )
+
+    out = await meta_resolution(ctx)  # type: ignore[arg-type]
+
+    assert out.metadata["meta_match"].plan.name == "meta-web-research-to-report"
+    assert out.metadata["meta_match_source"] == "semantic"
+    assert out.metadata["meta_activation_mode"] == "hint"
 
 
 @pytest.mark.asyncio

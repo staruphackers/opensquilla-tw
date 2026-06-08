@@ -47,6 +47,11 @@ def test_high_value_meta_skills_match_natural_user_prompts(tmp_path: Path) -> No
                 expected_meta_skill="meta-web-research-to-report",
             ),
             TriggerCase(
+                name="web_research_deep_report_cn",
+                user_message="帮我生成深度研究报告，探究鲨鱼的进化",
+                expected_meta_skill="meta-web-research-to-report",
+            ),
+            TriggerCase(
                 name="paper_manuscript",
                 user_message=(
                     "I need an academic manuscript about meta-skill "

@@ -6,6 +6,8 @@ meta_priority: 80
 always: false
 final_text_mode: "step:final_report_audit"
 triggers:
+  - "研究报告"
+  - "深度研究报告"
   - "调研报告"
   - "research report"
   - "decision memo"

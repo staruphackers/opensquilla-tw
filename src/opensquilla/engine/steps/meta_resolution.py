@@ -709,6 +709,30 @@ def _is_skill_marketplace_intent(query: str) -> bool:
     return has_subject and has_action
 
 
+_LOCAL_USER_SEMANTIC_FALLBACK_LAYERS = {
+    "managed",
+    "personal",
+    "project",
+    "workspace",
+}
+
+
+def _allows_semantic_meta_fallback(spec: SkillSpec) -> bool:
+    """Keep semantic-only routing conservative for user-installed proposals.
+
+    Direct trigger matches still work for every layer. This only prevents
+    local user-authored/generated meta-skills from hijacking broad semantic
+    report/research prompts when their registered triggers did not match.
+    """
+
+    layer = str(getattr(spec, "layer", "") or "").strip().lower()
+    provenance = getattr(spec, "provenance", None)
+    origin = str(getattr(provenance, "origin", "") or "").strip().lower()
+    if layer in _LOCAL_USER_SEMANTIC_FALLBACK_LAYERS and origin == "opensquilla-user":
+        return False
+    return True
+
+
 def _semantic_meta_candidate(
     ctx: TurnContext,
     candidates: list[tuple[int, str, object, SkillSpec]],
@@ -734,6 +758,14 @@ def _semantic_meta_candidate(
     if not str(query).strip():
         return None
     if not _has_semantic_workflow_cue(str(query)):
+        return None
+
+    candidates = [
+        candidate
+        for candidate in candidates
+        if _allows_semantic_meta_fallback(candidate[3])
+    ]
+    if not candidates:
         return None
 
     retriever = HybridRetriever(strategy="hybrid")
