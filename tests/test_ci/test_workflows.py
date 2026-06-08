@@ -198,7 +198,9 @@ def test_pr_target_validator_blocks_ordinary_main_pull_requests(tmp_path: Path) 
     assert "Ordinary pull requests should target dev" in result.stderr
 
 
-def test_pr_target_validator_allows_docs_only_main_pull_requests(tmp_path: Path) -> None:
+def test_pr_target_validator_blocks_unlabeled_docs_only_main_pull_requests(
+    tmp_path: Path,
+) -> None:
     result = _validate_pr_target(
         tmp_path,
         base="main",
@@ -207,14 +209,23 @@ def test_pr_target_validator_allows_docs_only_main_pull_requests(tmp_path: Path)
         changed_files=["docs/testing/framework.md"],
     )
 
-    assert result.returncode == 0
-    assert "Pull request targets main with documentation-only changes." in result.stdout
+    assert result.returncode == 1
+    assert "Ordinary pull requests should target dev" in result.stderr
 
 
 def test_pr_target_validator_allows_maintainer_labeled_main_pull_requests(
     tmp_path: Path,
 ) -> None:
-    for label in ["allow-main-target", "release", "hotfix", "sync-to-main", "docs-preview"]:
+    labels = [
+        "allow-main-target",
+        "release",
+        "hotfix",
+        "main-sync",
+        "release-docs",
+        "sync-to-main",
+        "docs-preview",
+    ]
+    for label in labels:
         result = _validate_pr_target(
             tmp_path,
             base="main",
@@ -224,6 +235,75 @@ def test_pr_target_validator_allows_maintainer_labeled_main_pull_requests(
         )
 
         assert result.returncode == 0
+        assert "Pull request targets main with maintainer approval label." in result.stdout
+
+
+def test_pr_target_validator_allows_staging_branch_pull_requests(
+    tmp_path: Path,
+) -> None:
+    for base in [
+        "sandbox-optimization",
+        "integration/sandbox-hardening",
+        "staging/sandbox-hardening",
+        "release/0.3.2",
+    ]:
+        result = _validate_pr_target(
+            tmp_path,
+            base=base,
+            head="pr/sandbox-run-modes-sandbox-optimization",
+            changed_files=["src/opensquilla/sandbox/backend/windows_appcontainer.py"],
+        )
+
+        assert result.returncode == 0
+        assert "staging/collaboration" in result.stdout
+        assert "final integration" in result.stdout
+
+
+def test_pr_target_validator_allows_labeled_staging_pull_requests(
+    tmp_path: Path,
+) -> None:
+    for label in ["maintainer-staging", "collaboration"]:
+        result = _validate_pr_target(
+            tmp_path,
+            base="sandbox-review",
+            head="feature/shared-sandbox-work",
+            labels=[label],
+            changed_files=["src/opensquilla/sandbox/policy.py"],
+        )
+
+        assert result.returncode == 0
+        assert "staging/collaboration" in result.stdout
+
+
+def test_pr_target_validator_blocks_unknown_target_branches(tmp_path: Path) -> None:
+    result = _validate_pr_target(
+        tmp_path,
+        base="feature/private-target",
+        head="feature/example",
+        changed_files=["src/opensquilla/engine/agent.py"],
+    )
+
+    assert result.returncode == 1
+    assert "Ordinary pull requests should target dev" in result.stderr
+
+
+def test_pr_target_validator_handles_missing_event_path() -> None:
+    env = os.environ.copy()
+    env.pop("GITHUB_EVENT_PATH", None)
+    env.pop("PR_LABELS", None)
+    env["PR_BASE_REF"] = "feature/private-target"
+
+    result = subprocess.run(
+        [_bash_executable(), PR_TARGET_VALIDATOR.as_posix()],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    assert "Ordinary pull requests should target dev" in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 def test_pr_target_branch_workflow_runs_trusted_base_validator() -> None:
