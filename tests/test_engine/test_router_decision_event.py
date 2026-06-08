@@ -4,6 +4,7 @@ consume."""
 
 from __future__ import annotations
 
+import math
 from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any
@@ -120,6 +121,41 @@ def test_malformed_probs_do_not_crash() -> None:
     assert event.probs == [0.0, 0.0, 0.5, 0.0]
 
 
+def test_non_finite_router_numbers_do_not_escape_event() -> None:
+    event = build_router_decision_event(
+        _ctx(
+            {
+                "routed_tier": "t3",
+                "routed_model": "claude-opus-4.7",
+                "routing_confidence": float("nan"),
+                "savings_pct": float("inf"),
+                "routing_extra": {"probs": [float("nan"), float("inf"), 0.5]},
+            }
+        )
+    )
+
+    assert event is not None
+    assert event.confidence == 0.0
+    assert event.savings_pct == 0.0
+    assert event.probs == [0.0, 0.0, 0.5]
+    assert all(math.isfinite(value) for value in event.probs)
+
+
+def test_out_of_range_router_probs_do_not_escape_event() -> None:
+    event = build_router_decision_event(
+        _ctx(
+            {
+                "routed_tier": "t3",
+                "routed_model": "claude-opus-4.7",
+                "routing_extra": {"probs": [-0.25, 0.5, 1.25]},
+            }
+        )
+    )
+
+    assert event is not None
+    assert event.probs == [0.0, 0.5, 0.0]
+
+
 def test_unknown_tier_string_results_in_negative_tier_index() -> None:
     event = build_router_decision_event(
         _ctx({"routed_tier": "image", "routed_model": "gemini-3.5-pro"})
@@ -190,6 +226,23 @@ def test_legacy_metadata_without_routing_applied_defaults_to_applied() -> None:
     assert event is not None
     assert event.routing_applied is True
     assert event.rollout_phase == "full"
+
+
+def test_non_boolean_routing_applied_defaults_to_applied() -> None:
+    event = build_router_decision_event(
+        _ctx(
+            {
+                "routed_tier": "t2",
+                "routed_model": "claude-sonnet-4.6",
+                "routing_applied": "",
+                "rollout_phase": "observe",
+            }
+        )
+    )
+
+    assert event is not None
+    assert event.routing_applied is True
+    assert event.rollout_phase == "observe"
 
 
 class _DoneProvider:

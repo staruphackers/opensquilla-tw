@@ -585,7 +585,7 @@ async def test_agent_bootstrap_stage_snapshot(
     expected_max_iterations = case["max_iterations"]
     expected_snapshot = {
         "outcome": "success",
-        "agent_class": "Agent",
+        "agent_class": "OpenSquillaPythonKernelRuntime",
         "agent_config_max_tokens": case["catalog_max_tokens"],
         "agent_config_context_window_tokens": case["catalog_context_window"],
         "agent_config_max_iterations": expected_max_iterations,

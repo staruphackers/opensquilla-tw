@@ -76,11 +76,11 @@ def _capture_locals_at_post_slice() -> dict[str, Any]:
     assert frame is not None, "could not locate _run_turn frame"
     locs = frame.f_locals
 
-    agent = locs.get("agent")
+    agent_config = locs.get("agent_config")
     return {
         "outcome": "success",
-        "agent_request_context_prompt_after": getattr(
-            getattr(agent, "config", None), "request_context_prompt", None
+        "agent_config_request_context_prompt_after": getattr(
+            agent_config, "request_context_prompt", None
         ),
     }
 
@@ -159,9 +159,21 @@ def _patch_preflight(runner, *, raises=None, calls=None):
 
 
 def _patch_load_history(runner, *, return_value=None, raises=None, calls=None):
-    async def _load(self, agent, session_key, *, trim_last_user=True):  # noqa: ARG001, ARG002
+    async def _load(  # noqa: ARG001, ARG002
+        self,
+        agent,
+        session_key,
+        *,
+        trim_last_user=True,
+        provider_kind="",
+    ):
         if calls is not None:
-            calls.append({"trim_last_user": trim_last_user})
+            calls.append(
+                {
+                    "trim_last_user": trim_last_user,
+                    "provider_kind": provider_kind,
+                }
+            )
         if raises is not None:
             raise raises("history boom")
         return return_value
@@ -421,7 +433,7 @@ async def test_compaction_and_history_stage_snapshot(
 
     expected_snapshot = {
         "outcome": "success",
-        "agent_request_context_prompt_after": case[
+        "agent_config_request_context_prompt_after": case[
             "expected_final_request_context"
         ],
     }
@@ -444,6 +456,7 @@ async def test_compaction_and_history_stage_snapshot(
         call_log["history"][0]["trim_last_user"]
         is case["history_has_persisted_user"]
     )
+    assert call_log["history"][0]["provider_kind"] == "post-pipeline"
 
 
 @pytest.mark.asyncio

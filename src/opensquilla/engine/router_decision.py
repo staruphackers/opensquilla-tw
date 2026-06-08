@@ -2,11 +2,30 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, cast
 
 from opensquilla.engine.pipeline import TurnContext
 from opensquilla.engine.types import RouterDecisionEvent
 from opensquilla.router_tiers import normalize_text_tier, tier_index
+
+
+def _coerce_float(value: object, default: float = 0.0) -> float:
+    if value is None or value == "":
+        return default
+    try:
+        coerced = float(cast(Any, value))
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(coerced):
+        return default
+    return coerced
+
+
+def _coerce_bool(value: object, default: bool = True) -> bool:
+    if isinstance(value, bool):
+        return value
+    return default
 
 
 def _coerce_probs(value: object) -> list[float]:
@@ -20,20 +39,9 @@ def _coerce_probs(value: object) -> list[float]:
 
     probs: list[float] = []
     for raw_value in raw_values[:4]:
-        try:
-            probs.append(float(raw_value))
-        except (TypeError, ValueError):
-            probs.append(0.0)
+        probability = _coerce_float(raw_value)
+        probs.append(probability if 0.0 <= probability <= 1.0 else 0.0)
     return probs
-
-
-def _coerce_float(value: object, default: float = 0.0) -> float:
-    if value is None or value == "":
-        return default
-    try:
-        return float(cast(Any, value))
-    except (TypeError, ValueError):
-        return default
 
 
 def build_router_decision_event(turn: TurnContext) -> RouterDecisionEvent | None:
@@ -58,9 +66,7 @@ def build_router_decision_event(turn: TurnContext) -> RouterDecisionEvent | None
     tier_idx = tier_index(routed_tier)
 
     source = str(turn.metadata.get("routing_source") or "none")
-    routing_applied = turn.metadata.get("routing_applied")
-    if routing_applied is None:
-        routing_applied = True
+    routing_applied = _coerce_bool(turn.metadata.get("routing_applied"))
 
     return RouterDecisionEvent(
         tier=str(routed_tier),
@@ -68,12 +74,12 @@ def build_router_decision_event(turn: TurnContext) -> RouterDecisionEvent | None
         model=str(turn.metadata.get("routed_model") or turn.model or ""),
         baseline_model=str(turn.metadata.get("baseline_model") or ""),
         source=source,
-        confidence=float(turn.metadata.get("routing_confidence") or 0.0),
+        confidence=_coerce_float(turn.metadata.get("routing_confidence")),
         probs=probs,
         savings_pct=savings_pct,
         fallback=source == "fallback",
         thinking_mode=str(turn.metadata.get("thinking_mode") or ""),
         prompt_policy=str(turn.metadata.get("prompt_policy") or ""),
-        routing_applied=bool(routing_applied),
+        routing_applied=routing_applied,
         rollout_phase=str(turn.metadata.get("rollout_phase") or "full"),
     )

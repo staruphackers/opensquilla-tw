@@ -347,10 +347,8 @@ def _setup_runner(monkeypatch: pytest.MonkeyPatch) -> TurnRunner:
     _patch_observability(runner)
     _patch_compaction_history(runner)
 
-    # Replace the Agent class with the stub so the post-slice probe fires when
-    # ``agent.run_turn`` is invoked. Patch both runtime and adapter import sites
-    # so construction uses the stub consistently.
-    monkeypatch.setattr("opensquilla.engine.runtime.Agent", _StubAgent)
+    # Replace the Python kernel Agent class with the stub so the post-slice
+    # probe fires when build_agent_for_kernel constructs the default kernel.
     monkeypatch.setattr("opensquilla.engine.agent.Agent", _StubAgent)
     return runner
 

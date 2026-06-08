@@ -487,7 +487,6 @@ def _setup_runner(monkeypatch: pytest.MonkeyPatch, case: _Case) -> tuple[
     _MAILBOX.events = list(case.events)
     _MAILBOX.raise_after = None
     _MAILBOX.refresh_prompt_calls = []
-    monkeypatch.setattr(runtime_mod, "Agent", _StubAgent)
     monkeypatch.setattr("opensquilla.engine.agent.Agent", _StubAgent)
 
     return runner, session_manager, capture_calls

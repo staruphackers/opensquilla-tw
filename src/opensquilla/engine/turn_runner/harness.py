@@ -69,7 +69,8 @@ from opensquilla.session.compaction_lifecycle import normalize_flush_triggers_st
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from opensquilla.engine.agent import Agent, ToolHandler
+    from opensquilla.engine.agent import ToolHandler
+    from opensquilla.engine.agent_core import KernelRuntime
     from opensquilla.engine.runtime import TurnRunner
     from opensquilla.engine.types import AgentConfig, AgentEvent, DoneEvent, ErrorEvent
     from opensquilla.observability.prompt_report import PromptReport
@@ -580,21 +581,31 @@ class _TurnRunnerAgentFactoryAdapter(AgentFactoryPort):
         turn_call_logger: TurnCallLogger | None,
         memory_sync_manager: Any | None,
         tool_context: ToolContext | None,
-    ) -> Agent:
-        from opensquilla.engine.agent import Agent
+    ) -> KernelRuntime:
+        from opensquilla.engine.agent_core import build_agent_for_kernel
 
-        return Agent(
-            provider=provider,
-            config=config,
-            tool_definitions=tool_definitions,
-            tool_handler=tool_handler,
-            usage_tracker=self._runner._usage_tracker,
-            session_key=session_key,
-            turn_call_logger=turn_call_logger,
-            memory_sync_manager=memory_sync_manager,
-            session_flush_service=self._runner._session_flush_service,
-            tool_registry=self._runner._tool_registry,
-            tool_context=tool_context,
+        return cast(
+            "KernelRuntime",
+            build_agent_for_kernel(
+                runtime_config=getattr(self._runner, "_config", None),
+                provider=provider,
+                config=config,
+                tool_definitions=tool_definitions,
+                tool_handler=tool_handler,
+                usage_tracker=self._runner._usage_tracker,
+                session_key=session_key,
+                turn_call_logger=turn_call_logger,
+                memory_sync_manager=memory_sync_manager,
+                session_flush_service=self._runner._session_flush_service,
+                tool_registry=self._runner._tool_registry,
+                tool_context=tool_context,
+                session_manager=getattr(self._runner, "_session_manager", None),
+                session_write_context_factory=getattr(
+                    self._runner,
+                    "_session_write_context_factory",
+                    None,
+                ),
+            ),
         )
 
 
@@ -659,8 +670,8 @@ class _TurnRunnerPreflightCompactionAdapter(PreflightCompactionPort):
 class _TurnRunnerHistoryLoaderAdapter(HistoryLoaderPort):
     """Bind ``TurnRunner._load_history`` as a Protocol port.
 
-    The helper mutates ``agent._history`` via
-    ``agent.set_history`` internally; the adapter preserves that.
+    The helper mutates kernel history via ``agent.set_history`` internally;
+    the adapter preserves that while keeping provider identity host-owned.
     Exceptions propagate (no surrounding
     try/except).
     """
@@ -671,14 +682,16 @@ class _TurnRunnerHistoryLoaderAdapter(HistoryLoaderPort):
     async def load(
         self,
         *,
-        agent: Agent,
+        agent: KernelRuntime,
         session_key: str,
         trim_last_user: bool,
+        provider_kind: str,
     ) -> str | None:
         return await self._runner._load_history(
             agent,
             session_key,
             trim_last_user=trim_last_user,
+            provider_kind=provider_kind,
         )
 
 class _RequestContextPrependAdapter(RequestContextPrependPort):
@@ -706,31 +719,24 @@ class _RequestContextPrependAdapter(RequestContextPrependPort):
 class _TurnRunnerAgentRunAdapter(AgentRunPort):
     """Bind ``agent.run_turn(turn_input, extra_messages=..., **kwargs)``.
 
-    Folds the ``_accepts_keyword_arg(agent.run_turn, "semantic_message")``
-    introspection inside the adapter so the stage body never imports
-    ``inspect``. ``semantic_message`` is forwarded only when the agent
-    accepts the keyword; otherwise the call uses the two-arg
-    invocation. The agent is supplied per-call so the stage can be
-    instantiated once and reused across turns.
+    ``KernelRuntime.run_turn`` owns the semantic-message keyword in the
+    agent-core contract, so the adapter forwards it unconditionally
+    instead of probing Python Agent method signatures. The agent is supplied
+    per-call so the stage can be instantiated once and reused across turns.
     """
 
     def run_turn(
         self,
-        agent: Agent,
+        agent: KernelRuntime,
         *,
         turn_input: str,
         extra_messages: list[Any] | None,
         semantic_message: str | None,
     ) -> AsyncIterator[AgentEvent]:
-        from opensquilla.engine.runtime import _accepts_keyword_arg
-
-        kwargs: dict[str, Any] = {}
-        if _accepts_keyword_arg(agent.run_turn, "semantic_message"):
-            kwargs["semantic_message"] = semantic_message
         return agent.run_turn(
             turn_input,
             extra_messages=extra_messages,
-            **kwargs,
+            semantic_message=semantic_message,
         )
 
 class _TurnRunnerCompactionPersistAdapter(CompactionPersistPort):
@@ -842,7 +848,7 @@ class _TurnRunnerSystemPromptRefreshAdapter(SystemPromptRefreshPort):
     def refresh_system_prompt(
         self,
         *,
-        agent: Agent,
+        agent: KernelRuntime,
         agent_id: str,
         tool_defs: list[Any],
         session_key: str,

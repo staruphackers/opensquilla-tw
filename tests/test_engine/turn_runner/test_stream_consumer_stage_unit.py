@@ -37,6 +37,7 @@ from opensquilla.engine.types import (
     CompactionEvent,
     DoneEvent,
     ErrorEvent,
+    RunHeartbeatEvent,
     TextDeltaEvent,
     ToolResultEvent,
     ToolUseStartEvent,
@@ -265,6 +266,28 @@ async def _drain(stage: StreamConsumerStage, inp: StreamConsumerStageInput) -> l
     async for event in stage.run(inp):
         yielded.append(event)
     return yielded
+
+
+@pytest.mark.asyncio
+async def test_stream_consumer_passes_through_run_heartbeat_events() -> None:
+    heartbeat = RunHeartbeatEvent(
+        phase="queue",
+        message='{"status":"running","task_id":"task-1"}',
+    )
+    done = DoneEvent(text="ok", model="test-model")
+    stage, recordings = _make_stage(
+        agent_run=_RecordingAgentRun(events=[heartbeat, done]),
+    )
+
+    events = await _drain(stage, _make_input())
+
+    assert events[0] == heartbeat
+    assert isinstance(events[1], DoneEvent)
+    assert events[1].text == "ok"
+    assert events[1].model == "test-model"
+    assert recordings["memory_sync_notify"].calls == [
+        {"sync_manager_present": False, "runtime_message": "hello there"}
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -31,6 +31,7 @@ from .types import (
     ToolCall,
     ToolResult,
     ToolResultEvent,
+    ToolUseEndEvent,
     ToolUseStartEvent,
     WarningEvent,
 )
@@ -96,6 +97,7 @@ __all__ = [
     "ToolHandler",
     "ToolResult",
     "ToolResultEvent",
+    "ToolUseEndEvent",
     "ToolUseStartEvent",
     "WarningEvent",
     "Agent",

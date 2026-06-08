@@ -25,7 +25,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from opensquilla.engine.agent import Agent, ToolHandler
+    from opensquilla.engine.agent import ToolHandler
+    from opensquilla.engine.agent_core import KernelRuntime
     from opensquilla.engine.types import AgentConfig
     from opensquilla.observability.prompt_report import PromptReport
     from opensquilla.provider.types import ModelCapabilities
@@ -64,7 +65,7 @@ class TurnContext:
     squilla_router_tier: Any = None
 
     # Populated by AgentBootstrapStage
-    agent: Agent | None = None
+    agent: KernelRuntime | None = None
     agent_config: AgentConfig | None = None
     effective_runtime_timeout: float = 0.0
     effective_max_iterations: int = 0

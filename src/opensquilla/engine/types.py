@@ -82,6 +82,15 @@ class ToolUseStartEvent:
 
 
 @dataclass
+class ToolUseEndEvent:
+    kind: Literal["tool_use_end"] = field(default="tool_use_end", init=False)
+    tool_use_id: str = ""
+    tool_name: str = ""
+    arguments: dict[str, Any] = field(default_factory=dict)
+    synthetic_from_text: bool = False
+
+
+@dataclass
 class ToolResultEvent:
     kind: Literal["tool_result"] = field(default="tool_result", init=False)
     tool_use_id: str = ""
@@ -247,6 +256,7 @@ AgentEvent = (
     | TextDeltaEvent
     | RunHeartbeatEvent
     | ToolUseStartEvent
+    | ToolUseEndEvent
     | ToolResultEvent
     | RouterControlReplayEvent
     | ArtifactEvent

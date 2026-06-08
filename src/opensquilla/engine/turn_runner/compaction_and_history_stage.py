@@ -18,8 +18,7 @@ Side-effect contract:
   ``agent.set_history`` and returns a (possibly ``None``) durable
   compaction-summary context string.
 - ``request_context_prepender.prepend`` is a pure string function whose
-  return value the harness applies as
-  ``agent.config.request_context_prompt = ...``.
+  return value the harness applies back to the host-owned ``AgentConfig``.
 
 ``CompactionAndHistoryStage`` IS the first consumer of
 ``CompactionHook.before_compact`` / ``CompactionHook.after_compact`` when hooks
@@ -46,7 +45,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from opensquilla.engine.agent import Agent
+    from opensquilla.engine.agent_core import KernelRuntime
     from opensquilla.engine.hooks.types import CompactionHook
     from opensquilla.engine.turn_runner.outcome import StageOutcome
 
@@ -137,9 +136,10 @@ class HistoryLoaderPort(Protocol):
     async def load(
         self,
         *,
-        agent: Agent,
+        agent: KernelRuntime,
         session_key: str,
         trim_last_user: bool,
+        provider_kind: str,
     ) -> str | None: ...
 
 @runtime_checkable
@@ -148,9 +148,8 @@ class RequestContextPrependPort(Protocol):
 
     Pure string function. Returns the prepended context (or the existing
     value unchanged when there is nothing to prepend). The harness
-    applies the result with ``agent.config.request_context_prompt =
-    ...`` after the stage returns; the stage itself does NOT mutate the
-    agent.
+    applies the result to the host-owned ``AgentConfig`` after the stage
+    returns; the stage itself does NOT mutate the agent.
 
     Reason for promoting a small pure function to a port: testability.
     A recording fake lets us assert "prepender was called with exactly
@@ -174,20 +173,24 @@ class CompactionAndHistoryStageInput:
 
     Mirrors the locals visible to the original inline slice at the point
     ``AgentBootstrapStage`` has finished. ``agent``,
-    ``context_window_tokens``, ``provider``, ``resolved_model``, and
-    ``turn`` come from the upstream stages; ``session_key``,
-    ``agent_id``, and ``history_has_persisted_user`` come from the
-    ``_run_turn`` call site.
+    ``context_window_tokens``, ``provider``, ``provider_name``, ``provider_kind``,
+    ``resolved_model``, and
+    ``turn`` come from the upstream stages; ``request_context_prompt``,
+    ``session_key``, ``agent_id``, and ``history_has_persisted_user``
+    come from the ``_run_turn`` call site.
     """
 
     # From AgentBootstrapStage
-    agent: Agent
+    agent: KernelRuntime
     context_window_tokens: int
     # From PromptAssemblerStage
     provider: Any
+    provider_name: str
+    provider_kind: str
     resolved_model: str
     turn: Any  # post-pipeline pipeline.TurnContext
     # From _run_turn locals (caller-provided)
+    request_context_prompt: str | None
     session_key: str
     agent_id: str
     history_has_persisted_user: bool
@@ -208,10 +211,9 @@ class CompactionAndHistoryStageOutput:
       equivalence harness asserts this is bit-identical between
       previous and current.
     - ``final_request_context_prompt``: the result of the prepend.
-      The harness applies this to
-      ``agent.config.request_context_prompt`` after the stage returns.
-      Surfaced (not applied inside the stage) so the harness remains
-      the only place that mutates ``agent.config``.
+      The harness applies this to the host-owned ``AgentConfig`` after
+      the stage returns. Surfaced (not applied inside the stage) so the
+      harness remains the only place that updates request context.
     """
 
     t3_upgrade_status: str
@@ -317,11 +319,12 @@ class CompactionAndHistoryStage:
             agent=inp.agent,
             session_key=inp.session_key,
             trim_last_user=inp.history_has_persisted_user,
+            provider_kind=inp.provider_kind,
         )
 
         # 4. Prepend compaction summary context to request_context_prompt (pure).
         final_request_context_prompt = self._request_context_prepender.prepend(
-            existing=inp.agent.config.request_context_prompt,
+            existing=inp.request_context_prompt,
             prepended=compaction_summary_context,
         )
 

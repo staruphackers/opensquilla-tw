@@ -47,7 +47,7 @@ from opensquilla.contracts.attachments import (
 from opensquilla.contracts.attachments import (
     attachment_size_limit_for_mime as _attachment_size_limit_for_mime,
 )
-from opensquilla.engine.agent import Agent, ToolHandler
+from opensquilla.engine.agent import ToolHandler
 from opensquilla.engine.cache_break_monitor import notify_compaction
 from opensquilla.engine.hooks import (
     CompactionHook,
@@ -145,6 +145,7 @@ from opensquilla.provider import (
     ProviderRecoveryAction,
     classify_provider_error,
     decide_recovery_action,
+    provider_metadata,
 )
 from opensquilla.router_control import (
     RouterControlHoldStore,
@@ -188,6 +189,7 @@ from opensquilla.session.terminal_reply import build_terminal_reply, sanitize_ag
 from opensquilla.tools.types import CallerKind, ToolContext
 
 if TYPE_CHECKING:
+    from opensquilla.engine.agent_core import KernelRuntime
     from opensquilla.persistence.meta_run_writer import MetaRunWriter
 
 # Stable user-facing envelope for LLM timeouts.
@@ -2102,6 +2104,8 @@ class TurnRunner:
             request_context_prompt = pa_out.request_context_prompt
             resolved_model = pa_out.resolved_model
             provider_name = pa_out.provider_name
+            provider_meta = provider_metadata(provider)
+            provider_kind = provider_meta.provider_kind or provider_meta.provider_name
             session_id_for_log = pa_out.session_id_for_log
             prompt_report_for_log = pa_out.prompt_report
             selector_model = pa_out.selector_model
@@ -2214,15 +2218,18 @@ class TurnRunner:
                     agent=agent,
                     context_window_tokens=agent_config.context_window_tokens,
                     provider=provider,
+                    provider_name=provider_name,
+                    provider_kind=provider_kind,
                     resolved_model=resolved_model,
                     turn=turn,
+                    request_context_prompt=agent_config.request_context_prompt,
                     session_key=session_key,
                     agent_id=agent_id,
                     history_has_persisted_user=history_has_persisted_user,
                 )
             )
             ch_out = ch_outcome.require_output()
-            agent.config.request_context_prompt = ch_out.final_request_context_prompt
+            agent_config.request_context_prompt = ch_out.final_request_context_prompt
 
             # 8. Build extra messages for attachments + turn_input rebind.
             # AttachmentStage owns the slice.
@@ -5377,14 +5384,20 @@ class TurnRunner:
 
     async def _load_history(
         self,
-        agent: Agent,
+        agent: KernelRuntime,
         session_key: str,
         *,
         trim_last_user: bool = True,
+        provider_kind: str = "",
     ) -> str | None:
         """Load existing transcript as agent history."""
         if self._session_manager is None:
             return None
+        if not provider_kind.strip():
+            from opensquilla.provider import provider_metadata
+
+            metadata = provider_metadata(getattr(agent, "provider", None))
+            provider_kind = metadata.provider_kind or metadata.provider_name
 
         transcript = await self._session_manager.get_transcript(session_key)
 
@@ -5436,10 +5449,9 @@ class TurnRunner:
         if trim_last_user and last_entry_was_user and history and history[-1].role == "user":
             history.pop()
         context_states = await self._load_context_states(session_key)
-        provider = getattr(agent, "provider", None)
         provider_context = build_provider_compaction_context(
             context_states=context_states,
-            provider_kind=str(getattr(provider, "provider_name", "")),
+            provider_kind=provider_kind,
         )
         if provider_context.messages:
             history = provider_context.messages + history

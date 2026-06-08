@@ -23,7 +23,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from opensquilla.engine.agent import Agent, ToolHandler
+    from opensquilla.engine.agent import ToolHandler
+    from opensquilla.engine.agent_core import KernelRuntime
     from opensquilla.engine.turn_runner.outcome import StageOutcome
     from opensquilla.engine.types import AgentConfig, ThinkingLevel
     from opensquilla.observability.turn_call_log import TurnCallLogger
@@ -229,7 +230,7 @@ class AgentFactoryPort(Protocol):
         turn_call_logger: TurnCallLogger | None,
         memory_sync_manager: Any | None,
         tool_context: ToolContext | None,
-    ) -> Agent: ...
+    ) -> KernelRuntime: ...
 
 # ---------------------------------------------------------------------------
 # Stage I/O dataclasses (frozen)
@@ -276,12 +277,13 @@ class AgentBootstrapStageInput:
 class AgentBootstrapStageOutput:
     """The pieces of state subsequent stages consume.
 
-    - ``agent``: the constructed ``Agent`` instance ready for
-      ``run_turn``. Subsequent stages mutate ``agent.config`` (history
-      load) and ``agent._context.system_prompt`` (compaction).
-    - ``agent_config``: the same ``AgentConfig`` carried on
-      ``agent.config``. Surfaced separately because PreflightCompactionStage
-      reads ``agent_config.context_window_tokens`` directly.
+    - ``agent``: the constructed ``KernelRuntime`` instance ready for
+      ``run_turn``. Subsequent stages interact through ``KernelRuntime``
+      methods such as ``set_history`` and ``refresh_system_prompt``.
+    - ``agent_config``: the host-owned ``AgentConfig`` used to construct
+      the kernel. Surfaced separately because downstream stages read and
+      update host config values without requiring foreign kernels to expose
+      a Python ``agent.config`` attribute.
     - ``effective_runtime_timeout`` / ``effective_max_iterations`` /
       ``effective_iteration_timeout`` / ``effective_tool_timeout`` /
       ``effective_request_timeout`` / ``effective_max_provider_retries``:
@@ -296,7 +298,7 @@ class AgentBootstrapStageOutput:
       assertions.
     """
 
-    agent: Agent
+    agent: KernelRuntime
     agent_config: AgentConfig
     effective_runtime_timeout: float
     effective_max_iterations: int

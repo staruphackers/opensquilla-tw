@@ -3576,8 +3576,14 @@ class Agent:
                     yield terminal_error
                     break
 
-                # Per-iteration deadline check after tool execution
-                if _loop.time() > tool_deadline:
+                # Per-iteration deadline check after tool execution. The task collector
+                # is the timeout authority; result projection and event delivery can
+                # legitimately happen after the tool has already completed.
+                if any(
+                    isinstance(result.execution_status, dict)
+                    and result.execution_status.get("timed_out") is True
+                    for result in executed_results
+                ):
                     yield self._transition(AgentState.ERROR)
                     terminal_error = ErrorEvent(
                         message=(

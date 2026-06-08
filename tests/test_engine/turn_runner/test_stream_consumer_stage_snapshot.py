@@ -471,7 +471,6 @@ def _setup_runner(
     _MAILBOX.raise_after = case.raise_after
     _MAILBOX.refresh_prompt_calls = []
 
-    monkeypatch.setattr(runtime_mod, "Agent", _StubAgent)
     monkeypatch.setattr("opensquilla.engine.agent.Agent", _StubAgent)
     return runner
 

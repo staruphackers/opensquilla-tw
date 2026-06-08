@@ -114,7 +114,7 @@ def _make_agent_stub(
     *,
     request_context_prompt: str | None = None,
 ) -> Any:
-    """Build a minimal Agent-shape with the attributes the stage reads."""
+    """Build a minimal Agent-shape for history-loader and mutation assertions."""
     return SimpleNamespace(
         config=SimpleNamespace(request_context_prompt=request_context_prompt),
     )
@@ -123,6 +123,9 @@ def _make_agent_stub(
 def _make_input(
     *,
     agent: Any | None = None,
+    provider: Any | None = None,
+    provider_name: str | None = None,
+    provider_kind: str | None = None,
     request_context_prompt: str | None = None,
     session_key: str = "agent:main:s1",
     agent_id: str = "agent:main",
@@ -131,12 +134,19 @@ def _make_input(
 ) -> CompactionAndHistoryStageInput:
     if agent is None:
         agent = _make_agent_stub(request_context_prompt=request_context_prompt)
+    if provider is None:
+        provider = SimpleNamespace(name="prov")
+    if provider_name is None:
+        provider_name = str(getattr(provider, "provider_name", ""))
     return CompactionAndHistoryStageInput(
         agent=agent,
         context_window_tokens=context_window_tokens,
-        provider=SimpleNamespace(name="prov"),
+        provider=provider,
+        provider_name=provider_name,
+        provider_kind=provider_kind if provider_kind is not None else provider_name,
         resolved_model="claude-sonnet-4.5",
         turn=SimpleNamespace(metadata={}, model=""),
+        request_context_prompt=request_context_prompt,
         session_key=session_key,
         agent_id=agent_id,
         history_has_persisted_user=history_has_persisted_user,
@@ -251,6 +261,23 @@ async def test_history_loader_returns_summary_context() -> None:
 
 
 @pytest.mark.asyncio
+async def test_request_context_prompt_comes_from_stage_input_not_agent_config() -> None:
+    stage, _, _, _, prepender = _make_stage(
+        history=_RecordingHistoryLoader(return_value="SUMMARY1"),
+    )
+
+    outcome = await stage.run(
+        _make_input(
+            agent=SimpleNamespace(),
+            request_context_prompt="EXISTING",
+        )
+    )
+
+    assert outcome.output.final_request_context_prompt == "SUMMARY1\n\nEXISTING"
+    assert prepender.calls[0]["existing"] == "EXISTING"
+
+
+@pytest.mark.asyncio
 async def test_history_loader_called_with_trim_last_user_true() -> None:
     stage, _, _, history, _ = _make_stage()
     inp = _make_input(history_has_persisted_user=True)
@@ -264,6 +291,39 @@ async def test_history_loader_called_with_trim_last_user_false() -> None:
     inp = _make_input(history_has_persisted_user=False)
     await stage.run(inp)
     assert history.calls[0]["trim_last_user"] is False
+
+
+@pytest.mark.asyncio
+async def test_history_loader_provider_kind_comes_from_stage_provider() -> None:
+    stage, _, _, history, _ = _make_stage()
+
+    await stage.run(
+        _make_input(
+            agent=SimpleNamespace(set_history=lambda _history: None),
+            provider=SimpleNamespace(provider_name="host-provider"),
+        )
+    )
+
+    assert history.calls[0]["provider_kind"] == "host-provider"
+
+
+@pytest.mark.asyncio
+async def test_history_loader_prefers_provider_kind_over_provider_name() -> None:
+    stage, _, _, history, _ = _make_stage()
+
+    await stage.run(
+        _make_input(
+            agent=SimpleNamespace(set_history=lambda _history: None),
+            provider=SimpleNamespace(
+                provider_name="openrouter",
+                provider_kind="anthropic",
+            ),
+            provider_name="openrouter",
+            provider_kind="anthropic",
+        )
+    )
+
+    assert history.calls[0]["provider_kind"] == "anthropic"
 
 
 @pytest.mark.asyncio
@@ -390,15 +450,15 @@ async def test_prepender_when_summary_is_none() -> None:
 
 @pytest.mark.asyncio
 async def test_stage_does_not_mutate_agent_config() -> None:
-    """Harness owns the agent.config.request_context_prompt mutation."""
+    """Harness owns request-context mutation on the host AgentConfig."""
     agent = _make_agent_stub(request_context_prompt="EXISTING")
     stage, _, _, _, _ = _make_stage(
         history=_RecordingHistoryLoader(return_value="SUMMARY"),
     )
-    inp = _make_input(agent=agent)
+    inp = _make_input(agent=agent, request_context_prompt="EXISTING")
     outcome = await stage.run(inp)
-    # Agent.config.request_context_prompt unchanged by the stage; harness
-    # applies output.final_request_context_prompt afterwards.
+    # Any kernel-side config alias remains unchanged by the stage; harness
+    # applies output.final_request_context_prompt to host AgentConfig afterwards.
     assert agent.config.request_context_prompt == "EXISTING"
     assert outcome.output.final_request_context_prompt == "SUMMARY\n\nEXISTING"
 

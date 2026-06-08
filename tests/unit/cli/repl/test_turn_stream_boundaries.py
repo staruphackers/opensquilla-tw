@@ -5,6 +5,7 @@ import importlib
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
+CLI_SOURCE_ROOT = PROJECT_ROOT / "src/opensquilla/cli"
 CHAT_CMD = PROJECT_ROOT / "src/opensquilla/cli/chat_cmd.py"
 TURN_STREAM = PROJECT_ROOT / "src/opensquilla/cli/chat/turn_stream.py"
 TURN_BRIDGE = PROJECT_ROOT / "src/opensquilla/cli/tui/turn_bridge.py"
@@ -64,6 +65,25 @@ def _imports_module_from_package(path: Path, package: str, module_name: str) -> 
     return False
 
 
+def _imports_agent_core_internals(path: Path) -> bool:
+    tree = ast.parse(path.read_text())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith("opensquilla.engine.agent_core"):
+                    return True
+            continue
+        if not isinstance(node, ast.ImportFrom):
+            continue
+        if node.module and node.module.startswith("opensquilla.engine.agent_core"):
+            return True
+        if node.module == "opensquilla.engine" and any(
+            alias.name.startswith("agent_core") for alias in node.names
+        ):
+            return True
+    return False
+
+
 def _defined_function_names(path: Path) -> set[str]:
     tree = ast.parse(path.read_text())
     return {
@@ -89,6 +109,16 @@ def _module_aliases(path: Path, module_alias: str) -> dict[str, str]:
         ):
             aliases[node.targets[0].id] = value.attr
     return aliases
+
+
+def test_cli_and_tui_do_not_import_agent_core_internals() -> None:
+    offenders = [
+        path.relative_to(PROJECT_ROOT).as_posix()
+        for path in sorted(CLI_SOURCE_ROOT.rglob("*.py"))
+        if _imports_agent_core_internals(path)
+    ]
+
+    assert offenders == []
 
 
 def test_chat_cmd_does_not_import_terminal_renderer_or_approval_handler() -> None:

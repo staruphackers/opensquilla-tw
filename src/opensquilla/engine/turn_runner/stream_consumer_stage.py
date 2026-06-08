@@ -36,7 +36,7 @@ from opensquilla.engine.hooks.types import CompactionState
 from opensquilla.engine.tool_text_compat import ProtocolTextLeakGuard
 
 if TYPE_CHECKING:
-    from opensquilla.engine.agent import Agent
+    from opensquilla.engine.agent_core import KernelRuntime
     from opensquilla.engine.hooks.types import CompactionHook
     from opensquilla.engine.types import (
         AgentEvent,
@@ -66,15 +66,15 @@ class AgentRunPort(Protocol):
     """Wrap ``agent.run_turn(turn_input, extra_messages=..., **kwargs)``.
 
     Returns the async iterator the agent produces; the stage consumes
-    it via ``async for``. The port handles the ``_accepts_keyword_arg``
-    introspection for ``semantic_message`` so the stage body has no
-    ``inspect``-based branching. The agent is supplied per-call so a
-    single stage instance can serve every turn.
+    it via ``async for``. ``KernelRuntime.run_turn`` owns the
+    ``semantic_message`` keyword in the agent-core contract, so the port
+    forwards it as part of the fixed kernel boundary. The agent is supplied
+    per-call so a single stage instance can serve every turn.
     """
 
     def run_turn(
         self,
-        agent: Agent,
+        agent: KernelRuntime,
         *,
         turn_input: str,
         extra_messages: list[Any] | None,
@@ -148,7 +148,7 @@ class SystemPromptRefreshPort(Protocol):
     def refresh_system_prompt(
         self,
         *,
-        agent: Agent,
+        agent: KernelRuntime,
         agent_id: str,
         tool_defs: list[Any],
         session_key: str,
@@ -225,7 +225,7 @@ class StreamConsumerStageInput:
     """
 
     # From AgentBootstrapStage
-    agent: Agent
+    agent: KernelRuntime
     agent_id: str
     sync_manager: Any  # MemorySyncManager | None
     private_memory_allowed: bool
