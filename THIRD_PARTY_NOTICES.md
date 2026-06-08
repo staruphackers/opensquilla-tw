@@ -15,6 +15,8 @@ It covers:
 - The cron prompt-injection scanner was reviewed against Hermes Agent
   reference material; the MIT notice is reproduced below for conservative
   attribution.
+- The optional Pi agent runtime integration can connect to an external upstream
+  Pi runtime through `pi_agent_rpc_command`; OpenSquilla does not bundle Pi.
 
 ## OpenClaw-derived bundled skill descriptors
 
@@ -185,6 +187,50 @@ prompt scanner.
 MIT License
 
 Copyright (c) 2025 Nous Research
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## Pi agent runtime integration
+
+- Component: optional external Pi agent runtime sidecar / RPC process for the
+  selectable `pi` agent kernel.
+- Upstream project: https://github.com/earendil-works/pi
+- Relevant upstream packages: `@earendil-works/pi-agent-core`,
+  `@earendil-works/pi-ai`, and `@earendil-works/pi-coding-agent`.
+- License: MIT
+- Copyright notice: Copyright (c) 2025 Mario Zechner
+
+Pi is not bundled with OpenSquilla. The production `pi` kernel must connect to
+an installed upstream Pi runtime, CLI, package wrapper, or equivalent upstream
+RPC process through `pi_agent_rpc_command` or an injected RPC client. OpenSquilla
+adapter code only translates IO/protocol frames and dispatches host-owned
+provider, tool, session, queue, savepoint, telemetry, and yield intents. The
+fake/test sidecars are not production Pi runtime substitutes.
+
+If OpenSquilla distributes a generated wrapper or packaging metadata for this
+bridge, the wrapper must preserve the upstream Pi provenance and MIT notice.
+
+```
+MIT License
+
+Copyright (c) 2025 Mario Zechner
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

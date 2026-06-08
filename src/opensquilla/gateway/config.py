@@ -1367,6 +1367,30 @@ class AgentDefaults(BaseModel):
     subagents: AgentSubagentDefaults | None = None
 
 
+class AgentCoreGatewayConfig(BaseModel):
+    """Selectable agent-core kernel settings consumed by TurnRunner."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kernel: Literal["opensquilla", "pi"] = "opensquilla"
+    protocol_version: str = "opensquilla.agent_core.v1"
+    pi_agent_rpc_command: str | None = None
+    pi_rpc_command: str | None = None
+    pi_agent_rpc_command_provenance: str | None = None
+    pi_rpc_command_provenance: str | None = None
+    allow_test_pi_rpc_command: bool = False
+    pi_agent_rpc_client: Any | None = None
+    pi_rpc_client: Any | None = None
+    pi_agent_rpc_client_provenance: str | None = None
+    pi_rpc_client_provenance: str | None = None
+    allow_test_pi_rpc_client: bool = False
+    strict_host_provider: bool = True
+    strict_host_tools: bool = True
+    strict_host_sessions: bool = True
+    strict_host_orchestration: bool = True
+    strict_host_finalizer: bool = True
+
+
 class SubagentsGatewayConfig(BaseModel):
     """Gateway-level subagent governance knobs."""
 
@@ -1546,6 +1570,7 @@ class GatewayConfig(BaseSettings):
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     agents: list[AgentEntryConfig] = Field(default_factory=list)
     agents_defaults: AgentDefaults = Field(default_factory=AgentDefaults)
+    agent_core: AgentCoreGatewayConfig = Field(default_factory=AgentCoreGatewayConfig)
     subagents: SubagentsGatewayConfig = Field(default_factory=SubagentsGatewayConfig)
     meta_skill: MetaSkillConfig = Field(default_factory=MetaSkillConfig)
 
