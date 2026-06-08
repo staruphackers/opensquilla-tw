@@ -65,6 +65,12 @@ class TextDeltaEvent:
 
 
 @dataclass
+class TextSnapshotEvent:
+    kind: Literal["text_snapshot"] = field(default="text_snapshot", init=False)
+    text: str = ""
+
+
+@dataclass
 class RunHeartbeatEvent:
     kind: Literal["run_heartbeat"] = field(default="run_heartbeat", init=False)
     phase: str = "agent"
@@ -176,6 +182,7 @@ class DoneEvent:
     vision_followup_gate_model: str | None = None
     vision_followup_needs_image: bool | None = None
     vision_followup_fallback: str | None = None
+    routed_provider: str = ""
 
     @property
     def upstream_cost_usd(self) -> float:
@@ -208,6 +215,7 @@ class RouterDecisionEvent:
     prompt_policy: str = ""
     routing_applied: bool = True
     rollout_phase: str = "full"
+    provider: str = ""
 
 
 @dataclass
@@ -329,6 +337,7 @@ class CompactionOutcome:
 AgentEvent = (
     ThinkingEvent
     | TextDeltaEvent
+    | TextSnapshotEvent
     | RunHeartbeatEvent
     | ToolUseStartEvent
     | ToolResultEvent
