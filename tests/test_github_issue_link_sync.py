@@ -295,6 +295,52 @@ def test_plan_edited_pr_retargeted_from_final_base_removes_linked_labels() -> No
     )
 
 
+def test_plan_edited_pr_retargeted_from_final_base_to_unknown_base_removes_linked_labels() -> None:
+    sync = _load_sync_module()
+
+    actions = sync.plan_issue_sync_actions(
+        {
+            "action": "edited",
+            "changes": {
+                "base": {
+                    "ref": {
+                        "from": "dev",
+                    },
+                },
+                "body": {
+                    "from": "Fixes #100",
+                },
+            },
+            "pull_request": {
+                "number": DUMMY_OPEN_PR,
+                "state": "open",
+                "merged": False,
+                "body": "Refs #200",
+                "base": {"ref": "feature/shared-work"},
+                "html_url": DUMMY_OPEN_PR_URL,
+            },
+            "repository": {
+                "full_name": "opensquilla/opensquilla",
+            },
+        }
+    )
+
+    assert actions == (
+        sync.IssueSyncAction(
+            issue_number=200,
+            kind="remove_linked_pr",
+            pr_number=DUMMY_OPEN_PR,
+            pr_url=DUMMY_OPEN_PR_URL,
+        ),
+        sync.IssueSyncAction(
+            issue_number=100,
+            kind="remove_linked_pr",
+            pr_number=DUMMY_OPEN_PR,
+            pr_url=DUMMY_OPEN_PR_URL,
+        ),
+    )
+
+
 def test_plan_open_staging_pr_does_not_add_linked_pr_label() -> None:
     sync = _load_sync_module()
 
@@ -308,6 +354,28 @@ def test_plan_open_staging_pr_does_not_add_linked_pr_label() -> None:
                 "body": "Fixes #100",
                 "base": {"ref": "sandbox-optimization"},
                 "html_url": DUMMY_OPEN_PR_URL,
+            },
+            "repository": {
+                "full_name": "opensquilla/opensquilla",
+            },
+        }
+    )
+
+    assert actions == ()
+
+
+def test_plan_closed_non_final_pr_does_not_remove_linked_pr_label() -> None:
+    sync = _load_sync_module()
+
+    actions = sync.plan_issue_sync_actions(
+        {
+            "action": "closed",
+            "pull_request": {
+                "number": DUMMY_CLOSED_PR,
+                "merged": False,
+                "body": "Fixes #100\nRefs #200",
+                "base": {"ref": "feature/shared-work"},
+                "html_url": DUMMY_CLOSED_PR_URL,
             },
             "repository": {
                 "full_name": "opensquilla/opensquilla",

@@ -3,7 +3,6 @@ name: Issue Link Sync
 "on":
   pull_request_target:
     types: [opened, reopened, edited, closed]
-    branches: [main, dev, "sandbox-*", "integration/*", "staging/*", "release/*"]
 
 permissions:
   contents: read

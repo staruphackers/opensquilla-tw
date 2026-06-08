@@ -340,6 +340,9 @@ def plan_issue_sync_actions(event: dict[str, Any]) -> tuple[IssueSyncAction, ...
     if action != "closed":
         return ()
 
+    if base_ref not in FINAL_BASE_REFS:
+        return ()
+
     if pr.get("merged") is True and base_ref == "dev":
         closing_actions = tuple(
             IssueSyncAction(
