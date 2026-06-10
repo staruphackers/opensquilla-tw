@@ -168,6 +168,14 @@ class DoneEvent:
     session_totals: SessionTotalsSnapshot | None = None
     routing_applied: bool = True
     rollout_phase: str = "full"
+    image_route_reason: str | None = None
+    vision_followup_gate_decision: str | None = None
+    vision_followup_gate_confidence: float | None = None
+    vision_followup_gate_reason: str | None = None
+    vision_followup_gate_source: str | None = None
+    vision_followup_gate_model: str | None = None
+    vision_followup_needs_image: bool | None = None
+    vision_followup_fallback: str | None = None
 
     @property
     def upstream_cost_usd(self) -> float:
@@ -312,6 +320,7 @@ class AgentConfig:
     context_overflow_threshold: float = 0.85  # trigger at 85%
     max_overflow_retries: int = 2
     max_history_turns: int = 0  # 0 = unlimited; compaction handles oversized history
+    preserve_historical_images: bool = False
     # Retry policy for transient LLM errors (429, 500, 503)
     max_provider_retries: int = 3
     length_capped_continuations: int = 3
