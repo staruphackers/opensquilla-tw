@@ -447,7 +447,10 @@ def _synthesize_text_tool_events(
     if not tools or not full_text:
         return []
 
-    from opensquilla.engine.tool_text_compat import parse_wrapped_tool_call_text
+    from opensquilla.engine.tool_text_compat import (
+        parse_function_style_tool_call_lines,
+        parse_wrapped_tool_call_text,
+    )
 
     events: list[ToolUseStartEvent | ToolUseEndEvent] = []
     allowed_tool_names = {tool.name for tool in tools}
@@ -494,6 +497,28 @@ def _synthesize_text_tool_events(
                 )
             )
     else:
+        function_style_calls = parse_function_style_tool_call_lines(full_text)
+        if function_style_calls:
+            for tool_name, arguments in function_style_calls:
+                if tool_name not in allowed_tool_names:
+                    continue
+                tool_use_id = f"text_compat_{uuid4().hex[:12]}"
+                events.append(
+                    ToolUseStartEvent(
+                        tool_use_id=tool_use_id,
+                        tool_name=tool_name,
+                        synthetic_from_text=True,
+                    )
+                )
+                events.append(
+                    ToolUseEndEvent(
+                        tool_use_id=tool_use_id,
+                        tool_name=tool_name,
+                        arguments=arguments,
+                        synthetic_from_text=True,
+                    )
+                )
+            return events
         plain_call = _parse_plain_json_tool_call(full_text)
         if plain_call is not None:
             tool_name, arguments = plain_call

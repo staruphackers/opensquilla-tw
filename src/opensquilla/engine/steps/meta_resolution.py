@@ -602,6 +602,16 @@ def _upgrade_meta_entry_model(
     ctx.metadata.setdefault("baseline_model", baseline_model)
     ctx.metadata["routed_tier"] = tier_name
     ctx.metadata["routed_model"] = model
+    router_cfg = getattr(getattr(ctx, "config", None), "squilla_router", None)
+    tiers = getattr(router_cfg, "tiers", {}) if router_cfg is not None else {}
+    tier_cfg = tiers.get(tier_name, {}) if isinstance(tiers, dict) else {}
+    provider = ""
+    if isinstance(tier_cfg, dict):
+        provider = str(tier_cfg.get("provider") or "").strip().lower()
+    if provider:
+        ctx.metadata["routed_provider"] = provider
+    else:
+        ctx.metadata.pop("routed_provider", None)
     ctx.metadata["routing_source"] = "meta_skill_required_tier"
     ctx.metadata["routing_confidence"] = 1.0
     ctx.metadata["routing_applied"] = True
@@ -1347,27 +1357,33 @@ async def meta_resolution(ctx: TurnContext) -> TurnContext:
     # never needs deep reasoning.
     _clamp_thinking_for_meta(ctx)
 
-    if getattr(chosen_plan, "name", "") == "meta-skill-creator":
-        highest = _highest_text_tier(ctx)
-        if highest is not None:
-            tier_name, model = highest
-            _upgrade_meta_entry_model(
-                ctx,
-                tier_name=tier_name,
-                model=model,
-                source="meta-skill-creator",
-            )
-    else:
-        minimum = _text_tier_at_least(ctx, "c2")
-        current_tier_key = _tier_sort_key(str(ctx.metadata.get("routed_tier") or ""), 0)[0]
-        if minimum is not None and 0 <= current_tier_key < 2:
-            tier_name, model = minimum
-            _upgrade_meta_entry_model(
-                ctx,
-                tier_name=tier_name,
-                model=model,
-                source="meta-skill-entry",
-            )
+    if (
+        activation_mode == "recommend"
+        and ctx.metadata.get("router_control_hold_applied") is not True
+    ):
+        if getattr(chosen_plan, "name", "") == "meta-skill-creator":
+            highest = _highest_text_tier(ctx)
+            if highest is not None:
+                tier_name, model = highest
+                _upgrade_meta_entry_model(
+                    ctx,
+                    tier_name=tier_name,
+                    model=model,
+                    source="meta-skill-creator",
+                )
+        else:
+            minimum = _text_tier_at_least(ctx, "c2")
+            current_tier_key = _tier_sort_key(
+                str(ctx.metadata.get("routed_tier") or ""), 0
+            )[0]
+            if minimum is not None and 0 <= current_tier_key < 2:
+                tier_name, model = minimum
+                _upgrade_meta_entry_model(
+                    ctx,
+                    tier_name=tier_name,
+                    model=model,
+                    source="meta-skill-entry",
+                )
 
     # ── Soft-hint injection ────────────────────────────────────────────
     # Append to the uncached suffix slot of system_prompt so cache

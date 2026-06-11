@@ -55,6 +55,16 @@ def test_text_encoded_tool_call_suffix_is_removed_without_losing_prose() -> None
     assert strip_synthetic_tool_call_suffix(text, ["web_search"]) == "Here is the answer."
 
 
+def test_function_style_tool_call_suffix_is_removed_without_losing_prose() -> None:
+    text = (
+        "Here is the answer.\n\n"
+        'web_search({"query": "beijing news"})\n\n'
+        'web_search({"query": "shanghai news"}'
+    )
+
+    assert strip_synthetic_tool_call_suffix(text, ["web_search"]) == "Here is the answer."
+
+
 def test_wrapped_tool_call_suffix_is_removed_without_losing_prose() -> None:
     text = (
         "Here is the answer.\n\n"

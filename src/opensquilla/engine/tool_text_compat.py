@@ -13,6 +13,9 @@ _PLAIN_JSON_TOOL_CALL_RE = re.compile(
 _PLAIN_JSON_TOOL_PREFIX_RE = re.compile(
     r"([A-Za-z_][A-Za-z0-9_.:-]*)\s*(?=\{)",
 )
+_FUNCTION_STYLE_TOOL_PREFIX_RE = re.compile(
+    r"^\s*([A-Za-z_][A-Za-z0-9_.:-]*)\s*\(\s*",
+)
 _WRAPPED_TOOL_CALL_RE = re.compile(
     r"^\s*<\s*tool_call\s*>\s*(\{.*\})\s*</\s*tool_call\s*>\s*(?:<\|role_end\|>)?\s*$",
     re.DOTALL | re.IGNORECASE,
@@ -88,6 +91,56 @@ _TEXT_PROTOCOL_PREFIXES = (
 _MAX_TEXT_PROTOCOL_PREFIX_LEN = max(len(prefix) for prefix in _TEXT_PROTOCOL_PREFIXES)
 
 
+def _parse_function_style_tool_call_line(line: str) -> tuple[str, dict[str, Any]] | None:
+    match = _FUNCTION_STYLE_TOOL_PREFIX_RE.match(line)
+    if match is None:
+        return None
+    try:
+        arguments, end = json.JSONDecoder().raw_decode(line, match.end())
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(arguments, dict):
+        return None
+    suffix = line[end:].strip()
+    if suffix not in {"", ")", ");"}:
+        return None
+    return match.group(1), arguments
+
+
+def parse_function_style_tool_call_lines(text: str) -> list[tuple[str, dict[str, Any]]]:
+    """Parse standalone ``tool_name({...})`` text-protocol lines."""
+
+    calls: list[tuple[str, dict[str, Any]]] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        call = _parse_function_style_tool_call_line(line)
+        if call is not None:
+            calls.append(call)
+    return calls
+
+
+def _find_function_style_tool_call_suffix_start(text: str, tool_name: str) -> int | None:
+    lines = text.splitlines(keepends=True)
+    offset = 0
+    for index, line in enumerate(lines):
+        call = _parse_function_style_tool_call_line(line)
+        if call is None or call[0] != tool_name:
+            offset += len(line)
+            continue
+        suffix_is_calls = True
+        for suffix_line in lines[index:]:
+            if not suffix_line.strip():
+                continue
+            if _parse_function_style_tool_call_line(suffix_line) is None:
+                suffix_is_calls = False
+                break
+        if suffix_is_calls:
+            return offset + (len(line) - len(line.lstrip()))
+        offset += len(line)
+    return None
+
+
 def parse_wrapped_tool_call_text(text: str) -> tuple[str, dict[str, Any]] | None:
     """Parse a complete ``<tool_call>{...}</tool_call>`` text payload."""
 
@@ -141,6 +194,10 @@ def strip_synthetic_tool_call_text(text: str, tool_name: str) -> str:
 
     if "<minimax:tool_call>" in text:
         return ""
+
+    function_style_start = _find_function_style_tool_call_suffix_start(text, tool_name)
+    if function_style_start is not None:
+        return text[:function_style_start].rstrip()
 
     lines = text.splitlines()
     for index in range(len(lines) - 1, -1, -1):
