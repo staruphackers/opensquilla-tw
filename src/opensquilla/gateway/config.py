@@ -158,6 +158,20 @@ class ToolsConfig(BaseModel):
                 "git_status",
                 "git_diff",
             ],
+            "core": [
+                "exec_command",
+                "read_file",
+                "write_file",
+                "edit_file",
+                "grep_search",
+                "glob_search",
+                "list_dir",
+                "web_search",
+                "web_fetch",
+                "publish_artifact",
+                "session_status",
+                "message",
+            ],
         }
     )
     toolset_priority: list[str] = Field(
@@ -172,6 +186,11 @@ class ToolsConfig(BaseModel):
             "grep_search",
             "glob_search",
             "list_dir",
+            "exec_command",
+            "write_file",
+            "edit_file",
+            "publish_artifact",
+            "message",
         ]
     )
 
@@ -1727,6 +1746,35 @@ class GatewayConfig(BaseSettings):
             raise ValueError(
                 "squilla_router.tier_profile requires llm.provider to match "
                 f"({normalized_profile!r} != {provider!r})"
+            )
+        return self
+
+    # Model-level because the check spans two sections: tier toolset names
+    # must resolve against the EFFECTIVE [tools.toolsets] dict (operator
+    # overrides REPLACE the built-ins), which SquillaRouterConfig field
+    # validators cannot see.
+    @model_validator(mode="after")
+    def _validate_squilla_router_tier_toolsets(self) -> GatewayConfig:
+        toolsets = getattr(self.tools, "toolsets", {}) or {}
+        valid = {"full", *toolsets}
+        tiers = getattr(self.squilla_router, "tiers", {})
+        if not isinstance(tiers, dict):
+            return self
+        for tier_name, tier_cfg in tiers.items():
+            if not isinstance(tier_cfg, dict):
+                continue
+            raw = tier_cfg.get("toolset")
+            if raw is None:
+                raw = tier_cfg.get("toolSet")
+            if raw is None:
+                continue
+            name = str(raw).strip()
+            if not name or name in valid:
+                continue
+            valid_names = ", ".join(sorted(valid))
+            raise ValueError(
+                f"squilla_router.tiers.{tier_name}.toolset {name!r} is not a "
+                f"configured toolset; valid names: {valid_names}"
             )
         return self
 

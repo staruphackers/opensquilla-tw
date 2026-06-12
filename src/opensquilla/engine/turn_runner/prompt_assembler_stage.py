@@ -619,6 +619,15 @@ class PromptAssemblerStage:
                     ),
                 )
                 turn.metadata.update(prompt_metadata)
+                # apply_prompt_cache ran before the fit; re-record the
+                # breakpoint so the narrowed prompt (not the stale one)
+                # is the cache base for str-shaped prompts.
+                if "cache_base_prompt" in turn.metadata:
+                    from opensquilla.engine.steps.prompt_cache import (
+                        record_cache_base_prompt,
+                    )
+
+                    record_cache_base_prompt(turn.metadata, turn.system_prompt)
 
         # 5. Memory fingerprint merge (defensive — port returns None to skip)
         fingerprint = self._memory_fingerprint.memory_mode_fingerprint()

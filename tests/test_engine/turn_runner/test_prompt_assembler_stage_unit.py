@@ -561,6 +561,127 @@ async def test_routed_tier_toolset_fits_schema_budget_and_rebuilds_prompt() -> N
     assert out.output.turn.metadata["tools_chars"] <= keep_budget
 
 
+def _small_tool(name: str) -> ToolDefinition:
+    return ToolDefinition(
+        name=name,
+        description=f"{name} tool",
+        input_schema=ToolInputSchema(
+            properties={"query": {"type": "string"}},
+            required=["query"],
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_routed_tier_core_toolset_resolves_via_real_tools_config() -> None:
+    from opensquilla.gateway.config import ToolsConfig
+
+    all_tools = [
+        _small_tool("exec_command"),
+        _small_tool("read_file"),
+        _small_tool("memory_search"),
+    ]
+    config = SimpleNamespace(
+        llm=SimpleNamespace(toolset=None, max_tool_schema_chars=0),
+        tools=ToolsConfig(),
+        squilla_router=SimpleNamespace(tiers={"c1": {"toolset": "core"}}),
+    )
+    turn = _make_turn(
+        metadata={"routed_tier": "c1"},
+        tool_defs=all_tools,
+        model="small-model",
+        config=config,
+    )
+    assembler = _RecordingPromptAssembler()
+    executor = _RecordingPipelineExecutor(turn=turn, provider=_StubProvider())
+    stage = _make_stage(
+        assembler=assembler,
+        executor=executor,
+        resolver=_TurnSystemPromptResolver(),
+    )
+
+    out = await stage.run(
+        _make_input(cloned_selector=_StubSelector(), tool_defs=all_tools)
+    )
+
+    assert [tool.name for tool in out.output.turn.tool_defs] == [
+        "exec_command",
+        "read_file",
+    ]
+    assert out.output.turn.metadata["selected_toolset"] == "core"
+    assert out.output.turn.metadata["dropped_tools"] == ["memory_search"]
+    assert assembler.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_cache_base_prompt_refreshed_after_fit_changed_rebuild() -> None:
+    all_tools = [_small_tool("web_search"), _small_tool("exec_command")]
+    config = SimpleNamespace(
+        llm=SimpleNamespace(toolset=None, max_tool_schema_chars=0),
+        tools=SimpleNamespace(
+            toolsets={"web": ["web_search"]},
+            toolset_priority=["web_search"],
+        ),
+        squilla_router=SimpleNamespace(tiers={"c1": {"toolset": "web"}}),
+    )
+    stale_prompt = "STALE FULL-TOOLS PROMPT"
+    turn = _make_turn(
+        metadata={
+            "routed_tier": "c1",
+            "cache_enabled": True,
+            "cache_base_prompt": stale_prompt,
+            "cache_base_chars": len(stale_prompt),
+        },
+        tool_defs=all_tools,
+        model="small-model",
+        system_prompt=stale_prompt,
+        config=config,
+    )
+    assembler = _RecordingPromptAssembler(base_prompt="NARROWED")
+    executor = _RecordingPipelineExecutor(turn=turn, provider=_StubProvider())
+    stage = _make_stage(
+        assembler=assembler,
+        executor=executor,
+        resolver=_TurnSystemPromptResolver(),
+    )
+
+    out = await stage.run(
+        _make_input(cloned_selector=_StubSelector(), tool_defs=all_tools)
+    )
+
+    assert out.output.turn.metadata["dropped_tools"] == ["exec_command"]
+    assert out.output.turn.metadata["cache_base_prompt"] == "NARROWED"
+    assert out.output.turn.metadata["cache_base_chars"] == len("NARROWED")
+
+
+@pytest.mark.asyncio
+async def test_fit_changed_rebuild_does_not_invent_cache_base_prompt() -> None:
+    all_tools = [_small_tool("web_search"), _small_tool("exec_command")]
+    config = SimpleNamespace(
+        llm=SimpleNamespace(toolset=None, max_tool_schema_chars=0),
+        tools=SimpleNamespace(
+            toolsets={"web": ["web_search"]},
+            toolset_priority=["web_search"],
+        ),
+        squilla_router=SimpleNamespace(tiers={"c1": {"toolset": "web"}}),
+    )
+    turn = _make_turn(
+        metadata={"routed_tier": "c1"},
+        tool_defs=all_tools,
+        model="small-model",
+        config=config,
+    )
+    executor = _RecordingPipelineExecutor(turn=turn, provider=_StubProvider())
+    stage = _make_stage(executor=executor, resolver=_TurnSystemPromptResolver())
+
+    out = await stage.run(
+        _make_input(cloned_selector=_StubSelector(), tool_defs=all_tools)
+    )
+
+    assert out.output.turn.metadata["dropped_tools"] == ["exec_command"]
+    assert "cache_base_prompt" not in out.output.turn.metadata
+
+
 @pytest.mark.asyncio
 async def test_observe_mode_route_keeps_default_provider_model_and_tools() -> None:
     def _tool(name: str, *, desc_size: int) -> ToolDefinition:
