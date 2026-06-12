@@ -49,13 +49,6 @@ from .types import (
 
 _OPENAI_API_BASE = "https://api.openai.com"
 log = structlog.get_logger(__name__)
-_PLAIN_JSON_TOOL_CALL_RE = re.compile(
-    r"^\s*([A-Za-z_][A-Za-z0-9_.:-]*)\s*(\{.*\})\s*$",
-    re.DOTALL,
-)
-_PLAIN_JSON_TOOL_PREFIX_RE = re.compile(
-    r"([A-Za-z_][A-Za-z0-9_.:-]*)\s*(?=\{)",
-)
 
 _OPENAI_TOOL_STATUS_OUTPUT_MAX_CHARS = 4000
 
@@ -278,56 +271,6 @@ def _resolve_llm_proxy(proxy: str | None) -> str | None:
     return proxy.strip() or None
 
 
-def _parse_exact_plain_json_tool_call(text: str) -> tuple[str, dict[str, Any]] | None:
-    """Parse a bare ``tool_name{...}`` assistant text response."""
-    candidates = [text]
-    non_empty_lines = [line for line in text.splitlines() if line.strip()]
-    if non_empty_lines:
-        last_line = non_empty_lines[-1]
-        if last_line != text:
-            candidates.append(last_line)
-
-    match = None
-    for candidate in candidates:
-        match = _PLAIN_JSON_TOOL_CALL_RE.match(candidate)
-        if match:
-            break
-    if match is None:
-        return None
-
-    try:
-        arguments = json.loads(match.group(2))
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(arguments, dict):
-        return None
-    return match.group(1), arguments
-
-
-def _parse_trailing_plain_json_tool_call(text: str) -> tuple[str, dict[str, Any]] | None:
-    """Parse a trailing ``tool_name{...}``, allowing prose before it."""
-    decoder = json.JSONDecoder()
-    for match in reversed(list(_PLAIN_JSON_TOOL_PREFIX_RE.finditer(text))):
-        try:
-            arguments, end = decoder.raw_decode(text, match.end())
-        except json.JSONDecodeError:
-            continue
-        if text[end:].strip():
-            continue
-        if not isinstance(arguments, dict):
-            continue
-        return match.group(1), arguments
-    return None
-
-
-def _parse_plain_json_tool_call(text: str) -> tuple[str, dict[str, Any]] | None:
-    """Parse a text response ending in ``tool_name{...}``."""
-    exact_call = _parse_exact_plain_json_tool_call(text)
-    if exact_call is not None:
-        return exact_call
-    return _parse_trailing_plain_json_tool_call(text)
-
-
 def _coerce_int(value: Any) -> int:
     try:
         return int(value or 0)
@@ -449,6 +392,7 @@ def _synthesize_text_tool_events(
 
     from opensquilla.engine.tool_text_compat import (
         parse_function_style_tool_call_lines,
+        parse_plain_json_tool_call,
         parse_wrapped_tool_call_text,
     )
 
@@ -519,7 +463,7 @@ def _synthesize_text_tool_events(
                     )
                 )
             return events
-        plain_call = _parse_plain_json_tool_call(full_text)
+        plain_call = parse_plain_json_tool_call(full_text)
         if plain_call is not None:
             tool_name, arguments = plain_call
             if tool_name in allowed_tool_names:

@@ -1544,7 +1544,9 @@ def test_openai_compat_synthesizes_multiple_function_style_tool_call_text(
     events = _collect_events(provider, ChatConfig(), tools=tools)
 
     tool_ends = [event for event in events if isinstance(event, ToolUseEndEvent)]
-    assert [(event.tool_name, event.arguments, event.synthetic_from_text) for event in tool_ends] == [
+    assert [
+        (event.tool_name, event.arguments, event.synthetic_from_text) for event in tool_ends
+    ] == [
         ("lookup", {"q": "hi"}, True),
         ("save", {"value": 1}, True),
     ]
@@ -1585,6 +1587,87 @@ def test_openai_compat_does_not_synthesize_unoffered_wrapped_tool_call_text(
     events = _collect_events(provider, ChatConfig(), tools=[tool])
 
     assert not any(isinstance(event, ToolUseEndEvent) for event in events)
+
+
+def test_openai_compat_does_not_synthesize_tool_call_from_embedded_prose(
+    monkeypatch: Any,
+) -> None:
+    """Prose mentioning ``tool_name{...}`` mid-sentence is not a tool call."""
+    chunks = [
+        {
+            "model": "local-model",
+            "choices": [
+                {
+                    "delta": {
+                        "content": (
+                            'You can use lookup{"q": "llada"} to search,'
+                            " then read the docs for more detail."
+                        )
+                    },
+                    "finish_reason": None,
+                }
+            ],
+        },
+        {"model": "local-model", "choices": [{"delta": {}, "finish_reason": "stop"}]},
+    ]
+    body = b"".join(f"data: {json.dumps(chunk)}\n\n".encode() for chunk in chunks)
+    captured: dict[str, Any] = {}
+    _patch_transport_body(monkeypatch, captured, body + b"data: [DONE]\n\n")
+    provider = OpenAIProvider(
+        api_key="test",
+        model="local-model",
+        base_url="http://localhost:8008/v1",
+        provider_kind="self_hosted_openai",
+    )
+    tool = ToolDefinition(
+        name="lookup",
+        description="Lookup a value.",
+        input_schema=ToolInputSchema(properties={"q": {"type": "string"}}, required=["q"]),
+    )
+
+    events = _collect_events(provider, ChatConfig(), tools=[tool])
+
+    assert not any(isinstance(event, ToolUseEndEvent) for event in events)
+
+
+def test_openai_compat_synthesizes_trailing_plain_json_tool_call(
+    monkeypatch: Any,
+) -> None:
+    """A message ending in ``tool_name{...}`` for an offered tool is a call."""
+    chunks = [
+        {
+            "model": "local-model",
+            "choices": [
+                {
+                    "delta": {"content": 'I will search for that.\nlookup{"q": "llada"}'},
+                    "finish_reason": None,
+                }
+            ],
+        },
+        {"model": "local-model", "choices": [{"delta": {}, "finish_reason": "stop"}]},
+    ]
+    body = b"".join(f"data: {json.dumps(chunk)}\n\n".encode() for chunk in chunks)
+    captured: dict[str, Any] = {}
+    _patch_transport_body(monkeypatch, captured, body + b"data: [DONE]\n\n")
+    provider = OpenAIProvider(
+        api_key="test",
+        model="local-model",
+        base_url="http://localhost:8008/v1",
+        provider_kind="self_hosted_openai",
+    )
+    tool = ToolDefinition(
+        name="lookup",
+        description="Lookup a value.",
+        input_schema=ToolInputSchema(properties={"q": {"type": "string"}}, required=["q"]),
+    )
+
+    events = _collect_events(provider, ChatConfig(), tools=[tool])
+
+    tool_ends = [event for event in events if isinstance(event, ToolUseEndEvent)]
+    assert len(tool_ends) == 1
+    assert tool_ends[0].tool_name == "lookup"
+    assert tool_ends[0].arguments == {"q": "llada"}
+    assert tool_ends[0].synthetic_from_text is True
 
 
 def test_gemini_stream_multiple_tool_calls_without_indexes_stay_separate(
