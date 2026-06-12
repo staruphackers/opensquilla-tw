@@ -71,6 +71,7 @@ from opensquilla.engine.turn_runner.turn_finalizer_stage import (
 )
 from opensquilla.provider.model_catalog import DEFAULT_CONTEXT_WINDOW
 from opensquilla.provider.types import ModelCapabilities
+from opensquilla.router_tiers import ROUTED_PROVIDER_KEY, ROUTED_TIER_KEY
 from opensquilla.session.compaction_lifecycle import normalize_flush_triggers_strict
 
 log = structlog.get_logger(__name__)
@@ -94,17 +95,17 @@ def _positive_int(value: Any) -> int:
 
 
 def _routed_tier_cfg(config: Any, metadata: dict[str, Any]) -> dict[str, Any]:
-    if config is None or not metadata.get("routed_provider"):
+    if config is None or not metadata.get(ROUTED_PROVIDER_KEY):
         return {}
     router_cfg = getattr(config, "squilla_router", None)
     tiers = getattr(router_cfg, "tiers", {}) if router_cfg is not None else {}
-    routed_tier = str(metadata.get("routed_tier") or "").strip()
+    routed_tier = str(metadata.get(ROUTED_TIER_KEY) or "").strip()
     tier_cfg = tiers.get(routed_tier, {}) if isinstance(tiers, dict) else {}
     return tier_cfg if isinstance(tier_cfg, dict) else {}
 
 
 def _tool_support_mode_for_turn(config: Any, llm_cfg: Any, metadata: dict[str, Any]) -> str:
-    if config is not None and metadata.get("routed_provider"):
+    if config is not None and metadata.get(ROUTED_PROVIDER_KEY):
         tier_cfg = _routed_tier_cfg(config, metadata)
         if "tool_support" in tier_cfg:
             return _normalize_tool_support(tier_cfg.get("tool_support"))
@@ -513,7 +514,7 @@ class _TurnRunnerModelCatalogAdapter(ModelCatalogPort):
         provider_name = getattr(llm_cfg, "provider", "openrouter")
         base_url = getattr(llm_cfg, "base_url", "")
         metadata = getattr(turn, "metadata", {}) or {}
-        if runner._config is not None and metadata.get("routed_provider"):
+        if runner._config is not None and metadata.get(ROUTED_PROVIDER_KEY):
             try:
                 from opensquilla.engine.runtime import _tier_routed_provider_config
 
@@ -553,7 +554,7 @@ class _TurnRunnerModelCatalogAdapter(ModelCatalogPort):
         if context_window_override > 0:
             context_window = context_window_override
         elif (
-            metadata.get("routed_provider")
+            metadata.get(ROUTED_PROVIDER_KEY)
             and runner._model_catalog is not None
             and context_window == DEFAULT_CONTEXT_WINDOW
         ):
@@ -562,7 +563,7 @@ class _TurnRunnerModelCatalogAdapter(ModelCatalogPort):
             )
             if info is None or info.context_window <= 0:
                 _warn_default_context_window_once(
-                    tier=str(metadata.get("routed_tier") or ""),
+                    tier=str(metadata.get(ROUTED_TIER_KEY) or ""),
                     model_id=model_id,
                     provider_name=str(provider_name or ""),
                     default_window=DEFAULT_CONTEXT_WINDOW,

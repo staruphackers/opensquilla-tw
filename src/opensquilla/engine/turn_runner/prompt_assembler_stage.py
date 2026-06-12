@@ -26,6 +26,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from opensquilla.router_tiers import (
+    ROUTED_MODEL_KEY,
+    ROUTED_PROVIDER_KEY,
+    ROUTED_TIER_KEY,
+    ROUTING_APPLIED_KEY,
+    ROUTING_SOURCE_KEY,
+)
+
 if TYPE_CHECKING:
     from opensquilla.engine.turn_runner.outcome import StageOutcome
     from opensquilla.observability.decision_log import PipelineStepRecord
@@ -127,7 +135,7 @@ def _reply_tags_enabled_for_tool_context(ctx: ToolContext | None) -> bool:
 
 
 def _tier_cfg_for_turn(config: Any, metadata: Mapping[str, Any]) -> Mapping[str, Any]:
-    routed_tier = str(metadata.get("routed_tier") or "").strip()
+    routed_tier = str(metadata.get(ROUTED_TIER_KEY) or "").strip()
     if not routed_tier:
         return {}
     router_cfg = getattr(config, "squilla_router", None)
@@ -168,23 +176,23 @@ def _pin_explicit_model_choice(turn: Any, explicit_model: str | None) -> None:
         turn.metadata = metadata
 
     turn.model = model
-    metadata["routed_model"] = model
-    metadata["routing_source"] = "explicit_model"
-    metadata["routing_applied"] = False
+    metadata[ROUTED_MODEL_KEY] = model
+    metadata[ROUTING_SOURCE_KEY] = "explicit_model"
+    metadata[ROUTING_APPLIED_KEY] = False
 
     matched_tier = _configured_tier_for_model(getattr(turn, "config", None), model)
     if matched_tier is None:
-        metadata.pop("routed_tier", None)
-        metadata.pop("routed_provider", None)
+        metadata.pop(ROUTED_TIER_KEY, None)
+        metadata.pop(ROUTED_PROVIDER_KEY, None)
         return
 
     tier_name, tier_cfg = matched_tier
-    metadata["routed_tier"] = tier_name
+    metadata[ROUTED_TIER_KEY] = tier_name
     provider = str(tier_cfg.get("provider") or "").strip().lower()
     if provider:
-        metadata["routed_provider"] = provider
+        metadata[ROUTED_PROVIDER_KEY] = provider
     else:
-        metadata.pop("routed_provider", None)
+        metadata.pop(ROUTED_PROVIDER_KEY, None)
 
 
 def _first_text(*values: Any) -> str | None:
@@ -639,7 +647,7 @@ class PromptAssemblerStage:
                 _SelectorFallbackProvider,
             )
 
-            routed_provider = str(turn_metadata.get("routed_provider") or "").strip()
+            routed_provider = str(turn_metadata.get(ROUTED_PROVIDER_KEY) or "").strip()
             if routed_provider and getattr(turn, "model", ""):
                 _apply_routed_provider_override(
                     inp.cloned_selector,
@@ -693,7 +701,7 @@ class PromptAssemblerStage:
                 )
             except Exception:  # noqa: BLE001 - defensive
                 selector_model = ""
-        routed_provider = str(turn_metadata.get("routed_provider") or "").strip()
+        routed_provider = str(turn_metadata.get(ROUTED_PROVIDER_KEY) or "").strip()
         if routed_provider and turn.model:
             resolved_model = turn.model
         else:
@@ -716,6 +724,6 @@ class PromptAssemblerStage:
                 trace_context_session_id=session_id_for_log,
                 prompt_report=prompt_report,
                 selector_model=selector_model,
-                squilla_router_tier=turn.metadata.get("routed_tier"),
+                squilla_router_tier=turn.metadata.get(ROUTED_TIER_KEY),
             )
         )

@@ -35,6 +35,14 @@ import structlog
 from opensquilla.engine.hooks.types import CompactionState
 from opensquilla.engine.tool_text_compat import ProtocolTextLeakGuard
 from opensquilla.observability.decision_log import build_vision_followup_gate_reason_code
+from opensquilla.router_tiers import (
+    ROUTED_MODEL_KEY,
+    ROUTED_PROVIDER_KEY,
+    ROUTED_TIER_KEY,
+    ROUTING_APPLIED_KEY,
+    ROUTING_CONFIDENCE_KEY,
+    ROUTING_SOURCE_KEY,
+)
 
 if TYPE_CHECKING:
     from opensquilla.engine.agent import Agent
@@ -504,16 +512,16 @@ class _DoneHandler:
                 heartbeat_ack_max_chars=inp.heartbeat_ack_max_chars,
             )
         )
-        routed_tier = metadata.get("routed_tier")
-        routing_source = metadata.get("routing_source", "none")
-        routing_confidence = float(metadata.get("routing_confidence") or 0.0)
-        routing_applied = metadata.get("routing_applied")
+        routed_tier = metadata.get(ROUTED_TIER_KEY)
+        routing_source = metadata.get(ROUTING_SOURCE_KEY, "none")
+        routing_confidence = float(metadata.get(ROUTING_CONFIDENCE_KEY) or 0.0)
+        routing_applied = metadata.get(ROUTING_APPLIED_KEY)
         if routing_applied is None:
             routing_applied = True
         rollout_phase = str(metadata.get("rollout_phase") or "full")
         baseline_model = metadata.get("baseline_model", "")
-        routed_provider = str(metadata.get("routed_provider") or "")
-        routed_model = metadata.get("routed_model", "") or event.model
+        routed_provider = str(metadata.get(ROUTED_PROVIDER_KEY) or "")
+        routed_model = metadata.get(ROUTED_MODEL_KEY, "") or event.model
         savings_pct = float(metadata.get("savings_pct") or 0.0)
         _max_p = float(metadata.get("savings_max_price_per_m") or 0.0)
         _rte_p = float(metadata.get("savings_routed_price_per_m") or 0.0)

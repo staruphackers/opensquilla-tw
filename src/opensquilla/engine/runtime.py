@@ -153,7 +153,16 @@ from opensquilla.router_control import (
     RouterControlHoldStore,
     render_router_control_prompt_block,
 )
-from opensquilla.router_tiers import HIGHEST_TEXT_TIER, normalize_text_tier, tier_index
+from opensquilla.router_tiers import (
+    HIGHEST_TEXT_TIER,
+    ROUTED_MODEL_KEY,
+    ROUTED_PROVIDER_KEY,
+    ROUTED_TIER_KEY,
+    ROUTING_APPLIED_KEY,
+    ROUTING_CONFIDENCE_KEY,
+    normalize_text_tier,
+    tier_index,
+)
 from opensquilla.safety import injection_guard, permission_matrix, sandbox, tool_tiers
 from opensquilla.session.compaction_lifecycle import (
     COMPACTION_CHUNK_SUMMARIZED_EVENT,
@@ -640,9 +649,9 @@ def _tier_routed_provider_config(
     current_config: Any,
     model: str,
 ) -> Any | None:
-    routed_provider = str(metadata.get("routed_provider") or "").strip().lower()
-    routed_model = str(metadata.get("routed_model") or model or "").strip()
-    routed_tier = str(metadata.get("routed_tier") or "").strip()
+    routed_provider = str(metadata.get(ROUTED_PROVIDER_KEY) or "").strip().lower()
+    routed_model = str(metadata.get(ROUTED_MODEL_KEY) or model or "").strip()
+    routed_tier = str(metadata.get(ROUTED_TIER_KEY) or "").strip()
     if not routed_provider or not routed_model:
         return None
 
@@ -665,7 +674,7 @@ def _tier_routed_fallback_configs(
     metadata: Mapping[str, Any],
     current_config: Any,
 ) -> list[Any]:
-    routed_tier = normalize_text_tier(metadata.get("routed_tier"))
+    routed_tier = normalize_text_tier(metadata.get(ROUTED_TIER_KEY))
     current_index = tier_index(routed_tier)
     if current_index < 0:
         return []
@@ -4515,9 +4524,9 @@ class TurnRunner:
                 squilla_router_tiers = getattr(router_cfg, "tiers", {})
 
                 # Squilla router
-                savings_telemetry.routed_model = metadata.get("routed_model")
+                savings_telemetry.routed_model = metadata.get(ROUTED_MODEL_KEY)
                 savings_telemetry.baseline_model = metadata.get("baseline_model")
-                savings_telemetry.routing_confidence = metadata.get("routing_confidence")
+                savings_telemetry.routing_confidence = metadata.get(ROUTING_CONFIDENCE_KEY)
                 savings_telemetry.routing_savings_pct = metadata.get("savings_pct")
 
                 _max_p = float(metadata.get("savings_max_price_per_m") or 0.0)
@@ -4803,11 +4812,11 @@ class TurnRunner:
         if not upgrade_compaction_enabled:
             return _T3_NOT_APPLICABLE
 
-        routed_tier = normalize_text_tier(turn.metadata.get("routed_tier"))
+        routed_tier = normalize_text_tier(turn.metadata.get(ROUTED_TIER_KEY))
         if routed_tier != HIGHEST_TEXT_TIER:
             return _T3_NOT_APPLICABLE
 
-        if not turn.metadata.get("routing_applied", False):
+        if not turn.metadata.get(ROUTING_APPLIED_KEY, False):
             return _T3_NOT_APPLICABLE
 
         routing_extra = turn.metadata.get("routing_extra", {})
