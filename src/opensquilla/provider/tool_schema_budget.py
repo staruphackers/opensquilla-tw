@@ -1,3 +1,10 @@
+"""Fit tool definitions into a per-route schema budget.
+
+Budgets (``max_tool_schema_chars``) are measured in compact-JSON
+serialization characters via the same ``_payload_chars`` accounting as
+provider request proof — not wire bytes, which serialize larger.
+"""
+
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
