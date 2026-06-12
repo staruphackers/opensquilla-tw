@@ -236,7 +236,12 @@ async def run_smoke(args: argparse.Namespace) -> SmokeReport:
         )
         calls = result["tool_calls"]
         offered = {tool.name for tool in _SMOKE_TOOLS}
-        leak = bool(_PROTOCOL_LEAK_RE.search(result["text"]))
+        # Protocol markers in provider-layer text are expected for synthetic
+        # calls: stripping is the stream consumer's job, one layer up.
+        synthetic_only = bool(calls) and all(
+            call["synthetic_from_text"] for call in calls
+        )
+        leak = bool(_PROTOCOL_LEAK_RE.search(result["text"])) and not synthetic_only
         valid = bool(calls) and all(call["tool_name"] in offered for call in calls)
         status = "passed" if valid and not leak and not result["error"] else "failed"
         if not calls and not result["error"]:
