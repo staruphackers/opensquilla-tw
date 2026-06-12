@@ -37,6 +37,14 @@ ROUTING_CONFIDENCE_KEY = "routing_confidence"
 ROUTING_APPLIED_KEY = "routing_applied"
 
 
+def routing_selection_effective(metadata: Mapping[str, Any]) -> bool:
+    """True when the routed_* selection should bear effect on execution."""
+    if str(metadata.get(ROUTING_SOURCE_KEY) or "") == "explicit_model":
+        return True
+    applied = metadata.get(ROUTING_APPLIED_KEY)
+    return True if applied is None else bool(applied)
+
+
 def normalize_text_tier(value: object) -> str | None:
     """Return the canonical text tier id for *value*, accepting legacy t0-t3."""
 

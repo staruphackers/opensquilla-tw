@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from opensquilla.engine.runtime import TurnRunner
+from opensquilla.engine.runtime import TurnRunner, _tier_routed_provider_config
 from opensquilla.gateway.config import GatewayConfig, SquillaRouterConfig
 from opensquilla.provider.selector import ModelSelector, ProviderConfig, SelectorConfig
 
@@ -669,3 +669,55 @@ async def test_run_pipeline_keeps_latest_text_on_unknown_auto_tier(
     assert "tool_required" not in turn.metadata
     assert "tool_required_route_upgrade" not in turn.metadata
     assert getattr(provider, "_provider_kind") == "inception"
+
+
+def _current_provider_config() -> ProviderConfig:
+    return ProviderConfig(
+        provider="inception",
+        model="inception/mercury-2",
+        api_key="inception-key",
+        base_url="https://api.inceptionlabs.ai/v1",
+    )
+
+
+def test_tier_routed_provider_config_skips_observe_mode_route() -> None:
+    config = GatewayConfig()
+    config.squilla_router = _router_cfg()
+
+    routed = _tier_routed_provider_config(
+        config=config,
+        metadata={
+            "routed_tier": "c2",
+            "routed_model": "z-ai/glm-5.1",
+            "routed_provider": "openrouter",
+            "routing_applied": False,
+            "routing_source": "v4_phase3",
+        },
+        current_config=_current_provider_config(),
+        model="inception/mercury-2",
+    )
+
+    assert routed is None
+
+
+def test_tier_routed_provider_config_keeps_explicit_model_pin() -> None:
+    config = GatewayConfig()
+    config.squilla_router = _router_cfg()
+
+    routed = _tier_routed_provider_config(
+        config=config,
+        metadata={
+            "routed_tier": "c2",
+            "routed_model": "z-ai/glm-5.1",
+            "routed_provider": "openrouter",
+            "routing_applied": False,
+            "routing_source": "explicit_model",
+        },
+        current_config=_current_provider_config(),
+        model="z-ai/glm-5.1",
+    )
+
+    assert routed is not None
+    assert routed.provider == "openrouter"
+    assert routed.model == "z-ai/glm-5.1"
+    assert routed.api_key == "openrouter-tier-key"

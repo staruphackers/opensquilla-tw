@@ -562,6 +562,74 @@ async def test_routed_tier_toolset_fits_schema_budget_and_rebuilds_prompt() -> N
 
 
 @pytest.mark.asyncio
+async def test_observe_mode_route_keeps_default_provider_model_and_tools() -> None:
+    def _tool(name: str, *, desc_size: int) -> ToolDefinition:
+        return ToolDefinition(
+            name=name,
+            description=f"{name} " + ("x" * desc_size),
+            input_schema=ToolInputSchema(
+                properties={
+                    "query": {
+                        "type": "string",
+                        "description": "q" * desc_size,
+                    }
+                },
+                required=["query"],
+            ),
+        )
+
+    web_search = _tool("web_search", desc_size=12)
+    exec_command = _tool("exec_command", desc_size=2000)
+    all_tools = [web_search, exec_command]
+    keep_budget = _payload_chars([_build_openai_tool(web_search)]) + 16
+    selector = _StubSelector("sel-observe", current_model="inception/mercury-2")
+    selector.resolve_returns = _StubProvider("default_provider")
+    config = SimpleNamespace(
+        llm=SimpleNamespace(toolset=None, max_tool_schema_chars=0),
+        tools=SimpleNamespace(
+            toolsets={"web": ["web_search", "exec_command"]},
+            toolset_priority=["web_search", "exec_command"],
+        ),
+        squilla_router=SimpleNamespace(
+            tiers={
+                "c2": {
+                    "provider": "openrouter",
+                    "model": "z-ai/glm-5.1",
+                    "toolset": "web",
+                    "max_tool_schema_chars": keep_budget,
+                },
+            }
+        ),
+    )
+    executor = _RecordingPipelineExecutor(
+        turn=_make_turn(
+            metadata={
+                "routed_tier": "c2",
+                "routed_model": "z-ai/glm-5.1",
+                "routed_provider": "openrouter",
+                "routing_applied": False,
+                "routing_source": "v4_phase3",
+            },
+            model="inception/mercury-2",
+            tool_defs=all_tools,
+            config=config,
+        ),
+        provider=_StubProvider("post_pipeline"),
+    )
+    stage = _make_stage(executor=executor, resolver=_TurnSystemPromptResolver())
+
+    out = await stage.run(_make_input(cloned_selector=selector, tool_defs=all_tools))
+
+    assert selector.overridden_primary == []
+    assert out.output.resolved_model == "inception/mercury-2"
+    assert [tool.name for tool in out.output.turn.tool_defs] == [
+        "web_search",
+        "exec_command",
+    ]
+    assert "dropped_tools" not in out.output.turn.metadata
+
+
+@pytest.mark.asyncio
 async def test_case05_pipeline_filter_skills_metadata_merge() -> None:
     assembler = _RecordingPromptAssembler(metadata_to_emit={"skill_count": 2})
     executor = _RecordingPipelineExecutor(

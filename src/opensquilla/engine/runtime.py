@@ -161,6 +161,7 @@ from opensquilla.router_tiers import (
     ROUTING_APPLIED_KEY,
     ROUTING_CONFIDENCE_KEY,
     normalize_text_tier,
+    routing_selection_effective,
     tier_index,
 )
 from opensquilla.safety import injection_guard, permission_matrix, sandbox, tool_tiers
@@ -649,6 +650,8 @@ def _tier_routed_provider_config(
     current_config: Any,
     model: str,
 ) -> Any | None:
+    if not routing_selection_effective(metadata):
+        return None
     routed_provider = str(metadata.get(ROUTED_PROVIDER_KEY) or "").strip().lower()
     routed_model = str(metadata.get(ROUTED_MODEL_KEY) or model or "").strip()
     routed_tier = str(metadata.get(ROUTED_TIER_KEY) or "").strip()

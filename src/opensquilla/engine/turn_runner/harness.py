@@ -71,7 +71,11 @@ from opensquilla.engine.turn_runner.turn_finalizer_stage import (
 )
 from opensquilla.provider.model_catalog import DEFAULT_CONTEXT_WINDOW
 from opensquilla.provider.types import ModelCapabilities
-from opensquilla.router_tiers import ROUTED_PROVIDER_KEY, ROUTED_TIER_KEY
+from opensquilla.router_tiers import (
+    ROUTED_PROVIDER_KEY,
+    ROUTED_TIER_KEY,
+    routing_selection_effective,
+)
 from opensquilla.session.compaction_lifecycle import normalize_flush_triggers_strict
 
 log = structlog.get_logger(__name__)
@@ -97,6 +101,8 @@ def _positive_int(value: Any) -> int:
 def _routed_tier_cfg(config: Any, metadata: dict[str, Any]) -> dict[str, Any]:
     if config is None or not metadata.get(ROUTED_PROVIDER_KEY):
         return {}
+    if not routing_selection_effective(metadata):
+        return {}
     router_cfg = getattr(config, "squilla_router", None)
     tiers = getattr(router_cfg, "tiers", {}) if router_cfg is not None else {}
     routed_tier = str(metadata.get(ROUTED_TIER_KEY) or "").strip()
@@ -105,7 +111,11 @@ def _routed_tier_cfg(config: Any, metadata: dict[str, Any]) -> dict[str, Any]:
 
 
 def _tool_support_mode_for_turn(config: Any, llm_cfg: Any, metadata: dict[str, Any]) -> str:
-    if config is not None and metadata.get(ROUTED_PROVIDER_KEY):
+    if (
+        config is not None
+        and metadata.get(ROUTED_PROVIDER_KEY)
+        and routing_selection_effective(metadata)
+    ):
         tier_cfg = _routed_tier_cfg(config, metadata)
         if "tool_support" in tier_cfg:
             return _normalize_tool_support(tier_cfg.get("tool_support"))
@@ -555,6 +565,7 @@ class _TurnRunnerModelCatalogAdapter(ModelCatalogPort):
             context_window = context_window_override
         elif (
             metadata.get(ROUTED_PROVIDER_KEY)
+            and routing_selection_effective(metadata)
             and runner._model_catalog is not None
             and context_window == DEFAULT_CONTEXT_WINDOW
         ):

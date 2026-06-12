@@ -32,6 +32,7 @@ from opensquilla.router_tiers import (
     ROUTED_TIER_KEY,
     ROUTING_APPLIED_KEY,
     ROUTING_SOURCE_KEY,
+    routing_selection_effective,
 )
 
 if TYPE_CHECKING:
@@ -135,6 +136,8 @@ def _reply_tags_enabled_for_tool_context(ctx: ToolContext | None) -> bool:
 
 
 def _tier_cfg_for_turn(config: Any, metadata: Mapping[str, Any]) -> Mapping[str, Any]:
+    if not routing_selection_effective(metadata):
+        return {}
     routed_tier = str(metadata.get(ROUTED_TIER_KEY) or "").strip()
     if not routed_tier:
         return {}
