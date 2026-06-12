@@ -174,6 +174,11 @@ class ToolsConfig(BaseModel):
                 # Control-plane escape hatch: without router_control a routed
                 # tier cannot switch tiers or release an active hold from chat.
                 "router_control",
+                # Meta entry point: meta_resolution injects prompt hints that
+                # instruct the model to call meta_invoke first; a surface
+                # without it strands those turns (visibility still gates it
+                # off when meta skills are disabled).
+                "meta_invoke",
             ],
         }
     )
@@ -181,6 +186,7 @@ class ToolsConfig(BaseModel):
         default_factory=lambda: [
             "session_status",
             "router_control",
+            "meta_invoke",
             "web_search",
             "web_fetch",
             "session_search",

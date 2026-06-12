@@ -31,7 +31,20 @@ CORE_TOOLS = [
     "session_status",
     "message",
     "router_control",
+    "meta_invoke",
 ]
+
+
+def test_core_keeps_the_meta_invoke_entry_point() -> None:
+    """meta_resolution prompt hints instruct the model to call meta_invoke
+    first; a core surface without it strands meta-armed turns (live
+    incident: agent:main:webchat:ymmm74ps — sticky meta hints on a c1 turn
+    whose toolset lacked meta_invoke produced dead-end turns and the user's
+    switch request never executed).
+    """
+    assert "meta_invoke" in ToolsConfig().toolsets["core"]
+    priority = ToolsConfig().toolset_priority
+    assert priority.index("meta_invoke") < priority.index("web_search")
 
 
 def test_core_keeps_the_router_control_escape_hatch() -> None:
