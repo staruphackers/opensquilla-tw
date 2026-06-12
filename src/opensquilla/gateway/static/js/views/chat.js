@@ -8010,8 +8010,28 @@ const ChatView = (() => {
     return wrap;
   }
 
+  function _summarizeToolErrorEnvelope(content) {
+    // Error envelopes are protocol payloads addressed to the model
+    // (recovery instructions); users get a one-line summary, full
+    // payload stays behind "View full".
+    try {
+      const data = JSON.parse(content);
+      if (!data || typeof data !== 'object' || data.status !== 'error') return null;
+      const cls = data.error_class || data.errorClass || '';
+      const msg = data.user_message || data.userMessage || data.message || '';
+      const summary = msg ? String(msg) : 'Tool call failed.';
+      return cls ? cls + ': ' + _truncate(summary, 160) : _truncate(summary, 160);
+    } catch (e) {
+      return null;
+    }
+  }
+
   function _buildToolResultDOM(content, isError, isTruncated = false, toolName = '') {
-    const preview = _truncate(content, 200);
+    let preview = _truncate(content, 200);
+    if (isError) {
+      const summary = _summarizeToolErrorEnvelope(content);
+      if (summary) preview = summary;
+    }
     if (!preview || preview.trim() === '') return null;
 
     const div = document.createElement('div');
@@ -8029,7 +8049,7 @@ const ChatView = (() => {
       if (sources) div.appendChild(sources);
     }
 
-    if (content.length > 200) {
+    if (content.length > 200 || (isError && content !== preview)) {
       const viewBtn = document.createElement('button');
       viewBtn.className = 'btn btn--sm btn--ghost chat-tool-view-btn';
       viewBtn.type = 'button';
@@ -8055,9 +8075,19 @@ const ChatView = (() => {
       return;
     }
     try { if (name && name.startsWith('meta-step:')) console.log('[meta-step] start', name); } catch (e) {}
-    const input = typeof payload.input === 'string'
-      ? payload.input
-      : JSON.stringify(payload.input || payload.arguments || '', null, 2);
+    let inputValue = payload.input || payload.arguments || '';
+    // Unwrap the provider's unparsed-arguments envelope: show the raw text
+    // the model emitted instead of a double-escaped {"_raw": "..."} wrapper.
+    if (
+      inputValue && typeof inputValue === 'object'
+      && typeof inputValue._raw === 'string'
+      && Object.keys(inputValue).length === 1
+    ) {
+      inputValue = inputValue._raw;
+    }
+    const input = typeof inputValue === 'string'
+      ? inputValue
+      : JSON.stringify(inputValue, null, 2);
     const toolId = payload.tool_use_id || '';
 
     const bubble = _ensureStreamBubble();

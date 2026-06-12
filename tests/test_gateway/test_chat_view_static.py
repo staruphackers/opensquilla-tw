@@ -3577,3 +3577,35 @@ def test_chat_queue_drain_preserves_draft_typed_during_stream() -> None:
     assert "_pendingAttachments = draftAttachments;" in body
     assert "_pendingSessionIntent = draftIntent;" in body
     assert body.index("_onSend();") < body.index("_textarea.value = draftText;")
+
+
+def test_chat_tool_error_envelope_renders_summary_not_protocol_payload() -> None:
+    """Error envelopes are recovery instructions addressed to the model;
+    the user-facing card shows a one-line summary and keeps the raw
+    payload behind View full (live incident agent:main:webchat:65dfv9pc).
+    """
+    source = CHAT_JS.read_text(encoding="utf-8")
+
+    start = source.index("function _summarizeToolErrorEnvelope(content)")
+    end = source.index("function _buildToolResultDOM(", start)
+    summarizer = source[start:end]
+    assert "data.status !== 'error'" in summarizer
+    assert "data.user_message" in summarizer
+
+    build_start = source.index("function _buildToolResultDOM(")
+    build_end = source.index("function _appendToolCall(", build_start)
+    build = source[build_start:build_end]
+    assert "const summary = _summarizeToolErrorEnvelope(content)" in build
+    assert "if (summary) preview = summary;" in build
+    assert "content.length > 200 || (isError && content !== preview)" in build
+
+
+def test_chat_tool_call_unwraps_unparsed_raw_argument_envelope() -> None:
+    source = CHAT_JS.read_text(encoding="utf-8")
+    start = source.index("function _appendToolCall(payload)")
+    end = source.index("const toolId = payload.tool_use_id || '';", start)
+    body = source[start:end]
+
+    assert "typeof inputValue._raw === 'string'" in body
+    assert "Object.keys(inputValue).length === 1" in body
+    assert "inputValue = inputValue._raw;" in body
