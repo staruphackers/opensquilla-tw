@@ -222,8 +222,6 @@ async def open_opentui_surface(
             if ready_marker is None
             else ready_marker
         )
-        if print_ready_marker and marker:
-            await active_bridge.send("scrollback.write", ScrollbackWrite(text=f"{marker}\n"))
         await active_bridge.send(
             "composer.set",
             ComposerState(placeholder="send a message"),
@@ -234,6 +232,8 @@ async def open_opentui_surface(
             if completion_context is not None
             else build_completion_context(surface, workspace_dir=active_workspace_dir),
         )
+        if print_ready_marker and marker:
+            await active_bridge.send("scrollback.write", ScrollbackWrite(text=f"{marker}\n"))
         yield OpenTuiSurface(
             active_bridge,
             approval_surface=surface,

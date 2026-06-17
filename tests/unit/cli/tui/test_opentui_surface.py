@@ -121,6 +121,29 @@ async def test_open_opentui_surface_sends_completion_context_on_startup() -> Non
 
 
 @pytest.mark.asyncio
+async def test_open_opentui_surface_marks_ready_after_completion_context() -> None:
+    bridge = FakeOpenTuiBridge()
+
+    async with open_opentui_surface(
+        surface=Surface.CLI_GATEWAY,
+        ready_marker="READY",
+        bridge=bridge,
+        completion_context=CompletionContext(catalog=(), files=()),
+    ):
+        pass
+
+    assert [message_type for message_type, _payload in bridge.sent] == [
+        "composer.set",
+        "completion.context",
+        "scrollback.write",
+    ]
+    assert bridge.sent[-1] == (
+        "scrollback.write",
+        asdict(ScrollbackWrite(text="READY\n")),
+    )
+
+
+@pytest.mark.asyncio
 async def test_opentui_surface_answers_file_completion_without_returning_input(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
