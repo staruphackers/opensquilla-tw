@@ -80,6 +80,10 @@ coalescing ratio, transcript item counts, visible viewport counts, expanded tool
 counts, viewport projection time, final text match status, plugin error count,
 and errors.
 
+Read [`features/tui-frontend.md`](features/tui-frontend.md) for backend status
+and [`tui-real-terminal-harness.md`](tui-real-terminal-harness.md) for
+terminal-level launch evidence.
+
 ## Pair Replay With Sessions
 
 Find the session first:

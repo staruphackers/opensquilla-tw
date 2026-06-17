@@ -24,12 +24,6 @@ data/
 .opensquilla/
 benchmarks/
 specs/
-# Public proposals tree: docs/proposals/ overrides global specs/ + plans/
-# ignores so design notes and implementation plans intended for review
-# travel with the repository.
-!docs/proposals/
-!docs/proposals/specs/
-!docs/proposals/plans/
 # Local agent/editor instructions and runtime state.
 AGENTS.md
 !docs/agents.md
@@ -48,6 +42,8 @@ GEMINI.md
 /prd.json
 /progress.txt
 /plans/
+/docs/plans/
+/docs/proposals/
 /docs/superpowers/
 !/docs/superpowers/
 !/docs/superpowers/plans/
@@ -86,8 +82,7 @@ opensquilla-webui/dist/
 /tests/_private/
 
 # Maintainer-local design / planning artifacts kept beside the repo but
-# not part of the published source. Move into /docs/proposals/ if/when
-# they are ready for public consumption.
+# not part of the published source.
 /meta-skills.pptx
 /kb-index.xlsx
 

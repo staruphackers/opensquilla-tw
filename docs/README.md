@@ -56,6 +56,8 @@ root release README with task-oriented guides.
   cost investigation workflow.
 - [`diagnostics-and-replay.md`](diagnostics-and-replay.md) - diagnostics,
   raw capture guidance, and read-only turn replay.
+- [`tui-real-terminal-harness.md`](tui-real-terminal-harness.md) -
+  real-terminal TUI launch, replay, and evidence capture.
 - [`operations.md`](operations.md) - sessions, cron, usage, diagnostics,
   migration, MCP server, and install inventory commands.
 - [`troubleshooting.md`](troubleshooting.md) - common install/runtime issues.

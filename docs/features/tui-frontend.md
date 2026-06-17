@@ -1,13 +1,23 @@
 # TUI Frontend
 
-OpenSquilla terminal chat uses renderer-independent TUI contracts built around
-two separate planes:
+OpenSquilla terminal chat has one stable default backend and one opt-in preview
+backend:
+
+| Backend or target | Status | How to use | Requirements |
+| --- | --- | --- | --- |
+| `native` | Stable default | `opensquilla chat` | Python package only |
+| `opentui` | Preview opt-in | `OPENSQUILLA_TUI_BACKEND=opentui opensquilla chat` | Bun and local OpenTUI package dependencies |
+| `live-opentui` | Manual harness target | Real-terminal harness only | tmux, OpenTUI deps, and live provider config |
+
+`live-opentui` is not an `OPENSQUILLA_TUI_BACKEND` value. It is a guarded test
+target that launches the OpenTUI preview path through the real CLI.
+
+The TUI contracts are renderer-independent and built around two separate planes:
 
 - **Streaming plane:** batches token deltas before writing to the terminal, so
   long answers do not redraw the whole interface for every token.
 - **Structured UI plane:** sends normalized TUI domain events to plugins. Plugin
-  snapshots can be rendered by the current terminal backend and by future
-  renderer.
+  snapshots can be rendered by capable TUI backends and by future renderers.
 
 The stable default terminal chat is Python-native and does not require Bun,
 npm, or OpenTUI node modules. OpenTUI is a preview backend selected explicitly
@@ -32,7 +42,12 @@ selection behavior.
 
 ## Router HUD
 
-When routing metadata is available, the OpenTUI footer can show:
+When routing metadata is available, capable TUI backends can render a Router
+HUD. In the current implementation, the OpenTUI footer is the primary preview
+display for this HUD. The HUD is display-only: it consumes turn metadata and
+does not change model selection.
+
+The HUD can show:
 
 - selected tier and model;
 - baseline model;
@@ -51,11 +66,12 @@ routes use warning styling.
 
 ## Backend Selection
 
-The default backend is stable terminal chat.
+The default backend is stable Python-native terminal chat.
 
 The internal backend selector reads `OPENSQUILLA_TUI_BACKEND`. Unset or empty
-values select stable terminal chat. Legacy values fail before chat launch with
-a clear unsupported-backend error.
+values select stable terminal chat. Set the variable to `opentui` only when
+evaluating the preview backend. Legacy values fail before chat launch with a
+clear unsupported-backend error.
 
 ```sh
 OPENSQUILLA_TUI_BACKEND=opentui opensquilla chat
@@ -64,7 +80,7 @@ OPENSQUILLA_TUI_BACKEND=opentui opensquilla chat
 The preview backend requires Bun and the local OpenTUI package dependencies:
 
 ```sh
-npm install --prefix src/opensquilla/cli/tui/opentui/package
+bun install --frozen-lockfile --cwd=src/opensquilla/cli/tui/opentui/package
 ```
 
 Do not add parallel terminal/frontend implementations without fresh product
@@ -86,3 +102,6 @@ Summary fields include `renderer`, `fixture`, `available`, `skip_reason`,
 `rendered_text_matches`, `plugin_error_count`, and `errors`.
 
 Use the OpenTUI results as preview backend evidence.
+
+For terminal-level launch and rendering evidence, use the
+[real-terminal TUI harness](../tui-real-terminal-harness.md).

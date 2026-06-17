@@ -85,9 +85,11 @@ opensquilla diagnostics on
 
 ## Terminal Router HUD
 
-Interactive terminal chat also surfaces routing decisions through the TUI Router
-HUD when router metadata is present. The HUD is display-only: it consumes the
-same turn metadata and does not change model selection.
+Interactive terminal chat can surface routing decisions through a TUI Router HUD
+when router metadata is present and the selected backend supports the structured
+UI/plugin surface. In the current implementation, the OpenTUI preview footer is
+the primary terminal display for this HUD. The HUD is display-only: it consumes
+the same turn metadata and does not change model selection.
 
 The HUD can show the selected tier, selected model, baseline model, route
 source, confidence, estimated savings, fallback state, thinking mode, prompt
