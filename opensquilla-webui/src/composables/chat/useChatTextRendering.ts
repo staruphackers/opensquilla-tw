@@ -45,11 +45,39 @@ marked.use({
   },
 })
 
-// `class` is only allowed where the code renderer above emits it; markdown
-// cannot smuggle arbitrary classes onto other elements or unknown values in.
+// Markdown only ever emits <input> as a disabled task-list checkbox. Drop any
+// other raw <input> outright so assistant text cannot render editable fields.
+DOMPurify.addHook('uponSanitizeElement', (node, data) => {
+  if (data.tagName !== 'input') return
+  if ((node as Element).getAttribute('type') !== 'checkbox') {
+    node.parentNode?.removeChild(node)
+  }
+})
+
+// GFM table `align` and the task-list checkbox `type` are allow-listed and
+// marked URI-safe (see ADD_URI_SAFE_ATTR below) so the sanitizer keeps them
+// through its normal pipeline; here they are additionally constrained to the
+// exact tags and values markdown emits, so nothing else can ride in on those
+// attribute names. `class` is only allowed where the code renderer above emits
+// it; markdown cannot smuggle arbitrary classes onto other elements.
 DOMPurify.addHook('uponSanitizeAttribute', (node, data) => {
-  if (data.attrName !== 'class') return
   const tag = node.nodeName.toLowerCase()
+
+  // Table column alignment — only the enum values, and only on table cells.
+  if (data.attrName === 'align') {
+    const ok = (tag === 'th' || tag === 'td')
+      && (data.attrValue === 'left' || data.attrValue === 'center' || data.attrValue === 'right')
+    if (!ok) data.keepAttr = false
+    return
+  }
+
+  // The only inputs markdown emits are disabled task-list checkboxes.
+  if (data.attrName === 'type') {
+    if (!(tag === 'input' && data.attrValue === 'checkbox')) data.keepAttr = false
+    return
+  }
+
+  if (data.attrName !== 'class') return
   if (tag !== 'code' && tag !== 'span') {
     data.keepAttr = false
     return
@@ -62,6 +90,23 @@ DOMPurify.addHook('uponSanitizeAttribute', (node, data) => {
     return
   }
   data.attrValue = safe.join(' ')
+})
+
+// External links open in a new tab without leaking the opener (only http(s)
+// anchors become cross-document). Task-list checkboxes are forced inert so a
+// raw `<input type="checkbox">` cannot render as an interactive control.
+DOMPurify.addHook('afterSanitizeAttributes', node => {
+  if (node.nodeName === 'A') {
+    const href = node.getAttribute('href') || ''
+    if (/^https?:/i.test(href)) {
+      node.setAttribute('target', '_blank')
+      node.setAttribute('rel', 'noopener noreferrer')
+    }
+    return
+  }
+  if (node.nodeName === 'INPUT') {
+    node.setAttribute('disabled', '')
+  }
 })
 
 export function useChatTextRendering() {
@@ -102,9 +147,14 @@ export function useChatTextRendering() {
         'p', 'br', 'hr', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
         'ul', 'ol', 'li', 'blockquote', 'pre', 'code',
         'strong', 'em', 'del', 'a', 'table', 'thead',
-        'tbody', 'tr', 'th', 'td', 'div', 'span', 'sup',
+        'tbody', 'tr', 'th', 'td', 'div', 'span', 'sup', 'input',
       ],
-      ALLOWED_ATTR: ['href', 'title', 'alt', 'target', 'rel', 'class'],
+      // `align` carries GFM table column alignment; `type`/`checked`/`disabled`
+      // are the (disabled) task-list checkbox attributes. No script vectors.
+      ALLOWED_ATTR: ['href', 'title', 'alt', 'target', 'rel', 'class', 'align', 'type', 'checked', 'disabled'],
+      // `align`/`type` carry inert presentational values, not URIs; mark them
+      // safe so the value gate keeps them (the hook above constrains the values).
+      ADD_URI_SAFE_ATTR: ['align', 'type'],
       ALLOWED_URI_REGEXP: /^(?:https?|mailto|#):/i,
     })
 
