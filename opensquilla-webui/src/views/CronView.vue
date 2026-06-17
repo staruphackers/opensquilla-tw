@@ -340,7 +340,7 @@ async function confirmDelete() {
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+  box-shadow: var(--shadow-md);
   display: none;
   font-size: 11px;
   left: 50%;
@@ -439,7 +439,7 @@ async function confirmDelete() {
 .cron-view-toggle__btn.is-active {
   background: var(--accent);
   border-color: var(--accent);
-  color: #fff;
+  color: var(--accent-foreground);
 }
 
 .cron-card.is-selected {
@@ -452,8 +452,8 @@ async function confirmDelete() {
 }
 
 @keyframes cron-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(var(--accent-rgb, 240, 160, 48), 0.3); }
-  50% { box-shadow: 0 0 0 4px rgba(var(--accent-rgb, 240, 160, 48), 0); }
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 30%, transparent); }
+  50% { box-shadow: 0 0 0 4px transparent; }
 }
 
 .cron-card__head {
@@ -863,7 +863,7 @@ async function confirmDelete() {
 }
 
 .cron-panel__scrim {
-  background: rgba(0, 0, 0, 0.4);
+  background: var(--scrim);
   bottom: 0;
   left: 0;
   opacity: 0;
@@ -1111,7 +1111,7 @@ async function confirmDelete() {
 }
 
 .cron-toggle__thumb {
-  background: #fff;
+  background: var(--bg);
   border-radius: 50%;
   display: block;
   height: 16px;
@@ -1145,7 +1145,7 @@ async function confirmDelete() {
 /* Modal */
 .modal-overlay {
   align-items: center;
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--scrim);
   bottom: 0;
   display: flex;
   justify-content: center;

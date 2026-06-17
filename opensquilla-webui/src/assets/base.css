@@ -216,6 +216,19 @@ input[type="radio"], input[type="checkbox"] {
 }
 input::placeholder, textarea::placeholder { color: var(--text-dim); }
 
+/* Keyboard focus ring for buttons and nav, mirroring the input focus treatment. */
+.btn:focus-visible,
+.btn--ghost:focus-visible,
+.btn--icon:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.sidebar-fn-item:focus-visible,
+.nav-item:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
 code, pre {
   font-family: var(--font-mono);
   font-size: var(--fs-sm);
@@ -986,28 +999,6 @@ pre {
   margin: 0;
   padding: var(--sp-2);
 }
-
-.sidebar-conn {
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-1);
-  flex-shrink: 0;
-  font-size: var(--fs-xs);
-  font-weight: 600;
-  color: var(--sidebar-text-soft);
-}
-
-.sidebar-conn-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: currentColor;
-}
-
-.sidebar-conn.connected { color: var(--ok); }
-.sidebar-conn.connecting { color: var(--warn); }
-.sidebar-conn.disconnected { color: var(--danger); }
 
 /* Legacy nav styles (kept for compatibility) */
 .nav-brand {
