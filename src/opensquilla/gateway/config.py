@@ -583,7 +583,7 @@ def _default_tiers() -> dict:
         },
         "c2": {
             "provider": "openrouter",
-            "model": "z-ai/glm-5.1",
+            "model": "z-ai/glm-5.2",
             "description": (
                 "stronger text model for multi-step coding, structured reasoning, "
                 "larger context synthesis, and harder analysis"
@@ -593,7 +593,7 @@ def _default_tiers() -> dict:
         },
         "c3": {
             "provider": "openrouter",
-            "model": "anthropic/claude-opus-4.7",
+            "model": "anthropic/claude-opus-4.8",
             "description": (
                 "Highest-quality text reasoning model for difficult planning, "
                 "deep review, complex debugging, and high-stakes synthesis"

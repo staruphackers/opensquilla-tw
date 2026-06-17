@@ -104,7 +104,8 @@ base_url = "https://openrouter.ai/api/v1"
 [llm.provider_routing]
 "deepseek/deepseek-v4-flash" = "deepseek"
 "z-ai/glm-5.1" = "z-ai"
-"anthropic/claude-opus-4.7" = "anthropic"
+"z-ai/glm-5.2" = "z-ai"
+"anthropic/claude-opus-4.8" = "anthropic"
 "moonshotai/kimi-k2.6" = "moonshotai"
 
 [memory]
@@ -216,14 +217,14 @@ thinking_level = "high"
 
 [squilla_router.tiers.c2]
 provider = "openrouter"
-model = "z-ai/glm-5.1"
+model = "z-ai/glm-5.2"
 description = "Stronger text route for multi-step coding, structured reasoning, larger context synthesis, and harder analysis"
 supports_image = false
 thinking_level = "high"
 
 [squilla_router.tiers.c3]
 provider = "openrouter"
-model = "anthropic/claude-opus-4.7"
+model = "anthropic/claude-opus-4.8"
 description = "Highest-quality text reasoning route for difficult planning, deep review, complex debugging, and high-stakes synthesis"
 supports_image = false
 thinking_level = "high"
