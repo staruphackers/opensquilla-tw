@@ -94,7 +94,10 @@ function fuzzyScore(query, candidate) {
 
   let score = q.length * 100;
   if (text.startsWith(q)) score += 80;
-  const prefixSegment = pathSegments(text).find((segment) => segment.startsWith(q));
+  const segments = pathSegments(text);
+  const commandSegment = text.startsWith("/") ? segments[0] : null;
+  if (commandSegment?.startsWith(q)) score += 90;
+  const prefixSegment = segments.find((segment) => segment.startsWith(q));
   if (prefixSegment) {
     score += 60;
     score += Math.max(0, 24 - prefixSegment.length * 2);

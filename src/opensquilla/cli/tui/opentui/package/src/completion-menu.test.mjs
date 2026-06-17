@@ -68,6 +68,20 @@ test("filterCatalog ranks subsequence matches predictably", () => {
   ]);
 });
 
+test("filterCatalog prefers command-name prefixes over later path segments", () => {
+  const catalog = [
+    { label: "/audio-cog", description: "skill", insert_text: "/audio-cog " },
+    { label: "/html-coder", description: "skill", insert_text: "/html-coder " },
+    { label: "/compact", description: "command", insert_text: "/compact " },
+    { label: "/cost", description: "command", insert_text: "/cost " },
+  ];
+
+  assert.deepEqual(
+    filterCatalog(catalog, "co").map((item) => item.label).slice(0, 2),
+    ["/cost", "/compact"],
+  );
+});
+
 test("acceptCompletionText replaces the active token with insert text", () => {
   assert.deepEqual(acceptCompletionText("/cmp", 0, 4, "/compact "), {
     text: "/compact ",
