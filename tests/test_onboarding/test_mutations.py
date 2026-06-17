@@ -369,7 +369,7 @@ def test_upsert_router_forces_image_model_role_invariants():
         tiers={
             "image_model": {
                 "provider": "openrouter",
-                "model": "anthropic/claude-opus-4.7",
+                "model": "anthropic/claude-opus-4.8",
                 "supportsImage": False,
                 "image_only": False,
             }
@@ -377,7 +377,7 @@ def test_upsert_router_forces_image_model_role_invariants():
     )
 
     image_tier = res.config.squilla_router.tiers["image_model"]
-    assert image_tier["model"] == "anthropic/claude-opus-4.7"
+    assert image_tier["model"] == "anthropic/claude-opus-4.8"
     assert image_tier["supports_image"] is True
     assert image_tier["image_only"] is True
 
