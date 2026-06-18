@@ -9,7 +9,8 @@ from typing import Any
 OPENROUTER_DEFAULT_PROVIDER_ROUTING = {
     "deepseek/deepseek-v4-flash": "deepseek",
     "z-ai/glm-5.1": "z-ai",
-    "anthropic/claude-opus-4.7": "anthropic",
+    "z-ai/glm-5.2": "z-ai",
+    "anthropic/claude-opus-4.8": "anthropic",
     "moonshotai/kimi-k2.6": "moonshotai",
 }
 

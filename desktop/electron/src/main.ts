@@ -305,8 +305,8 @@ const ROUTER_PROFILES: Record<string, Record<string, RouterTier>> = {
   openrouter: {
     t0: { provider: 'openrouter', model: 'deepseek/deepseek-v4-flash', description: 'Fast everyday work', thinkingLevel: 'high' },
     t1: { provider: 'openrouter', model: 'deepseek/deepseek-v4-pro', description: 'Balanced agent work', thinkingLevel: 'high' },
-    t2: { provider: 'openrouter', model: 'z-ai/glm-5.1', description: 'Complex reasoning', thinkingLevel: 'high' },
-    t3: { provider: 'openrouter', model: 'anthropic/claude-opus-4.7', description: 'Highest quality review and planning', thinkingLevel: 'high' },
+    t2: { provider: 'openrouter', model: 'z-ai/glm-5.2', description: 'Complex reasoning', thinkingLevel: 'high' },
+    t3: { provider: 'openrouter', model: 'anthropic/claude-opus-4.8', description: 'Highest quality review and planning', thinkingLevel: 'high' },
     image_model: { provider: 'openrouter', model: 'moonshotai/kimi-k2.6', description: 'Vision route for image attachments', supportsImage: true, imageOnly: true, thinkingLevel: 'medium' },
   },
   openai: {
