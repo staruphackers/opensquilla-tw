@@ -338,6 +338,70 @@ function shareExportCss(): string {
     #${SHARE_STAGE_ID} .msg-ai-meta > span {
       opacity: 1 !important;
     }
+
+    /* Markdown blocks the scoped chat CSS does not reach in a cloned stage.
+       Mirrors styles/chat-markdown.css so exported images render tables,
+       headings, quotes, links and rules the same as the live chat. */
+    #${SHARE_STAGE_ID} .msg-ai-text table {
+      display: block;
+      width: max-content;
+      max-width: 100%;
+      overflow-x: auto;
+      border-collapse: collapse;
+      border: 1px solid var(--border);
+      margin: var(--sp-2) 0;
+      font-size: 0.9375em;
+    }
+    #${SHARE_STAGE_ID} .msg-ai-text th,
+    #${SHARE_STAGE_ID} .msg-ai-text td {
+      padding: var(--sp-1) var(--sp-3);
+      border: 1px solid var(--border);
+      text-align: left;
+      vertical-align: top;
+    }
+    #${SHARE_STAGE_ID} .msg-ai-text th {
+      background: var(--bg-elevated);
+      font-weight: 600;
+    }
+    #${SHARE_STAGE_ID} .msg-ai-text h1,
+    #${SHARE_STAGE_ID} .msg-ai-text h2,
+    #${SHARE_STAGE_ID} .msg-ai-text h3,
+    #${SHARE_STAGE_ID} .msg-ai-text h4,
+    #${SHARE_STAGE_ID} .msg-ai-text h5,
+    #${SHARE_STAGE_ID} .msg-ai-text h6 {
+      font-family: var(--font-display);
+      font-weight: 600;
+      line-height: 1.3;
+      margin: var(--sp-3) 0 var(--sp-2);
+      color: var(--text);
+    }
+    #${SHARE_STAGE_ID} .msg-ai-text h1 { font-size: 1.4em; }
+    #${SHARE_STAGE_ID} .msg-ai-text h2 { font-size: 1.25em; }
+    #${SHARE_STAGE_ID} .msg-ai-text h3 { font-size: 1.1em; }
+    #${SHARE_STAGE_ID} .msg-ai-text h4 { font-size: 1em; }
+    #${SHARE_STAGE_ID} .msg-ai-text h5,
+    #${SHARE_STAGE_ID} .msg-ai-text h6 { font-size: 0.9em; color: var(--text-muted); }
+    #${SHARE_STAGE_ID} .msg-ai-text blockquote {
+      border-left: 2px solid var(--border-strong);
+      color: var(--text-muted);
+      margin: var(--sp-2) 0;
+      padding-left: var(--sp-3);
+    }
+    #${SHARE_STAGE_ID} .msg-ai-text a { color: var(--accent); text-decoration: none; }
+    #${SHARE_STAGE_ID} .msg-ai-text hr {
+      border: 0;
+      border-top: 1px solid var(--border);
+      margin: var(--sp-3) 0;
+    }
+    #${SHARE_STAGE_ID} .msg-ai-text li:has(> input[type='checkbox']) {
+      list-style: none;
+      margin-left: -1.1em;
+    }
+    #${SHARE_STAGE_ID} .msg-ai-text li > input[type='checkbox'] {
+      margin: 0 0.4em 0 0;
+      vertical-align: middle;
+      accent-color: var(--accent);
+    }
   `
 }
 
