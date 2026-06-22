@@ -3,9 +3,15 @@ from __future__ import annotations
 import tomllib
 from types import SimpleNamespace
 
+import pytest
+
 from opensquilla.gateway.config import GatewayConfig
 from opensquilla.gateway.llm_runtime import resolve_llm_runtime_config
-from opensquilla.gateway.rpc_config import _handle_config_patch, _sync_provider_selector
+from opensquilla.gateway.rpc_config import (
+    _handle_config_patch,
+    _handle_config_patch_safe,
+    _sync_provider_selector,
+)
 
 
 class _CapturingSelector:
@@ -96,6 +102,28 @@ def test_direct_provider_runtime_does_not_inherit_openrouter_provider_routing() 
     assert runtime.provider_routing == {}
 
 
+def test_squilla_router_visual_mode_defaults_to_real_candidates() -> None:
+    cfg = GatewayConfig()
+
+    assert cfg.squilla_router.visual_mode == "real_candidates"
+    assert cfg.to_public_dict()["squilla_router"]["visual_mode"] == "real_candidates"
+
+
+def test_squilla_router_visual_mode_accepts_legacy_grid_and_model_space_alias() -> None:
+    legacy_cfg = GatewayConfig(squilla_router={"visual_mode": "legacy_grid"})
+    alias_cfg = GatewayConfig(squilla_router={"visual_mode": "model_space"})
+    dashed_alias_cfg = GatewayConfig(squilla_router={"visual_mode": "model-space"})
+
+    assert legacy_cfg.squilla_router.visual_mode == "legacy_grid"
+    assert alias_cfg.squilla_router.visual_mode == "legacy_grid"
+    assert dashed_alias_cfg.squilla_router.visual_mode == "legacy_grid"
+
+
+def test_squilla_router_visual_mode_rejects_unknown_value() -> None:
+    with pytest.raises(ValueError, match="visual_mode must be one of"):
+        GatewayConfig(squilla_router={"visual_mode": "all_models"})
+
+
 def test_runtime_config_sync_resolves_selected_provider_env(monkeypatch) -> None:
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-key")
@@ -131,3 +159,17 @@ async def test_config_patch_runtime_env_key_is_not_persisted(monkeypatch, tmp_pa
     persisted = tomllib.loads((tmp_path / "config.toml").read_text())
     assert persisted["squilla_router"]["tier_profile"] == "deepseek"
     assert "api_key" not in persisted["llm"]
+
+
+async def test_safe_config_patch_allows_router_visual_mode(tmp_path) -> None:
+    cfg = GatewayConfig(config_path=str(tmp_path / "config.toml"))
+    ctx = SimpleNamespace(config=cfg, provider_selector=_CapturingSelector())
+
+    await _handle_config_patch_safe(
+        {"patches": {"squilla_router.visual_mode": "legacy_grid"}},
+        ctx,
+    )
+
+    assert ctx.config.squilla_router.visual_mode == "legacy_grid"
+    persisted = tomllib.loads((tmp_path / "config.toml").read_text())
+    assert persisted["squilla_router"]["visual_mode"] == "legacy_grid"
