@@ -263,6 +263,169 @@ class LlmProviderConfig(BaseSettings):
         return self
 
 
+def _ensemble_ref(
+    model: str,
+    *,
+    provider: str = "openrouter",
+    temperature: float | None = None,
+    max_tokens: int = 0,
+    thinking: str | None = None,
+    k: int = 1,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "provider": provider,
+        "model": model,
+        "k": k,
+    }
+    if temperature is not None:
+        payload["temperature"] = temperature
+    if max_tokens > 0:
+        payload["max_tokens"] = max_tokens
+    if thinking:
+        payload["thinking"] = thinking
+    return payload
+
+
+def _ensemble_profile(
+    proposers: list[dict[str, Any]],
+    aggregator: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "proposers": proposers,
+        "aggregator": aggregator,
+    }
+
+
+def _default_llm_ensemble_profiles() -> dict[str, dict[str, Any]]:
+    """Built-in experiment profiles with operator-overridable model IDs."""
+    g3_proposers = [
+        _ensemble_ref("deepseek/deepseek-v4-pro", thinking="high"),
+        _ensemble_ref("z-ai/glm-5.2", thinking="high"),
+        _ensemble_ref("google/gemini-3-flash-preview", thinking="high"),
+    ]
+    return {
+        "b3_glm_self_fusion": _ensemble_profile(
+            [_ensemble_ref("z-ai/glm-5.2", thinking="high", k=3)],
+            _ensemble_ref("z-ai/glm-5.2", thinking="high"),
+        ),
+        "g1_code": _ensemble_profile(
+            [
+                _ensemble_ref("deepseek/deepseek-v4-pro", thinking="high"),
+                _ensemble_ref("z-ai/glm-5.2", thinking="high"),
+                _ensemble_ref("moonshotai/kimi-k2.7-code", thinking="high"),
+            ],
+            _ensemble_ref("z-ai/glm-5.2", thinking="high"),
+        ),
+        "g2_general": _ensemble_profile(
+            [
+                _ensemble_ref("z-ai/glm-5.2", thinking="high"),
+                _ensemble_ref("qwen/qwen3.7-plus", thinking="high"),
+                _ensemble_ref("moonshotai/kimi-k2.6", thinking="medium"),
+            ],
+            _ensemble_ref("z-ai/glm-5.2", thinking="high"),
+        ),
+        "g3_standard": _ensemble_profile(
+            list(g3_proposers),
+            _ensemble_ref("z-ai/glm-5.2", thinking="high"),
+        ),
+        "g4_gemini_aggregator": _ensemble_profile(
+            list(g3_proposers),
+            _ensemble_ref("google/gemini-3-flash-preview", thinking="high"),
+        ),
+        "g5_opus_aggregator": _ensemble_profile(
+            list(g3_proposers),
+            _ensemble_ref("anthropic/claude-opus-4.8", thinking="high"),
+        ),
+        "g6_gpt_aggregator": _ensemble_profile(
+            list(g3_proposers),
+            _ensemble_ref("openai/gpt-5.5", thinking="high"),
+        ),
+        "g7_two_proposers": _ensemble_profile(
+            [
+                _ensemble_ref("deepseek/deepseek-v4-pro", thinking="high"),
+                _ensemble_ref("z-ai/glm-5.2", thinking="high"),
+            ],
+            _ensemble_ref("z-ai/glm-5.2", thinking="high"),
+        ),
+        "g8_four_proposers": _ensemble_profile(
+            [
+                _ensemble_ref("deepseek/deepseek-v4-pro", thinking="high"),
+                _ensemble_ref("z-ai/glm-5.2", thinking="high"),
+                _ensemble_ref("google/gemini-3-flash-preview", thinking="high"),
+                _ensemble_ref("qwen/qwen3.7-plus", thinking="high"),
+            ],
+            _ensemble_ref("z-ai/glm-5.2", thinking="high"),
+        ),
+    }
+
+
+class EnsembleModelRef(BaseModel):
+    """Provider/model generation settings for an ensemble member."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    provider: str = ""
+    model: str = ""
+    api_key_env: str = ""
+    base_url: str = ""
+    proxy: str = ""
+    temperature: float | None = None
+    max_tokens: int = Field(default=0, ge=0)
+    thinking: str | None = None
+    k: int = Field(default=1, ge=1)
+
+
+class EnsembleProfile(BaseModel):
+    """B5 profile: parallel proposers and one aggregator."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    proposers: list[EnsembleModelRef] = Field(default_factory=list)
+    aggregator: EnsembleModelRef = Field(default_factory=EnsembleModelRef)
+    candidate_max_chars: int = Field(default=24_000, ge=0)
+    proposer_timeout_seconds: float = Field(default=120.0, gt=0.0)
+    aggregator_timeout_seconds: float = Field(default=120.0, gt=0.0)
+    shuffle_candidates: bool = True
+    record_candidates: bool = False
+
+
+class LlmEnsembleConfig(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_prefix="OPENSQUILLA_LLM_ENSEMBLE_",
+        env_nested_delimiter="__",
+        extra="ignore",
+    )
+
+    enabled: bool = False
+    active_profile: str = "g3_standard"
+    mode: Literal["b5_fusion"] = "b5_fusion"
+    proposer_tools: bool = False
+    min_successful_proposers: int = Field(default=1, ge=1)
+    all_failed_policy: Literal["fallback_single", "error"] = "fallback_single"
+    profiles: dict[str, EnsembleProfile] = Field(default_factory=_default_llm_ensemble_profiles)
+
+    @model_validator(mode="after")
+    def _merge_default_profiles_and_validate_active(self) -> LlmEnsembleConfig:
+        default_profiles = {
+            name: EnsembleProfile.model_validate(profile)
+            for name, profile in _default_llm_ensemble_profiles().items()
+        }
+        default_profiles.update(self.profiles)
+        self.profiles = default_profiles
+        if not self.enabled:
+            return self
+        profile = self.profiles.get(self.active_profile)
+        if profile is None:
+            raise ValueError(
+                f"llm_ensemble.active_profile {self.active_profile!r} is not configured"
+            )
+        if not profile.proposers:
+            raise ValueError("llm_ensemble active profile must define at least one proposer")
+        if not profile.aggregator.model:
+            raise ValueError("llm_ensemble active profile must define an aggregator model")
+        return self
+
+
 # Module-level dedupe state for the legacy ``enabled`` deprecation warning.
 # A plain ``bool`` flag guarded by a ``Lock`` makes the check-and-set atomic
 # across concurrent constructors; ``threading.Event`` is *not* atomic for
@@ -1550,6 +1713,7 @@ class GatewayConfig(BaseSettings):
     task_runtime: TaskRuntimeConfig = Field(default_factory=TaskRuntimeConfig)
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
     llm: LlmProviderConfig = Field(default_factory=LlmProviderConfig)
+    llm_ensemble: LlmEnsembleConfig = Field(default_factory=LlmEnsembleConfig)
     prompt_cache: PromptCacheConfig = Field(default_factory=PromptCacheConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     prompt: PromptConfig = Field(default_factory=PromptConfig)

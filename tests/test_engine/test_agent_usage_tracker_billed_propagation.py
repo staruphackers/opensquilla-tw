@@ -23,7 +23,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from unittest.mock import MagicMock
 
+import pytest
+
 from opensquilla.engine.usage import UsageTracker
+
+
+def _usage_int(value: object) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _usage_float(value: object) -> float:
+    try:
+        return max(0.0, float(value or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 @dataclass
@@ -46,6 +62,7 @@ class _FakeProviderDoneEvent:
     thinking_signature: str | None = None
     tool_use_id: str | None = None
     tool_name: str | None = None
+    model_usage_breakdown: list[dict] | None = None
 
 
 def _simulate_agent_raw_ev_block(
@@ -61,6 +78,23 @@ def _simulate_agent_raw_ev_block(
     test below asserts the call shape, so a divergence fails fast.
     """
     if tracker and session_key:
+        if raw_ev.model_usage_breakdown:
+            for row in raw_ev.model_usage_breakdown:
+                cache_read = (
+                    row.get("cache_read_tokens")
+                    if "cache_read_tokens" in row
+                    else row.get("cached_tokens")
+                )
+                tracker.add(
+                    session_key,
+                    input_tokens=_usage_int(row.get("input_tokens") or 0),
+                    output_tokens=_usage_int(row.get("output_tokens") or 0),
+                    model_id=str(row.get("model") or fallback_model_id or ""),
+                    cache_read_tokens=_usage_int(cache_read or 0),
+                    cache_write_tokens=_usage_int(row.get("cache_write_tokens") or 0),
+                    billed_cost=_usage_float(row.get("billed_cost") or 0.0),
+                )
+            return
         tracker.add(
             session_key,
             input_tokens=raw_ev.input_tokens,
@@ -162,6 +196,80 @@ def test_multiple_raw_events_accumulate_per_model() -> None:
     assert by_model["z-ai/glm-5.1"]["costUsd"] == 0.0111
     assert by_model["z-ai/glm-5.1"]["costSource"] == "provider_billed"
     assert sum(row["costUsd"] for row in breakdown) == 0.1365
+
+
+def test_ensemble_breakdown_accumulates_each_underlying_model() -> None:
+    tracker = UsageTracker()
+    session_key = "agent:test:webchat:ensemble"
+    raw_ev = _FakeProviderDoneEvent(
+        input_tokens=33,
+        output_tokens=12,
+        cached_tokens=0,
+        cache_write_tokens=0,
+        billed_cost=0.03,
+        model="z-ai/glm-5.2",
+        model_usage_breakdown=[
+            {
+                "model": "deepseek/deepseek-v4-pro",
+                "input_tokens": 10,
+                "output_tokens": 2,
+                "cached_tokens": 1,
+                "cache_write_tokens": 0,
+                "billed_cost": 0.01,
+            },
+            {
+                "model": "z-ai/glm-5.2",
+                "input_tokens": 23,
+                "output_tokens": 10,
+                "cached_tokens": 0,
+                "cache_write_tokens": 4,
+                "billed_cost": 0.02,
+            },
+        ],
+    )
+
+    _simulate_agent_raw_ev_block(tracker, session_key, raw_ev)
+
+    usage = tracker.get(session_key)
+    assert usage is not None
+    by_model = {row["model"]: row for row in usage.model_breakdown}
+    assert by_model["deepseek/deepseek-v4-pro"]["inputTokens"] == 10
+    assert by_model["deepseek/deepseek-v4-pro"]["cacheReadTokens"] == 1
+    assert by_model["z-ai/glm-5.2"]["outputTokens"] == 10
+    assert by_model["z-ai/glm-5.2"]["cacheWriteTokens"] == 4
+    assert usage.billed_cost == pytest.approx(0.03)
+
+
+def test_ensemble_breakdown_malformed_usage_values_do_not_raise() -> None:
+    tracker = UsageTracker()
+    session_key = "agent:test:webchat:ensemble-malformed"
+    raw_ev = _FakeProviderDoneEvent(
+        input_tokens=0,
+        output_tokens=0,
+        cached_tokens=0,
+        cache_write_tokens=0,
+        billed_cost=0.0,
+        model="fallback-model",
+        model_usage_breakdown=[
+            {
+                "model": "bad-row",
+                "input_tokens": "not-an-int",
+                "output_tokens": None,
+                "cached_tokens": "also-bad",
+                "cache_write_tokens": -3,
+                "billed_cost": "not-a-float",
+            }
+        ],
+    )
+
+    _simulate_agent_raw_ev_block(tracker, session_key, raw_ev)
+
+    usage = tracker.get(session_key)
+    assert usage is not None
+    by_model = {row["model"]: row for row in usage.model_breakdown}
+    assert by_model["bad-row"]["inputTokens"] == 0
+    assert by_model["bad-row"]["cacheWriteTokens"] == 0
+    assert by_model["bad-row"]["costUsd"] == 0.0
 
 
 def test_mock_tracker_receives_billed_cost_kwarg() -> None:

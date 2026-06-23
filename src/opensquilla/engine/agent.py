@@ -168,6 +168,21 @@ def _cost_source_for_usage(cost_usd: float, billed_cost: float) -> str:
         return "opensquilla_estimate"
     return "unavailable"
 
+
+def _usage_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _usage_float(value: Any) -> float:
+    try:
+        return max(0.0, float(value or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 MAX_META_INVOKE_DEPTH = 3
 MAX_META_INVOKE_PER_TURN = 8
 
@@ -2460,15 +2475,51 @@ class Agent:
                                     # gateway/rpc_usage.py:_reconcile_breakdown_to_row
                                     # (the pro-rate fallback now skips when items
                                     # already carry real billed totals).
-                                    self._usage_tracker.add(
-                                        self._session_key,
-                                        input_tokens=raw_ev.input_tokens,
-                                        output_tokens=raw_ev.output_tokens,
-                                        model_id=raw_ev.model or self.config.model_id or "",
-                                        cache_read_tokens=raw_ev.cached_tokens,
-                                        cache_write_tokens=raw_ev.cache_write_tokens,
-                                        billed_cost=raw_ev.billed_cost,
+                                    usage_breakdown = getattr(
+                                        raw_ev,
+                                        "model_usage_breakdown",
+                                        None,
                                     )
+                                    if isinstance(usage_breakdown, list) and usage_breakdown:
+                                        for usage_row in usage_breakdown:
+                                            if not isinstance(usage_row, dict):
+                                                continue
+                                            cache_read = (
+                                                usage_row.get("cache_read_tokens")
+                                                if "cache_read_tokens" in usage_row
+                                                else usage_row.get("cached_tokens")
+                                            )
+                                            self._usage_tracker.add(
+                                                self._session_key,
+                                                input_tokens=_usage_int(
+                                                    usage_row.get("input_tokens") or 0
+                                                ),
+                                                output_tokens=_usage_int(
+                                                    usage_row.get("output_tokens") or 0
+                                                ),
+                                                model_id=str(
+                                                    usage_row.get("model")
+                                                    or self.config.model_id
+                                                    or ""
+                                                ),
+                                                cache_read_tokens=_usage_int(cache_read or 0),
+                                                cache_write_tokens=_usage_int(
+                                                    usage_row.get("cache_write_tokens") or 0
+                                                ),
+                                                billed_cost=_usage_float(
+                                                    usage_row.get("billed_cost") or 0.0
+                                                ),
+                                            )
+                                    else:
+                                        self._usage_tracker.add(
+                                            self._session_key,
+                                            input_tokens=raw_ev.input_tokens,
+                                            output_tokens=raw_ev.output_tokens,
+                                            model_id=raw_ev.model or self.config.model_id or "",
+                                            cache_read_tokens=raw_ev.cached_tokens,
+                                            cache_write_tokens=raw_ev.cache_write_tokens,
+                                            billed_cost=raw_ev.billed_cost,
+                                        )
 
                             elif isinstance(raw_ev, ProviderErrorEvent):
                                 provider_error_for_log = raw_ev
@@ -2554,6 +2605,18 @@ class Agent:
                             "cost_source": getattr(provider_done_for_log, "cost_source", "none"),
                             "model": provider_done_for_log.model,
                         }
+                        model_usage_breakdown = getattr(
+                            provider_done_for_log,
+                            "model_usage_breakdown",
+                            None,
+                        )
+                        if model_usage_breakdown:
+                            response_payload["usage"][
+                                "model_usage_breakdown"
+                            ] = model_usage_breakdown
+                        ensemble_trace = getattr(provider_done_for_log, "ensemble_trace", None)
+                        if ensemble_trace:
+                            response_payload["ensemble_trace"] = ensemble_trace
                     if provider_error_for_log is not None:
                         response_payload["error"] = {
                             "message": provider_error_for_log.message,

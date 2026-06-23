@@ -108,6 +108,65 @@ base_url = "https://openrouter.ai/api/v1"
 "anthropic/claude-opus-4.8" = "anthropic"
 "moonshotai/kimi-k2.6" = "moonshotai"
 
+[llm_ensemble]
+# Experimental B5 fusion mode. Disabled by default; when enabled, the normal
+# model-router still records routing metadata, but the agent LLM provider is
+# replaced by the active ensemble profile below.
+enabled = false
+active_profile = "g3_standard"
+mode = "b5_fusion"
+proposer_tools = false
+min_successful_proposers = 1
+all_failed_policy = "fallback_single"
+
+[[llm_ensemble.profiles.g1_code.proposers]]
+provider = "openrouter"
+model = "deepseek/deepseek-v4-pro"
+thinking = "high"
+
+[[llm_ensemble.profiles.g1_code.proposers]]
+provider = "openrouter"
+model = "z-ai/glm-5.2"
+thinking = "high"
+
+[[llm_ensemble.profiles.g1_code.proposers]]
+provider = "openrouter"
+model = "moonshotai/kimi-k2.7-code"
+thinking = "high"
+
+[llm_ensemble.profiles.g1_code.aggregator]
+provider = "openrouter"
+model = "z-ai/glm-5.2"
+thinking = "high"
+
+[[llm_ensemble.profiles.g3_standard.proposers]]
+provider = "openrouter"
+model = "deepseek/deepseek-v4-pro"
+thinking = "high"
+
+[[llm_ensemble.profiles.g3_standard.proposers]]
+provider = "openrouter"
+model = "z-ai/glm-5.2"
+thinking = "high"
+
+[[llm_ensemble.profiles.g3_standard.proposers]]
+provider = "openrouter"
+model = "google/gemini-3-flash-preview"
+thinking = "high"
+
+[llm_ensemble.profiles.g3_standard.aggregator]
+provider = "openrouter"
+model = "z-ai/glm-5.2"
+thinking = "high"
+
+[llm_ensemble.profiles.g4_gemini_aggregator]
+proposers = [
+  { provider = "openrouter", model = "deepseek/deepseek-v4-pro", thinking = "high" },
+  { provider = "openrouter", model = "z-ai/glm-5.2", thinking = "high" },
+  { provider = "openrouter", model = "google/gemini-3-flash-preview", thinking = "high" },
+]
+aggregator = { provider = "openrouter", model = "google/gemini-3-flash-preview", thinking = "high" }
+
 [memory]
 # "workspace" stores MEMORY.md and memory/*.md under workspace_dir.
 # SQLite indexes still live under state_dir.
