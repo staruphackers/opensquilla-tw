@@ -20,7 +20,9 @@ from scripts.run_draco_ensemble import (
     judge_text,
     load_tasks,
     quality_total,
+    render_markdown,
     score_criterion_judgments,
+    summarize,
 )
 
 
@@ -175,6 +177,51 @@ def test_draco_runner_expands_outer_timeout_for_profile_budget() -> None:
     assert group_timeout_seconds(requested_timeout=360.0, config=cfg, group="G6") == 450.0
     assert group_timeout_seconds(requested_timeout=600.0, config=cfg, group="G6") == 600.0
     assert group_timeout_seconds(requested_timeout=360.0, config=cfg, group="B2") == 360.0
+
+
+def test_draco_summary_compares_avg_quality_and_cost_pct_against_baselines() -> None:
+    rows = [
+        {
+            "task_id": "task-1",
+            "group": "B0",
+            "latency_ms": 100,
+            "quality_total": 40.0,
+            "judge": {"pass_rate": 40.0, "judge_error_count": 0},
+            "usage": {"billed_cost": 0.10, "input_tokens": 10, "output_tokens": 5},
+            "error": "",
+        },
+        {
+            "task_id": "task-1",
+            "group": "B1",
+            "latency_ms": 200,
+            "quality_total": 30.0,
+            "judge": {"pass_rate": 30.0, "judge_error_count": 0},
+            "usage": {"billed_cost": 0.20, "input_tokens": 12, "output_tokens": 6},
+            "error": "",
+        },
+        {
+            "task_id": "task-1",
+            "group": "G2",
+            "latency_ms": 300,
+            "quality_total": 45.0,
+            "judge": {"pass_rate": 50.0, "judge_error_count": 0},
+            "usage": {"billed_cost": 0.05, "input_tokens": 14, "output_tokens": 7},
+            "error": "",
+        },
+    ]
+
+    summary = summarize(rows)
+    g2 = summary["groups"]["G2"]
+
+    assert g2["avg_quality_pct_delta_vs_b0"] == pytest.approx(12.5)
+    assert g2["avg_cost_pct_delta_vs_b0"] == pytest.approx(-50.0)
+    assert g2["avg_quality_pct_delta_vs_b1"] == pytest.approx(50.0)
+    assert g2["avg_cost_pct_delta_vs_b1"] == pytest.approx(-75.0)
+    markdown = render_markdown(summary, Path("reports/draco/draco_ensemble_test.jsonl"))
+    assert "Win vs" not in markdown
+    assert "AvgQ % vs B0" in markdown
+    assert "+12.50%" in markdown
+    assert "-50.00%" in markdown
 
 
 def test_load_tasks_accepts_official_draco_problem_and_answer(tmp_path: Path) -> None:

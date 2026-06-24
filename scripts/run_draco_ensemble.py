@@ -1078,8 +1078,16 @@ def percentile(values: list[int], pct: float) -> float:
     return float(ordered[index])
 
 
+def numeric_pct_delta(value: Any, baseline: Any) -> float | None:
+    if isinstance(value, int | float) and isinstance(baseline, int | float):
+        baseline_float = float(baseline)
+        if baseline_float == 0.0:
+            return None
+        return (float(value) - baseline_float) / baseline_float * 100.0
+    return None
+
+
 def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    by_task_group = {(row["task_id"], row["group"]): row for row in rows}
     summary: dict[str, Any] = {"groups": {}}
     for group in sorted({row["group"] for row in rows}):
         group_rows = [row for row in rows if row["group"] == group]
@@ -1099,26 +1107,6 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
             + int((row.get("usage") or {}).get("output_tokens") or 0)
             for row in group_rows
         ]
-        wins_vs_b0 = 0
-        compared_b0 = 0
-        wins_vs_b1 = 0
-        compared_b1 = 0
-        for row in group_rows:
-            score = row.get("quality_total")
-            if score is None:
-                continue
-            for baseline in ["B0", "B1"]:
-                baseline_score = (
-                    by_task_group.get((row["task_id"], baseline), {}).get("quality_total")
-                )
-                if baseline_score is None:
-                    continue
-                if baseline == "B0":
-                    compared_b0 += 1
-                    wins_vs_b0 += int(score > baseline_score)
-                else:
-                    compared_b1 += 1
-                    wins_vs_b1 += int(score > baseline_score)
         summary["groups"][group] = {
             "rows": len(group_rows),
             "completed": sum(1 for row in group_rows if not row.get("error")),
@@ -1132,15 +1120,29 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "avg_total_tokens": statistics.mean(tokens) if tokens else 0.0,
             "latency_p50_ms": percentile(latencies, 50),
             "latency_p95_ms": percentile(latencies, 95),
-            "win_rate_vs_b0": wins_vs_b0 / compared_b0 if compared_b0 else None,
-            "win_rate_vs_b1": wins_vs_b1 / compared_b1 if compared_b1 else None,
         }
+    for item in summary["groups"].values():
+        for baseline in ("B0", "B1"):
+            baseline_item = summary["groups"].get(baseline) or {}
+            suffix = baseline.lower()
+            item[f"avg_quality_pct_delta_vs_{suffix}"] = numeric_pct_delta(
+                item.get("avg_quality"),
+                baseline_item.get("avg_quality"),
+            )
+            item[f"avg_cost_pct_delta_vs_{suffix}"] = numeric_pct_delta(
+                item.get("avg_cost_usd"),
+                baseline_item.get("avg_cost_usd"),
+            )
     return summary
 
 
 def render_markdown(summary: dict[str, Any], jsonl_path: Path) -> str:
     stamp = jsonl_path.stem.removeprefix("draco_ensemble_")
     trace_path = jsonl_path.parent / f"draco_run_{stamp}.trace.jsonl"
+
+    def _signed_pct(value: Any) -> str:
+        return f"{float(value):+.2f}%" if isinstance(value, int | float) else ""
+
     lines = [
         "# DRACO Ensemble Summary",
         "",
@@ -1150,15 +1152,16 @@ def render_markdown(summary: dict[str, Any], jsonl_path: Path) -> str:
         f"Runner mode: `{RUNNER_MODE}`; external research tools are not attached.",
         "",
         "| Group | Rows | Done | Avg Quality | Avg Pass | Judge Err | Avg $ | "
-        "Avg Tokens | p50 ms | p95 ms | Win vs B0 | Win vs B1 |",
+        "Avg Tokens | p50 ms | p95 ms | AvgQ % vs B0 | Avg$ % vs B0 | "
+        "AvgQ % vs B1 | Avg$ % vs B1 |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | "
-        "---: | ---: |",
+        "---: | ---: | ---: | ---: |",
     ]
     for group, item in sorted(summary["groups"].items()):
         lines.append(
             "| {group} | {rows} | {done} | {quality} | {pass_rate} | "
             "{judge_errors} | {cost:.6f} | {tokens:.1f} | {p50:.0f} | "
-            "{p95:.0f} | {b0} | {b1} |".format(
+            "{p95:.0f} | {q_b0} | {cost_b0} | {q_b1} | {cost_b1} |".format(
                 group=group,
                 rows=item["rows"],
                 done=item["completed"],
@@ -1175,16 +1178,10 @@ def render_markdown(summary: dict[str, Any], jsonl_path: Path) -> str:
                 tokens=item["avg_total_tokens"],
                 p50=item["latency_p50_ms"],
                 p95=item["latency_p95_ms"],
-                b0=(
-                    f"{item['win_rate_vs_b0']:.2%}"
-                    if item["win_rate_vs_b0"] is not None
-                    else ""
-                ),
-                b1=(
-                    f"{item['win_rate_vs_b1']:.2%}"
-                    if item["win_rate_vs_b1"] is not None
-                    else ""
-                ),
+                q_b0=_signed_pct(item.get("avg_quality_pct_delta_vs_b0")),
+                cost_b0=_signed_pct(item.get("avg_cost_pct_delta_vs_b0")),
+                q_b1=_signed_pct(item.get("avg_quality_pct_delta_vs_b1")),
+                cost_b1=_signed_pct(item.get("avg_cost_pct_delta_vs_b1")),
             )
         )
     return "\n".join(lines) + "\n"
