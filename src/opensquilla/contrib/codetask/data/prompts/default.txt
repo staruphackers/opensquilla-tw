@@ -41,10 +41,21 @@ Phase 2 — RUN THE PROJECT
   harness works before you change anything.
 
 Phase 3 — WRITE ACCEPTANCE TESTS FIRST (red)
-  Before fixing anything, write one or more tests that encode the expected
-  behavior from Phase 1. Run them and CONFIRM THEY FAIL on the current code.
-  A test that passes immediately proves nothing — make it genuinely fail
-  for the right reason first.
+  TESTABILITY GATE — decide this FAST, up front, before sinking time: can
+  this change be proven by a DETERMINISTIC automated test you can run here?
+  Some changes cannot — e.g. UI/browser interaction or event-timing
+  behavior, things needing a real GUI/network/hardware, or an area of the
+  repo with no usable test harness. If it is NOT automatically testable, do
+  NOT burn the run trying to force a test: make the code change anyway, set
+  "testable": false with a concrete "not_testable_reason", and finish. Also
+  bail this way if, after a couple of HONEST attempts, you cannot get a test
+  to genuinely FAIL on the current code for the RIGHT reason — stop, mark it
+  not testable, explain why, and proceed; do NOT keep grinding until the
+  timeout.
+  When a real automated test IS feasible: write one or more tests that
+  encode the expected behavior from Phase 1, run them and CONFIRM THEY FAIL
+  on the current code. A test that passes immediately proves nothing — make
+  it genuinely fail for the right reason first.
 
 Phase 4 — IMPLEMENT (green)
   Make the minimal change to non-test code so your acceptance tests pass.
@@ -81,8 +92,11 @@ Phase 6 — RECORD THE VERIFICATION MANIFEST (required)
     `PYTHONPATH=src python -m pytest tests/test_x.py::test_y`.
   - "test_paths" must list the test files you ADDED/CHANGED so the runner can
     re-create the red state on the original code. This is required.
-  - If the task genuinely cannot be expressed as an automated test (pure docs
-    or config), set "testable": false and explain in "not_testable_reason".
+  - If the task genuinely cannot be expressed as a DETERMINISTIC automated
+    test — pure docs or config, OR UI/browser/event-timing behavior, OR an
+    area with no usable test harness — set "testable": false and explain in
+    "not_testable_reason". Decide this EARLY (Phase 3), not after burning the
+    run.
   - If you find the expected behavior ALREADY holds before any change, still
     write the acceptance test and record your finding in "assumptions".
   - Record any assumption you made when the task was ambiguous, so the user
@@ -92,5 +106,7 @@ Phase 7 — COMMIT
   Commit your change on the current branch with a clear message. Do not
   commit scratch files.
 
-Be thorough. Getting the acceptance test to truly go from red to green is
-more important than speed.
+Be thorough WHERE a test is feasible — getting it to truly go from red to
+green is more important than speed. But do NOT grind on an untestable
+change: a fast, honest "not_testable" with the change made beats burning
+the whole run failing to write a test.
