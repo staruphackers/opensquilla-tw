@@ -52,6 +52,7 @@ GROUP_SPECS: dict[str, dict[str, str]] = {
 
 RUNNER_MODE = "provider_only"
 PROFILE_TIMEOUT_MARGIN_SECONDS = 30.0
+JUDGE_MAX_ATTEMPTS = 3
 
 
 @dataclass
@@ -573,6 +574,14 @@ def run_result_summary(result: RunResult) -> dict[str, Any]:
     }
 
 
+def bounded_judge_attempts(value: int | None) -> int:
+    try:
+        attempts = JUDGE_MAX_ATTEMPTS if value is None else int(value)
+    except (TypeError, ValueError):
+        attempts = JUDGE_MAX_ATTEMPTS
+    return max(1, min(JUDGE_MAX_ATTEMPTS, attempts))
+
+
 async def judge_text(
     *,
     judge_provider: Any | None,
@@ -581,6 +590,7 @@ async def judge_text(
     dry_run: bool,
     judge_repeats: int = 1,
     judge_concurrency: int = 1,
+    judge_max_attempts: int = JUDGE_MAX_ATTEMPTS,
 ) -> dict[str, Any] | None:
     if not answer.strip():
         return None
@@ -619,6 +629,7 @@ async def judge_text(
         })
     if judge_provider is None:
         return None
+    max_attempts = bounded_judge_attempts(judge_max_attempts)
     if criteria:
         repeats = max(1, int(judge_repeats or 1))
         semaphore = asyncio.Semaphore(max(1, int(judge_concurrency or 1)))
@@ -634,6 +645,7 @@ async def judge_text(
                     answer=answer,
                     criterion=criterion,
                     repeat_index=repeat_index,
+                    max_attempts=max_attempts,
                 )
 
         judgments = await asyncio.gather(
@@ -659,21 +671,37 @@ async def judge_text(
         f"Reference:\n{reference}\n\n"
         f"Answer:\n{answer}"
     )
-    result = await collect_run(
-        judge_provider,
-        prompt,
-        timeout=120.0,
-        config=ChatConfig(temperature=0.0, thinking=False),
-    )
-    parsed = extract_json_object(result.final_text)
-    if parsed is not None:
-        normalized = normalize_legacy_judge_result(parsed)
-        normalized["judge_run"] = run_result_summary(result)
-        return normalized
+    attempts: list[dict[str, Any]] = []
+    last_result: RunResult | None = None
+    for attempt_index in range(1, max_attempts + 1):
+        result = await collect_run(
+            judge_provider,
+            prompt,
+            timeout=120.0,
+            config=ChatConfig(temperature=0.0, thinking=False),
+        )
+        last_result = result
+        parsed = extract_json_object(result.final_text)
+        attempts.append(
+            {
+                "attempt": attempt_index,
+                "parsed": parsed is not None,
+                "run": run_result_summary(result),
+            }
+        )
+        if parsed is not None:
+            normalized = normalize_legacy_judge_result(parsed)
+            normalized["judge_run"] = run_result_summary(result)
+            normalized["judge_attempt_count"] = attempt_index
+            normalized["judge_attempts"] = attempts
+            return normalized
+    last_text = last_result.final_text if last_result is not None else ""
     return {
         "error": "judge_json_parse_failed",
-        "raw": result.final_text[:2000],
-        "judge_run": run_result_summary(result),
+        "raw": last_text[:2000],
+        "judge_run": run_result_summary(last_result) if last_result is not None else {},
+        "judge_attempt_count": len(attempts),
+        "judge_attempts": attempts,
     }
 
 
@@ -691,6 +719,7 @@ async def judge_criterion(
     answer: str,
     criterion: dict[str, Any],
     repeat_index: int = 0,
+    max_attempts: int = JUDGE_MAX_ATTEMPTS,
 ) -> dict[str, Any]:
     weight = coerce_weight(criterion.get("weight"))
     criterion_type = "negative" if weight < 0 else "positive"
@@ -708,27 +737,53 @@ async def judge_criterion(
         f"- weight: {weight}\n"
         f"- requirement: {criterion.get('requirement')}\n"
     )
-    result = await collect_run(
-        judge_provider,
-        prompt,
-        timeout=120.0,
-        config=ChatConfig(temperature=0.0, thinking=False),
-    )
-    parsed = extract_json_object(result.final_text) or {}
-    met = parse_verdict(parsed.get("verdict"))
-    row = {
+    attempts: list[dict[str, Any]] = []
+    last_row: dict[str, Any] | None = None
+    for attempt_index in range(1, bounded_judge_attempts(max_attempts) + 1):
+        result = await collect_run(
+            judge_provider,
+            prompt,
+            timeout=120.0,
+            config=ChatConfig(temperature=0.0, thinking=False),
+        )
+        parsed = extract_json_object(result.final_text) or {}
+        met = parse_verdict(parsed.get("verdict"))
+        run_summary = run_result_summary(result)
+        attempts.append(
+            {
+                "attempt": attempt_index,
+                "verdict": parsed.get("verdict") if parsed else "",
+                "met": met,
+                "run": run_summary,
+            }
+        )
+        row = {
+            **criterion,
+            "weight": weight,
+            "repeat_index": repeat_index,
+            "verdict": parsed.get("verdict") if parsed else "",
+            "met": met,
+            "rationale": str(parsed.get("rationale") or parsed.get("reason") or "")[:1000],
+            "judge_run": run_summary,
+            "judge_attempt_count": attempt_index,
+            "judge_attempts": list(attempts),
+        }
+        if met is not None:
+            return row
+        row["error"] = result.error or "judge_verdict_parse_failed"
+        row["raw"] = result.final_text[:1000]
+        last_row = row
+    return last_row if last_row is not None else {
         **criterion,
         "weight": weight,
         "repeat_index": repeat_index,
-        "verdict": parsed.get("verdict") if parsed else "",
-        "met": met,
-        "rationale": str(parsed.get("rationale") or parsed.get("reason") or "")[:1000],
-        "judge_run": run_result_summary(result),
+        "verdict": "",
+        "met": None,
+        "rationale": "",
+        "error": "judge_verdict_parse_failed",
+        "judge_attempt_count": 0,
+        "judge_attempts": [],
     }
-    if met is None:
-        row["error"] = result.error or "judge_verdict_parse_failed"
-        row["raw"] = result.final_text[:1000]
-    return row
 
 
 def score_criterion_judgments(
@@ -900,6 +955,7 @@ async def run_one(
     judge_candidates: bool,
     judge_repeats: int,
     judge_concurrency: int,
+    judge_max_attempts: int,
     timeout: float,
 ) -> dict[str, Any]:
     spec = GROUP_SPECS[group]
@@ -941,6 +997,7 @@ async def run_one(
         dry_run=dry_run and judge_provider is not None,
         judge_repeats=judge_repeats,
         judge_concurrency=judge_concurrency,
+        judge_max_attempts=judge_max_attempts,
     )
     candidate_judges: list[dict[str, Any] | None] = []
     if judge_candidates:
@@ -953,6 +1010,7 @@ async def run_one(
                     dry_run=dry_run and judge_provider is not None,
                     judge_repeats=judge_repeats,
                     judge_concurrency=judge_concurrency,
+                    judge_max_attempts=judge_max_attempts,
                 )
             )
     fused_total = quality_total(judge)
@@ -1200,6 +1258,7 @@ def manifest_args(args: argparse.Namespace) -> dict[str, Any]:
         "judge_model",
         "judge_repeats",
         "judge_concurrency",
+        "judge_max_attempts",
         "judge_candidates",
     ]
     payload: dict[str, Any] = {}
@@ -1300,6 +1359,7 @@ async def amain(args: argparse.Namespace) -> int:
                 judge_candidates=args.judge_candidates,
                 judge_repeats=args.judge_repeats,
                 judge_concurrency=getattr(args, "judge_concurrency", 1),
+                judge_max_attempts=getattr(args, "judge_max_attempts", JUDGE_MAX_ATTEMPTS),
                 timeout=args.timeout,
             )
 
@@ -1357,6 +1417,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--judge-model", default="")
     parser.add_argument("--judge-repeats", type=int, default=1)
     parser.add_argument("--judge-concurrency", type=int, default=1)
+    parser.add_argument("--judge-max-attempts", type=int, default=JUDGE_MAX_ATTEMPTS)
     parser.add_argument("--judge-candidates", action="store_true")
     return parser
 

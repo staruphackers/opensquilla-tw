@@ -42,6 +42,26 @@ class _CriterionJudgeProvider:
         return []
 
 
+class _FlakyCriterionJudgeProvider:
+    model = "judge-flaky"
+    provider_name = "judge"
+
+    def __init__(self, *, failures_before_success: int) -> None:
+        self.failures_before_success = failures_before_success
+        self.calls = 0
+
+    async def chat(self, messages: list[Message], tools=None, config=None):  # noqa: ANN001, ARG002
+        self.calls += 1
+        if self.calls <= self.failures_before_success:
+            yield TextDeltaEvent(text='{"verdict":"MAYBE","rationale":"not parseable"}')
+        else:
+            yield TextDeltaEvent(text='{"verdict":"MET","rationale":"ok"}')
+        yield DoneEvent(model=self.model)
+
+    async def list_models(self) -> list:
+        return []
+
+
 class _SlowProvider:
     provider_name = "slow"
 
@@ -81,6 +101,7 @@ async def test_draco_runner_dry_run_writes_jsonl_and_summary(tmp_path: Path) -> 
         judge_model="dry-judge",
         judge_repeats=1,
         judge_concurrency=1,
+        judge_max_attempts=3,
         judge_candidates=True,
     )
 
@@ -127,6 +148,7 @@ def test_draco_runner_default_groups_include_g1() -> None:
     assert "G1" in args.groups.split(",")
     assert GROUP_SPECS["G1"]["profile"] == "g1_code"
     assert args.judge_concurrency == 1
+    assert args.judge_max_attempts == 3
 
 
 def test_draco_runner_profile_groups_exist_in_default_config() -> None:
@@ -295,6 +317,45 @@ async def test_judge_text_uses_draco_criterion_judgments() -> None:
     assert result["pass_rate"] == 100.0
     assert result["criteria_count"] == 2
     assert [item["verdict"] for item in result["criterion_judgments"]] == ["MET", "UNMET"]
+
+
+@pytest.mark.asyncio
+async def test_judge_text_retries_invalid_criterion_verdict_up_to_three() -> None:
+    provider = _FlakyCriterionJudgeProvider(failures_before_success=2)
+    task = {
+        "id": "task-1",
+        "prompt": "Research this.",
+        "rubric": {
+            "id": "rubric-1",
+            "sections": [
+                {
+                    "id": "factual-accuracy",
+                    "title": "Factual Accuracy",
+                    "criteria": [
+                        {"id": "pos", "weight": 10, "requirement": "Contains fact"},
+                    ],
+                }
+            ],
+        },
+    }
+
+    result = await judge_text(
+        judge_provider=provider,
+        task=task,
+        answer="A researched answer.",
+        dry_run=False,
+        judge_max_attempts=9,
+    )
+
+    assert provider.calls == 3
+    assert result is not None
+    assert result["score_status"] == "complete"
+    assert result["judge_error_count"] == 0
+    [judgment] = result["criterion_judgments"]
+    assert judgment["met"] is True
+    assert judgment["judge_attempt_count"] == 3
+    assert len(judgment["judge_attempts"]) == 3
+    assert judgment["judge_attempts"][0]["met"] is None
 
 
 def test_invalid_criterion_judgment_marks_score_partial() -> None:
