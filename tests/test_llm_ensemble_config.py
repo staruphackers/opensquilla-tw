@@ -41,6 +41,10 @@ def test_llm_ensemble_config_defaults_disabled_with_profiles() -> None:
         cfg.llm_ensemble.profiles["g4_gemini_aggregator"].aggregator.model
         == "google/gemini-3-flash-preview"
     )
+    assert (
+        cfg.llm_ensemble.profiles["g6_gpt_aggregator"].aggregator_timeout_seconds
+        == 300.0
+    )
     assert cfg.llm_ensemble.profiles["g3_standard"].record_candidates is False
 
 

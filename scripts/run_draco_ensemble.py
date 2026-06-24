@@ -51,6 +51,7 @@ GROUP_SPECS: dict[str, dict[str, str]] = {
 }
 
 RUNNER_MODE = "provider_only"
+PROFILE_TIMEOUT_MARGIN_SECONDS = 30.0
 
 
 @dataclass
@@ -923,8 +924,13 @@ async def run_one(
             )
     except Exception as exc:  # noqa: BLE001 - report config errors per row
         provider_error = f"{type(exc).__name__}: {exc}"
+    effective_timeout = group_timeout_seconds(
+        requested_timeout=timeout,
+        config=config,
+        group=group,
+    )
     run = (
-        await collect_run(provider, str(task["prompt"]), timeout=timeout)
+        await collect_run(provider, str(task["prompt"]), timeout=effective_timeout)
         if provider is not None
         else RunResult(final_text="", done=None, error=provider_error)
     )
@@ -980,6 +986,8 @@ async def run_one(
         "execution": {
             "provider_error": provider_error,
             "run_error": run.error,
+            "requested_timeout_s": timeout,
+            "effective_timeout_s": effective_timeout,
             "latency_ms": run.latency_ms,
             "ttft_ms": run.ttft_ms,
             "total_elapsed_ms": int((completed_at - started) * 1000),
@@ -1000,6 +1008,28 @@ async def run_one(
             else None
         ),
     }
+
+
+def group_timeout_seconds(
+    *,
+    requested_timeout: float,
+    config: GatewayConfig,
+    group: str,
+) -> float:
+    if requested_timeout <= 0:
+        return requested_timeout
+    spec = GROUP_SPECS[group]
+    if spec["kind"] != "profile":
+        return requested_timeout
+    profile = config.llm_ensemble.profiles.get(spec["profile"])
+    if profile is None:
+        return requested_timeout
+    profile_budget = (
+        float(profile.proposer_timeout_seconds)
+        + float(profile.aggregator_timeout_seconds)
+        + PROFILE_TIMEOUT_MARGIN_SECONDS
+    )
+    return max(float(requested_timeout), profile_budget)
 
 
 def compact_judge_summary(judge: dict[str, Any] | None) -> dict[str, Any]:

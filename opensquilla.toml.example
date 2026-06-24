@@ -167,6 +167,16 @@ proposers = [
 ]
 aggregator = { provider = "openrouter", model = "google/gemini-3-flash-preview", thinking = "high" }
 
+[llm_ensemble.profiles.g6_gpt_aggregator]
+proposer_timeout_seconds = 120.0
+aggregator_timeout_seconds = 300.0
+proposers = [
+  { provider = "openrouter", model = "deepseek/deepseek-v4-pro", thinking = "high" },
+  { provider = "openrouter", model = "z-ai/glm-5.2", thinking = "high" },
+  { provider = "openrouter", model = "google/gemini-3-flash-preview", thinking = "high" },
+]
+aggregator = { provider = "openrouter", model = "openai/gpt-5.5", thinking = "high" }
+
 [memory]
 # "workspace" stores MEMORY.md and memory/*.md under workspace_dir.
 # SQLite indexes still live under state_dir.

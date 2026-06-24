@@ -16,6 +16,7 @@ from scripts.run_draco_ensemble import (
     build_parser,
     build_profile_provider,
     collect_run,
+    group_timeout_seconds,
     judge_text,
     load_tasks,
     quality_total,
@@ -166,6 +167,14 @@ def test_draco_runner_profile_provider_records_candidates_for_results() -> None:
     )
 
     assert provider.record_candidates is True
+
+
+def test_draco_runner_expands_outer_timeout_for_profile_budget() -> None:
+    cfg = GatewayConfig()
+
+    assert group_timeout_seconds(requested_timeout=360.0, config=cfg, group="G6") == 450.0
+    assert group_timeout_seconds(requested_timeout=600.0, config=cfg, group="G6") == 600.0
+    assert group_timeout_seconds(requested_timeout=360.0, config=cfg, group="B2") == 360.0
 
 
 def test_load_tasks_accepts_official_draco_problem_and_answer(tmp_path: Path) -> None:

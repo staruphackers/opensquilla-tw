@@ -289,11 +289,19 @@ def _ensemble_ref(
 def _ensemble_profile(
     proposers: list[dict[str, Any]],
     aggregator: dict[str, Any],
+    *,
+    proposer_timeout_seconds: float | None = None,
+    aggregator_timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "proposers": proposers,
         "aggregator": aggregator,
     }
+    if proposer_timeout_seconds is not None:
+        payload["proposer_timeout_seconds"] = proposer_timeout_seconds
+    if aggregator_timeout_seconds is not None:
+        payload["aggregator_timeout_seconds"] = aggregator_timeout_seconds
+    return payload
 
 
 def _default_llm_ensemble_profiles() -> dict[str, dict[str, Any]]:
@@ -339,6 +347,7 @@ def _default_llm_ensemble_profiles() -> dict[str, dict[str, Any]]:
         "g6_gpt_aggregator": _ensemble_profile(
             list(g3_proposers),
             _ensemble_ref("openai/gpt-5.5", thinking="high"),
+            aggregator_timeout_seconds=300.0,
         ),
         "g7_two_proposers": _ensemble_profile(
             [
