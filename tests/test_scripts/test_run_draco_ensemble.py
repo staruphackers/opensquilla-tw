@@ -105,6 +105,15 @@ async def test_draco_runner_dry_run_writes_jsonl_and_summary(tmp_path: Path) -> 
         judge_concurrency=1,
         judge_max_attempts=3,
         judge_candidates=True,
+        command_argv=[
+            ".venv/bin/python",
+            "scripts/run_draco_ensemble.py",
+            "--input",
+            str(input_path),
+            "--groups",
+            "B2,G1,G3",
+            "--dry-run",
+        ],
     )
 
     rc = await amain(args)
@@ -145,11 +154,17 @@ async def test_draco_runner_dry_run_writes_jsonl_and_summary(tmp_path: Path) -> 
     ]
     assert len(trace_rows) == len(rows)
     assert trace_rows[0]["run_trace"]["events"]
+    [command_path] = output_dir.glob("draco_run_*.command.txt")
+    command_text = command_path.read_text(encoding="utf-8")
+    assert "scripts/run_draco_ensemble.py" in command_text
+    assert "--groups B2,G1,G3" in command_text
     [manifest_path] = output_dir.glob("draco_run_*.manifest.json")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["status"] == "complete"
     assert manifest["rows_written"] == len(rows)
     assert manifest["artifacts"]["trace_jsonl"] == str(trace_path)
+    assert manifest["artifacts"]["command_txt"] == str(command_path)
+    assert manifest["command"]["shell"].startswith(".venv/bin/python")
     assert manifest["tool_policy"]["tool_mode"] == "provider_only"
     assert "huggingface.co" in manifest["tool_policy"]["contamination_blocked_domains"]
 

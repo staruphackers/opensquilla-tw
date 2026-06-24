@@ -7,6 +7,8 @@ import argparse
 import asyncio
 import hashlib
 import json
+import os
+import shlex
 import statistics
 import sys
 import time
@@ -1367,6 +1369,71 @@ def manifest_args(args: argparse.Namespace) -> dict[str, Any]:
     return payload
 
 
+def reconstructed_cli_args(args: argparse.Namespace) -> list[str]:
+    cli_args: list[str] = []
+    for key, value in manifest_args(args).items():
+        if value is None or value == "" or value is False:
+            continue
+        flag = f"--{key.replace('_', '-')}"
+        if value is True:
+            cli_args.append(flag)
+        else:
+            cli_args.extend([flag, str(value)])
+    return cli_args
+
+
+def command_argv(args: argparse.Namespace) -> list[str]:
+    raw_argv = getattr(args, "command_argv", None)
+    if raw_argv:
+        return [str(item) for item in raw_argv]
+    return [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        *reconstructed_cli_args(args),
+    ]
+
+
+def command_payload(args: argparse.Namespace) -> dict[str, Any]:
+    argv = command_argv(args)
+    return {
+        "cwd": str(Path.cwd()),
+        "python": sys.executable,
+        "argv": argv,
+        "shell": shlex.join(argv),
+        "pythonpath": os.environ.get("PYTHONPATH", ""),
+        "parsed_args": manifest_args(args),
+    }
+
+
+def write_command_file(
+    path: Path,
+    *,
+    args: argparse.Namespace,
+    stamp: str,
+) -> dict[str, Any]:
+    payload = command_payload(args)
+    lines = [
+        "# DRACO benchmark command",
+        f"stamp: {stamp}",
+        f"cwd: {payload['cwd']}",
+        f"python: {payload['python']}",
+    ]
+    if payload["pythonpath"]:
+        lines.append(f"PYTHONPATH: {payload['pythonpath']}")
+    lines.extend(
+        [
+            "",
+            payload["shell"],
+            "",
+            "# Parsed args",
+            json.dumps(payload["parsed_args"], ensure_ascii=False, indent=2, sort_keys=True),
+            "",
+        ]
+    )
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return payload
+
+
 def write_manifest(
     path: Path,
     *,
@@ -1381,6 +1448,7 @@ def write_manifest(
     finished_at: float | None = None,
     summary: dict[str, Any] | None = None,
     tool_policy: dict[str, Any] | None = None,
+    command: dict[str, Any] | None = None,
 ) -> None:
     policy = tool_policy or benchmark_tool_policy(args)
     payload: dict[str, Any] = {
@@ -1403,6 +1471,8 @@ def write_manifest(
         "rows_written": rows_written,
         "artifacts": artifacts,
     }
+    if command is not None:
+        payload["command"] = command
     if summary is not None:
         payload["summary"] = summary
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -1429,6 +1499,7 @@ async def amain(args: argparse.Namespace) -> int:
     jsonl_path = output_dir / f"draco_ensemble_{stamp}.jsonl"
     trace_path = output_dir / f"draco_run_{stamp}.trace.jsonl"
     manifest_path = output_dir / f"draco_run_{stamp}.manifest.json"
+    command_path = output_dir / f"draco_run_{stamp}.command.txt"
     summary_json_path = jsonl_path.with_suffix(".summary.json")
     semaphore = asyncio.Semaphore(max(1, args.concurrency))
     rows: list[dict[str, Any]] = []
@@ -1436,9 +1507,11 @@ async def amain(args: argparse.Namespace) -> int:
         "results_jsonl": str(jsonl_path),
         "trace_jsonl": str(trace_path),
         "manifest_json": str(manifest_path),
+        "command_txt": str(command_path),
         "summary_json": str(summary_json_path),
         "summary_markdown": str(jsonl_path.with_suffix(".md")),
     }
+    command = write_command_file(command_path, args=args, stamp=stamp)
     write_manifest(
         manifest_path,
         args=args,
@@ -1449,6 +1522,7 @@ async def amain(args: argparse.Namespace) -> int:
         groups=groups,
         artifacts=artifacts,
         tool_policy=tool_policy,
+        command=command,
     )
 
     async def _guarded(task: dict[str, Any], group: str) -> dict[str, Any]:
@@ -1504,10 +1578,12 @@ async def amain(args: argparse.Namespace) -> int:
         artifacts=artifacts,
         summary=summary,
         tool_policy=tool_policy,
+        command=command,
     )
     print(f"wrote {jsonl_path}")
     print(f"wrote {trace_path}")
     print(f"wrote {manifest_path}")
+    print(f"wrote {command_path}")
     print(f"wrote {summary_json_path}")
     print(f"wrote {summary_path}")
     return 0
@@ -1551,6 +1627,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
+    args.command_argv = [sys.executable, *sys.argv]
     return asyncio.run(amain(args))
 
 
