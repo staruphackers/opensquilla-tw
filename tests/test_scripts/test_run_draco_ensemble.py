@@ -97,8 +97,25 @@ async def test_draco_runner_dry_run_writes_jsonl_and_summary(tmp_path: Path) -> 
     assert g3["ensemble_trace"]["profile"] == "g3_standard"
     assert g3["candidate_judges"]
     assert g3["usage"]["model_usage_breakdown"]
+    assert g3["run_trace"]["event_count"] >= 2
+    assert g3["final_text_sha256"]
     md_path = jsonl_path.with_suffix(".md")
     assert "DRACO Ensemble Summary" in md_path.read_text(encoding="utf-8")
+    summary_json_path = jsonl_path.with_suffix(".summary.json")
+    assert summary_json_path.exists()
+    [trace_path] = output_dir.glob("draco_run_*.trace.jsonl")
+    trace_rows = [
+        json.loads(line)
+        for line in trace_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(trace_rows) == len(rows)
+    assert trace_rows[0]["run_trace"]["events"]
+    [manifest_path] = output_dir.glob("draco_run_*.manifest.json")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["status"] == "complete"
+    assert manifest["rows_written"] == len(rows)
+    assert manifest["artifacts"]["trace_jsonl"] == str(trace_path)
 
 
 def test_draco_runner_default_groups_include_g1() -> None:
@@ -277,3 +294,4 @@ async def test_collect_run_enforces_outer_timeout() -> None:
 
     assert result.final_text == ""
     assert "TimeoutError" in result.error
+    assert result.trace_events[-1]["kind"] == "timeout"

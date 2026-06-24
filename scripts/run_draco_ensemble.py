@@ -5,11 +5,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import statistics
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +27,11 @@ from opensquilla.provider.types import (
     DoneEvent,
     ErrorEvent,
     Message,
+    ProviderHeartbeatEvent,
+    ReasoningDeltaEvent,
     TextDeltaEvent,
+    ToolUseDeltaEvent,
+    ToolUseEndEvent,
     ToolUseStartEvent,
 )
 
@@ -56,6 +61,7 @@ class RunResult:
     latency_ms: int = 0
     ttft_ms: int | None = None
     tool_call_count: int = 0
+    trace_events: list[dict[str, Any]] = field(default_factory=list)
 
 
 class DryProvider:
@@ -414,7 +420,19 @@ async def collect_run(
     error = ""
     ttft_ms: int | None = None
     tool_call_count = 0
+    trace_events: list[dict[str, Any]] = []
     started = time.monotonic()
+
+    def _trace(kind: str, **payload: Any) -> None:
+        trace_events.append(
+            {
+                "seq": len(trace_events) + 1,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+                "kind": kind,
+                **payload,
+            }
+        )
+
     try:
         chat_config = (
             config.model_copy(update={"timeout": timeout})
@@ -432,14 +450,54 @@ async def collect_run(
                 if isinstance(event, TextDeltaEvent):
                     if ttft_ms is None and event.text:
                         ttft_ms = int((time.monotonic() - started) * 1000)
+                        _trace("first_text_delta", text_chars=len(event.text))
+                    else:
+                        _trace("text_delta", text_chars=len(event.text))
                     text_parts.append(event.text)
+                elif isinstance(event, ReasoningDeltaEvent):
+                    _trace("reasoning_delta", text_chars=len(event.text))
                 elif isinstance(event, ToolUseStartEvent):
                     tool_call_count += 1
+                    _trace(
+                        "tool_use_start",
+                        tool_use_id=event.tool_use_id,
+                        tool_name=event.tool_name,
+                        synthetic_from_text=event.synthetic_from_text,
+                    )
+                elif isinstance(event, ToolUseDeltaEvent):
+                    _trace(
+                        "tool_use_delta",
+                        tool_use_id=event.tool_use_id,
+                        json_fragment_chars=len(event.json_fragment),
+                    )
+                elif isinstance(event, ToolUseEndEvent):
+                    _trace(
+                        "tool_use_end",
+                        tool_use_id=event.tool_use_id,
+                        tool_name=event.tool_name,
+                        argument_keys=sorted(event.arguments.keys()),
+                        synthetic_from_text=event.synthetic_from_text,
+                    )
+                elif isinstance(event, ProviderHeartbeatEvent):
+                    _trace(
+                        "provider_heartbeat",
+                        phase=event.phase,
+                        message=event.message,
+                    )
                 elif isinstance(event, DoneEvent):
                     done = event
+                    _trace(
+                        "done",
+                        stop_reason=event.stop_reason,
+                        usage=done_payload(event),
+                        has_ensemble_trace=bool(event.ensemble_trace),
+                    )
                 elif isinstance(event, ErrorEvent):
                     error = event.message
+                    _trace("error", message=event.message, code=event.code)
                     break
+                else:
+                    _trace("stream_event", event_type=type(event).__name__)
 
         if timeout and timeout > 0:
             try:
@@ -447,10 +505,12 @@ async def collect_run(
                     await _consume()
             except TimeoutError:
                 error = f"TimeoutError: run timed out after {timeout:g}s"
+                _trace("timeout", timeout_s=timeout)
         else:
             await _consume()
     except Exception as exc:  # noqa: BLE001 - benchmark rows should keep going
         error = f"{type(exc).__name__}: {exc}"
+        _trace("exception", error=error)
     return RunResult(
         final_text="".join(text_parts),
         done=done,
@@ -458,6 +518,7 @@ async def collect_run(
         latency_ms=int((time.monotonic() - started) * 1000),
         ttft_ms=ttft_ms,
         tool_call_count=tool_call_count,
+        trace_events=trace_events,
     )
 
 
@@ -466,6 +527,7 @@ def done_payload(done: DoneEvent | None) -> dict[str, Any]:
         return {}
     return {
         "model": done.model,
+        "stop_reason": done.stop_reason,
         "input_tokens": done.input_tokens,
         "output_tokens": done.output_tokens,
         "reasoning_tokens": done.reasoning_tokens,
@@ -474,6 +536,8 @@ def done_payload(done: DoneEvent | None) -> dict[str, Any]:
         "billed_cost": done.billed_cost,
         "cost_source": done.cost_source,
         "model_usage_breakdown": done.model_usage_breakdown,
+        "reasoning_content_chars": len(done.reasoning_content or ""),
+        "thinking_signature_present": bool(done.thinking_signature),
     }
 
 
@@ -489,6 +553,23 @@ def candidate_texts(done: DoneEvent | None) -> list[str]:
         for candidate in candidates
         if isinstance(candidate, dict) and str(candidate.get("text") or "").strip()
     ]
+
+
+def text_sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def run_result_summary(result: RunResult) -> dict[str, Any]:
+    return {
+        "latency_ms": result.latency_ms,
+        "ttft_ms": result.ttft_ms,
+        "tool_call_count": result.tool_call_count,
+        "error": result.error,
+        "final_text_chars": len(result.final_text),
+        "final_text_sha256": text_sha256(result.final_text),
+        "usage": done_payload(result.done),
+        "trace_events": result.trace_events,
+    }
 
 
 async def judge_text(
@@ -585,8 +666,14 @@ async def judge_text(
     )
     parsed = extract_json_object(result.final_text)
     if parsed is not None:
-        return normalize_legacy_judge_result(parsed)
-    return {"error": "judge_json_parse_failed", "raw": result.final_text[:2000]}
+        normalized = normalize_legacy_judge_result(parsed)
+        normalized["judge_run"] = run_result_summary(result)
+        return normalized
+    return {
+        "error": "judge_json_parse_failed",
+        "raw": result.final_text[:2000],
+        "judge_run": run_result_summary(result),
+    }
 
 
 def rubric_id(task: dict[str, Any]) -> str:
@@ -635,6 +722,7 @@ async def judge_criterion(
         "verdict": parsed.get("verdict") if parsed else "",
         "met": met,
         "rationale": str(parsed.get("rationale") or parsed.get("reason") or "")[:1000],
+        "judge_run": run_result_summary(result),
     }
     if met is None:
         row["error"] = result.error or "judge_verdict_parse_failed"
@@ -865,21 +953,42 @@ async def run_one(
     candidate_totals = [
         total for total in (quality_total(item) for item in candidate_judges) if total is not None
     ]
+    completed_at = time.time()
+    final_text_sha = text_sha256(run.final_text)
+    prompt_sha = text_sha256(str(task["prompt"]))
     return {
         "task_id": task["id"],
         "group": group,
         "domain": task.get("domain", ""),
         "prompt": task["prompt"],
+        "prompt_sha256": prompt_sha,
         "metadata": task.get("metadata", {}),
+        "provider_spec": dict(spec),
         "runner_mode": RUNNER_MODE,
         "tools_enabled": False,
         "started_at": started,
+        "completed_at": completed_at,
+        "total_elapsed_ms": int((completed_at - started) * 1000),
         "latency_ms": run.latency_ms,
         "ttft_ms": run.ttft_ms,
         "tool_call_count": run.tool_call_count,
         "trajectory_steps": run.tool_call_count,
         "error": run.error,
         "final_text": run.final_text,
+        "final_text_chars": len(run.final_text),
+        "final_text_sha256": final_text_sha,
+        "execution": {
+            "provider_error": provider_error,
+            "run_error": run.error,
+            "latency_ms": run.latency_ms,
+            "ttft_ms": run.ttft_ms,
+            "total_elapsed_ms": int((completed_at - started) * 1000),
+            "tool_call_count": run.tool_call_count,
+        },
+        "run_trace": {
+            "event_count": len(run.trace_events),
+            "events": run.trace_events,
+        },
         "usage": done_payload(run.done),
         "ensemble_trace": (run.done.ensemble_trace if run.done is not None else {}),
         "judge": judge,
@@ -890,6 +999,44 @@ async def run_one(
             if fused_total is not None and candidate_totals
             else None
         ),
+    }
+
+
+def compact_judge_summary(judge: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(judge, dict):
+        return {}
+    return {
+        "mode": judge.get("mode"),
+        "score_status": judge.get("score_status"),
+        "quality_total": quality_total(judge),
+        "pass_rate": judge.get("pass_rate"),
+        "valid_pass_rate": judge.get("valid_pass_rate"),
+        "judge_error_count": judge.get("judge_error_count"),
+        "criteria_count": judge.get("criteria_count"),
+        "valid_criteria_count": judge.get("valid_criteria_count"),
+        "invalid_criteria_count": judge.get("invalid_criteria_count"),
+    }
+
+
+def trace_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "row_index": row.get("row_index"),
+        "task_id": row.get("task_id"),
+        "group": row.get("group"),
+        "domain": row.get("domain"),
+        "started_at": row.get("started_at"),
+        "completed_at": row.get("completed_at"),
+        "prompt_sha256": row.get("prompt_sha256"),
+        "final_text_sha256": row.get("final_text_sha256"),
+        "final_text_chars": row.get("final_text_chars"),
+        "error": row.get("error"),
+        "execution": row.get("execution") or {},
+        "usage": row.get("usage") or {},
+        "run_trace": row.get("run_trace") or {},
+        "ensemble_trace": row.get("ensemble_trace") or {},
+        "judge": compact_judge_summary(row.get("judge")),
+        "candidate_judge_count": len(row.get("candidate_judges") or []),
+        "fusion_delta": row.get("fusion_delta"),
     }
 
 
@@ -962,10 +1109,13 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def render_markdown(summary: dict[str, Any], jsonl_path: Path) -> str:
+    stamp = jsonl_path.stem.removeprefix("draco_ensemble_")
+    trace_path = jsonl_path.parent / f"draco_run_{stamp}.trace.jsonl"
     lines = [
         "# DRACO Ensemble Summary",
         "",
         f"Raw JSONL: `{jsonl_path}`",
+        f"Trace JSONL: `{trace_path}`",
         "",
         f"Runner mode: `{RUNNER_MODE}`; external research tools are not attached.",
         "",
@@ -1010,6 +1160,66 @@ def render_markdown(summary: dict[str, Any], jsonl_path: Path) -> str:
     return "\n".join(lines) + "\n"
 
 
+def manifest_args(args: argparse.Namespace) -> dict[str, Any]:
+    keys = [
+        "input",
+        "config",
+        "output_dir",
+        "groups",
+        "max_tasks",
+        "concurrency",
+        "timeout",
+        "dry_run",
+        "judge_model",
+        "judge_repeats",
+        "judge_concurrency",
+        "judge_candidates",
+    ]
+    payload: dict[str, Any] = {}
+    for key in keys:
+        value = getattr(args, key, None)
+        payload[key] = str(value) if isinstance(value, Path) else value
+    return payload
+
+
+def write_manifest(
+    path: Path,
+    *,
+    args: argparse.Namespace,
+    stamp: str,
+    status: str,
+    started_at: float,
+    tasks: list[dict[str, Any]],
+    groups: list[str],
+    artifacts: dict[str, str],
+    rows_written: int = 0,
+    finished_at: float | None = None,
+    summary: dict[str, Any] | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "benchmark": "DRACO",
+        "runner": "scripts/run_draco_ensemble.py",
+        "runner_mode": RUNNER_MODE,
+        "stamp": stamp,
+        "status": status,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "elapsed_ms": (
+            int((finished_at - started_at) * 1000) if finished_at is not None else None
+        ),
+        "args": manifest_args(args),
+        "groups": groups,
+        "group_specs": {group: GROUP_SPECS[group] for group in groups},
+        "task_count": len(tasks),
+        "task_ids": [str(task["id"]) for task in tasks],
+        "rows_written": rows_written,
+        "artifacts": artifacts,
+    }
+    if summary is not None:
+        payload["summary"] = summary
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 async def amain(args: argparse.Namespace) -> int:
     tasks = load_tasks(args.input, max_tasks=args.max_tasks)
     groups = parse_groups(args.groups)
@@ -1026,9 +1236,30 @@ async def amain(args: argparse.Namespace) -> int:
     output_dir = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
+    run_started_at = time.time()
     jsonl_path = output_dir / f"draco_ensemble_{stamp}.jsonl"
+    trace_path = output_dir / f"draco_run_{stamp}.trace.jsonl"
+    manifest_path = output_dir / f"draco_run_{stamp}.manifest.json"
+    summary_json_path = jsonl_path.with_suffix(".summary.json")
     semaphore = asyncio.Semaphore(max(1, args.concurrency))
     rows: list[dict[str, Any]] = []
+    artifacts = {
+        "results_jsonl": str(jsonl_path),
+        "trace_jsonl": str(trace_path),
+        "manifest_json": str(manifest_path),
+        "summary_json": str(summary_json_path),
+        "summary_markdown": str(jsonl_path.with_suffix(".md")),
+    }
+    write_manifest(
+        manifest_path,
+        args=args,
+        stamp=stamp,
+        status="running",
+        started_at=run_started_at,
+        tasks=tasks,
+        groups=groups,
+        artifacts=artifacts,
+    )
 
     async def _guarded(task: dict[str, Any], group: str) -> dict[str, Any]:
         async with semaphore:
@@ -1046,17 +1277,42 @@ async def amain(args: argparse.Namespace) -> int:
             )
 
     pending = [_guarded(task, group) for task in tasks for group in groups]
-    with jsonl_path.open("w", encoding="utf-8") as fh:
-        for coro in asyncio.as_completed(pending):
+    with jsonl_path.open("w", encoding="utf-8") as fh, trace_path.open(
+        "w", encoding="utf-8"
+    ) as trace_fh:
+        for row_index, coro in enumerate(asyncio.as_completed(pending), start=1):
             row = await coro
+            row["row_index"] = row_index
             rows.append(row)
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
             fh.flush()
+            trace_fh.write(json.dumps(trace_row(row), ensure_ascii=False) + "\n")
+            trace_fh.flush()
             print(f"{row['group']} {row['task_id']} error={bool(row['error'])}", flush=True)
     summary = summarize(rows)
     summary_path = jsonl_path.with_suffix(".md")
     summary_path.write_text(render_markdown(summary, jsonl_path), encoding="utf-8")
+    summary_json_path.write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    write_manifest(
+        manifest_path,
+        args=args,
+        stamp=stamp,
+        status="complete",
+        started_at=run_started_at,
+        finished_at=time.time(),
+        tasks=tasks,
+        groups=groups,
+        rows_written=len(rows),
+        artifacts=artifacts,
+        summary=summary,
+    )
     print(f"wrote {jsonl_path}")
+    print(f"wrote {trace_path}")
+    print(f"wrote {manifest_path}")
+    print(f"wrote {summary_json_path}")
     print(f"wrote {summary_path}")
     return 0
 
