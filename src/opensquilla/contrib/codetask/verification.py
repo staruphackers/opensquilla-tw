@@ -30,6 +30,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -84,6 +85,14 @@ def _tail(text: str, *, max_lines: int = 40, max_chars: int = 4000) -> str:
     return tail
 
 
+def _cmd_timeout(base: int, deadline: float | None) -> int:
+    """Per-command timeout bounded by a shared wall-clock deadline so the TOTAL
+    verification (multiple commands) cannot run past it."""
+    if deadline is None:
+        return base
+    return max(1, min(base, int(deadline - time.monotonic())))
+
+
 def verify(
     *,
     repo: Path,
@@ -91,6 +100,7 @@ def verify(
     scratch_dir: Path,
     acceptance_timeout: int = DEFAULT_ACCEPTANCE_TIMEOUT,
     regression_timeout: int = DEFAULT_REGRESSION_TIMEOUT,
+    deadline: float | None = None,
 ) -> VerificationOutcome:
     """Run the full verification protocol and decide the task state."""
     manifest = load_manifest(scratch_dir)
@@ -146,7 +156,7 @@ def verify(
 
     # GREEN: run each acceptance command at the current (post-change) tree.
     for check in checks:
-        rc, out = _run_shell(check.command, cwd=repo, timeout=acceptance_timeout, repo=repo)
+        rc, out = _run_shell(check.command, cwd=repo, timeout=_cmd_timeout(acceptance_timeout, deadline), repo=repo)
         check.after = "pass" if rc == 0 else "fail"
         check.green_exit_code = rc
         check.green_output_tail = _tail(out)
@@ -172,7 +182,7 @@ def verify(
                 # the agent's command cannot teleport the red check back into
                 # the already-fixed task repo.
                 wt_command = _localize_command(check.command, repo, wt)
-                rc, out = _run_shell(wt_command, cwd=wt, timeout=acceptance_timeout, repo=repo)
+                rc, out = _run_shell(wt_command, cwd=wt, timeout=_cmd_timeout(acceptance_timeout, deadline), repo=repo)
                 check.before = "fail" if rc != 0 else "pass"
                 check.red_exit_code = rc
                 check.red_output_tail = _tail(out)
@@ -185,6 +195,7 @@ def verify(
         repo=repo,
         base_commit=base_commit,
         timeout=regression_timeout,
+        deadline=deadline,
     )
 
     state, detail = _decide_state(checks, regression, red_unprovable)
@@ -238,13 +249,14 @@ def _run_regression(
     repo: Path,
     base_commit: str,
     timeout: int,
+    deadline: float | None = None,
 ) -> RegressionResult | None:
     if not command or not str(command).strip():
         return None
     cmd = str(command).strip()
     result = RegressionResult(command=cmd, ran=True)
 
-    head_rc, head_out = _run_shell(cmd, cwd=repo, timeout=timeout, repo=repo)
+    head_rc, head_out = _run_shell(cmd, cwd=repo, timeout=_cmd_timeout(timeout, deadline), repo=repo)
     head_fail = _parse_failures(head_out, head_rc)
     head_names = _failing_names(head_out)
     result.passed = _parse_passes(head_out)
@@ -259,7 +271,7 @@ def _run_regression(
     try:
         with _BaseWorktree(repo, base_commit) as wt:
             base_rc, base_out = _run_shell(
-                _localize_command(cmd, repo, wt), cwd=wt, timeout=timeout, repo=repo
+                _localize_command(cmd, repo, wt), cwd=wt, timeout=_cmd_timeout(timeout, deadline), repo=repo
             )
             base_fail = _parse_failures(base_out, base_rc)
             base_names = _failing_names(base_out)

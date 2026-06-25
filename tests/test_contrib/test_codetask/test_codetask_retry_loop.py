@@ -125,7 +125,8 @@ def test_loop_does_not_retry_not_testable(monkeypatch, tmp_path):
 def test_attempt1_honors_small_timeout_not_inflated(monkeypatch, tmp_path):
     _wire(monkeypatch, tmp_path, [_vout(TaskState.VERIFIED)])
     runner.solve(repo="/tmp/x", task="do", max_attempts=1, timeout=60)
-    assert _FakeAdapter.last_timeout == 60
+    # honors timeout minus an adaptive verify reserve (min(300, 60//4)=15)
+    assert _FakeAdapter.last_timeout == 45
 
 
 def test_retry_skipped_for_budget_is_not_counted(monkeypatch, tmp_path):
@@ -170,6 +171,8 @@ def test_failure_signature_distinguishes_failures():
 
 
 def test_redact_masks_secrets():
-    assert "<redacted>" in runner._redact("API_KEY=sk-abc123")
-    assert "<redacted>" in runner._redact("Authorization: Bearer xyz")
+    r1 = runner._redact("API_KEY=sk-abc123")
+    assert "<redacted>" in r1 and "sk-abc123" not in r1
+    r2 = runner._redact("Authorization: Bearer xyztoken")
+    assert "<redacted>" in r2 and "xyztoken" not in r2
     assert runner._redact("normal output line") == "normal output line"

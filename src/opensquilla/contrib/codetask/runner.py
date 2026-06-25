@@ -85,7 +85,7 @@ def _snapshot_attempt(run_id: str, attempt: int) -> None:
 
 _SECRET_RE = re.compile(
     r"(?i)(api[_-]?key|secret|token|password|passwd|access[_-]?key|authorization|bearer)"
-    r"(\s*[:=]\s*|\s+)\S+"
+    r"(\s*[:=]\s*|\s+)(bearer\s+)?\S+"
 )
 
 
@@ -94,7 +94,7 @@ def _redact(text: str) -> str:
     output is fed back into a model prompt (trusted host, but defense in depth)."""
     if not text:
         return text
-    return _SECRET_RE.sub(lambda m: m.group(1) + m.group(2) + "<redacted>", text)
+    return _SECRET_RE.sub(lambda m: m.group(1) + m.group(2) + (m.group(3) or "") + "<redacted>", text)
 
 
 def _summarize_failure(vout: Any) -> str:
@@ -254,10 +254,17 @@ def solve(
         if attempt >= 1:  # this iteration would be a RETRY (attempt incremented below)
             usable = (deadline - time.monotonic()) - _VERIFY_RESERVE_SECONDS
             if usable < _MIN_USEFUL_AGENT_SECONDS:
+                result.final_failure_reason = (
+                    "stopped retrying: shared time budget exhausted"
+                )
+                result.retry_exhausted = True
                 break
             agent_budget = int(min(timeout, usable))
         else:
-            agent_budget = int(max(1, timeout))  # first attempt honors full timeout
+            # First attempt: adaptively reserve verify time so the whole run
+            # stays within the shared deadline; never crush a small timeout.
+            _reserve = min(_VERIFY_RESERVE_SECONDS, timeout // 4)
+            agent_budget = int(max(1, timeout - _reserve))
         attempt += 1
         result.attempts = attempt
 
@@ -272,6 +279,12 @@ def solve(
                 except OSError:
                     pass
         result.patch_path = None
+        _scratch_manifest = scratch / config.VERIFICATION_MANIFEST_NAME
+        if _scratch_manifest.exists():
+            try:
+                _scratch_manifest.unlink()
+            except OSError:
+                pass
 
         prompt = (
             base_prompt
@@ -341,14 +354,13 @@ def solve(
                 result.error = bout.detail
             break  # build mode: single attempt in v1
 
-        # Bound verification by the SHARED deadline so it cannot run past it.
-        _remaining_v = max(1, int(deadline - time.monotonic()))
+        # Bound the WHOLE verification by the shared deadline (per-command,
+        # re-checked between commands) so multiple commands cannot overrun it.
         vout = verify(
             repo=prepared.path,
             base_commit=prepared.base_commit,
             scratch_dir=scratch,
-            acceptance_timeout=min(config.DEFAULT_ACCEPTANCE_TIMEOUT, _remaining_v),
-            regression_timeout=min(config.DEFAULT_REGRESSION_TIMEOUT, _remaining_v),
+            deadline=deadline,
         )
         result.state = vout.state
         result.acceptance = vout.acceptance
@@ -390,7 +402,7 @@ def solve(
         TaskState.ALREADY_SATISFIED,
         TaskState.NOT_TESTABLE,
     )
-    result.retry_exhausted = (
+    result.retry_exhausted = result.retry_exhausted or (
         attempt >= max_attempts and not _terminal_ok and result.state in _RETRYABLE_STATES
     )
     result.relaunch_recommended = False
