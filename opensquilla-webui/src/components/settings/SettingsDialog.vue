@@ -147,6 +147,12 @@
               @copy="copyCommand"
               @save="saveProvider"
             />
+            <SetupBehaviorPanel
+              v-else-if="section === 'behavior'"
+              :panel="behaviorPanel"
+              @update-auto-session-titles="setAutoSessionTitles"
+              @save="saveBehavior"
+            />
             <SetupRouterPanel
               v-else-if="section === 'router'"
               :panel="routerPanel"
@@ -217,6 +223,7 @@ import { useRoute, useRouter } from 'vue-router'
 import Icon from '@/components/Icon.vue'
 import LoadingSpinner from '@/components/LoadingSpinner.vue'
 import SetupCommandBlock from '@/components/setup/SetupCommandBlock.vue'
+import SetupBehaviorPanel from '@/components/setup/SetupBehaviorPanel.vue'
 import SetupConnectionPanel from '@/components/settings/SetupConnectionPanel.vue'
 import SetupProviderPanel from '@/components/setup/SetupProviderPanel.vue'
 import SetupRouterPanel from '@/components/setup/SetupRouterPanel.vue'
@@ -239,6 +246,7 @@ const {
   setSection,
   loaded,
   providerPanel,
+  behaviorPanel,
   routerPanel,
   channelsPanel,
   capabilitiesPanel,
@@ -257,6 +265,7 @@ const {
   saveDirtySections,
   discardChanges,
   selectProvider,
+  setAutoSessionTitles,
   setRouterMode,
   setRouterDefaultTier,
   setRouterVisualMode,
@@ -272,6 +281,7 @@ const {
   onMemoryProviderChange,
   onImageProviderChange,
   saveProvider,
+  saveBehavior,
   saveRouter,
   saveChannel,
   saveSearch,

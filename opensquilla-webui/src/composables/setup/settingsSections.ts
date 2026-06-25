@@ -8,6 +8,7 @@ export const SETTINGS_SECTIONS = [
   // Connect and never enters the dirty bar, so it is excluded from save/discard.
   { id: 'connection', label: 'Connection', icon: 'home', client: false },
   { id: 'provider', label: 'Provider', icon: 'agents', client: false },
+  { id: 'behavior', label: 'Behavior', icon: 'chat', client: false },
   { id: 'router', label: 'Router', icon: 'cron', client: false },
   { id: 'channels', label: 'Channels', icon: 'channels', client: false },
   { id: 'capabilities', label: 'Capabilities', icon: 'skills', client: false },

@@ -1,6 +1,7 @@
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useSetupChannelsForm } from '@/composables/setup/useSetupChannelsForm'
 import { useSetupCapabilitiesForm } from '@/composables/setup/useSetupCapabilitiesForm'
+import { useSetupBehaviorForm } from '@/composables/setup/useSetupBehaviorForm'
 import { useSetupProviderForm } from '@/composables/setup/useSetupProviderForm'
 import { useSetupRouterForm } from '@/composables/setup/useSetupRouterForm'
 import { useSettingsPromotedForm, DEFAULT_LLM_TIMEOUT_SECONDS } from '@/composables/setup/useSettingsPromotedForm'
@@ -141,6 +142,9 @@ interface ConfigData {
     visual_mode?: string
     tiers?: Record<string, TierConfig>
   }
+  naming?: {
+    enabled?: boolean
+  }
   search_provider?: string
   search_api_key_env?: string
   search_max_results?: number
@@ -193,6 +197,7 @@ const loaded = ref(false)
 const { section, setSection } = useSettingsSection('provider')
 
 const providerForm = useSetupProviderForm()
+const behaviorForm = useSetupBehaviorForm()
 const routerForm = useSetupRouterForm()
 const channelsForm = useSetupChannelsForm()
 const capabilitiesForm = useSetupCapabilitiesForm()
@@ -234,6 +239,7 @@ async function loadData() {
 
     // Initialize form values from config
     providerForm.initFromConfig(config.value.llm || {}, status.value, runtimeProviders.value)
+    behaviorForm.initFromConfig(config.value)
     routerForm.initFromConfig(config.value.squilla_router || {}, currentRouterProfile.value?.tiers || {})
     capabilitiesForm.initSearchFromConfig(config.value, searchProviders.value)
     capabilitiesForm.initMemoryFromConfig(config.value)
@@ -326,6 +332,12 @@ const routerSummary = computed(() => {
   return routerForm.mode.value === 'disabled' ? 'disabled' : 'SquillaRouter'
 })
 
+const behaviorStatusText = computed(() => {
+  return behaviorForm.autoSessionTitles.value
+    ? 'New sessions receive a short generated title after the first user message.'
+    : 'New sessions keep the first-message fallback title without an extra naming call.'
+})
+
 const channelSpec = computed(() => catalogChannels.value.find(c => c.type === channelsForm.selectedChannelType.value) || null)
 const channelSpecFields = computed(() => channelSpec.value?.fields || [])
 const channelRuntimeRows = computed(() => (channelStatus.value.channels || []).filter(row => row.configured !== false))
@@ -391,6 +403,10 @@ const providerPanel = providerForm.createPanel({
   providerEnvKey,
   providerEnvCommand,
   llmTimeoutSeconds: promotedForm.llmTimeoutSeconds,
+})
+
+const behaviorPanel = behaviorForm.createPanel({
+  statusText: behaviorStatusText,
 })
 
 const routerPanel = routerForm.createPanel({
@@ -575,6 +591,7 @@ function sectionStatus(sectionId: string): { label: string; tone: string } {
     if (providerEnvMissing.value) return { label: 'Needs action', tone: 'is-warn' }
     return detailStepStatus((status.value.sectionDetails || {}).llm || (status.value.sectionDetails || {}).provider)
   }
+  if (sectionId === 'behavior') return { label: 'Live', tone: 'is-ok' }
   if (sectionId === 'router' && !hasSavedProvider.value) {
     return { label: 'Provider first', tone: 'is-muted' }
   }
@@ -632,6 +649,7 @@ function sectionForDetailName(name: string): SettingsSectionId | null {
 // ---------------------------------------------------------------------------
 
 const providerDirty = computed(() => providerForm.isDirty.value || promotedForm.timeoutDirty.value)
+const behaviorDirty = computed(() => behaviorForm.isDirty.value)
 const routerDirty = computed(() => routerForm.isDirty.value)
 const channelsDirty = computed(() => channelsForm.isDirty.value)
 const capabilitiesDirty = computed(() => (
@@ -644,6 +662,7 @@ const capabilitiesDirty = computed(() => (
 
 function sectionDirty(sectionId: string): boolean {
   if (sectionId === 'provider') return providerDirty.value
+  if (sectionId === 'behavior') return behaviorDirty.value
   if (sectionId === 'router') return routerDirty.value
   if (sectionId === 'channels') return channelsDirty.value
   if (sectionId === 'capabilities') return capabilitiesDirty.value
@@ -655,6 +674,7 @@ const hasUnsavedChanges = computed(() => dirtySections.value.length > 0)
 
 async function saveDirtySections() {
   if (providerDirty.value) await saveProvider()
+  if (behaviorDirty.value) await saveBehavior()
   if (routerDirty.value) await saveRouter()
   if (channelsDirty.value) await saveChannel()
   if (capabilitiesForm.searchDirty.value) await saveSearch()
@@ -681,6 +701,10 @@ function isProviderAdvancedField(field: FieldSpec): boolean {
 
 function selectProvider(value: string) {
   providerForm.selectProvider(value)
+}
+
+function setAutoSessionTitles(enabled: boolean) {
+  behaviorForm.setAutoSessionTitles(enabled)
 }
 
 function onProviderChange() {
@@ -914,6 +938,16 @@ async function saveProvider() {
   }
 }
 
+async function saveBehavior() {
+  try {
+    const restart = await safePatchConfig(behaviorForm.patches())
+    pushToast(restart ? 'Behavior saved. Restart required.' : 'Behavior saved.')
+    await loadData()
+  } catch (err) {
+    pushToast('Save failed: ' + (err instanceof Error ? err.message : String(err)), { tone: 'danger' })
+  }
+}
+
 async function saveRouter() {
   if (!hasSavedProvider.value && routerForm.routingDirty.value) {
     pushToast('Choose a provider before saving router tiers.', { tone: 'danger' })
@@ -1063,6 +1097,7 @@ async function copyConfigPath() {
     setSection,
     loaded,
     providerPanel,
+    behaviorPanel,
     routerPanel,
     channelsPanel,
     capabilitiesPanel,
@@ -1085,6 +1120,7 @@ async function copyConfigPath() {
     saveDirtySections,
     discardChanges,
     selectProvider,
+    setAutoSessionTitles,
     setRouterMode,
     setRouterDefaultTier,
     setRouterVisualMode,
@@ -1100,6 +1136,7 @@ async function copyConfigPath() {
     onMemoryProviderChange,
     onImageProviderChange,
     saveProvider,
+    saveBehavior,
     saveRouter,
     saveChannel,
     saveSearch,

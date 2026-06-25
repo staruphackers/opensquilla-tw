@@ -13,6 +13,10 @@ describe('sectionFromRouteParam — /settings/:section mapping', () => {
     expect(sectionFromRouteParam('connection')).toBe('connection')
   })
 
+  it('maps the Behavior section for session preferences', () => {
+    expect(sectionFromRouteParam('behavior')).toBe('behavior')
+  })
+
   it('falls back to the default first section for unknown, missing, or sentinel params', () => {
     // `auto` is a routing sentinel (/setup → /settings/auto), not a real
     // section, so the param mapper treats it as unknown and defaults.
@@ -28,6 +32,7 @@ describe('sectionFromRouteParam — /settings/:section mapping', () => {
 describe('isKnownSectionParam', () => {
   it('recognises real sections and rejects sentinels/unknowns', () => {
     expect(isKnownSectionParam('connection')).toBe(true)
+    expect(isKnownSectionParam('behavior')).toBe(true)
     expect(isKnownSectionParam('capabilities')).toBe(true)
     expect(isKnownSectionParam('auto')).toBe(false)
     expect(isKnownSectionParam('nope')).toBe(false)
