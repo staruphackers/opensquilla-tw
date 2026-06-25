@@ -42,6 +42,13 @@ deny = [
   "messag*",
   # Image / media / audio generation is irrelevant to coding.
   "image*", "tts", "music*", "song*", "voice*", "dubbing*", "audio*",
+  # Code-irrelevant for a single isolated coding/build run (codex-reviewed):
+  # Feishu/Lark, gateway control, skill mutation/search + skill-dep install
+  # (real leak: runs brew/node/uv install specs), doc/media generation,
+  # meta-invoke, artifact publishing, manual router control.
+  "feishu_*", "gateway", "skill_*", "install_skill_deps",
+  "create_*", "pdf", "canvas", "read_spreadsheet", "meta_invoke",
+  "publish_artifact", "router_control",
 ]
 # RFC2544 fake-IP DNS pass-through. Mainland-China ISPs (Beijing Telecom etc.)
 # transparently rewrite DNS for graylisted domains like github.com to
