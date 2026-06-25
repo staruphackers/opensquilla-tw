@@ -99,6 +99,9 @@ class FakeStorage:
             rows = rows[:limit]
         return rows
 
+    async def count_transcript_entries(self, session_id: str) -> int:
+        return len(self._transcripts.get(session_id, []))
+
     async def list_user_transcript_content_batch(
         self,
         session_ids: list[str],
@@ -1389,6 +1392,64 @@ class TestSessionsSend:
         assert res.ok is True
         assert runtime.enqueue_calls[0]["message"] == "Original visible request"
         assert runtime.enqueue_calls[0]["semantic_message"] == hidden_message
+
+    @pytest.mark.asyncio
+    async def test_send_schedules_auto_title_on_task_runtime_first_message(
+        self, dispatcher, monkeypatch
+    ):
+        class RecordingTaskRuntime:
+            def __init__(self) -> None:
+                self.enqueue_calls: list[dict[str, Any]] = []
+
+            async def enqueue(self, envelope, message: str, **kwargs: Any):
+                self.enqueue_calls.append(
+                    {"envelope": envelope, "message": message, **kwargs}
+                )
+                return SimpleNamespace(
+                    task_id="task-title-1",
+                    session_key=envelope.session_key,
+                    status="queued",
+                )
+
+        session = FakeSession(
+            session_key="agent:main:webchat:title-runtime",
+            session_id="title-runtime",
+            display_name=None,
+            derived_title=None,
+        )
+        runtime = RecordingTaskRuntime()
+        manager = FakeSessionManager([session])
+        ctx = make_ctx(session_manager=manager, task_runtime=runtime)
+        called = asyncio.Event()
+        calls: list[tuple[Any, str, str]] = []
+
+        async def fake_generate_session_title(
+            title_ctx: Any, key: str, first_message: str
+        ) -> None:
+            calls.append((title_ctx, key, first_message))
+            called.set()
+
+        monkeypatch.setattr(
+            rpc_sessions,
+            "generate_session_title",
+            fake_generate_session_title,
+        )
+
+        res = await dispatcher.dispatch(
+            "r1",
+            "sessions.send",
+            {
+                "key": session.session_key,
+                "message": "北京天气怎么样",
+                "_source": {"caller_kind": "web", "channel_kind": "webchat"},
+            },
+            ctx,
+        )
+
+        assert res.ok is True
+        assert res.payload["task_id"] == "task-title-1"
+        await asyncio.wait_for(called.wait(), timeout=1.0)
+        assert calls == [(ctx, session.session_key, "北京天气怎么样")]
 
     @pytest.mark.asyncio
     async def test_send_marks_direct_runner_empty_transcript_as_fresh_user_session(
