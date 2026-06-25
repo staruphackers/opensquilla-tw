@@ -12,7 +12,7 @@ import shlex
 import statistics
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -21,7 +21,22 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from opensquilla.engine.types import THINKING_BUDGETS, ThinkingLevel
+from opensquilla.engine.agent import Agent
+from opensquilla.engine.types import (
+    THINKING_BUDGETS,
+    AgentConfig,
+    DoneEvent as AgentDoneEvent,
+    ErrorEvent as AgentErrorEvent,
+    RunHeartbeatEvent as AgentRunHeartbeatEvent,
+    StateChangeEvent as AgentStateChangeEvent,
+    TextDeltaEvent as AgentTextDeltaEvent,
+    ThinkingEvent as AgentThinkingEvent,
+    ThinkingLevel,
+    ToolResultEvent as AgentToolResultEvent,
+    ToolUseDeltaEvent as AgentToolUseDeltaEvent,
+    ToolUseStartEvent as AgentToolUseStartEvent,
+    WarningEvent as AgentWarningEvent,
+)
 from opensquilla.gateway.config import GatewayConfig
 from opensquilla.gateway.llm_runtime import resolve_llm_runtime_config
 from opensquilla.provider.ensemble import build_ensemble_provider_from_config
@@ -40,6 +55,10 @@ from opensquilla.provider.types import (
     ToolUseEndEvent,
     ToolUseStartEvent,
 )
+from opensquilla.result_budget import build_webresearch_tool_run_budget_policy
+from opensquilla.tools.dispatch import build_tool_handler
+from opensquilla.tools.registry import ToolRegistry
+from opensquilla.tools.types import CallerKind, InteractionMode, ToolContext, ToolSpec
 
 GROUP_SPECS: dict[str, dict[str, str]] = {
     "B0": {"kind": "single", "model": "anthropic/claude-opus-4.8"},
@@ -58,8 +77,18 @@ GROUP_SPECS: dict[str, dict[str, str]] = {
 
 TOOL_MODE_PROVIDER_ONLY = "provider_only"
 TOOL_MODE_OPENROUTER_SERVER_TOOLS = "openrouter_server_tools"
+TOOL_MODE_LOCAL_WEB_TOOLS = "local_web_tools"
 RUNNER_MODE = TOOL_MODE_PROVIDER_ONLY
-SUPPORTED_TOOL_MODES = (TOOL_MODE_PROVIDER_ONLY, TOOL_MODE_OPENROUTER_SERVER_TOOLS)
+RUNNER_MODE_PROVIDER = "provider"
+RUNNER_MODE_AGENT_LOOP = "agent_loop"
+DEFAULT_DRACO_RUNNER_MODE = RUNNER_MODE_AGENT_LOOP
+DEFAULT_AGENT_MAX_ITERATIONS = 12
+SUPPORTED_RUNNER_MODES = (RUNNER_MODE_PROVIDER, RUNNER_MODE_AGENT_LOOP)
+SUPPORTED_TOOL_MODES = (
+    TOOL_MODE_PROVIDER_ONLY,
+    TOOL_MODE_OPENROUTER_SERVER_TOOLS,
+    TOOL_MODE_LOCAL_WEB_TOOLS,
+)
 DEFAULT_OPENROUTER_WEB_SEARCH_ENGINE = "exa"
 DEFAULT_OPENROUTER_WEB_SEARCH_MAX_RESULTS = 5
 DEFAULT_OPENROUTER_WEB_SEARCH_MAX_TOTAL_RESULTS = 10
@@ -295,6 +324,10 @@ def positive_int_value(raw: Any, *, default: int, field: str) -> int:
     return parsed
 
 
+def approx_chars_for_content_tokens(tokens: int) -> int:
+    return max(100, int(tokens) * 4)
+
+
 def openrouter_server_tool_settings(
     args: argparse.Namespace | None,
     *,
@@ -374,7 +407,46 @@ def benchmark_tool_policy(args: argparse.Namespace | None = None) -> dict[str, A
     )
     if mode not in SUPPORTED_TOOL_MODES:
         raise ValueError(f"unknown tool mode: {mode}")
-    if mode != TOOL_MODE_PROVIDER_ONLY:
+    if mode == TOOL_MODE_LOCAL_WEB_TOOLS:
+        if not blocked_domains:
+            raise ValueError(
+                "DRACO research-tool runs require contamination-blocked domains"
+            )
+        local_search_max_results = positive_int_value(
+            getattr(args, "openrouter_web_search_max_results", None),
+            default=DEFAULT_OPENROUTER_WEB_SEARCH_MAX_RESULTS,
+            field="openrouter_web_search_max_results",
+        )
+        local_fetch_max_content_tokens = positive_int_value(
+            getattr(args, "openrouter_web_fetch_max_content_tokens", None),
+            default=DEFAULT_OPENROUTER_WEB_FETCH_MAX_CONTENT_TOKENS,
+            field="openrouter_web_fetch_max_content_tokens",
+        )
+        return {
+            "tool_mode": mode,
+            "tools_enabled": True,
+            "tool_names": ["web_search", "web_fetch"],
+            "local_web_tools": {
+                "web_search": {
+                    "excluded_domains": blocked_domains,
+                    "max_results": local_search_max_results,
+                },
+                "web_fetch": {
+                    "blocked_domains": blocked_domains,
+                    "max_content_tokens": local_fetch_max_content_tokens,
+                    "max_content_chars": approx_chars_for_content_tokens(
+                        local_fetch_max_content_tokens
+                    ),
+                },
+            },
+            "contamination_blocked_domains": blocked_domains,
+            "contamination_controls": {
+                "status": "enforced_by_local_web_tools",
+                "web_search_field": "excluded_domains_query_and_result_filter",
+                "web_fetch_field": "blocked_domains",
+            },
+        }
+    if mode == TOOL_MODE_OPENROUTER_SERVER_TOOLS:
         if not blocked_domains:
             raise ValueError(
                 "DRACO research-tool runs require contamination-blocked domains"
@@ -414,6 +486,47 @@ def benchmark_tool_policy(args: argparse.Namespace | None = None) -> dict[str, A
 def benchmark_tools_for_policy(tool_policy: dict[str, Any]) -> list[ToolDefinition] | None:
     if not tool_policy.get("tools_enabled"):
         return None
+    if tool_policy.get("tool_mode") == TOOL_MODE_LOCAL_WEB_TOOLS:
+        return [
+            ToolDefinition(
+                name="web_search",
+                description=(
+                    "Search the web and return result titles, URLs, and snippets. "
+                    "Benchmark leakage domains are excluded and filtered."
+                ),
+                input_schema=ToolInputSchema(
+                    properties={
+                        "query": {"type": "string", "description": "Search query."},
+                        "max_results": {
+                            "type": "integer",
+                            "description": "Maximum number of results to return.",
+                        },
+                    },
+                    required=["query"],
+                ),
+            ),
+            ToolDefinition(
+                name="web_fetch",
+                description=(
+                    "Fetch a URL and extract readable content. Benchmark leakage "
+                    "domains are blocked."
+                ),
+                input_schema=ToolInputSchema(
+                    properties={
+                        "url": {"type": "string", "description": "URL to fetch."},
+                        "extract_mode": {
+                            "type": "string",
+                            "description": "Extraction mode, usually markdown.",
+                        },
+                        "max_chars": {
+                            "type": "integer",
+                            "description": "Maximum characters to return.",
+                        },
+                    },
+                    required=["url"],
+                ),
+            ),
+        ]
     server_tools = tool_policy.get("openrouter_server_tools") or {}
     tools: list[ToolDefinition] = []
     for key, description in (
@@ -433,6 +546,306 @@ def benchmark_tools_for_policy(tool_policy: dict[str, Any]) -> list[ToolDefiniti
             )
         )
     return tools or None
+
+
+def local_web_search_max_results(tool_policy: dict[str, Any]) -> int:
+    local_policy = tool_policy.get("local_web_tools") or {}
+    search_defaults = local_policy.get("web_search") or {}
+    return positive_int_value(
+        search_defaults.get("max_results"),
+        default=DEFAULT_OPENROUTER_WEB_SEARCH_MAX_RESULTS,
+        field="local_web_search_max_results",
+    )
+
+
+def local_web_fetch_max_chars(tool_policy: dict[str, Any]) -> int:
+    local_policy = tool_policy.get("local_web_tools") or {}
+    fetch_defaults = local_policy.get("web_fetch") or {}
+    chars = fetch_defaults.get("max_content_chars")
+    if isinstance(chars, int | float) and not isinstance(chars, bool):
+        return max(100, int(chars))
+    tokens = positive_int_value(
+        fetch_defaults.get("max_content_tokens"),
+        default=DEFAULT_OPENROUTER_WEB_FETCH_MAX_CONTENT_TOKENS,
+        field="local_web_fetch_max_content_tokens",
+    )
+    return approx_chars_for_content_tokens(tokens)
+
+
+def bounded_tool_int(
+    value: Any,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int | None = None,
+) -> int:
+    try:
+        if isinstance(value, bool):
+            parsed = default
+        elif isinstance(value, int | float):
+            parsed = int(value)
+        else:
+            parsed = int(str(value).strip())
+    except (TypeError, ValueError, OverflowError):
+        parsed = default
+    parsed = max(minimum, parsed)
+    if maximum is not None:
+        parsed = min(parsed, maximum)
+    return parsed
+
+
+def configure_local_web_search_runtime(
+    config: GatewayConfig,
+    tool_policy: dict[str, Any],
+) -> dict[str, Any]:
+    if tool_policy.get("tool_mode") != TOOL_MODE_LOCAL_WEB_TOOLS:
+        return {}
+
+    import opensquilla.search.providers.brave  # noqa: F401
+    import opensquilla.search.providers.duckduckgo  # noqa: F401
+    from opensquilla.search.registry import get_provider_spec
+    from opensquilla.tools.builtin.web import configure_search
+
+    configured_provider = str(
+        getattr(config, "search_provider", "duckduckgo") or "duckduckgo"
+    ).strip() or "duckduckgo"
+    provider = configured_provider
+    api_key = str(getattr(config, "search_api_key", "") or "").strip()
+    api_key_source = "config" if api_key else ""
+    env_key = str(getattr(config, "search_api_key_env", "") or "").strip()
+    if not api_key:
+        try:
+            spec = get_provider_spec(provider)
+            if not env_key:
+                env_key = str(getattr(spec, "env_key", "") or "").strip()
+        except Exception:
+            env_key = env_key or ""
+        if env_key and os.environ.get(env_key):
+            api_key = str(os.environ.get(env_key) or "")
+            api_key_source = f"env:{env_key}"
+
+    brave_env_key = "BRAVE_SEARCH_API_KEY"
+    if provider == "duckduckgo":
+        brave_env_key_present = bool(os.environ.get(brave_env_key))
+        if api_key or brave_env_key_present:
+            provider = "brave"
+            if not api_key and brave_env_key_present:
+                api_key = str(os.environ.get(brave_env_key) or "")
+                api_key_source = f"env:{brave_env_key}"
+
+    runtime_max_results = local_web_search_max_results(tool_policy)
+    proxy = str(getattr(config, "search_proxy", "") or "").strip()
+    fallback_policy = str(getattr(config, "search_fallback_policy", "off") or "off")
+    diagnostics = bool(getattr(config, "search_diagnostics", False))
+    use_env_proxy = bool(getattr(config, "search_use_env_proxy", False))
+    configure_search(
+        provider_name=provider,
+        max_results=runtime_max_results,
+        api_key=api_key,
+        proxy=proxy,
+        use_env_proxy=use_env_proxy,
+        fallback_policy=fallback_policy,
+        diagnostics=diagnostics,
+    )
+    return {
+        "configured_provider": configured_provider,
+        "provider": provider,
+        "max_results": runtime_max_results,
+        "api_key_configured": bool(api_key),
+        "api_key_source": api_key_source,
+        "proxy_configured": bool(proxy),
+        "use_env_proxy": use_env_proxy,
+        "fallback_policy": fallback_policy,
+        "diagnostics": diagnostics,
+    }
+
+
+def blocked_domain_match(url: str, blocked_domains: list[str]) -> str:
+    domain = normalize_domain(url)
+    if not domain:
+        return ""
+    for blocked in blocked_domains:
+        if domain == blocked or domain.endswith(f".{blocked}"):
+            return blocked
+    return ""
+
+
+def append_search_exclusions(query: str, blocked_domains: list[str]) -> str:
+    clean_query = str(query or "").strip()
+    exclusions = " ".join(f"-site:{domain}" for domain in blocked_domains if domain)
+    return f"{clean_query} {exclusions}".strip() if exclusions else clean_query
+
+
+def filter_blocked_search_results(
+    payload: dict[str, Any],
+    *,
+    blocked_domains: list[str],
+    original_query: str,
+    executed_query: str,
+) -> dict[str, Any]:
+    filtered = dict(payload)
+    results = filtered.get("results")
+    removed: list[dict[str, str]] = []
+    kept: list[Any] = []
+    if isinstance(results, list):
+        for item in results:
+            if not isinstance(item, dict):
+                kept.append(item)
+                continue
+            match = blocked_domain_match(str(item.get("url") or ""), blocked_domains)
+            if match:
+                removed.append(
+                    {
+                        "url": str(item.get("url") or ""),
+                        "blocked_domain": match,
+                    }
+                )
+            else:
+                kept.append(item)
+        filtered["results"] = kept
+    filtered["query"] = original_query
+    filtered["executed_query"] = executed_query
+    filtered["blocked_domains"] = blocked_domains
+    filtered["blocked_result_count"] = len(removed)
+    if removed:
+        filtered["blocked_results"] = removed
+    return filtered
+
+
+def build_local_web_tool_registry(tool_policy: dict[str, Any]) -> ToolRegistry:
+    registry = ToolRegistry()
+    blocked_domains = parse_domain_list(
+        tool_policy.get("contamination_blocked_domains") or []
+    )
+    default_max_results = local_web_search_max_results(tool_policy)
+    default_fetch_max_chars = local_web_fetch_max_chars(tool_policy)
+
+    async def _web_search(query: str, max_results: int | None = None) -> str:
+        from opensquilla.tools.builtin.web import run_web_search_payload
+
+        original_query = str(query or "")
+        executed_query = append_search_exclusions(original_query, blocked_domains)
+        limit = bounded_tool_int(
+            max_results,
+            default=default_max_results,
+            minimum=1,
+            maximum=default_max_results,
+        )
+        payload = await run_web_search_payload(executed_query, limit)
+        filtered = filter_blocked_search_results(
+            payload,
+            blocked_domains=blocked_domains,
+            original_query=original_query,
+            executed_query=executed_query,
+        )
+        return json.dumps(filtered, ensure_ascii=False, indent=2)
+
+    async def _web_fetch(
+        url: str,
+        extract_mode: str = "markdown",
+        max_chars: int | None = None,
+    ) -> str:
+        from opensquilla.tools.builtin.web_fetch import web_fetch
+
+        match = blocked_domain_match(str(url or ""), blocked_domains)
+        if match:
+            return json.dumps(
+                {
+                    "url": url,
+                    "error_class": "BlockedDomain",
+                    "error": (
+                        "This URL belongs to a DRACO contamination-blocked domain "
+                        f"({match}) and was not fetched."
+                    ),
+                    "blocked_domain": match,
+                    "blocked_domains": blocked_domains,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        effective_max_chars = bounded_tool_int(
+            max_chars,
+            default=default_fetch_max_chars,
+            minimum=100,
+            maximum=default_fetch_max_chars,
+        )
+        return await web_fetch(
+            url,
+            extract_mode=extract_mode,
+            max_chars=effective_max_chars,
+        )
+
+    registry.register(
+        ToolSpec(
+            name="web_search",
+            description=(
+                "Search the web and return result titles, URLs, and snippets. "
+                "Benchmark leakage domains are excluded and filtered."
+            ),
+            parameters={
+                "query": {"type": "string", "description": "Search query."},
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return.",
+                },
+            },
+            required=["query"],
+            result_budget_class="external",
+        ),
+        _web_search,
+    )
+    registry.register(
+        ToolSpec(
+            name="web_fetch",
+            description=(
+                "Fetch a URL and extract readable content. Benchmark leakage "
+                "domains are blocked."
+            ),
+            parameters={
+                "url": {"type": "string", "description": "URL to fetch."},
+                "extract_mode": {
+                    "type": "string",
+                    "description": "Extraction mode, usually markdown.",
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "Maximum characters to return.",
+                },
+            },
+            required=["url"],
+            result_budget_class="external",
+        ),
+        _web_fetch,
+    )
+    return registry
+
+
+def build_benchmark_tool_context(
+    *,
+    task_id: str,
+    group: str,
+    tool_policy: dict[str, Any],
+    output_dir: Path | None = None,
+) -> ToolContext:
+    scratch_dir = None
+    if output_dir is not None:
+        scratch_dir = str(output_dir / "scratch" / group / task_id)
+    return ToolContext(
+        is_owner=True,
+        caller_kind=CallerKind.CLI,
+        interaction_mode=InteractionMode.UNATTENDED,
+        agent_id=f"draco-{group}",
+        session_key=f"draco:{group}:{task_id}",
+        task_id=task_id,
+        allowed_tools={"web_search", "web_fetch"},
+        workspace_dir=str(ROOT),
+        workspace_strict=True,
+        scratch_dir=scratch_dir,
+        tool_run_budget_policy=build_webresearch_tool_run_budget_policy(
+            max_single_fetch_chars=local_web_fetch_max_chars(tool_policy),
+            max_web_search_results=local_web_search_max_results(tool_policy),
+        ),
+    )
 
 
 def normalize_generation_thinking(raw: Any) -> str:
@@ -916,6 +1329,398 @@ async def collect_run(
     )
 
 
+class BenchmarkTurnCallRecorder:
+    def __init__(self) -> None:
+        self.records: list[dict[str, Any]] = []
+
+    def write(self, kind: str, payload: dict[str, Any]) -> None:
+        self.records.append(
+            {
+                "seq": len(self.records) + 1,
+                "kind": kind,
+                "payload": json_safe(payload),
+            }
+        )
+
+
+def json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [json_safe(item) for item in value]
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return model_dump(mode="json")
+    if is_dataclass(value) and not isinstance(value, type):
+        return json_safe(asdict(value))
+    if isinstance(value, Path):
+        return str(value)
+    try:
+        json.dumps(value)
+        return value
+    except TypeError:
+        return repr(value)
+
+
+def agent_thinking_from_chat_config(config: ChatConfig | None) -> bool | ThinkingLevel:
+    if config is None or not config.thinking:
+        return False
+    if config.thinking_level is not None:
+        try:
+            return ThinkingLevel(str(config.thinking_level))
+        except ValueError:
+            return True
+    return True
+
+
+def agent_config_from_chat_config(
+    config: ChatConfig | None,
+    *,
+    timeout: float,
+    model_id: str,
+    max_iterations: int,
+) -> AgentConfig:
+    return AgentConfig(
+        max_iterations=max(0, int(max_iterations or 0)),
+        timeout=timeout,
+        iteration_timeout=timeout,
+        request_timeout=(
+            float(config.timeout)
+            if config is not None and getattr(config, "timeout", 0)
+            else timeout
+        ),
+        max_tokens=(
+            int(config.max_tokens)
+            if config is not None and getattr(config, "max_tokens", 0)
+            else AgentConfig().max_tokens
+        ),
+        temperature=config.temperature if config is not None else None,
+        thinking=agent_thinking_from_chat_config(config),
+        thinking_budget_tokens=(
+            int(config.thinking_budget_tokens)
+            if config is not None and getattr(config, "thinking_budget_tokens", 0)
+            else AgentConfig().thinking_budget_tokens
+        ),
+        stop_sequences=list(config.stop_sequences) if config is not None else [],
+        model_capabilities=config.model_capabilities if config is not None else None,
+        model_id=model_id,
+        workspace_dir=str(ROOT),
+        tool_result_external_keep_recent=3,
+        metadata={
+            "benchmark": "DRACO",
+            "runner_mode": RUNNER_MODE_AGENT_LOOP,
+            "tool_activity_heartbeat_interval": 30.0,
+        },
+    )
+
+
+def llm_response_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        record
+        for record in records
+        if record.get("kind") in {"llm_response", "llm_error"}
+        and isinstance(record.get("payload"), dict)
+    ]
+
+
+def aggregate_agent_model_usage(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for call_index, record in enumerate(llm_response_records(records), start=1):
+        payload = record["payload"]
+        usage = payload.get("usage") if isinstance(payload, dict) else None
+        if not isinstance(usage, dict):
+            continue
+        breakdown = usage.get("model_usage_breakdown")
+        if isinstance(breakdown, list) and breakdown:
+            for row in breakdown:
+                if not isinstance(row, dict):
+                    continue
+                enriched = dict(row)
+                enriched["agent_call_index"] = call_index
+                enriched["agent_iteration"] = coerce_metric_int(payload.get("iteration"))
+                enriched["agent_call_attempt"] = coerce_metric_int(
+                    payload.get("call_attempt")
+                )
+                rows.append(enriched)
+            continue
+        rows.append(
+            {
+                "role": "agent_llm_call",
+                "agent_call_index": call_index,
+                "agent_iteration": coerce_metric_int(payload.get("iteration")),
+                "agent_call_attempt": coerce_metric_int(payload.get("call_attempt")),
+                "model": str(usage.get("model") or ""),
+                "input_tokens": coerce_metric_int(usage.get("input_tokens")),
+                "output_tokens": coerce_metric_int(usage.get("output_tokens")),
+                "reasoning_tokens": coerce_metric_int(usage.get("reasoning_tokens")),
+                "cached_tokens": coerce_metric_int(usage.get("cached_tokens")),
+                "cache_write_tokens": coerce_metric_int(
+                    usage.get("cache_write_tokens")
+                ),
+                "billed_cost": float(usage.get("billed_cost") or 0.0),
+                "cost_source": str(usage.get("cost_source") or "none"),
+            }
+        )
+    return rows
+
+
+def aggregate_agent_ensemble_trace(records: list[dict[str, Any]]) -> dict[str, Any]:
+    traces: list[dict[str, Any]] = []
+    total_llm_requests = 0
+    for call_index, record in enumerate(llm_response_records(records), start=1):
+        payload = record["payload"]
+        trace = payload.get("ensemble_trace") if isinstance(payload, dict) else None
+        if not isinstance(trace, dict) or not trace:
+            continue
+        enriched = dict(trace)
+        enriched["agent_call_index"] = call_index
+        enriched["agent_iteration"] = coerce_metric_int(payload.get("iteration"))
+        traces.append(enriched)
+        total_llm_requests += coerce_metric_int(trace.get("llm_request_count"))
+    if not traces:
+        return {}
+    first_trace = traces[0]
+    payload: dict[str, Any] = {
+        "mode": "agent_loop",
+        "agent_llm_call_count": len(llm_response_records(records)),
+        "llm_request_count": total_llm_requests or len(llm_response_records(records)),
+        "calls": traces,
+    }
+    for key in (
+        "profile",
+        "shuffle_candidates",
+        "successful_proposers",
+        "total_candidates",
+        "fallback_used",
+        "final_request_role",
+    ):
+        if key in first_trace:
+            payload[key] = first_trace[key]
+    return payload
+
+
+def provider_done_from_agent_done(
+    done: AgentDoneEvent | None,
+    *,
+    recorder: BenchmarkTurnCallRecorder,
+    fallback_model: str,
+) -> DoneEvent | None:
+    if done is None:
+        return None
+    breakdown = aggregate_agent_model_usage(recorder.records)
+    trace = aggregate_agent_ensemble_trace(recorder.records)
+    if trace:
+        trace["agent_iterations"] = done.iterations
+    provider_usage: dict[str, Any] = {
+        "agent_iterations": done.iterations,
+        "agent_llm_call_count": len(llm_response_records(recorder.records)),
+    }
+    return DoneEvent(
+        stop_reason="stop",
+        input_tokens=done.input_tokens,
+        output_tokens=done.output_tokens,
+        reasoning_content=done.reasoning_content,
+        reasoning_tokens=done.reasoning_tokens,
+        cached_tokens=done.cached_tokens,
+        billed_cost=done.billed_cost or done.cost_usd,
+        model=done.model or fallback_model,
+        cache_write_tokens=done.cache_write_tokens,
+        cost_source=done.cost_source,
+        model_usage_breakdown=breakdown,
+        ensemble_trace=trace,
+        provider_usage=provider_usage,
+    )
+
+
+async def collect_agent_run(
+    provider: Any,
+    prompt: str,
+    *,
+    timeout: float,
+    config: ChatConfig | None,
+    tools: list[ToolDefinition] | None,
+    tool_policy: dict[str, Any],
+    task_id: str,
+    group: str,
+    output_dir: Path | None = None,
+    max_iterations: int = DEFAULT_AGENT_MAX_ITERATIONS,
+) -> RunResult:
+    text_parts: list[str] = []
+    done: AgentDoneEvent | None = None
+    error = ""
+    ttft_ms: int | None = None
+    tool_call_count = 0
+    trace_events: list[dict[str, Any]] = []
+    started = time.monotonic()
+    recorder = BenchmarkTurnCallRecorder()
+
+    def _trace(kind: str, **payload: Any) -> None:
+        trace_events.append(
+            {
+                "seq": len(trace_events) + 1,
+                "elapsed_ms": int((time.monotonic() - started) * 1000),
+                "kind": kind,
+                **payload,
+            }
+        )
+
+    tool_registry: ToolRegistry | None = None
+    tool_context: ToolContext | None = None
+    tool_handler = None
+    if tool_policy.get("tool_mode") == TOOL_MODE_LOCAL_WEB_TOOLS:
+        tool_registry = build_local_web_tool_registry(tool_policy)
+        tool_context = build_benchmark_tool_context(
+            task_id=task_id,
+            group=group,
+            tool_policy=tool_policy,
+            output_dir=output_dir,
+        )
+        tool_handler = build_tool_handler(tool_registry, tool_context)
+
+    model_id = getattr(provider, "model", "") or getattr(provider, "profile_name", "")
+    agent = Agent(
+        provider=provider,
+        config=agent_config_from_chat_config(
+            config,
+            timeout=timeout,
+            model_id=str(model_id or ""),
+            max_iterations=max_iterations,
+        ),
+        tool_definitions=tools,
+        tool_handler=tool_handler,
+        tool_registry=tool_registry,
+        tool_context=tool_context,
+        session_key=f"draco:{group}:{task_id}",
+        turn_call_logger=recorder,
+    )
+    try:
+        async def _consume() -> None:
+            nonlocal done, error, ttft_ms, tool_call_count
+            async for event in agent.run_turn(prompt):
+                if isinstance(event, AgentTextDeltaEvent):
+                    if event.presentation == "answer":
+                        if ttft_ms is None and event.text:
+                            ttft_ms = int((time.monotonic() - started) * 1000)
+                            _trace(
+                                "first_text_delta",
+                                text_chars=len(event.text),
+                                presentation=event.presentation,
+                            )
+                        else:
+                            _trace(
+                                "text_delta",
+                                text_chars=len(event.text),
+                                presentation=event.presentation,
+                            )
+                        text_parts.append(event.text)
+                    else:
+                        _trace(
+                            "intermediate_text_delta",
+                            text_chars=len(event.text),
+                            presentation=event.presentation,
+                        )
+                elif isinstance(event, AgentThinkingEvent):
+                    _trace("thinking_delta", text_chars=len(event.text))
+                elif isinstance(event, AgentToolUseStartEvent):
+                    tool_call_count += 1
+                    _trace(
+                        "tool_use_start",
+                        tool_use_id=event.tool_use_id,
+                        tool_name=event.tool_name,
+                        synthetic_from_text=event.synthetic_from_text,
+                    )
+                elif isinstance(event, AgentToolUseDeltaEvent):
+                    _trace(
+                        "tool_use_delta",
+                        tool_use_id=event.tool_use_id,
+                        json_fragment_chars=len(event.json_fragment),
+                    )
+                elif isinstance(event, AgentToolResultEvent):
+                    _trace(
+                        "tool_result",
+                        tool_use_id=event.tool_use_id,
+                        tool_name=event.tool_name,
+                        is_error=event.is_error,
+                        result_chars=len(event.result or ""),
+                    )
+                elif isinstance(event, AgentRunHeartbeatEvent):
+                    _trace(
+                        "run_heartbeat",
+                        phase=event.phase,
+                        message=event.message,
+                        idle_ms=event.idle_ms,
+                    )
+                elif isinstance(event, AgentStateChangeEvent):
+                    _trace(
+                        "state_change",
+                        from_state=str(event.from_state),
+                        to_state=str(event.to_state),
+                    )
+                elif isinstance(event, AgentWarningEvent):
+                    _trace("warning", code=event.code, message=event.message)
+                elif isinstance(event, AgentDoneEvent):
+                    done = event
+                    if event.text and not "".join(text_parts).strip():
+                        text_parts.append(event.text)
+                    _trace(
+                        "done",
+                        usage={
+                            "input_tokens": event.input_tokens,
+                            "output_tokens": event.output_tokens,
+                            "reasoning_tokens": event.reasoning_tokens,
+                            "cached_tokens": event.cached_tokens,
+                            "cache_write_tokens": event.cache_write_tokens,
+                            "billed_cost": event.billed_cost,
+                            "cost_usd": event.cost_usd,
+                            "cost_source": event.cost_source,
+                            "model": event.model,
+                            "iterations": event.iterations,
+                        },
+                    )
+                elif isinstance(event, AgentErrorEvent):
+                    error = event.message
+                    _trace("error", message=event.message, code=event.code)
+                else:
+                    _trace("agent_event", event_type=type(event).__name__)
+
+        if timeout and timeout > 0:
+            try:
+                async with asyncio.timeout(timeout):
+                    await _consume()
+            except TimeoutError:
+                error = f"TimeoutError: agent run timed out after {timeout:g}s"
+                _trace("timeout", timeout_s=timeout)
+        else:
+            await _consume()
+    except Exception as exc:  # noqa: BLE001 - benchmark rows should keep going
+        error = f"{type(exc).__name__}: {exc}"
+        _trace("exception", error=error)
+
+    provider_done = provider_done_from_agent_done(
+        done,
+        recorder=recorder,
+        fallback_model=str(model_id or ""),
+    )
+    trace_events.append(
+        {
+            "seq": len(trace_events) + 1,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "kind": "turn_call_log_summary",
+            "llm_response_records": len(llm_response_records(recorder.records)),
+            "records": recorder.records,
+        }
+    )
+    return RunResult(
+        final_text="".join(text_parts),
+        done=provider_done,
+        error=error,
+        latency_ms=int((time.monotonic() - started) * 1000),
+        ttft_ms=ttft_ms,
+        tool_call_count=tool_call_count,
+        trace_events=trace_events,
+    )
+
+
 def coerce_metric_int(value: Any) -> int:
     if isinstance(value, bool):
         return 0
@@ -1004,11 +1809,28 @@ def done_payload(done: DoneEvent | None) -> dict[str, Any]:
     return payload
 
 
-def candidate_texts(done: DoneEvent | None) -> list[str]:
+def candidate_texts(
+    done: DoneEvent | None,
+    *,
+    final_agent_call_only: bool = False,
+) -> list[str]:
     if done is None:
         return []
     trace = done.ensemble_trace or {}
-    candidates = trace.get("candidates") if isinstance(trace, dict) else None
+    candidates: list[Any] = []
+    if isinstance(trace, dict):
+        direct_candidates = trace.get("candidates")
+        if isinstance(direct_candidates, list):
+            candidates.extend(direct_candidates)
+        calls = trace.get("calls")
+        if isinstance(calls, list):
+            selected_calls = calls[-1:] if final_agent_call_only else calls
+            for call in selected_calls:
+                if not isinstance(call, dict):
+                    continue
+                call_candidates = call.get("candidates")
+                if isinstance(call_candidates, list):
+                    candidates.extend(call_candidates)
     if not isinstance(candidates, list):
         return []
     return [
@@ -1095,6 +1917,21 @@ def mark_empty_generation_output(result: RunResult) -> None:
     )
 
 
+def mark_retryable_generation_error(result: RunResult, reason: str) -> None:
+    if result.error or not reason:
+        return
+    if reason not in {GENERATION_EMPTY_OUTPUT_ERROR, GENERATION_MISSING_DONE_ERROR}:
+        return
+    result.error = reason
+    result.trace_events.append(
+        {
+            "seq": len(result.trace_events) + 1,
+            "elapsed_ms": result.latency_ms,
+            "kind": reason,
+        }
+    )
+
+
 def selected_generation_attempt(
     attempts: list[dict[str, Any]],
     selected_result: RunResult,
@@ -1120,6 +1957,12 @@ async def collect_generation_with_retries(
     timeout: float,
     config: ChatConfig | None = None,
     tools: list[ToolDefinition] | None = None,
+    runner_mode: str = RUNNER_MODE_PROVIDER,
+    tool_policy: dict[str, Any] | None = None,
+    task_id: str = "",
+    group: str = "",
+    output_dir: Path | None = None,
+    agent_max_iterations: int = DEFAULT_AGENT_MAX_ITERATIONS,
     max_attempts: int = GENERATION_MAX_ATTEMPTS,
     retry_backoff_seconds: float = 0.0,
 ) -> tuple[RunResult, list[dict[str, Any]], int]:
@@ -1128,15 +1971,30 @@ async def collect_generation_with_retries(
     last_result: RunResult | None = None
     attempt_limit = bounded_generation_attempts(max_attempts)
     for attempt_index in range(1, attempt_limit + 1):
-        result = await collect_run(
-            provider,
-            prompt,
-            timeout=timeout,
-            config=config,
-            tools=tools,
-        )
+        if runner_mode == RUNNER_MODE_AGENT_LOOP:
+            result = await collect_agent_run(
+                provider,
+                prompt,
+                timeout=timeout,
+                config=config,
+                tools=tools,
+                tool_policy=tool_policy or {},
+                task_id=task_id,
+                group=group,
+                output_dir=output_dir,
+                max_iterations=agent_max_iterations,
+            )
+        else:
+            result = await collect_run(
+                provider,
+                prompt,
+                timeout=timeout,
+                config=config,
+                tools=tools,
+            )
         last_result = result
         reason = generation_retry_reason(result)
+        mark_retryable_generation_error(result, reason)
         if result.final_text.strip() and best_non_empty is None:
             best_non_empty = result
         will_retry = bool(reason) and attempt_index < attempt_limit
@@ -1166,6 +2024,8 @@ async def collect_generation_with_retries(
         error=GENERATION_MISSING_DONE_ERROR,
     )
     mark_empty_generation_output(selected)
+    if best_non_empty is None and attempts:
+        return selected, attempts, coerce_metric_int(attempts[-1].get("attempt"))
     return selected, attempts, selected_generation_attempt(attempts, selected)
 
 
@@ -1590,6 +2450,9 @@ async def run_one(
     timeout: float,
     tool_policy: dict[str, Any],
     generation_policy: dict[str, Any],
+    runner_mode: str = RUNNER_MODE_PROVIDER,
+    output_dir: Path | None = None,
+    agent_max_iterations: int = DEFAULT_AGENT_MAX_ITERATIONS,
     generation_max_attempts: int = GENERATION_MAX_ATTEMPTS,
     generation_retry_backoff: float = DEFAULT_GENERATION_RETRY_BACKOFF_SECONDS,
     tools: list[ToolDefinition] | None = None,
@@ -1625,7 +2488,10 @@ async def run_one(
                 dry_run=dry_run,
                 generation_policy=generation_policy,
                 requested_timeout=effective_timeout,
-                enable_proposer_tools=bool(tool_policy.get("tools_enabled")),
+                enable_proposer_tools=bool(
+                    tool_policy.get("tools_enabled")
+                    and tool_policy.get("tool_mode") != TOOL_MODE_LOCAL_WEB_TOOLS
+                ),
             )
     except Exception as exc:  # noqa: BLE001 - report config errors per row
         provider_error = f"{type(exc).__name__}: {exc}"
@@ -1637,6 +2503,12 @@ async def run_one(
                 timeout=effective_timeout,
                 config=generation_config,
                 tools=tools,
+                runner_mode=runner_mode,
+                tool_policy=tool_policy,
+                task_id=str(task["id"]),
+                group=group,
+                output_dir=output_dir,
+                agent_max_iterations=agent_max_iterations,
                 max_attempts=generation_attempt_limit,
                 retry_backoff_seconds=generation_retry_backoff_s,
             )
@@ -1645,9 +2517,11 @@ async def run_one(
         run = RunResult(final_text="", done=None, error=provider_error)
         generation_attempts = []
         selected_generation_attempt_index = 0
+    terminal_generation_reason = generation_retry_reason(run)
+    mark_retryable_generation_error(run, terminal_generation_reason)
     profile_proposer_timeout_s = getattr(provider, "proposer_timeout_seconds", None)
     profile_aggregator_timeout_s = getattr(provider, "aggregator_timeout_seconds", None)
-    should_judge = not run.error
+    should_judge = not terminal_generation_reason and run.done is not None
     judge = (
         await judge_text(
             judge_provider=judge_provider,
@@ -1663,7 +2537,10 @@ async def run_one(
     )
     candidate_judges: list[dict[str, Any] | None] = []
     if judge_candidates and should_judge:
-        for candidate in candidate_texts(run.done):
+        for candidate in candidate_texts(
+            run.done,
+            final_agent_call_only=runner_mode == RUNNER_MODE_AGENT_LOOP,
+        ):
             candidate_judges.append(
                 await judge_text(
                     judge_provider=judge_provider,
@@ -1738,7 +2615,7 @@ async def run_one(
         "prompt_sha256": prompt_sha,
         "metadata": task.get("metadata", {}),
         "provider_spec": dict(spec),
-        "runner_mode": tool_policy.get("tool_mode") or RUNNER_MODE,
+        "runner_mode": runner_mode,
         "tools_enabled": bool(tool_policy.get("tools_enabled")),
         "tool_policy": tool_policy,
         "generation_policy": generation_policy,
@@ -1775,6 +2652,8 @@ async def run_one(
             "effective_timeout_s": effective_timeout,
             "profile_proposer_timeout_s": profile_proposer_timeout_s,
             "profile_aggregator_timeout_s": profile_aggregator_timeout_s,
+            "runner_mode": runner_mode,
+            "agent_max_iterations": agent_max_iterations,
             "latency_ms": latency_ms,
             "selected_generation_latency_ms": run.latency_ms,
             "ttft_ms": run.ttft_ms,
@@ -2148,6 +3027,8 @@ def render_markdown(
     jsonl_path: Path,
     tool_policy: dict[str, Any] | None = None,
     generation_policy: dict[str, Any] | None = None,
+    runner_mode: str = DEFAULT_DRACO_RUNNER_MODE,
+    agent_max_iterations: int = DEFAULT_AGENT_MAX_ITERATIONS,
 ) -> str:
     stamp = jsonl_path.stem.removeprefix("draco_ensemble_")
     trace_path = jsonl_path.parent / f"draco_run_{stamp}.trace.jsonl"
@@ -2155,7 +3036,8 @@ def render_markdown(
     generation = generation_policy or generation_thinking_policy()
     blocked_domains = policy.get("contamination_blocked_domains") or []
     tool_line = (
-        f"Runner mode: `{policy.get('tool_mode') or RUNNER_MODE}`; tools enabled: "
+        f"Runner mode: `{runner_mode}`; tool mode: `{policy.get('tool_mode') or RUNNER_MODE}`; "
+        "tools enabled: "
         f"`{str(bool(policy.get('tools_enabled'))).lower()}`"
     )
     if policy.get("tools_enabled"):
@@ -2166,7 +3048,7 @@ def render_markdown(
             tool_line = f"{tool_line}."
     if not policy.get("tools_enabled"):
         tool_line = (
-            f"Runner mode: `{policy.get('tool_mode') or RUNNER_MODE}`; "
+            f"Runner mode: `{runner_mode}`; tool mode: `{policy.get('tool_mode') or RUNNER_MODE}`; "
             "external research tools are not attached."
         )
 
@@ -2185,6 +3067,7 @@ def render_markdown(
         f"level: `{generation.get('thinking_level')}`, "
         f"budget: `{generation.get('thinking_budget_tokens')}`, "
         f"temperature: `{generation.get('temperature')}`).",
+        f"Agent max iterations: `{agent_max_iterations}`.",
         tool_line,
         "Contamination blocked domains: "
         f"`{', '.join(blocked_domains) if blocked_domains else '(none)'}`.",
@@ -2256,6 +3139,8 @@ def manifest_args(args: argparse.Namespace) -> dict[str, Any]:
         "max_tasks",
         "concurrency",
         "timeout",
+        "runner_mode",
+        "agent_max_iterations",
         "dry_run",
         "judge_model",
         "judge_repeats",
@@ -2372,7 +3257,12 @@ def write_manifest(
     payload: dict[str, Any] = {
         "benchmark": "DRACO",
         "runner": "scripts/run_draco_ensemble.py",
-        "runner_mode": policy.get("tool_mode") or RUNNER_MODE,
+        "runner_mode": getattr(args, "runner_mode", DEFAULT_DRACO_RUNNER_MODE),
+        "agent_max_iterations": getattr(
+            args,
+            "agent_max_iterations",
+            DEFAULT_AGENT_MAX_ITERATIONS,
+        ),
         "tool_policy": policy,
         "generation_policy": generation_policy,
         "stamp": stamp,
@@ -2400,6 +3290,20 @@ def write_manifest(
 async def amain(args: argparse.Namespace) -> int:
     tasks = load_tasks(args.input, max_tasks=args.max_tasks)
     groups = parse_groups(args.groups)
+    args.runner_mode = str(
+        getattr(args, "runner_mode", DEFAULT_DRACO_RUNNER_MODE)
+        or DEFAULT_DRACO_RUNNER_MODE
+    ).strip()
+    if args.runner_mode not in SUPPORTED_RUNNER_MODES:
+        raise ValueError(f"unknown runner mode: {args.runner_mode}")
+    try:
+        args.agent_max_iterations = int(
+            getattr(args, "agent_max_iterations", DEFAULT_AGENT_MAX_ITERATIONS)
+            or DEFAULT_AGENT_MAX_ITERATIONS
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("agent_max_iterations must be an integer") from exc
+    args.agent_max_iterations = max(0, args.agent_max_iterations)
     args.generation_thinking = normalize_generation_thinking(
         getattr(args, "generation_thinking", DEFAULT_GENERATION_THINKING)
     )
@@ -2414,12 +3318,27 @@ async def amain(args: argparse.Namespace) -> int:
         )
     )
     tool_policy = benchmark_tool_policy(args)
-    benchmark_tools = benchmark_tools_for_policy(tool_policy)
+    if (
+        args.runner_mode == RUNNER_MODE_AGENT_LOOP
+        and tool_policy.get("tool_mode") == TOOL_MODE_OPENROUTER_SERVER_TOOLS
+    ):
+        raise ValueError(
+            "--runner-mode=agent_loop requires executable local tools; use "
+            "--tool-mode=local_web_tools, or use --runner-mode=provider for "
+            "OpenRouter server-side tools."
+        )
     generation_policy = generation_thinking_policy(args)
     config = GatewayConfig.load(args.config)
+    search_runtime = configure_local_web_search_runtime(config, tool_policy)
+    if search_runtime:
+        local_web_tools = dict(tool_policy.get("local_web_tools") or {})
+        local_web_tools["search_runtime"] = search_runtime
+        tool_policy = {**tool_policy, "local_web_tools": local_web_tools}
+    benchmark_tools = benchmark_tools_for_policy(tool_policy)
     inherited = inherited_provider_config(config)
     if (
         tool_policy.get("tools_enabled")
+        and tool_policy.get("tool_mode") == TOOL_MODE_OPENROUTER_SERVER_TOOLS
         and inherited.provider != "openrouter"
         and not getattr(args, "dry_run", False)
     ):
@@ -2483,6 +3402,9 @@ async def amain(args: argparse.Namespace) -> int:
                 timeout=args.timeout,
                 tool_policy=tool_policy,
                 generation_policy=generation_policy,
+                runner_mode=args.runner_mode,
+                output_dir=output_dir,
+                agent_max_iterations=args.agent_max_iterations,
                 generation_max_attempts=getattr(
                     args, "generation_max_attempts", GENERATION_MAX_ATTEMPTS
                 ),
@@ -2515,6 +3437,8 @@ async def amain(args: argparse.Namespace) -> int:
             jsonl_path,
             tool_policy=tool_policy,
             generation_policy=generation_policy,
+            runner_mode=args.runner_mode,
+            agent_max_iterations=args.agent_max_iterations,
         ),
         encoding="utf-8",
     )
@@ -2555,6 +3479,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-tasks", type=int, default=0)
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=180.0)
+    parser.add_argument(
+        "--runner-mode",
+        choices=SUPPORTED_RUNNER_MODES,
+        default=DEFAULT_DRACO_RUNNER_MODE,
+        help=(
+            "Generation runner. agent_loop runs the full Agent tool loop; "
+            "provider runs one provider.chat call for provider-level ablations."
+        ),
+    )
+    parser.add_argument(
+        "--agent-max-iterations",
+        type=int,
+        default=DEFAULT_AGENT_MAX_ITERATIONS,
+        help=(
+            "Maximum Agent LLM/tool-loop iterations when --runner-mode=agent_loop; "
+            "0 means unlimited."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--judge-model", default="")
     parser.add_argument("--judge-repeats", type=int, default=3)
@@ -2586,11 +3528,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--tool-mode",
         choices=SUPPORTED_TOOL_MODES,
-        default=RUNNER_MODE,
+        default=TOOL_MODE_PROVIDER_ONLY,
         help=(
             "Benchmark tool mode. provider_only attaches no external tools; "
-            "openrouter_server_tools attaches OpenRouter web_search and web_fetch "
-            "server tools with benchmark leakage domains excluded."
+            "local_web_tools attaches executable web_search and web_fetch tools "
+            "for the Agent loop; openrouter_server_tools attaches OpenRouter "
+            "server tools for provider-level runs."
         ),
     )
     parser.add_argument(

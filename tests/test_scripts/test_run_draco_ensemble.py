@@ -16,6 +16,9 @@ from opensquilla.provider.types import (
     TextDeltaEvent,
     ToolDefinition,
     ToolInputSchema,
+    ToolUseDeltaEvent,
+    ToolUseEndEvent,
+    ToolUseStartEvent,
 )
 from scripts.run_draco_ensemble import (
     GROUP_SPECS,
@@ -24,8 +27,13 @@ from scripts.run_draco_ensemble import (
     benchmark_tool_policy,
     benchmark_tools_for_policy,
     build_parser,
+    build_benchmark_tool_context,
+    build_local_web_tool_registry,
     build_profile_provider,
+    candidate_texts,
     compact_chat_config,
+    configure_local_web_search_runtime,
+    collect_agent_run,
     collect_generation_with_retries,
     collect_run,
     generation_chat_config,
@@ -37,6 +45,7 @@ from scripts.run_draco_ensemble import (
     quality_total,
     render_markdown,
     run_one,
+    run_result_summary,
     score_criterion_judgments,
     summarize,
 )
@@ -138,6 +147,20 @@ class _EmptyThenSuccessProvider:
         return []
 
 
+class _AlwaysEmptyProvider:
+    provider_name = "always-empty"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def chat(self, messages: list[Message], tools=None, config=None):  # noqa: ANN001, ARG002
+        self.calls += 1
+        yield DoneEvent(model="empty")
+
+    async def list_models(self) -> list:
+        return []
+
+
 class _ErrorThenSuccessProvider:
     provider_name = "error-then-success"
 
@@ -158,6 +181,20 @@ class _ErrorThenSuccessProvider:
         return []
 
 
+class _MissingDoneProvider:
+    provider_name = "missing-done"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def chat(self, messages: list[Message], tools=None, config=None):  # noqa: ANN001, ARG002
+        self.calls += 1
+        yield TextDeltaEvent(text="partial answer")
+
+    async def list_models(self) -> list:
+        return []
+
+
 class _ToolCaptureProvider:
     provider_name = "tool-capture"
 
@@ -168,6 +205,36 @@ class _ToolCaptureProvider:
         self.seen_tools = tools
         yield TextDeltaEvent(text="ok")
         yield DoneEvent(model="tool-capture")
+
+    async def list_models(self) -> list:
+        return []
+
+
+class _AgentToolLoopProvider:
+    provider_name = "agent-tool-loop"
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def chat(self, messages: list[Message], tools=None, config=None):  # noqa: ANN001, ARG002
+        self.calls += 1
+        if self.calls == 1:
+            yield ToolUseStartEvent(tool_use_id="call_1", tool_name="web_fetch")
+            yield ToolUseDeltaEvent(
+                tool_use_id="call_1",
+                json_fragment='{"url":"https://huggingface.co/datasets/perplexity-ai/draco"}',
+            )
+            yield ToolUseEndEvent(
+                tool_use_id="call_1",
+                tool_name="web_fetch",
+                arguments={
+                    "url": "https://huggingface.co/datasets/perplexity-ai/draco"
+                },
+            )
+            yield DoneEvent(input_tokens=10, output_tokens=2, model="tool-loop")
+            return
+        yield TextDeltaEvent(text="final after tool")
+        yield DoneEvent(input_tokens=11, output_tokens=4, model="tool-loop")
 
     async def list_models(self) -> list:
         return []
@@ -196,6 +263,8 @@ async def test_draco_runner_dry_run_writes_jsonl_and_summary(tmp_path: Path) -> 
         max_tasks=0,
         concurrency=2,
         timeout=10.0,
+        runner_mode="provider",
+        agent_max_iterations=12,
         dry_run=True,
         judge_model="dry-judge",
         judge_repeats=1,
@@ -233,7 +302,7 @@ async def test_draco_runner_dry_run_writes_jsonl_and_summary(tmp_path: Path) -> 
     assert g3["usage"]["model_usage_breakdown"]
     assert g3["run_trace"]["event_count"] >= 2
     assert g3["final_text_sha256"]
-    assert g3["runner_mode"] == "provider_only"
+    assert g3["runner_mode"] == "provider"
     assert g3["tools_enabled"] is False
     assert g3["stream_tool_call_count"] == 0
     assert g3["server_tool_call_count"] == 0
@@ -282,6 +351,8 @@ async def test_draco_runner_dry_run_writes_jsonl_and_summary(tmp_path: Path) -> 
     assert manifest["artifacts"]["command_txt"] == str(command_path)
     assert ".venv/bin/python scripts/run_draco_ensemble.py" in manifest["command"]["shell"]
     assert manifest["tool_policy"]["tool_mode"] == "provider_only"
+    assert manifest["runner_mode"] == "provider"
+    assert manifest["agent_max_iterations"] == 12
     assert manifest["generation_policy"]["generation_thinking"] == "high"
     assert "huggingface.co" in manifest["tool_policy"]["contamination_blocked_domains"]
 
@@ -297,6 +368,8 @@ def test_draco_runner_default_groups_include_g1() -> None:
     assert args.generation_max_attempts == 3
     assert args.generation_retry_backoff == 2.0
     assert args.generation_thinking == "high"
+    assert args.runner_mode == "agent_loop"
+    assert args.agent_max_iterations == 12
     assert args.tool_mode == "provider_only"
     assert args.openrouter_web_search_engine == "exa"
     assert args.openrouter_web_fetch_engine == "openrouter"
@@ -342,6 +415,183 @@ def test_draco_runner_openrouter_server_tools_policy_enforces_conflict_domains()
     assert [tool.provider_tool["type"] for tool in tools] == [  # type: ignore[index]
         "openrouter:web_search",
         "openrouter:web_fetch",
+    ]
+
+
+def test_draco_runner_local_web_tools_policy_enforces_conflict_domains() -> None:
+    args = build_parser().parse_args([
+        "--input",
+        "draco.jsonl",
+        "--tool-mode",
+        "local_web_tools",
+        "--contamination-blocked-domains",
+        "huggingface.co,github.com",
+    ])
+
+    policy = benchmark_tool_policy(args)
+    tools = benchmark_tools_for_policy(policy)
+
+    assert policy["tools_enabled"] is True
+    assert policy["tool_names"] == ["web_search", "web_fetch"]
+    assert policy["contamination_controls"]["status"] == "enforced_by_local_web_tools"
+    assert policy["local_web_tools"]["web_search"]["excluded_domains"] == [
+        "huggingface.co",
+        "github.com",
+    ]
+    assert policy["local_web_tools"]["web_fetch"]["blocked_domains"] == [
+        "huggingface.co",
+        "github.com",
+    ]
+    assert policy["local_web_tools"]["web_fetch"]["max_content_chars"] == 200_000
+    assert tools is not None
+    assert [tool.name for tool in tools] == ["web_search", "web_fetch"]
+
+
+def test_draco_runner_local_web_tool_context_matches_recorded_budget() -> None:
+    args = build_parser().parse_args([
+        "--input",
+        "draco.jsonl",
+        "--tool-mode",
+        "local_web_tools",
+        "--openrouter-web-search-max-results",
+        "7",
+        "--openrouter-web-fetch-max-content-tokens",
+        "1234",
+    ])
+    policy = benchmark_tool_policy(args)
+
+    ctx = build_benchmark_tool_context(
+        task_id="task-1",
+        group="G3",
+        tool_policy=policy,
+    )
+
+    assert ctx.tool_run_budget_policy.max_web_search_results == 7
+    assert ctx.tool_run_budget_policy.max_single_fetch_chars == 4936
+    assert policy["local_web_tools"]["web_fetch"]["max_content_chars"] == 4936
+
+
+@pytest.mark.asyncio
+async def test_draco_runner_local_web_search_clamps_model_max_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, int]] = []
+
+    async def _fake_search(query: str, max_results: int | None = None) -> dict:
+        calls.append((query, int(max_results or 0)))
+        return {"results": [{"url": "https://example.com/source", "title": "source"}]}
+
+    monkeypatch.setattr(
+        "opensquilla.tools.builtin.web.run_web_search_payload",
+        _fake_search,
+    )
+    args = build_parser().parse_args([
+        "--input",
+        "draco.jsonl",
+        "--tool-mode",
+        "local_web_tools",
+        "--openrouter-web-search-max-results",
+        "7",
+    ])
+    registry = build_local_web_tool_registry(benchmark_tool_policy(args))
+    registered = registry.get("web_search")
+
+    assert registered is not None
+    await registered.handler(query="research topic", max_results="999")
+    await registered.handler(query="research topic", max_results="not-a-number")
+
+    assert [call[1] for call in calls] == [7, 7]
+
+
+@pytest.mark.asyncio
+async def test_draco_runner_local_web_fetch_clamps_model_max_chars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int | None] = []
+
+    async def _fake_fetch(
+        url: str,
+        extract_mode: str = "markdown",
+        max_chars: int | None = None,
+    ) -> str:
+        calls.append(max_chars)
+        return json.dumps(
+            {"url": url, "extract_mode": extract_mode, "max_chars": max_chars}
+        )
+
+    monkeypatch.setattr("opensquilla.tools.builtin.web_fetch.web_fetch", _fake_fetch)
+    args = build_parser().parse_args([
+        "--input",
+        "draco.jsonl",
+        "--tool-mode",
+        "local_web_tools",
+        "--openrouter-web-fetch-max-content-tokens",
+        "1234",
+    ])
+    registry = build_local_web_tool_registry(benchmark_tool_policy(args))
+    registered = registry.get("web_fetch")
+
+    assert registered is not None
+    await registered.handler(url="https://example.com/source", max_chars="999999")
+    await registered.handler(url="https://example.com/source", max_chars="10")
+    await registered.handler(url="https://example.com/source", max_chars="bad")
+
+    assert calls == [4936, 100, 4936]
+
+
+def test_draco_runner_configures_local_search_runtime_without_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def _fake_configure_search(**kwargs: object) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "brave-secret")
+    monkeypatch.setattr(
+        "opensquilla.tools.builtin.web.configure_search",
+        _fake_configure_search,
+    )
+    args = build_parser().parse_args([
+        "--input",
+        "draco.jsonl",
+        "--tool-mode",
+        "local_web_tools",
+        "--openrouter-web-search-max-results",
+        "7",
+    ])
+
+    runtime = configure_local_web_search_runtime(
+        GatewayConfig(search_max_results=2),
+        benchmark_tool_policy(args),
+    )
+
+    assert calls
+    assert calls[0]["provider_name"] == "brave"
+    assert calls[0]["api_key"] == "brave-secret"
+    assert calls[0]["max_results"] == 7
+    assert runtime["provider"] == "brave"
+    assert runtime["max_results"] == 7
+    assert runtime["api_key_configured"] is True
+    assert "brave-secret" not in json.dumps(runtime)
+
+
+def test_draco_runner_candidate_texts_can_scope_to_final_agent_call() -> None:
+    done = DoneEvent(
+        ensemble_trace={
+            "calls": [
+                {"candidates": [{"text": "tool planning candidate"}]},
+                {"candidates": [{"text": "final answer candidate"}]},
+            ]
+        }
+    )
+
+    assert candidate_texts(done) == [
+        "tool planning candidate",
+        "final answer candidate",
+    ]
+    assert candidate_texts(done, final_agent_call_only=True) == [
+        "final answer candidate"
     ]
 
 
@@ -505,6 +755,48 @@ async def test_draco_runner_collect_run_passes_tools_to_provider() -> None:
 
     assert run.final_text == "ok"
     assert provider.seen_tools == [tool]
+
+
+@pytest.mark.asyncio
+async def test_draco_runner_collect_agent_run_executes_local_web_tool_loop() -> None:
+    provider = _AgentToolLoopProvider()
+    args = build_parser().parse_args([
+        "--input",
+        "draco.jsonl",
+        "--tool-mode",
+        "local_web_tools",
+        "--contamination-blocked-domains",
+        "huggingface.co",
+    ])
+    policy = benchmark_tool_policy(args)
+
+    run = await collect_agent_run(
+        provider,
+        "research this",
+        timeout=10.0,
+        config=generation_chat_config(
+            generation_thinking_policy(Namespace(generation_thinking="off"))
+        ),
+        tools=benchmark_tools_for_policy(policy),
+        tool_policy=policy,
+        task_id="task-1",
+        group="B0",
+        max_iterations=4,
+    )
+
+    summary = run_result_summary(run)
+
+    assert provider.calls == 2
+    assert run.final_text == "final after tool"
+    assert run.error == ""
+    assert run.tool_call_count == 1
+    assert run.done is not None
+    assert run.done.provider_usage["agent_iterations"] == 2
+    assert summary["llm_request_count"] == 2
+    assert any(
+        event.get("kind") == "tool_result" and event.get("tool_name") == "web_fetch"
+        for event in run.trace_events
+    )
 
 
 def test_draco_runner_generation_chat_config_uses_explicit_high_by_default() -> None:
@@ -952,7 +1244,7 @@ def test_quality_total_normalizes_legacy_dimension_scores() -> None:
 async def test_run_one_skips_judge_when_generation_is_not_done(monkeypatch) -> None:  # noqa: ANN001
     async def _failed_generation(*args, **kwargs):  # noqa: ANN002, ANN003
         return (
-            RunResult(final_text="partial answer", done=None, error="boom"),
+            RunResult(final_text="partial answer", done=None, error=""),
             [],
             0,
         )
@@ -987,6 +1279,7 @@ async def test_run_one_skips_judge_when_generation_is_not_done(monkeypatch) -> N
     )
 
     assert judge_provider.calls == 0
+    assert row["error"] == "generation_missing_done"
     assert row["judge"] is None
     assert row["candidate_judges"] == []
     assert row["quality_total"] is None
@@ -1050,6 +1343,32 @@ async def test_collect_generation_with_retries_recovers_from_empty_output() -> N
 
 
 @pytest.mark.asyncio
+async def test_collect_generation_with_retries_marks_all_empty_output_as_failure() -> None:
+    provider = _AlwaysEmptyProvider()
+
+    result, attempts, selected_attempt = await collect_generation_with_retries(
+        provider,
+        "task",
+        timeout=1.0,
+        max_attempts=3,
+    )
+
+    assert provider.calls == 3
+    assert selected_attempt == 3
+    assert result.final_text == ""
+    assert result.done is not None
+    assert result.error == "empty_generation_output"
+    assert all(
+        attempt["retry_reason"] == "empty_generation_output"
+        for attempt in attempts
+    )
+    assert all(
+        attempt["run"]["error"] == "empty_generation_output"
+        for attempt in attempts
+    )
+
+
+@pytest.mark.asyncio
 async def test_collect_generation_with_retries_recovers_from_error() -> None:
     provider = _ErrorThenSuccessProvider(failures_before_success=1)
 
@@ -1084,3 +1403,29 @@ async def test_collect_generation_with_retries_caps_attempts_at_three() -> None:
     assert result.final_text == "partial"
     assert result.error == "boom"
     assert all(attempt["retry_reason"] == "boom" for attempt in attempts)
+
+
+@pytest.mark.asyncio
+async def test_collect_generation_with_retries_marks_missing_done_as_failure() -> None:
+    provider = _MissingDoneProvider()
+
+    result, attempts, selected_attempt = await collect_generation_with_retries(
+        provider,
+        "task",
+        timeout=1.0,
+        max_attempts=3,
+    )
+
+    assert provider.calls == 3
+    assert selected_attempt == 1
+    assert result.final_text == "partial answer"
+    assert result.done is None
+    assert result.error == "generation_missing_done"
+    assert all(
+        attempt["retry_reason"] == "generation_missing_done"
+        for attempt in attempts
+    )
+    assert all(
+        attempt["run"]["error"] == "generation_missing_done"
+        for attempt in attempts
+    )
