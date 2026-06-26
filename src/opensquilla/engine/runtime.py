@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import concurrent.futures
 import contextlib
 import contextvars
 import copy
@@ -25,6 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Final, Literal, SupportsInt, TypeGuard, cast
+from urllib.parse import urlsplit
 
 import structlog
 
@@ -40,15 +42,37 @@ from opensquilla.contracts.attachments import (
     ALLOWED_MEDIA_TYPES as _ALLOWED_ENGINE_MEDIA_TYPES,
 )
 from opensquilla.contracts.attachments import (
+    DOCX_MIME as _DOCX_MIME,
+)
+from opensquilla.contracts.attachments import (
+    EMAIL_ATTACHMENT_MIMES as _EMAIL_ATTACHMENT_MIMES,
+)
+from opensquilla.contracts.attachments import (
     MAX_ATTACHMENTS as _MAX_ATTACHMENT_COUNT,
+)
+from opensquilla.contracts.attachments import (
+    MBOX_MIME as _MBOX_MIME,
+)
+from opensquilla.contracts.attachments import (
+    MSG_MIME as _MSG_MIME,
+)
+from opensquilla.contracts.attachments import (
+    OFFICE_ATTACHMENT_MIMES as _OFFICE_ATTACHMENT_MIMES,
+)
+from opensquilla.contracts.attachments import (
+    PPTX_MIME as _PPTX_MIME,
 )
 from opensquilla.contracts.attachments import (
     TEXT_ATTACHMENT_MIMES as _ENGINE_TEXT_FAMILY_MIMES,
 )
 from opensquilla.contracts.attachments import (
+    XLSX_MIME as _XLSX_MIME,
+)
+from opensquilla.contracts.attachments import (
     attachment_size_limit_for_mime as _attachment_size_limit_for_mime,
 )
 from opensquilla.engine.agent import Agent, ToolHandler
+from opensquilla.engine.agent_injection import PendingInputProvider
 from opensquilla.engine.cache_break_monitor import notify_compaction
 from opensquilla.engine.hooks import (
     CompactionHook,
@@ -294,6 +318,7 @@ _SAFE_TOOL_NAMES: frozenset[str] = frozenset(
         "skill_search_community",
         "skill_view",
         "tts",
+        "web_discover",
         "web_fetch",
         "web_search",
     }
@@ -629,6 +654,7 @@ def _prepend_request_context_prompt(
 
 _MAX_TOOL_RESULT_CHARS = 2000
 _MAX_TOOL_RESULT_METADATA_VALUE_CHARS = 256
+_MAX_PERSISTED_TOOL_SOURCES = 12
 _MAX_PERSISTED_TOOL_ARGUMENT_FIELD_CHARS = 4096
 _PERSISTED_TOOL_ARGUMENT_PREVIEW_CHARS = 512
 _PERSISTED_TOOL_ARGUMENT_PROJECTION_PREFIX = "[historical_tool_argument_omitted]\n"
@@ -638,12 +664,23 @@ _TOOL_ARGUMENT_PAYLOAD_FIELDS: Final[dict[str, frozenset[str]]] = {
 }
 _TOOL_RESULT_METADATA_KEYS: Final[frozenset[str]] = frozenset(
     {
+        "budget_clamped",
+        "cache_status",
+        "domain_limited_count",
+        "duplicate_count",
         "provider",
         "query",
         "fallback_from",
+        "fetch_failed_count",
+        "fetched_count",
         "error",
         "error_class",
         "error_kind",
+        "mode",
+        "recency_degraded",
+        "recency_supported",
+        "returned_chars",
+        "selected_provider",
     }
 )
 _SENTINELS: Final[frozenset[str]] = frozenset({"NO_REPLY", "HEARTBEAT_OK"})
@@ -711,15 +748,41 @@ def _bounded_tool_result_metadata(
     for key in _TOOL_RESULT_METADATA_KEYS:
         if key not in parsed:
             continue
-        value = parsed[key]
-        if isinstance(value, str):
-            metadata[key] = _truncate_json_string(
-                value,
-                _MAX_TOOL_RESULT_METADATA_VALUE_CHARS,
-            )
-        elif isinstance(value, int | float | bool) or value is None:
-            metadata[key] = value
+        _add_bounded_tool_result_metadata(metadata, key, parsed[key])
+
+    diagnostics = parsed.get("diagnostics")
+    if isinstance(diagnostics, Mapping):
+        for key in _TOOL_RESULT_METADATA_KEYS:
+            if key not in diagnostics or key in metadata:
+                continue
+            _add_bounded_tool_result_metadata(metadata, key, diagnostics[key])
+
+        diagnostic_attempts = diagnostics.get("provider_attempts")
+        if (
+            "provider_attempt_count" not in metadata
+            and isinstance(diagnostic_attempts, list | tuple)
+        ):
+            metadata["provider_attempt_count"] = len(diagnostic_attempts)
+
+    attempts = parsed.get("provider_attempts")
+    if isinstance(attempts, list | tuple):
+        metadata["provider_attempt_count"] = len(attempts)
+
     return metadata
+
+
+def _add_bounded_tool_result_metadata(
+    metadata: dict[str, str | int | float | bool | None],
+    key: str,
+    value: Any,
+) -> None:
+    if isinstance(value, str):
+        metadata[key] = _truncate_json_string(
+            value,
+            _MAX_TOOL_RESULT_METADATA_VALUE_CHARS,
+        )
+    elif isinstance(value, int | float | bool) or value is None:
+        metadata[key] = value
 
 
 def _json_tool_result_preview(parsed: Any, original_chars: int, max_chars: int) -> str:
@@ -760,6 +823,90 @@ def _json_tool_result_preview(parsed: Any, original_chars: int, max_chars: int) 
     if len(rendered) <= max_chars:
         return rendered
     return json.dumps({"result_truncated": True}, ensure_ascii=False)
+
+
+def _persisted_web_search_sources(parsed: Any) -> list[dict[str, Any]]:
+    if not isinstance(parsed, Mapping):
+        return []
+    candidates = parsed.get("sources")
+    if not isinstance(candidates, list | tuple):
+        candidates = parsed.get("results")
+    if not isinstance(candidates, list | tuple):
+        return []
+
+    sources: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        source = _persisted_web_search_source(candidate)
+        if source is None:
+            continue
+        key = str(source.get("url") or "").split("#", 1)[0]
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        sources.append(source)
+        if len(sources) >= _MAX_PERSISTED_TOOL_SOURCES:
+            break
+    return sources
+
+
+def _persisted_web_search_source(candidate: Any) -> dict[str, Any] | None:
+    if not isinstance(candidate, Mapping):
+        return None
+    url = _persisted_source_url(candidate.get("url") or candidate.get("final_url"))
+    if url is None:
+        return None
+
+    source: dict[str, Any] = {"url": url}
+    canonical_url = _persisted_source_url(candidate.get("canonical_url"))
+    if canonical_url is not None:
+        source["canonical_url"] = canonical_url
+    title = _persisted_source_text(candidate.get("title"), max_chars=256)
+    if title:
+        source["title"] = title
+    domain = _persisted_source_text(candidate.get("domain"), max_chars=128)
+    if not domain:
+        domain = _domain_from_source_url(url)
+    if domain:
+        source["domain"] = domain
+    provider = _persisted_source_text(candidate.get("provider"), max_chars=64)
+    if provider:
+        source["provider"] = provider
+    rank = candidate.get("rank")
+    if isinstance(rank, int):
+        source["rank"] = rank
+    fetched = candidate.get("fetched")
+    if isinstance(fetched, bool):
+        source["fetched"] = fetched
+    return source
+
+
+def _persisted_source_url(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    url = value.strip()
+    if not url or url.endswith("…"):
+        return None
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return None
+    if parts.scheme not in {"http", "https"} or not parts.netloc:
+        return None
+    return url
+
+
+def _persisted_source_text(value: Any, *, max_chars: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    return _truncate_json_string(value.strip(), max_chars)
+
+
+def _domain_from_source_url(url: str) -> str:
+    try:
+        return urlsplit(url).hostname or ""
+    except ValueError:
+        return ""
 
 
 def _tool_argument_text(value: Any) -> str:
@@ -848,6 +995,17 @@ def _persisted_tool_result_segment(
     }
     if event.execution_status is not None:
         segment["execution_status"] = normalize_execution_status(event.execution_status)
+
+    parsed_result: Any = None
+    parsed_result_available = False
+    if event.tool_name == "web_search" or len(result) > max_chars:
+        with contextlib.suppress(json.JSONDecodeError, TypeError):
+            parsed_result = json.loads(result)
+            parsed_result_available = True
+    if event.tool_name == "web_search" and parsed_result_available:
+        sources = _persisted_web_search_sources(parsed_result)
+        if sources:
+            segment["sources"] = sources
     if len(result) <= max_chars:
         return segment
 
@@ -855,14 +1013,16 @@ def _persisted_tool_result_segment(
     segment["result_original_chars"] = len(result)
     if "execution_status" in segment:
         segment["execution_status"] = mark_execution_status_truncated(segment["execution_status"])
-    try:
-        parsed = json.loads(result)
-    except (json.JSONDecodeError, TypeError):
+    if not parsed_result_available:
         segment["result"] = result[:max_chars]
         return segment
 
+    parsed = parsed_result
     if isinstance(parsed, dict):
         segment.update(_bounded_tool_result_metadata(parsed))
+        sources = _persisted_web_search_sources(parsed)
+        if sources:
+            segment["sources"] = sources
     segment["result"] = _json_tool_result_preview(parsed, len(result), max_chars)
     return segment
 
@@ -1304,6 +1464,321 @@ def _extract_pdf_attachment_text(raw_bytes: bytes, filename: str) -> str:
     return _truncate_attachment_text(extracted)
 
 
+# Office documents are zip containers. Guard against decompression bombs by
+# rejecting archives whose declared uncompressed payload is implausibly large
+# before handing the bytes to a parser.
+_OFFICE_DECOMPRESSED_LIMIT = 200 * 1024 * 1024
+_XLSX_MAX_ROWS_PER_SHEET = 1000
+_XLSX_MAX_COLS = 64
+
+
+def _office_zip_guard(raw_bytes: bytes, filename: str) -> None:
+    # Measure the *actual* inflated size by streaming each member, not the
+    # central-directory ``file_size`` (which the uploader controls and can lie
+    # about). Reads in bounded chunks and aborts as soon as the running total
+    # crosses the limit, so a decompression bomb never inflates past the cap.
+    import io
+    import zipfile
+
+    chunk_size = 1024 * 1024
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw_bytes)) as archive:
+            total = 0
+            for info in archive.infolist():
+                with archive.open(info) as member:
+                    while True:
+                        block = member.read(chunk_size)
+                        if not block:
+                            break
+                        total += len(block)
+                        if total > _OFFICE_DECOMPRESSED_LIMIT:
+                            raise ValueError(
+                                f"office attachment {filename!r} decompresses beyond "
+                                f"the {_OFFICE_DECOMPRESSED_LIMIT} byte safety limit"
+                            )
+    except ValueError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - zipfile raises several error types
+        raise ValueError(
+            f"office attachment {filename!r} is not a readable OOXML container: {exc}"
+        ) from exc
+
+
+def _extract_docx_text(raw_bytes: bytes) -> str:
+    import io
+
+    from docx import Document
+
+    document = Document(io.BytesIO(raw_bytes))
+    parts: list[str] = []
+    for paragraph in document.paragraphs:
+        text = paragraph.text.strip()
+        if text:
+            parts.append(text)
+    for table in document.tables:
+        for row in table.rows:
+            cells = [cell.text.strip() for cell in row.cells]
+            if any(cells):
+                parts.append(" | ".join(cells))
+    return "\n".join(parts).strip()
+
+
+def _extract_xlsx_text(raw_bytes: bytes) -> str:
+    import io
+
+    from openpyxl import load_workbook  # type: ignore[import-untyped]
+
+    workbook = load_workbook(io.BytesIO(raw_bytes), read_only=True, data_only=True)
+    try:
+        sheet_blocks: list[str] = []
+        for sheet in workbook.worksheets:
+            rows: list[str] = []
+            for row_index, row in enumerate(sheet.iter_rows(values_only=True)):
+                if row_index >= _XLSX_MAX_ROWS_PER_SHEET:
+                    rows.append(f"[sheet truncated at {_XLSX_MAX_ROWS_PER_SHEET} rows]")
+                    break
+                cells = [
+                    "" if value is None else str(value)
+                    for value in row[:_XLSX_MAX_COLS]
+                ]
+                if any(cells):
+                    rows.append(",".join(cells))
+            if rows:
+                sheet_blocks.append(f"=== Sheet: {sheet.title} ===\n" + "\n".join(rows))
+        return "\n\n".join(sheet_blocks).strip()
+    finally:
+        workbook.close()
+
+
+def _extract_pptx_text(raw_bytes: bytes) -> str:
+    import io
+
+    from pptx import Presentation
+
+    presentation = Presentation(io.BytesIO(raw_bytes))
+    slide_blocks: list[str] = []
+    for index, slide in enumerate(presentation.slides, start=1):
+        lines: list[str] = []
+        for shape in slide.shapes:
+            if not getattr(shape, "has_text_frame", False):
+                continue
+            for paragraph in shape.text_frame.paragraphs:
+                text = "".join(run.text for run in paragraph.runs).strip()
+                if text:
+                    lines.append(text)
+        notes = ""
+        if slide.has_notes_slide:
+            notes_frame = slide.notes_slide.notes_text_frame
+            if notes_frame is not None:
+                notes = notes_frame.text.strip()
+        block = f"--- Slide {index} ---"
+        if lines:
+            block += "\n" + "\n".join(lines)
+        if notes:
+            block += f"\n[Notes]\n{notes}"
+        slide_blocks.append(block)
+    return "\n\n".join(slide_blocks).strip()
+
+
+_OFFICE_EXTRACTORS: dict[str, Callable[[bytes], str]] = {
+    _DOCX_MIME: _extract_docx_text,
+    _XLSX_MIME: _extract_xlsx_text,
+    _PPTX_MIME: _extract_pptx_text,
+}
+
+
+def _extract_office_attachment_text(
+    raw_bytes: bytes, filename: str, media_type: str
+) -> str:
+    """Extract text from an OOXML office attachment before it reaches any provider.
+
+    docx/xlsx/pptx are zip containers that no provider adapter can encode, so they
+    are converted to bounded plain-text context, mirroring the PDF path.
+    """
+
+    extractor = _OFFICE_EXTRACTORS.get(media_type)
+    if extractor is None:  # pragma: no cover - guarded by the allow-list
+        raise ValueError(f"unsupported office media type {media_type!r}")
+    _office_zip_guard(raw_bytes, filename)
+    try:
+        extracted = extractor(raw_bytes).strip()
+    except ValueError:
+        raise
+    except ImportError as exc:  # pragma: no cover - dependency is declared
+        raise ValueError(
+            f"office text extraction requires a missing dependency: {exc}"
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 - parsers raise many error types
+        raise ValueError(
+            f"office attachment {filename!r} could not be read: {exc}"
+        ) from exc
+    if not extracted:
+        raise ValueError(f"office attachment {filename!r} has no extractable text")
+    return _truncate_attachment_text(extracted)
+
+
+_EMAIL_MAX_MESSAGES = 50
+
+
+def _strip_html_to_text(html: str) -> str:
+    """Conservative HTML -> text for email bodies.
+
+    Drops script/style/head blocks entirely (no execution, no leakage), turns
+    block tags into newlines, strips remaining tags, and unescapes entities.
+    """
+
+    import html as _html_mod
+    import re
+
+    cleaned = re.sub(r"(?is)<(script|style|head)\b.*?</\1>", " ", html)
+    cleaned = re.sub(r"(?i)<\s*(br|/p|/div|/tr|/li|/h[1-6])\s*>", "\n", cleaned)
+    cleaned = re.sub(r"(?s)<[^>]+>", " ", cleaned)
+    cleaned = _html_mod.unescape(cleaned)
+    lines = [line.strip() for line in cleaned.splitlines()]
+    return "\n".join(line for line in lines if line)
+
+
+def _render_one_email(message: Any) -> str:
+    headers: list[str] = []
+    for label in ("From", "To", "Cc", "Subject", "Date"):
+        value = message.get(label)
+        if value:
+            headers.append(f"{label}: {value}")
+
+    body_text = ""
+    try:
+        body_part = message.get_body(preferencelist=("plain", "html"))
+    except Exception:  # noqa: BLE001 - defensive against malformed parts
+        body_part = None
+    if body_part is not None:
+        try:
+            content = body_part.get_content()
+        except Exception:  # noqa: BLE001
+            content = ""
+        if not isinstance(content, str):
+            content = ""
+        if body_part.get_content_type() == "text/html":
+            body_text = _strip_html_to_text(content)
+        else:
+            body_text = content
+
+    attachment_lines: list[str] = []
+    try:
+        for part in message.iter_attachments():
+            name = part.get_filename() or "(unnamed)"
+            attachment_lines.append(f"  - {name} ({part.get_content_type()})")
+    except Exception:  # noqa: BLE001
+        pass
+
+    rendered = "\n".join(headers)
+    if body_text.strip():
+        rendered += "\n\n" + body_text.strip()
+    if attachment_lines:
+        rendered += "\n\n[attachments]\n" + "\n".join(attachment_lines)
+    return rendered.strip()
+
+
+def _extract_email_text(raw_bytes: bytes, media_type: str) -> str:
+    import email
+    import re
+    from email import policy
+
+    # Trust the resolved media type: the gateway sniffer/guard already settle
+    # eml-vs-mbox, so a .eml whose body happens to start with "From " is not
+    # mis-routed through the mbox splitter.
+    is_mbox = media_type == _MBOX_MIME
+    if is_mbox:
+        chunks = re.split(rb"(?m)^From .*\n", raw_bytes)
+        messages = [chunk for chunk in chunks if chunk.strip()][:_EMAIL_MAX_MESSAGES]
+        rendered: list[str] = []
+        for index, chunk in enumerate(messages, start=1):
+            message = email.message_from_bytes(chunk, policy=policy.default)
+            rendered.append(f"--- Message {index} ---\n{_render_one_email(message)}")
+        return "\n\n".join(rendered).strip()
+
+    message = email.message_from_bytes(raw_bytes, policy=policy.default)
+    return _render_one_email(message)
+
+
+def _extract_msg_text(raw_bytes: bytes) -> str:
+    import io
+
+    try:
+        import extract_msg
+    except ImportError as exc:
+        raise ValueError(
+            "Outlook .msg extraction requires the optional 'extract-msg' package "
+            "(install opensquilla[msg])"
+        ) from exc
+
+    message = extract_msg.openMsg(io.BytesIO(raw_bytes))
+    try:
+        headers: list[str] = []
+        for label, value in (
+            ("From", getattr(message, "sender", None)),
+            ("To", getattr(message, "to", None)),
+            ("Cc", getattr(message, "cc", None)),
+            ("Subject", getattr(message, "subject", None)),
+            ("Date", getattr(message, "date", None)),
+        ):
+            if value:
+                headers.append(f"{label}: {value}")
+
+        body = getattr(message, "body", None) or ""
+        if not body:
+            html_body = getattr(message, "htmlBody", None)
+            if isinstance(html_body, bytes):
+                html_body = html_body.decode("utf-8", "replace")
+            if isinstance(html_body, str) and html_body:
+                body = _strip_html_to_text(html_body)
+
+        attachment_lines: list[str] = []
+        for part in getattr(message, "attachments", None) or []:
+            name = (
+                getattr(part, "longFilename", None)
+                or getattr(part, "shortFilename", None)
+                or "(unnamed)"
+            )
+            attachment_lines.append(f"  - {name}")
+    finally:
+        try:
+            message.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    rendered = "\n".join(headers)
+    if isinstance(body, str) and body.strip():
+        rendered += "\n\n" + body.strip()
+    if attachment_lines:
+        rendered += "\n\n[attachments]\n" + "\n".join(attachment_lines)
+    return rendered.strip()
+
+
+def _extract_email_attachment_text(
+    raw_bytes: bytes, filename: str, media_type: str
+) -> str:
+    """Extract text from an email attachment.
+
+    .eml/.mbox use the stdlib email/mailbox parsers (zero dependency); .msg uses
+    the optional extract-msg package and degrades gracefully if it is absent.
+    """
+
+    try:
+        if media_type == _MSG_MIME:
+            extracted = _extract_msg_text(raw_bytes).strip()
+        else:
+            extracted = _extract_email_text(raw_bytes, media_type).strip()
+    except ValueError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - email parsers raise many error types
+        raise ValueError(
+            f"email attachment {filename!r} could not be read: {exc}"
+        ) from exc
+    if not extracted:
+        raise ValueError(f"email attachment {filename!r} has no extractable text")
+    return _truncate_attachment_text(extracted)
+
+
 # Strong past-tense / perfect-aspect phrases that signal the model is claiming
 # to have produced an image. Only checked when ``image_generate`` is available
 # and was not invoked. Future-tense ("I'll draw…", "给你画…") is intentionally
@@ -1725,6 +2200,16 @@ class TurnRunner:
         kind = input_provenance.get("kind")
         return str(kind) if kind is not None and str(kind) else None
 
+    @staticmethod
+    def _normalize_input_provenance(
+        input_provenance: dict[str, Any] | str | None,
+    ) -> dict[str, Any] | None:
+        if isinstance(input_provenance, dict):
+            return dict(input_provenance)
+        if input_provenance:
+            return {"kind": str(input_provenance)}
+        return None
+
     @classmethod
     def _turn_memory_capture_allowed(
         cls,
@@ -1817,7 +2302,7 @@ class TurnRunner:
         length_capped_continuations: int | None = None,
         input_mode: str = "user",
         persist_input: bool = False,
-        input_provenance: dict[str, Any] | None = None,
+        input_provenance: dict[str, Any] | str | None = None,
         history_has_persisted_user: bool = True,
         fresh_user_session: bool | None = None,
         session_intent: str | None = None,
@@ -1828,6 +2313,8 @@ class TurnRunner:
         no_memory_capture: bool = False,
         ingress_pipeline_steps: list[PipelineStepRecord] | None = None,
         router_control_replay_depth: int = 0,
+        *,
+        pending_input_provider: PendingInputProvider | None = None,
     ) -> AsyncIterator[AgentEvent]:
         """Run one agent turn with full orchestration.
 
@@ -1842,6 +2329,7 @@ class TurnRunner:
         """
         session_key = canonicalize_session_key(session_key)
         agent_id = normalize_agent_id(agent_id)
+        normalized_input_provenance = self._normalize_input_provenance(input_provenance)
         lock = self.get_session_lock(session_key)
         effective_tool_context = replace(
             tool_context,
@@ -1879,11 +2367,12 @@ class TurnRunner:
                     length_capped_continuations=length_capped_continuations,
                     input_mode=input_mode,
                     persist_input=persist_input,
-                    input_provenance=input_provenance,
+                    input_provenance=normalized_input_provenance,
                     history_has_persisted_user=history_has_persisted_user,
                     fresh_user_session=fresh_user_session,
                     session_intent=session_intent,
                     semantic_message=semantic_message,
+                    pending_input_provider=pending_input_provider,
                     run_kind=run_kind,
                     heartbeat_ack_max_chars=heartbeat_ack_max_chars,
                     bootstrap_context_mode=bootstrap_context_mode,
@@ -1919,11 +2408,12 @@ class TurnRunner:
                         length_capped_continuations=length_capped_continuations,
                         input_mode=input_mode,
                         persist_input=persist_input,
-                        input_provenance=input_provenance,
+                        input_provenance=normalized_input_provenance,
                         history_has_persisted_user=history_has_persisted_user,
                         fresh_user_session=fresh_user_session,
                         session_intent=session_intent,
                         semantic_message=semantic_message,
+                        pending_input_provider=pending_input_provider,
                         run_kind=run_kind,
                         heartbeat_ack_max_chars=heartbeat_ack_max_chars,
                         bootstrap_context_mode=bootstrap_context_mode,
@@ -1964,6 +2454,8 @@ class TurnRunner:
         no_memory_capture: bool = False,
         ingress_pipeline_steps: list[PipelineStepRecord] | None = None,
         router_control_replay_depth: int = 0,
+        *,
+        pending_input_provider: PendingInputProvider | None = None,
     ) -> AsyncIterator[AgentEvent]:
         # Observability: bracket turn setup + stream loop with monotonic clock
         # so latency_ms reflects the full turn.
@@ -2089,6 +2581,7 @@ class TurnRunner:
                     ),
                     ingress_pipeline_steps=ingress_pipeline_steps,
                     normalization_metadata=normalization_metadata,
+                    input_provenance=input_provenance,
                 )
             )
             pa_out = pa_outcome.require_output()
@@ -2277,6 +2770,7 @@ class TurnRunner:
                 session_manager_present=self._session_manager is not None,
                 state=stream_state,
                 tool_context=tool_context,
+                pending_input_provider=pending_input_provider,
             )
             router_control_replay_event: RouterControlReplayEvent | None = None
             async for event in self._stream_consumer_stage.run(stream_inp):
@@ -2307,6 +2801,7 @@ class TurnRunner:
                     fresh_user_session=False,
                     session_intent=session_intent,
                     semantic_message=semantic_message,
+                    pending_input_provider=pending_input_provider,
                     run_kind=run_kind,
                     heartbeat_ack_max_chars=heartbeat_ack_max_chars,
                     bootstrap_context_mode=bootstrap_context_mode,
@@ -3196,7 +3691,10 @@ class TurnRunner:
         """Build tool definitions and handler from registry, filtered by ToolContext."""
         if self._tool_registry is None:
             return [], None
-        from opensquilla.skills.meta.enabled import is_meta_skill_enabled
+        from opensquilla.skills.meta.enabled import (
+            is_meta_auto_trigger_enabled,
+            is_meta_skill_enabled,
+        )
         from opensquilla.tools.dispatch import build_tool_handler
         from opensquilla.tools.policy import apply_tool_policy_from_config
         from opensquilla.tools.registry import filter_by_profile, resolve_profile
@@ -3208,13 +3706,14 @@ class TurnRunner:
             except Exception:
                 loaded_skills = []
         meta_skill_enabled = is_meta_skill_enabled(self._config)
+        meta_auto_trigger = is_meta_auto_trigger_enabled(self._config)
         has_invokable_meta_skill = any(
             getattr(skill, "kind", "skill") == "meta"
             and not getattr(skill, "disable_model_invocation", False)
             for skill in loaded_skills
         )
         if ctx is not None:
-            if meta_skill_enabled and has_invokable_meta_skill:
+            if meta_skill_enabled and meta_auto_trigger and has_invokable_meta_skill:
                 if ctx.surfaced_tools is None:
                     ctx.surfaced_tools = set()
                 ctx.surfaced_tools.add("meta_invoke")
@@ -3278,7 +3777,7 @@ class TurnRunner:
             for skill in loaded_skills
             if not getattr(skill, "disable_model_invocation", False)
             and (
-                meta_skill_enabled
+                (meta_skill_enabled and meta_auto_trigger)
                 or getattr(skill, "kind", "skill") != "meta"
             )
         }
@@ -3824,6 +4323,7 @@ class TurnRunner:
         flags_text_override: str | None = None,
         tool_context: ToolContext | None = None,
         normalization_metadata: dict[str, Any] | None = None,
+        input_provenance: dict[str, Any] | None = None,
     ) -> tuple[Any, Any]:
         """Run the pre-turn pipeline and re-resolve provider if model changed.
 
@@ -3843,6 +4343,7 @@ class TurnRunner:
             filter_skills,
             inject_platform_hint,
             inject_subagent_grounding,
+            meta_command_launch,
             meta_resolution,
             observe_reasoning_hint,
             resolve_model,
@@ -3873,17 +4374,26 @@ class TurnRunner:
             )
 
         async def _bounded_apply_squilla_router(turn: TurnContext) -> TurnContext:
-            async def _run_router_step() -> TurnContext:
-                return await apply_squilla_router(_copy_router_turn(turn))
+            def _run_router_step_sync() -> TurnContext:
+                return asyncio.run(apply_squilla_router(_copy_router_turn(turn)))
 
+            loop = asyncio.get_running_loop()
+            executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1,
+                thread_name_prefix="opensquilla-router-timeout",
+            )
+            future = loop.run_in_executor(executor, _run_router_step_sync)
             try:
                 routed = await asyncio.wait_for(
-                    asyncio.to_thread(lambda: asyncio.run(_run_router_step())),
+                    future,
                     timeout=router_timeout,
                 )
                 return commit_deferred_router_history(routed)
             except TimeoutError as exc:
+                future.cancel()
                 raise TimeoutError(f"squilla router timed out after {router_timeout:g}s") from exc
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
 
         _bounded_apply_squilla_router.__name__ = "apply_squilla_router"
 
@@ -3928,6 +4438,15 @@ class TurnRunner:
             material_tokens = normalization_metadata.get("material_estimated_tokens")
             if type(material_tokens) is int and material_tokens > 0:
                 initial_metadata["material_estimated_tokens"] = material_tokens
+        if input_provenance:
+            if isinstance(input_provenance, dict):
+                normalized_provenance = dict(input_provenance)
+            else:
+                normalized_provenance = {"kind": str(input_provenance)}
+            initial_metadata["input_provenance"] = normalized_provenance
+            provenance_kind = self._input_provenance_kind(normalized_provenance)
+            if provenance_kind:
+                initial_metadata["input_provenance_kind"] = provenance_kind
         if ingress_pipeline_steps:
             initial_metadata["pipeline_steps"] = list(ingress_pipeline_steps)
         if prev_assistant_text:
@@ -3983,6 +4502,7 @@ class TurnRunner:
                 observe_reasoning_hint,
                 meta_resolution,
                 enforce_coding_mode,
+                meta_command_launch,
                 filter_skills,
                 inject_subagent_grounding,
                 inject_platform_hint,
@@ -3992,7 +4512,23 @@ class TurnRunner:
 
         # Apply routed model back to cloned selector (local, not shared)
         if turn.model and cloned_selector is not None:
-            cloned_selector.override_model(turn.model)
+            router_fallback_chain = (
+                turn.metadata.get("router_fallback_chain")
+                if turn.metadata.get("routing_applied") is True
+                else None
+            )
+            override_with_fallback_chain = getattr(
+                cloned_selector,
+                "override_model_with_fallback_chain",
+                None,
+            )
+            if callable(override_with_fallback_chain) and isinstance(
+                router_fallback_chain,
+                list,
+            ):
+                override_with_fallback_chain(turn.model, router_fallback_chain)
+            else:
+                cloned_selector.override_model(turn.model)
             provider = cloned_selector.resolve()
 
         return turn, provider
@@ -6072,6 +6608,34 @@ class TurnRunner:
                             "[attachment unavailable: declared text content is not valid UTF-8]"
                         )
                 wrapped = _render_file_context_block(filename, media_type, decoded_text)
+                attachment_blocks.append(ContentBlockText(text=wrapped))
+            elif media_type in _OFFICE_ATTACHMENT_MIMES:
+                try:
+                    extracted_office_text = _extract_office_attachment_text(
+                        raw_bytes, filename, media_type
+                    )
+                except ValueError as exc:
+                    extracted_office_text = (
+                        "[attachment unavailable: document text could not be "
+                        f"extracted: {exc}]"
+                    )
+                wrapped = _render_file_context_block(
+                    filename, media_type, extracted_office_text
+                )
+                attachment_blocks.append(ContentBlockText(text=wrapped))
+            elif media_type in _EMAIL_ATTACHMENT_MIMES:
+                try:
+                    extracted_email_text = _extract_email_attachment_text(
+                        raw_bytes, filename, media_type
+                    )
+                except ValueError as exc:
+                    extracted_email_text = (
+                        "[attachment unavailable: email could not be "
+                        f"extracted: {exc}]"
+                    )
+                wrapped = _render_file_context_block(
+                    filename, media_type, extracted_email_text
+                )
                 attachment_blocks.append(ContentBlockText(text=wrapped))
             else:  # pragma: no cover - guarded by allow-list above
                 raise ValueError(f"attachments[{index}] media type {media_type!r} is not handled")

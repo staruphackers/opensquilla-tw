@@ -62,6 +62,12 @@ class ThinkingEvent:
 class TextDeltaEvent:
     kind: Literal["text_delta"] = field(default="text_delta", init=False)
     text: str = ""
+    # Whether this text is the turn's final answer (render as a card) or
+    # intermediate narration between tool calls (render as a lightweight purple
+    # ✱ line). Decided by the agent from whether the producing provider call
+    # ended up making tool calls — see agent.py. Defaults to "answer" so any
+    # producer that does not set it keeps the pre-existing card behavior.
+    presentation: Literal["intermediate", "answer"] = "answer"
 
 
 @dataclass
@@ -79,6 +85,13 @@ class ToolUseStartEvent:
     tool_use_id: str = ""
     tool_name: str = ""
     synthetic_from_text: bool = False
+
+
+@dataclass
+class ToolUseDeltaEvent:
+    kind: Literal["tool_use_delta"] = field(default="tool_use_delta", init=False)
+    tool_use_id: str = ""
+    json_fragment: str = ""
 
 
 @dataclass
@@ -117,6 +130,7 @@ class ArtifactEvent:
     created_at: str = ""
     download_url: str = ""
     store: str = "artifacts"
+    has_thumbnail: bool = False
 
 
 @dataclass
@@ -208,6 +222,83 @@ class RouterDecisionEvent:
     prompt_policy: str = ""
     routing_applied: bool = True
     rollout_phase: str = "full"
+    context_window: int | None = None
+
+
+@dataclass
+class MetaPreflightEvent:
+    """Emitted before a MetaSkill run begins when the plan declares a
+    ``request_template``. This is a non-blocking preview of the interpreted
+    request and declared assumptions; the scheduler continues after emitting it.
+    """
+
+    kind: Literal["meta_preflight"] = field(default="meta_preflight", init=False)
+    run_id: str = ""
+    meta_skill_name: str = ""
+    request_template: dict[str, Any] = field(default_factory=dict)
+    interpreted_request: str = ""
+    missing_fields: list[str] = field(default_factory=list)
+    assumptions: list[str] = field(default_factory=list)
+    can_skip: bool = True
+    requires_confirmation: bool = False
+
+
+@dataclass
+class MetaRunAnnouncedEvent:
+    """Emitted once when a MetaSkill run starts and its plan has been
+    compiled. WebUI uses this to seed the step ribbon with all declared
+    step ids, labels, kinds, and dependency edges. `parent_run_id` is
+    reserved for nested meta-skill rollouts (always None today).
+    """
+
+    kind: Literal["meta_run_announced"] = field(default="meta_run_announced", init=False)
+    run_id: str = ""
+    meta_skill_name: str = ""
+    language: str = ""
+    steps: list[dict[str, Any]] = field(default_factory=list)
+    total: int = 0
+    parent_run_id: str | None = None
+
+
+@dataclass
+class MetaStepStateEvent:
+    """One state transition for a single MetaSkill step within a run.
+
+    `state` is one of pending / running / succeeded / failed / skipped /
+    substituted. `status_text` is an optional short human-readable label
+    shown under the active chip; `error` carries the failure message when
+    `state == "failed"`; `substitute_for` is set on the substitute step
+    yielded after an `on_failure` branch fires.
+    """
+
+    kind: Literal["meta_step_state"] = field(default="meta_step_state", init=False)
+    run_id: str = ""
+    step_id: str = ""
+    state: Literal[
+        "pending", "running", "succeeded", "failed", "skipped", "substituted"
+    ] = "pending"
+    status_text: str | None = None
+    error: str | None = None
+    substitute_for: str | None = None
+    rescue: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class MetaRunCompletedEvent:
+    """Terminal event for a MetaSkill run. `outcome` is one of
+    ok / failed / cancelled. The three step-id lists let the WebUI freeze
+    the final ribbon state without scanning back through the stream.
+    `recovered_steps` keeps the audit trail for failed steps whose
+    on-failure substitute completed successfully.
+    """
+
+    kind: Literal["meta_run_completed"] = field(default="meta_run_completed", init=False)
+    run_id: str = ""
+    outcome: Literal["ok", "failed", "cancelled"] = "ok"
+    completed_steps: list[str] = field(default_factory=list)
+    failed_steps: list[str] = field(default_factory=list)
+    recovered_steps: list[str] = field(default_factory=list)
+    skipped_steps: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -255,6 +346,7 @@ AgentEvent = (
     | TextDeltaEvent
     | RunHeartbeatEvent
     | ToolUseStartEvent
+    | ToolUseDeltaEvent
     | ToolResultEvent
     | RouterControlReplayEvent
     | ArtifactEvent
@@ -264,6 +356,10 @@ AgentEvent = (
     | CompactionEvent
     | WarningEvent
     | RouterDecisionEvent
+    | MetaPreflightEvent
+    | MetaRunAnnouncedEvent
+    | MetaStepStateEvent
+    | MetaRunCompletedEvent
 )
 
 
