@@ -1,9 +1,10 @@
 """Unit tests for opensquilla.contrib.codetask.verification."""
 
-import pytest
+import json
 import shutil
 import subprocess
-import json
+
+import pytest
 
 from opensquilla.contrib.codetask import verification
 from opensquilla.contrib.codetask.config import VERIFICATION_MANIFEST_NAME

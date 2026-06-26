@@ -54,7 +54,9 @@ def _save_metadata(
             "session_id": agent_result.session_id,
             "usage": agent_result.usage,
         }
-    (artifact_dir / "metadata.json").write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    (artifact_dir / "metadata.json").write_text(
+        json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
 
 
 def _append_state(state_path: Path, record: InstanceRecord) -> None:
@@ -172,7 +174,9 @@ def run_one_instance(
         patch_empty = is_empty_patch(cleaned)
 
         # Save raw and cleaned patch
-        (artifact_dir / "git.patch").write_text(cleaned if not patch_empty else "", encoding="utf-8")
+        (artifact_dir / "git.patch").write_text(
+            cleaned if not patch_empty else "", encoding="utf-8"
+        )
         if raw_patch != cleaned:
             (artifact_dir / "git.patch.raw").write_text(raw_patch, encoding="utf-8")
 

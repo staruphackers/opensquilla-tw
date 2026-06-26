@@ -17,9 +17,9 @@ import shutil
 import subprocess
 import time
 import tomllib
+from pathlib import Path
 
 import tomli_w
-from pathlib import Path
 
 from opensquilla.contrib.codetask.config import (
     DEFAULT_AGENT_TIMEOUT,

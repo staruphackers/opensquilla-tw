@@ -156,7 +156,12 @@ def verify(
 
     # GREEN: run each acceptance command at the current (post-change) tree.
     for check in checks:
-        rc, out = _run_shell(check.command, cwd=repo, timeout=_cmd_timeout(acceptance_timeout, deadline), repo=repo)
+        rc, out = _run_shell(
+            check.command,
+            cwd=repo,
+            timeout=_cmd_timeout(acceptance_timeout, deadline),
+            repo=repo,
+        )
         check.after = "pass" if rc == 0 else "fail"
         check.green_exit_code = rc
         check.green_output_tail = _tail(out)
@@ -182,7 +187,12 @@ def verify(
                 # the agent's command cannot teleport the red check back into
                 # the already-fixed task repo.
                 wt_command = _localize_command(check.command, repo, wt)
-                rc, out = _run_shell(wt_command, cwd=wt, timeout=_cmd_timeout(acceptance_timeout, deadline), repo=repo)
+                rc, out = _run_shell(
+                    wt_command,
+                    cwd=wt,
+                    timeout=_cmd_timeout(acceptance_timeout, deadline),
+                    repo=repo,
+                )
                 check.before = "fail" if rc != 0 else "pass"
                 check.red_exit_code = rc
                 check.red_output_tail = _tail(out)
@@ -332,7 +342,9 @@ def _run_regression(
     cmd = str(command).strip()
     result = RegressionResult(command=cmd, ran=True)
 
-    head_rc, head_out = _run_shell(cmd, cwd=repo, timeout=_cmd_timeout(timeout, deadline), repo=repo)
+    head_rc, head_out = _run_shell(
+        cmd, cwd=repo, timeout=_cmd_timeout(timeout, deadline), repo=repo
+    )
     head_fail = _parse_failures(head_out, head_rc)
     head_names = _failing_names(head_out)
     result.passed = _parse_passes(head_out)
@@ -347,7 +359,10 @@ def _run_regression(
     try:
         with _BaseWorktree(repo, base_commit) as wt:
             base_rc, base_out = _run_shell(
-                _localize_command(cmd, repo, wt), cwd=wt, timeout=_cmd_timeout(timeout, deadline), repo=repo
+                _localize_command(cmd, repo, wt),
+                cwd=wt,
+                timeout=_cmd_timeout(timeout, deadline),
+                repo=repo,
             )
             base_fail = _parse_failures(base_out, base_rc)
             base_names = _failing_names(base_out)

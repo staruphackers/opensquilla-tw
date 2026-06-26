@@ -94,7 +94,9 @@ def _redact(text: str) -> str:
     output is fed back into a model prompt (trusted host, but defense in depth)."""
     if not text:
         return text
-    return _SECRET_RE.sub(lambda m: m.group(1) + m.group(2) + (m.group(3) or "") + "<redacted>", text)
+    return _SECRET_RE.sub(
+        lambda m: m.group(1) + m.group(2) + (m.group(3) or "") + "<redacted>", text
+    )
 
 
 def _summarize_failure(vout: Any) -> str:

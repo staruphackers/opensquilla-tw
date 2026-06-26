@@ -250,7 +250,10 @@ _CODING_MODE_UNAVAILABLE_DIRECTIVE = (
     "Do NOT try to `pip install` OpenSquilla yourself, do NOT clone the "
     "repository, and do NOT hand-edit files via the shell as a workaround — the "
     "in-session file-editing tools are disabled and a manual workaround skips "
-    "code-task's isolation and verification. Do NOT run any installation or repair commands yourself (no `pip install`, no `bash scripts/install_source.sh`, no building OpenSquilla) — surface the problem to the user/operator and let THEM fix the environment. Read-only requests (showing "
+    "code-task's isolation and verification. Do NOT run any installation or "
+    "repair commands yourself (no `pip install`, no `bash scripts/install_source.sh`, "
+    "no building OpenSquilla) — surface the problem to the user/operator and let "
+    "THEM fix the environment. Read-only requests (showing "
     "structure, explaining code) and ordinary conversation are answered "
     "normally."
 )

@@ -11,14 +11,14 @@ from opensquilla.engine.steps.coding_mode import enforce_coding_mode
 from opensquilla.engine.steps.skills_filter import _eligibility_ctx
 from opensquilla.gateway.config import GatewayConfig
 from opensquilla.gateway.rpc_config import _SAFE_WRITE_PATCH_PATHS
-from opensquilla.tools.policy_config import (
-    CODING_MODE_DENIED_TOOLS,
-    coding_mode_denied_tools,
-)
 from opensquilla.skills.eligibility import (
     CODING_MODE_SKILLS,
     effective_disabled,
     is_skill_available,
+)
+from opensquilla.tools.policy_config import (
+    CODING_MODE_DENIED_TOOLS,
+    coding_mode_denied_tools,
 )
 
 
@@ -64,7 +64,9 @@ class TestDirectiveInjection:
         # Deterministic, no subprocess: the directive's command line is the
         # resolved code-task invocation; pin it for these assertions.
         from opensquilla.engine.steps import coding_mode as _cm
-        monkeypatch.setattr(_cm, "resolve_code_task_command", lambda: "/opt/x/opensquilla code-task")
+        monkeypatch.setattr(
+            _cm, "resolve_code_task_command", lambda: "/opt/x/opensquilla code-task"
+        )
 
     def _ctx(self, coding_mode: bool):
         return SimpleNamespace(
@@ -303,7 +305,10 @@ class TestCodeTaskResolution:
         monkeypatch.setattr(cm.sys, "executable", py)
         monkeypatch.setattr(cm.shutil, "which", lambda name: None)
         monkeypatch.setattr(cm, "_runs_code_task", lambda argv: argv[:2] == [py, "-P"])
-        assert cm.resolve_code_task_command() == f"{shlex.quote(py)} -P -m opensquilla.cli.main code-task"
+        assert (
+            cm.resolve_code_task_command()
+            == f"{shlex.quote(py)} -P -m opensquilla.cli.main code-task"
+        )
         cm._reset_resolution_cache()
 
     def test_adjacent_exists_but_preflight_fails_falls_through(self, monkeypatch, tmp_path):
@@ -317,7 +322,10 @@ class TestCodeTaskResolution:
         monkeypatch.setattr(cm.shutil, "which", lambda name: None)
         # adjacent CLI exists but its --help fails; module invocation works
         monkeypatch.setattr(cm, "_runs_code_task", lambda argv: argv[:2] == [py, "-P"])
-        assert cm.resolve_code_task_command() == f"{shlex.quote(py)} -P -m opensquilla.cli.main code-task"
+        assert (
+            cm.resolve_code_task_command()
+            == f"{shlex.quote(py)} -P -m opensquilla.cli.main code-task"
+        )
         cm._reset_resolution_cache()
 
     def test_failure_is_not_cached_retries(self, monkeypatch, tmp_path):

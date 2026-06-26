@@ -50,7 +50,9 @@ def _wire(monkeypatch, tmp_path, outcomes, collects=None):
     repo.mkdir()
     prepared = SimpleNamespace(path=repo, base_commit="base", base_ref="main", branch="task/x")
     monkeypatch.setattr(runner.workspace, "prepare_repo", lambda *a, **k: prepared)
-    monkeypatch.setattr(runner, "resolve_task", lambda **k: SimpleNamespace(slug="x", source="inline"))
+    monkeypatch.setattr(
+        runner, "resolve_task", lambda **k: SimpleNamespace(slug="x", source="inline")
+    )
     monkeypatch.setattr(runner, "render_task_md", lambda *a, **k: "task body")
     monkeypatch.setattr(runner.envprobe, "probe", lambda p: SimpleNamespace(as_hints=lambda: ""))
     monkeypatch.setattr(runner, "_render_prompt", lambda *a, **k: "PROMPT")

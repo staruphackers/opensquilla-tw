@@ -161,5 +161,7 @@ def solve_instance(
     }
     # Persist the result next to the other per-instance artifacts so
     # non-JSON callers can still find it.
-    (artifact_dir / "result.json").write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+    (artifact_dir / "result.json").write_text(
+        json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     return result
