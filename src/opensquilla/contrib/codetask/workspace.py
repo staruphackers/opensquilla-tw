@@ -62,6 +62,39 @@ def is_dirty(path: Path) -> bool:
     return r.returncode == 0 and bool(r.stdout.strip())
 
 
+def prepare_scratch_repo(run_id: str, *, slug: str = "task") -> PreparedRepo:
+    """Prepare an empty git repo for "write code from scratch" tasks.
+
+    The agent adds files; ``collect_change`` diffs them against an empty base
+    commit. Used by ``--verification-mode scratch`` (green-only).
+    """
+    dest = repo_dir(run_id)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+    if _git(["init", "-q"], dest).returncode != 0:
+        raise WorkspaceError("git init failed for scratch repo")
+    _git(["config", "user.email", GIT_USER_EMAIL], dest)
+    _git(["config", "user.name", GIT_USER_NAME], dest)
+    _write_repo_excludes(dest)
+    # Empty initial commit so `git diff <base>` and count_commits work normally.
+    _git(["commit", "-q", "--allow-empty", "-m", "scratch base"], dest)
+    head = _git(["rev-parse", "HEAD"], dest)
+    base_commit = head.stdout.strip() if head.returncode == 0 else ""
+    branch = f"{TASK_BRANCH_PREFIX}{slug}"
+    if _git(["checkout", "-b", branch], dest).returncode != 0:
+        branch = f"{TASK_BRANCH_PREFIX}{slug}-{run_id.split('-')[-1]}"
+        _git(["checkout", "-b", branch], dest)
+    logger.info("Prepared scratch repo @ %s on branch %s", base_commit[:12], branch)
+    return PreparedRepo(
+        path=dest,
+        base_ref="(scratch)",
+        base_commit=base_commit,
+        branch=branch,
+    )
+
+
 def prepare_repo(
     run_id: str,
     repo: str,

@@ -19,7 +19,7 @@ from typing import Any
 
 from opensquilla.contrib.codetask import config, envprobe, workspace
 from opensquilla.contrib.codetask.adapter import LocalAdapter
-from opensquilla.contrib.codetask.inputs import TaskSpec, render_task_md, resolve_task
+from opensquilla.contrib.codetask.inputs import InputError, TaskSpec, render_task_md, resolve_task
 from opensquilla.contrib.codetask.types import TaskResult, TaskState
 from opensquilla.contrib.codetask.verification import verify
 
@@ -160,7 +160,7 @@ def _render_retry_prompt(
 
 def solve(
     *,
-    repo: str,
+    repo: str = "",
     issue: int | None = None,
     task: str | None = None,
     task_file: str | None = None,
@@ -177,10 +177,31 @@ def solve(
     # 1. Resolve the task text first (cheap), so a bad task fails before cloning.
     #    Issue mode may need the clone to resolve the repo, so clone first when
     #    --issue is used.
+    valid_modes = {"red-green", "build", "scratch"}
+    if verification_mode not in valid_modes:
+        raise InputError(
+            f"Unknown verification_mode {verification_mode!r}; expected one of: "
+            "red-green, build, scratch."
+        )
+    if verification_mode == "scratch":
+        if repo:
+            raise InputError(
+                "Do not pass repo with verification_mode='scratch'; it creates an empty repo."
+            )
+        if issue is not None:
+            raise InputError("verification_mode='scratch' supports task or task_file, not issue.")
+    elif not repo:
+        raise InputError("Pass repo unless using verification_mode='scratch'.")
+
     spec: TaskSpec
     run_id = run_id or _default_run_id("task")
 
-    if issue is not None:
+    if verification_mode == "scratch":
+        # No repo: write self-contained code from scratch in an empty git repo.
+        spec = resolve_task(task_text=task, task_file=task_file)
+        run_id_final = run_id or _default_run_id(spec.slug)
+        prepared = workspace.prepare_scratch_repo(run_id_final, slug=spec.slug)
+    elif issue is not None:
         prepared = workspace.prepare_repo(
             run_id, repo, base_ref=base_ref, shallow=shallow, slug="task"
         )
@@ -227,7 +248,9 @@ def solve(
         source=spec.source,
         artifact_dir=str(artifact_dir),
     )
-    result.verification_kind = "build" if verification_mode == "build" else "red_green"
+    result.verification_kind = {"build": "build", "scratch": "scratch"}.get(
+        verification_mode, "red_green"
+    )
 
     # 4. Verify->fix loop. Re-run the agent on the SAME prepared repo (clone +
     #    built venv + the prior attempt's changes all preserved) when the
@@ -354,14 +377,21 @@ def solve(
                 result.error = bout.detail
             break  # build mode: single attempt in v1
 
-        # Bound the WHOLE verification by the shared deadline (per-command,
-        # re-checked between commands) so multiple commands cannot overrun it.
-        vout = verify(
-            repo=prepared.path,
-            base_commit=prepared.base_commit,
-            scratch_dir=scratch,
-            deadline=deadline,
-        )
+        if verification_mode == "scratch":
+            from opensquilla.contrib.codetask.verification import verify_scratch
+
+            vout = verify_scratch(
+                repo=prepared.path, scratch_dir=scratch, deadline=deadline
+            )
+        else:
+            # Bound the WHOLE verification by the shared deadline (per-command,
+            # re-checked between commands) so multiple commands cannot overrun it.
+            vout = verify(
+                repo=prepared.path,
+                base_commit=prepared.base_commit,
+                scratch_dir=scratch,
+                deadline=deadline,
+            )
         result.state = vout.state
         result.acceptance = vout.acceptance
         result.regression = vout.regression

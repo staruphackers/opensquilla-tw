@@ -30,8 +30,8 @@ import re
 import shlex
 import shutil
 import subprocess
-import time
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -205,6 +205,82 @@ def verify(
         regression=regression,
         assumptions=assumptions,
         detail=detail,
+    )
+
+
+def verify_scratch(
+    *,
+    repo: Path,
+    scratch_dir: Path,
+    acceptance_timeout: int = DEFAULT_ACCEPTANCE_TIMEOUT,
+    deadline: float | None = None,
+) -> VerificationOutcome:
+    """Green-only verification for from-scratch standalone code.
+
+    The agent's acceptance tests must pass on the produced code. There is no
+    red phase on an empty base and no regression suite because there is no
+    pre-existing project.
+    """
+    manifest = load_manifest(scratch_dir)
+    if manifest is None:
+        return VerificationOutcome(
+            state=TaskState.INVALID_ACCEPTANCE_TEST,
+            acceptance=[],
+            regression=None,
+            assumptions=[],
+            detail="agent did not emit a valid verification.json manifest",
+        )
+    assumptions = [str(a) for a in manifest.get("assumptions", []) if str(a).strip()]
+    if manifest.get("testable") is False:
+        reason = str(manifest.get("not_testable_reason", "")).strip()
+        return VerificationOutcome(
+            state=TaskState.NOT_TESTABLE,
+            acceptance=[],
+            regression=None,
+            assumptions=assumptions,
+            detail=reason or "agent reported the task is not testable",
+        )
+    checks: list[AcceptanceCheck] = []
+    for entry in manifest.get("acceptance_tests") or []:
+        if not isinstance(entry, dict):
+            continue
+        cmd = str(entry.get("command", "")).strip()
+        if not cmd:
+            continue
+        checks.append(
+            AcceptanceCheck(
+                name=str(entry.get("name") or cmd)[:80],
+                command=cmd,
+                expected="pass",
+            )
+        )
+    if not checks:
+        return VerificationOutcome(
+            state=TaskState.INVALID_ACCEPTANCE_TEST,
+            acceptance=[],
+            regression=None,
+            assumptions=assumptions,
+            detail="manifest declared testable but listed no runnable acceptance tests",
+        )
+    all_pass = True
+    for check in checks:
+        rc, out = _run_shell(
+            check.command,
+            cwd=repo,
+            timeout=_cmd_timeout(acceptance_timeout, deadline),
+            repo=repo,
+        )
+        check.after = "pass" if rc == 0 else "fail"
+        check.green_exit_code = rc
+        check.green_output_tail = _tail(out)
+        if rc != 0:
+            all_pass = False
+    return VerificationOutcome(
+        state=TaskState.VERIFIED if all_pass else TaskState.FAILED,
+        acceptance=checks,
+        regression=None,
+        assumptions=assumptions,
+        detail="" if all_pass else "the from-scratch acceptance test did not pass (green-only)",
     )
 
 

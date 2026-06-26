@@ -1,6 +1,6 @@
 ---
 name: code-task
-description: "PREFERRED way to change code in a REAL repository: fix a GitHub issue, fix a bug, add/implement a function or feature, or make any edit to a project the user names by a filesystem path (e.g. /tmp/foo, ~/code/bar) or a git URL. Clones the repo, runs an OpenSquilla agent on the host to make the change on a task branch, then independently VERIFIES it with a red→green→regression test loop and reports a structured result. STRONGLY prefer this over hand-editing the user's files yourself in this session: editing files directly skips the isolation and the runner-verified red→green proof, so it is not equivalent. Use it whenever the request names a real on-disk repo/path or a repo URL and asks to fix/add/implement/change code. Examples: 'fix issue 412 in github.com/acme/widgets', '给 /tmp/calc 加个 average 函数', '帮我改一下 ~/proj 里的 X', 'implement CSV export in my project'. Docker-free host execution; treat the target repo as TRUSTED. GitHub issue mode needs the `gh` CLI. (Do NOT use for conceptual coding questions, code snippets with no target repo, or repos the user has not pointed at.)"
+description: "PREFERRED way to change code in a REAL repository: fix a GitHub issue, fix a bug, add/implement a function or feature, or make any edit to a project the user names by a filesystem path (e.g. /tmp/foo, ~/code/bar) or a git URL. Clones the repo, runs an OpenSquilla agent on the host to make the change on a task branch, then independently VERIFIES it with a red→green→regression test loop and reports a structured result. STRONGLY prefer this over hand-editing the user's files yourself in this session: editing files directly skips the isolation and the runner-verified red→green proof, so it is not equivalent. Use it whenever the request names a real on-disk repo/path or a repo URL and asks to fix/add/implement/change code. Examples: 'fix issue 412 in github.com/acme/widgets', '给 /tmp/calc 加个 average 函数', '帮我改一下 ~/proj 里的 X', 'implement CSV export in my project'. Docker-free host execution; treat the target repo as TRUSTED. GitHub issue mode needs the `gh` CLI. For self-contained, TESTABLE code from scratch when NO repo is named (e.g. 'write a function that maps A-Z to pitches'), use `--verification-mode scratch` with no --repo: it scaffolds a throwaway project, writes the code plus a test, and verifies it green. Only truly trivial one-liners or conceptual/non-testable questions are answered inline."
 triggers:
   - "code-task"
   - "fix the issue"
@@ -48,9 +48,12 @@ if the change looks small enough to do by hand. Editing the files yourself
 in this session is **not equivalent**: it skips the disposable clone, the
 task branch, and (most importantly) the runner-verified red→green→regression
 proof, so neither you nor the user gets evidence the change actually works.
-The only time to do it inline instead is when there is no target repo at all
-(a throwaway snippet, a conceptual question). When in doubt and a real repo
-is named, prefer code-task.
+Answer inline (no code-task) ONLY for truly trivial one-liners, pseudocode, or
+conceptual / non-deterministic questions. For self-contained TESTABLE code from
+scratch with no repo named, use `code-task solve --task "..." --verification-mode
+scratch` (no --repo): it writes the code plus a test and verifies it green-only
+(no red/regression -- there is nothing pre-existing to regress). When a real repo
+is named, prefer code-task red-green.
 
 ## Translating the user's request
 
@@ -73,8 +76,8 @@ opensquilla code-task solve --repo <url-or-path> ( --issue N | --task "<text>" |
 - **A short request in the message** → `--task "<their request>"`.
 - **A long spec, or pasted from Jira/GitLab/内网** → save it to a file and
   use `--task-file <path>`.
-- Always pass `--repo`. If the user is already in a local checkout, use that
-  path; otherwise the GitHub/remote URL.
+- Always pass `--repo`, except for `--verification-mode scratch`. If the user
+  is already in a local checkout, use that path; otherwise the GitHub/remote URL.
 - Pass `--yes` to skip the interactive trusted-host confirmation (you are
   acting on the user's behalf), but only after the safety check below.
 
@@ -170,3 +173,8 @@ back. Therefore:
 
 For building an app or UI **from scratch** (e.g. an Electron + Vite + React desktop app) there is no red->green test loop. Use `--verification-mode build`: the runner owns a fixed checklist (`npm ci` -> `npm run build` -> `npx electron-builder` for the HOST OS, with the target pinned — `--mac dmg` -> `.dmg`, `--win nsis` -> `.exe`, `--linux AppImage` -> `.AppImage`) and `state=verified` means the app actually builds and packages into an installer. Each OS only builds its own installer, so run on each OS (or a CI matrix) to collect all three. The result carries `verification_kind=build` and `build.installer_path(s)`. Preview/launch is intentionally out of scope (no GUI is run).
 
+For self-contained, testable code when the user has not named a repo, use
+`--verification-mode scratch` with `--task` or `--task-file` and no `--repo`.
+The runner creates an empty git repo, asks the agent to write code plus pytest
+coverage, and independently reruns the declared acceptance command. This mode is
+green-only and returns `verification_kind=scratch`.

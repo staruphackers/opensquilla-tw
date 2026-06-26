@@ -30,12 +30,63 @@ def test_solve_requires_one_task_input():
     assert "exactly one" in result.output
 
 
+def test_solve_requires_repo_unless_scratch():
+    result = runner.invoke(codetask_app, ["solve", "--task", "do it", "--yes"])
+    assert result.exit_code == 2
+    assert "--repo" in result.output
+
+
 def test_solve_rejects_two_task_inputs():
     result = runner.invoke(
         codetask_app,
         ["solve", "--repo", "/tmp/x", "--issue", "1", "--task", "y", "--yes"],
     )
     assert result.exit_code == 2
+
+
+def test_solve_rejects_unknown_verification_mode():
+    result = runner.invoke(
+        codetask_app,
+        [
+            "solve",
+            "--repo",
+            "/tmp/x",
+            "--task",
+            "do it",
+            "--verification-mode",
+            "unknown",
+            "--yes",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "Unknown --verification-mode" in result.output
+
+
+def test_scratch_rejects_repo():
+    result = runner.invoke(
+        codetask_app,
+        [
+            "solve",
+            "--repo",
+            "/tmp/x",
+            "--task",
+            "do it",
+            "--verification-mode",
+            "scratch",
+            "--yes",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "Do not pass --repo" in result.output
+
+
+def test_scratch_rejects_issue():
+    result = runner.invoke(
+        codetask_app,
+        ["solve", "--issue", "1", "--verification-mode", "scratch", "--yes"],
+    )
+    assert result.exit_code == 2
+    assert "not --issue" in result.output
 
 
 def test_json_without_yes_is_refused():

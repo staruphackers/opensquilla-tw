@@ -18,7 +18,7 @@ _STATE_GLYPH = {
 }
 
 _STATE_BLURB = {
-    TaskState.VERIFIED: "acceptance test went red → green, no regressions",
+    TaskState.VERIFIED: "acceptance test passed (verified)",
     TaskState.ALREADY_SATISFIED: "expected behavior already held on the base commit",
     TaskState.NOT_TESTABLE: "work done but not expressible as an automated test",
     TaskState.ENVIRONMENT_BLOCKED: "could not build/test the repo environment",

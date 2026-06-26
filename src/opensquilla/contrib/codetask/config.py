@@ -125,6 +125,8 @@ def prompt_template_path(verification_mode: str = "red-green", is_edit: bool = F
         return Path(override).expanduser()
     if verification_mode == "build":
         name = "app_edit.txt" if is_edit else "app_build.txt"
+    elif verification_mode == "scratch":
+        name = "scratch.txt"
     else:
         name = "default.txt"
     return _DATA_DIR / "prompts" / name

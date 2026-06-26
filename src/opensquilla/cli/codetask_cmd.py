@@ -29,7 +29,10 @@ def _codetask_main() -> None:
 
 @codetask_app.command("solve")
 def solve(
-    repo: str = typer.Option(..., help="Repo to work on: a git URL or a local path."),
+    repo: str = typer.Option(
+        "",
+        help="Repo to work on (git URL or local path); omit for --verification-mode scratch.",
+    ),
     issue: int = typer.Option(None, "--issue", help="GitHub issue number (needs `gh`)."),
     task: str = typer.Option(None, "--task", help="Free-form task / feature request text."),
     task_file: str = typer.Option(
@@ -43,7 +46,10 @@ def solve(
     verification_mode: str = typer.Option(
         "red-green",
         "--verification-mode",
-        help="How to verify: red-green (agent tests, default) or build (app build checklist).",
+        help=(
+            "How to verify: red-green (default) / build (app checklist) / "
+            "scratch (from-scratch code, green-only, no --repo)."
+        ),
     ),
     run_id: str = typer.Option("", help="Run identifier (auto-generated when empty)."),
     json_output: bool = typer.Option(False, "--json", help="Print the result as JSON."),
@@ -68,6 +74,38 @@ def solve(
         )
         raise typer.Exit(2)
 
+    valid_modes = {"red-green", "build", "scratch"}
+    if verification_mode not in valid_modes:
+        typer.secho(
+            f"Unknown --verification-mode {verification_mode!r}; expected one of: "
+            "red-green, build, scratch.",
+            err=True,
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(2)
+    if verification_mode == "scratch":
+        if repo:
+            typer.secho(
+                "Do not pass --repo with --verification-mode scratch; it creates an empty repo.",
+                err=True,
+                fg=typer.colors.RED,
+            )
+            raise typer.Exit(2)
+        if issue is not None:
+            typer.secho(
+                "--verification-mode scratch supports --task or --task-file, not --issue.",
+                err=True,
+                fg=typer.colors.RED,
+            )
+            raise typer.Exit(2)
+    elif not repo:
+        typer.secho(
+            "Pass --repo unless using --verification-mode scratch.",
+            err=True,
+            fg=typer.colors.RED,
+        )
+        raise typer.Exit(2)
+
     # Trusted-host gate. --json is non-interactive, so it must carry an
     # explicit --yes rather than silently skipping the gate (codex review #5).
     if not yes:
@@ -81,7 +119,8 @@ def solve(
             )
             raise typer.Exit(2)
         typer.secho(TRUSTED_HOST_WARNING, fg=typer.colors.YELLOW)
-        if not typer.confirm(f"Run code-task against {repo}?", default=False):
+        target = "a scratch repo" if verification_mode == "scratch" else repo
+        if not typer.confirm(f"Run code-task against {target}?", default=False):
             raise typer.Exit(1)
 
     # Resolve the run id here so we can announce the run directory on STDOUT's
