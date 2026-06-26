@@ -1162,6 +1162,21 @@ async def _should_auto_title(
         return False
 
 
+def _schedule_auto_title(
+    ctx: RpcContext,
+    key: str,
+    first_message: str,
+    *,
+    enabled: bool,
+) -> None:
+    if not enabled:
+        return
+    asyncio.create_task(
+        generate_session_title(ctx, key, first_message),
+        name=f"session-title:{key}",
+    )
+
+
 @_d.method("sessions.send", scope="operator.write")
 async def _handle_sessions_send(params: dict | None, ctx: RpcContext) -> dict:
     key = _require_key(params)
@@ -1487,6 +1502,12 @@ async def _handle_sessions_send(params: dict | None, ctx: RpcContext) -> dict:
                     await _store.evict(_u)
                 except Exception:  # noqa: BLE001 — eviction is best-effort
                     log.warning("uploads.evict_failed_post_turn uuid=%s", _u[:8])
+        _schedule_auto_title(
+            ctx,
+            key,
+            semantic_message_text or message_text,
+            enabled=_generate_title,
+        )
         return {"status": "accepted", "key": key, "task_id": handle.task_id}
 
     # 2. Run agent turn in background via TurnRunner
@@ -1667,13 +1688,12 @@ async def _handle_sessions_send(params: dict | None, ctx: RpcContext) -> dict:
                 await _store.evict(_u)
             except Exception:  # noqa: BLE001 — eviction is best-effort
                 log.warning("uploads.evict_failed_post_turn uuid=%s", _u[:8])
-    if _generate_title:
-        # Fire-and-forget: auto-name the session from its first user message.
-        # Independent of the turn; writes derived_title + broadcasts on success.
-        asyncio.create_task(
-            generate_session_title(ctx, key, semantic_message_text or message_text),
-            name=f"session-title:{key}",
-        )
+    _schedule_auto_title(
+        ctx,
+        key,
+        semantic_message_text or message_text,
+        enabled=_generate_title,
+    )
     return {"status": "accepted", "key": key}
 
 

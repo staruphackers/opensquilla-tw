@@ -253,12 +253,33 @@ async def test_call_naming_llm_payload_and_sanitization(monkeypatch):
     # Cheap, deterministic title-shaped request.
     assert captured["url"] == "https://openrouter.ai/api/v1/chat/completions"
     assert captured["json"]["model"] == "deepseek/deepseek-v4-pro"
-    assert captured["json"]["max_tokens"] == 24
+    assert captured["json"]["max_tokens"] == 96
     assert captured["json"]["temperature"] == 0
     assert captured["json"]["stream"] is False
     # OpenRouter attribution headers are present (mirrors compaction path).
     assert captured["headers"]["Authorization"] == "Bearer test-key"
     assert "X-OpenRouter-Title" in captured["headers"]
+
+
+@pytest.mark.asyncio
+async def test_call_naming_llm_disables_openrouter_reasoning_for_reasoning_models(
+    monkeypatch,
+):
+    captured: dict = {}
+    monkeypatch.setattr(
+        "opensquilla.session.naming.httpx.AsyncClient",
+        lambda **kwargs: _fake_client(captured),
+    )
+
+    title = await call_naming_llm(
+        "Help me reset my password please",
+        model="deepseek/deepseek-v4-pro",
+        api_key="test-key",
+        base_url="https://openrouter.ai/api/v1",
+    )
+
+    assert title == "Reset my password"
+    assert captured["json"]["reasoning"] == {"enabled": False}
 
 
 @pytest.mark.asyncio

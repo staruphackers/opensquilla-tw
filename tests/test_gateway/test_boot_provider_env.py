@@ -175,3 +175,30 @@ async def test_config_patch_safe_accepts_router_visual_mode(tmp_path) -> None:
     assert ctx.config.squilla_router.visual_mode == "legacy_grid"
     persisted = tomllib.loads((tmp_path / "config.toml").read_text())
     assert persisted["squilla_router"]["visual_mode"] == "legacy_grid"
+
+
+async def test_config_patch_safe_accepts_session_title_toggle(tmp_path) -> None:
+    cfg = GatewayConfig(config_path=str(tmp_path / "config.toml"))
+    ctx = SimpleNamespace(config=cfg)
+
+    res = await _handle_config_patch_safe(
+        {"patches": {"naming.enabled": False}},
+        ctx,
+    )
+
+    assert res["patched"] == ["naming.enabled"]
+    assert res["restartRequired"] is False
+    assert ctx.config.naming.enabled is False
+    persisted = tomllib.loads((tmp_path / "config.toml").read_text())
+    assert persisted["naming"]["enabled"] is False
+
+
+async def test_config_patch_safe_rejects_session_title_advanced_paths(tmp_path) -> None:
+    cfg = GatewayConfig(config_path=str(tmp_path / "config.toml"))
+    ctx = SimpleNamespace(config=cfg)
+
+    with pytest.raises(ValueError, match="naming.model"):
+        await _handle_config_patch_safe(
+            {"patches": {"naming.model": "deepseek/deepseek-v4-pro"}},
+            ctx,
+        )

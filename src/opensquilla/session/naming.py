@@ -33,6 +33,19 @@ log = structlog.get_logger(__name__)
 
 _DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 _MAX_INPUT_CHARS = 4000  # cap the untrusted first message fed to the namer
+_TITLE_MAX_TOKENS = 96
+_OPENROUTER_REASONING_DEFAULT_MODELS = frozenset(
+    {
+        "deepseek/deepseek-v4",
+        "deepseek/deepseek-v4-pro",
+        "deepseek/deepseek-v4-pro-20260423",
+        "z-ai/glm-4.5",
+        "z-ai/glm-4.5-air",
+        "z-ai/glm-5",
+        "z-ai/glm-5.1",
+        "z-ai/glm-5.2",
+    }
+)
 
 # Wrapper characters stripped from both ends of a model-produced title:
 # straight/smart quotes, CJK quotes/brackets, and markdown emphasis/fence/heading.
@@ -197,6 +210,13 @@ def _build_system_prompt(language: str) -> str:
     )
 
 
+def _should_disable_openrouter_reasoning(url: str, model: str) -> bool:
+    if "openrouter.ai" not in url.lower():
+        return False
+    normalized_model = model.strip().lower()
+    return normalized_model in _OPENROUTER_REASONING_DEFAULT_MODELS
+
+
 async def call_naming_llm(
     first_message: str,
     *,
@@ -226,10 +246,12 @@ async def call_naming_llm(
             {"role": "system", "content": _build_system_prompt(language)},
             {"role": "user", "content": user_content},
         ],
-        "max_tokens": 24,
+        "max_tokens": _TITLE_MAX_TOKENS,
         "temperature": 0,
         "stream": False,
     }
+    if _should_disable_openrouter_reasoning(url, model):
+        payload["reasoning"] = {"enabled": False}
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",

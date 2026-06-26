@@ -9,6 +9,7 @@ from typer.testing import CliRunner
 
 import opensquilla.cli.search_cmd as search_cmd  # type: ignore[import-untyped]
 from opensquilla.cli.main import app  # type: ignore[import-untyped]
+from opensquilla.search.types import DEFAULT_SEARCH_MAX_RESULTS
 
 runner = CliRunner()
 
@@ -125,7 +126,7 @@ def test_search_benchmark_passes_options_to_helper(monkeypatch):
     _assert_benchmark_metrics(payload)
     assert payload["delta"]["external_tool_calls_per_question"] == -1
     assert payload["delta"]["avg_returned_chars"] == -200
-    assert seen == [("smoke", 3, 5, False)]
+    assert seen == [("smoke", 3, DEFAULT_SEARCH_MAX_RESULTS, False)]
 
 
 def test_search_benchmark_live_json_rejects_without_env(monkeypatch):
