@@ -375,6 +375,7 @@ def test_run_shell_sets_uv_project_for_uv_repo(tmp_path):
     assert rc == 0 and "UVP=[]" in out, out
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="code-task Windows support is WIP")
 @pytest.mark.skipif(shutil.which("uv") is None, reason="uv not installed")
 def test_uv_run_from_worktree_reuses_repo_venv(tmp_path):
     """End-to-end: with UV_PROJECT injected by _run_shell, `uv run` from a base
