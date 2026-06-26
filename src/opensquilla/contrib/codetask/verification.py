@@ -450,6 +450,124 @@ def _localize_command(command: str, repo: Path, target: Path) -> str:
     return out
 
 
+_BASH_PROBE_SENTINEL = "__opensquilla_bash_probe_ok__"
+_BASH_PROBE_TIMEOUT = 5.0
+# Process-level cache: bash location is stable for the gateway's lifetime.
+# Tuple form (resolved, path) so a cached "not found" doesn't keep re-probing.
+_BASH_RESOLVED: bool = False
+_BASH_CACHED: str | None = None
+
+
+def _windows_bash_candidates() -> list[str]:
+    """Ordered candidate paths to try as ``bash`` on Windows.
+
+    Walks every ``bash.<PATHEXT>`` hit on PATH, then the standard
+    Git-for-Windows install locations as a last-resort fallback. The
+    ``OPENSQUILLA_BASH`` env override (if set) is yielded first so an
+    operator can force a specific shell without rearranging PATH.
+    Caller probes each in order; first one that passes wins.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(p: str | None) -> None:
+        if not p:
+            return
+        key = os.path.normcase(os.path.abspath(p))
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(p)
+
+    _add(os.environ.get("OPENSQUILLA_BASH"))
+
+    pathext = [
+        e for e in os.environ.get("PATHEXT", ".EXE").split(os.pathsep) if e
+    ] or [".EXE"]
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        if not d:
+            continue
+        for ext in pathext:
+            cand = os.path.join(d, "bash" + ext)
+            if os.path.isfile(cand):
+                _add(cand)
+
+    for base in (
+        os.environ.get("ProgramFiles"),
+        os.environ.get("ProgramFiles(x86)"),
+        os.environ.get("LOCALAPPDATA"),
+    ):
+        if not base:
+            continue
+        for rel in (
+            r"Git\usr\bin\bash.exe",
+            r"Git\bin\bash.exe",
+            r"Programs\Git\usr\bin\bash.exe",
+            r"Programs\Git\bin\bash.exe",
+        ):
+            cand = os.path.join(base, rel)
+            if os.path.isfile(cand):
+                _add(cand)
+    return out
+
+
+def _probe_bash(path: str) -> bool:
+    """True iff ``path`` is real bash (not a stub or busybox).
+
+    Runs ``-lc`` with a bash-specific invariant (``$BASH_VERSION`` is set
+    by every real bash and unset by busybox, dash, the WSL launcher stub,
+    and a ``bash.cmd`` wrapper that calls ``exit /b``). Requires both
+    returncode 0 AND the sentinel in stdout so a stub that happens to
+    exit 0 but echoes nothing — or echoes garbage — is rejected.
+    """
+    try:
+        proc = subprocess.run(
+            [path, "-lc", f'test -n "$BASH_VERSION" && echo {_BASH_PROBE_SENTINEL}'],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_BASH_PROBE_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0 and _BASH_PROBE_SENTINEL in (proc.stdout or "")
+
+
+def _resolve_bash() -> str | None:
+    """Find a working ``bash`` (or None).
+
+    POSIX is bit-equivalent to the original ``shutil.which("bash")`` lookup —
+    called fresh on every invocation, no cache, no probe — because the
+    busybox/WSL-stub class of failure is Windows-only and any caching layer
+    would diverge from the old behavior if ``PATH`` changes mid-process.
+    Windows enumerates candidates, probes each (see
+    :func:`_windows_bash_candidates`, :func:`_probe_bash`), and memoizes the
+    result for the gateway's lifetime so per-shell-call probe cost stays at
+    one round-trip total.
+    """
+    if os.name != "nt":
+        return shutil.which("bash")
+    global _BASH_RESOLVED, _BASH_CACHED
+    if _BASH_RESOLVED:
+        return _BASH_CACHED
+    for cand in _windows_bash_candidates():
+        if _probe_bash(cand):
+            _BASH_CACHED = cand
+            _BASH_RESOLVED = True
+            return cand
+    _BASH_RESOLVED = True
+    _BASH_CACHED = None
+    return None
+
+
+def _reset_bash_cache() -> None:
+    """Test helper: drop the memoized bash resolution."""
+    global _BASH_RESOLVED, _BASH_CACHED
+    _BASH_RESOLVED = False
+    _BASH_CACHED = None
+
+
 def _run_shell(
     command: str, *, cwd: Path, timeout: int, repo: Path | None = None
 ) -> tuple[int, str]:
@@ -460,12 +578,18 @@ def _run_shell(
     them. On Windows the user must have Git Bash / WSL installed; we surface
     a clear error instead of an opaque ``FileNotFoundError`` if it is not.
     """
-    bash = shutil.which("bash")
+    bash = _resolve_bash()
     if bash is None:
-        hint = (
-            "bash not found on PATH"
-            + (" (install Git Bash or WSL)" if os.name != "posix" else "")
-        )
+        if os.name == "nt":
+            hint = (
+                "no working bash found (install Git Bash, or set "
+                "OPENSQUILLA_BASH to a working bash.exe; fake bash.cmd "
+                "stubs and an unconfigured WSL launcher are skipped "
+                "automatically)"
+            )
+        else:
+            # Bit-equivalent to the original message on Linux/Mac.
+            hint = "bash not found on PATH"
         return -1, f"OSERROR: {hint}"
     shim: Path | None = None
     prefixed = command

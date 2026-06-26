@@ -423,3 +423,177 @@ def test_tail_bounds_output():
     assert out.splitlines() == [str(i) for i in range(90, 100)]
     big = "x" * 9000
     assert len(verification._tail(big, max_chars=4000)) == 4000
+
+
+# ─────────────── bash resolution (probe-past-fake-stub) ──────────────────
+# Field report: on Windows a fake `bash.cmd` ahead of real Git Bash on PATH
+# hijacks `shutil.which("bash")` and the verifier dies on the stub instead
+# of falling through to the real shell. The class also covers WSL launchers
+# that exist but exit non-zero when WSL is not configured. POSIX is bit-
+# equivalent to the old shutil.which path (the bug is Windows-only), so the
+# enumeration/probe tests below are skipped there.
+
+import os  # noqa: E402
+import sys  # noqa: E402  -- used by the busybox-mimic test below
+
+
+@pytest.fixture(autouse=True)
+def _reset_bash_cache_between_tests():
+    verification._reset_bash_cache()
+    yield
+    verification._reset_bash_cache()
+
+
+def _real_bash() -> str:
+    real = shutil.which("bash")
+    if real is None:
+        pytest.skip("real bash not available")
+    return real
+
+
+@pytest.mark.skipif(os.name != "nt", reason="fake bash.cmd hijack is Windows-only")
+def test_resolve_bash_skips_fake_cmd_stub(tmp_path, monkeypatch):
+    """Mirror the field report: fake bash.cmd ahead of real bash on PATH.
+
+    Without the probe, `shutil.which("bash")` returns the .cmd stub and the
+    verifier crashes with exit 17 + "FAKE BASH STUB". `_resolve_bash` must
+    fall past it to the real Git Bash entry further down PATH.
+    """
+    real = _real_bash()
+    fake_dir = tmp_path / "fake-bin"
+    fake_dir.mkdir()
+    (fake_dir / "bash.cmd").write_text(
+        "@echo FAKE BASH STUB\r\n@exit /b 17\r\n", encoding="ascii"
+    )
+    monkeypatch.setenv("PATH", f"{fake_dir}{os.pathsep}{os.path.dirname(real)}")
+    monkeypatch.delenv("OPENSQUILLA_BASH", raising=False)
+
+    resolved = verification._resolve_bash()
+
+    assert resolved is not None
+    assert os.path.normcase(resolved) != os.path.normcase(str(fake_dir / "bash.cmd"))
+    # And it actually runs the verifier command:
+    rc, out = verification._run_shell("echo real_bash_ran", cwd=tmp_path, timeout=10)
+    assert rc == 0 and "real_bash_ran" in out, (rc, out)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="enumerate-and-probe is Windows-only")
+def test_resolve_bash_skips_failing_probe(tmp_path, monkeypatch):
+    """A bash whose -lc probe exits non-zero (e.g. an unconfigured WSL stub
+    that prints an error and exits 1) must be skipped in favor of a later
+    candidate that actually runs."""
+    real = _real_bash()
+    broken_dir = tmp_path / "broken-bin"
+    broken_dir.mkdir()
+    stub = broken_dir / "bash.cmd"
+    stub.write_text("@echo broken-bash\r\n@exit /b 99\r\n", encoding="ascii")
+    monkeypatch.setenv("PATH", f"{broken_dir}{os.pathsep}{os.path.dirname(real)}")
+    monkeypatch.delenv("OPENSQUILLA_BASH", raising=False)
+
+    resolved = verification._resolve_bash()
+    assert resolved is not None
+    assert os.path.normcase(resolved) != os.path.normcase(str(stub))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="busybox-vs-bash discrimination is Windows-only")
+def test_resolve_bash_rejects_non_bash_with_clear_sentinel(tmp_path, monkeypatch):
+    """The probe must reject a shell that runs ``-lc`` cleanly but isn't
+    actually bash (e.g. busybox-w32's bash.exe), because verification
+    commands lean on bash-only syntax (``[[ ]]``, arrays, ``BASH_SOURCE``).
+
+    Discrimination test: this stub correctly handles a bare ``echo X`` script
+    — so it would pass the naive ``echo SENTINEL`` probe — but fails the
+    bash-specific ``$BASH_VERSION`` guard the way a real busybox would.
+    Proves the strengthened probe is doing real work.
+    """
+    real = _real_bash()
+    not_bash = tmp_path / "not-bash"
+    not_bash.mkdir()
+    mimic_py = not_bash / "busybox_mimic.py"
+    mimic_py.write_text(
+        "import sys\n"
+        "argv = sys.argv[1:]\n"
+        "# Mimic only what is needed: a shell that handles `-lc \"echo X\"` but\n"
+        "# does not set BASH_VERSION, so the probe's test-guard fails and the\n"
+        "# && short-circuits -- same observable shape as busybox-w32 bash.\n"
+        "if len(argv) >= 2 and argv[0] in ('-lc', '-c'):\n"
+        "    script = argv[1].strip()\n"
+        "    if script.startswith('echo '):\n"
+        "        print(script[5:].strip().strip('\\\"').strip(\"'\"))\n"
+        "        sys.exit(0)\n"
+        "    sys.exit(1)\n"
+        "sys.exit(2)\n",
+        encoding="ascii",
+    )
+    stub = not_bash / "bash.cmd"
+    stub.write_text(
+        f'@"{sys.executable}" "{mimic_py}" %*\r\n', encoding="ascii"
+    )
+    monkeypatch.setenv("PATH", f"{not_bash}{os.pathsep}{os.path.dirname(real)}")
+    monkeypatch.delenv("OPENSQUILLA_BASH", raising=False)
+
+    # Sanity: the stub does pass the naive probe (proves the test is honest).
+    import subprocess as _sp
+    naive = _sp.run(
+        [str(stub), "-lc", f"echo {verification._BASH_PROBE_SENTINEL}"],
+        capture_output=True, text=True, timeout=10,
+    )
+    assert naive.returncode == 0
+    assert verification._BASH_PROBE_SENTINEL in (naive.stdout or "")
+
+    # And the strengthened probe rejects it, falling through to real bash.
+    resolved = verification._resolve_bash()
+    assert resolved is not None
+    assert os.path.normcase(resolved) != os.path.normcase(str(stub))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="OPENSQUILLA_BASH override is Windows-only")
+def test_resolve_bash_honors_env_override(tmp_path, monkeypatch):
+    """OPENSQUILLA_BASH wins over PATH discovery — including over a real bash
+    already on PATH — so operators can force a specific shell without
+    rearranging PATH."""
+    real = _real_bash()
+    monkeypatch.setenv("OPENSQUILLA_BASH", real)
+    # Remove all bash candidates from PATH so the only way to find it is via override.
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    assert verification._resolve_bash() == real
+
+
+@pytest.mark.skipif(os.name != "nt", reason="enumerate-and-probe is Windows-only")
+def test_resolve_bash_returns_none_when_no_working_bash(tmp_path, monkeypatch):
+    """If no candidate probes successfully, return None and let `_run_shell`
+    surface the actionable OSERROR hint (instead of running a broken stub)."""
+    monkeypatch.setenv("PATH", str(tmp_path))  # empty dir, no bash
+    monkeypatch.delenv("OPENSQUILLA_BASH", raising=False)
+    # Also blank out the Git-Bash fallback locations our resolver checks.
+    for env_var in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        monkeypatch.setenv(env_var, str(tmp_path))
+
+    assert verification._resolve_bash() is None
+    rc, out = verification._run_shell("true", cwd=tmp_path, timeout=5)
+    assert rc == -1 and "OSERROR" in out and "bash" in out, out
+
+
+def test_resolve_bash_memoizes(tmp_path, monkeypatch):
+    """Once resolved, repeated calls must return the cached path and skip
+    re-probing — the gateway runs many _run_shell calls per task and probes
+    cost ~50ms each on Windows."""
+    real = _real_bash()
+    if os.name == "nt":
+        monkeypatch.setenv("OPENSQUILLA_BASH", real)
+    # POSIX: cache short-circuits on shutil.which("bash") which is `real`.
+
+    first = verification._resolve_bash()
+    calls = {"n": 0}
+    real_probe = verification._probe_bash
+
+    def counting_probe(p):
+        calls["n"] += 1
+        return real_probe(p)
+
+    monkeypatch.setattr(verification, "_probe_bash", counting_probe)
+    second = verification._resolve_bash()
+
+    assert first == second == real
+    assert calls["n"] == 0, "cached resolution must not re-probe"
