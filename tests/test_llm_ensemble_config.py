@@ -69,6 +69,17 @@ def test_llm_ensemble_config_defaults_disabled_with_profiles() -> None:
         "google/gemini-3-flash-preview",
         "moonshotai/kimi-k2.7-code",
     ]
+    g15 = cfg.llm_ensemble.profiles["g15_g8_top3_prefilter"]
+    assert [ref.model for ref in g15.proposers] == [
+        "deepseek/deepseek-v4-pro",
+        "z-ai/glm-5.2",
+        "google/gemini-3-flash-preview",
+        "qwen/qwen3.7-plus",
+    ]
+    assert g15.aggregator.model == "z-ai/glm-5.2"
+    assert g15.candidate_scorer is not None
+    assert g15.candidate_scorer.model == "google/gemini-3-flash-preview"
+    assert g15.candidate_prefilter_top_k == 3
     assert cfg.llm_ensemble.profiles["g3_standard"].record_candidates is False
 
 
@@ -86,6 +97,8 @@ def test_build_ensemble_provider_from_gateway_config() -> None:
                 "custom": {
                     "proposers": [{"model": "p1"}, {"model": "p2", "k": 2}],
                     "aggregator": {"model": "agg"},
+                    "candidate_scorer": {"model": "judge"},
+                    "candidate_prefilter_top_k": 1,
                     "candidate_max_chars": 123,
                 }
             },
@@ -109,4 +122,7 @@ def test_build_ensemble_provider_from_gateway_config() -> None:
     assert [member.provider_config.model for member in provider.proposers] == ["p1", "p2"]
     assert provider.proposers[1].k == 2
     assert provider.aggregator.provider_config.model == "agg"
+    assert provider.candidate_scorer is not None
+    assert provider.candidate_scorer.provider_config.model == "judge"
+    assert provider.candidate_prefilter_top_k == 1
     assert provider.candidate_max_chars == 123

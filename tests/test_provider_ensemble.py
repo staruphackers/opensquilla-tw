@@ -139,6 +139,8 @@ async def test_ensemble_runs_proposers_text_only_and_aggregator_with_tools(
     assert done.ensemble_trace["shuffle_candidates"] is False
     assert done.ensemble_trace["final_request_role"] == "aggregator"
     assert done.ensemble_trace["llm_request_count"] == 3
+    assert "candidate_prefilter" not in done.ensemble_trace
+    assert "selected_candidate_indexes" not in done.ensemble_trace
     assert "draft from p1" in done.ensemble_trace["candidates"][0]["text"]
     assert calls[0]["model"] in {"p1", "p2"}
     proposer_calls = [call for call in calls if call["model"] in {"p1", "p2"}]
@@ -146,6 +148,128 @@ async def test_ensemble_runs_proposers_text_only_and_aggregator_with_tools(
     aggregator_call = next(call for call in calls if call["model"] == "agg")
     assert aggregator_call["tools"] == [tool]
     assert "Candidate drafts" in aggregator_call["messages"][-1].content
+
+
+@pytest.mark.asyncio
+async def test_ensemble_prefilters_candidates_with_scorer_before_aggregation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _events(model: str, text: str, in_tokens: int, out_tokens: int):
+        return lambda _messages, _tools: [
+            TextDeltaEvent(text=text),
+            DoneEvent(input_tokens=in_tokens, output_tokens=out_tokens, model=model),
+        ]
+
+    factories = {
+        "p1": _events("p1", "draft from p1", 10, 2),
+        "p2": _events("p2", "draft from p2", 11, 3),
+        "p3": _events("p3", "draft from p3", 12, 4),
+        "p4": _events("p4", "draft from p4", 13, 5),
+        "judge": _events(
+            "judge",
+            '{"ranked_candidate_indexes":[2,0,1],"scores":[{"index":2,"score":9.0}]}',
+            20,
+            4,
+        ),
+        "agg": _events("agg", "final fused", 30, 6),
+    }
+
+    def fake_build_provider(cfg: ProviderConfig) -> _FakeProvider:
+        return _FakeProvider(cfg, calls, factories)
+
+    monkeypatch.setattr("opensquilla.provider.selector._build_provider", fake_build_provider)
+    provider = EnsembleProvider(
+        profile_name="test",
+        proposers=[_member("p1"), _member("p2"), _member("p3"), _member("p4")],
+        aggregator=_member("agg"),
+        candidate_scorer=_member("judge"),
+        candidate_prefilter_top_k=3,
+        record_candidates=True,
+        shuffle_candidates=False,
+    )
+
+    events = [event async for event in provider.chat([Message(role="user", content="solve")])]
+
+    done = events[-1]
+    assert isinstance(done, DoneEvent)
+    assert done.input_tokens == 96
+    assert done.output_tokens == 24
+    assert [row["role"] for row in done.model_usage_breakdown] == [
+        "proposer",
+        "proposer",
+        "proposer",
+        "proposer",
+        "candidate_scorer",
+        "aggregator",
+    ]
+    assert done.ensemble_trace["total_candidates"] == 4
+    assert done.ensemble_trace["candidate_prefilter"]["applied"] is True
+    assert done.ensemble_trace["candidate_prefilter"]["selected_candidate_indexes"] == [
+        2,
+        0,
+        1,
+    ]
+    assert done.ensemble_trace["selected_candidate_indexes"] == [2, 0, 1]
+    assert done.ensemble_trace["llm_request_count"] == 6
+    aggregator_prompt = next(call for call in calls if call["model"] == "agg")[
+        "messages"
+    ][-1].content
+    assert "draft from p1" in aggregator_prompt
+    assert "draft from p2" in aggregator_prompt
+    assert "draft from p3" in aggregator_prompt
+    assert "draft from p4" not in aggregator_prompt
+
+
+@pytest.mark.asyncio
+async def test_ensemble_prefilter_failure_falls_back_to_all_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def _events(model: str, text: str):
+        return lambda _messages, _tools: [
+            TextDeltaEvent(text=text),
+            DoneEvent(input_tokens=1, output_tokens=1, model=model),
+        ]
+
+    factories = {
+        "p1": _events("p1", "draft from p1"),
+        "p2": _events("p2", "draft from p2"),
+        "p3": _events("p3", "draft from p3"),
+        "p4": _events("p4", "draft from p4"),
+        "judge": _events("judge", "not json"),
+        "agg": _events("agg", "final fused"),
+    }
+
+    def fake_build_provider(cfg: ProviderConfig) -> _FakeProvider:
+        return _FakeProvider(cfg, calls, factories)
+
+    monkeypatch.setattr("opensquilla.provider.selector._build_provider", fake_build_provider)
+    provider = EnsembleProvider(
+        profile_name="test",
+        proposers=[_member("p1"), _member("p2"), _member("p3"), _member("p4")],
+        aggregator=_member("agg"),
+        candidate_scorer=_member("judge"),
+        candidate_prefilter_top_k=3,
+        record_candidates=True,
+        shuffle_candidates=False,
+    )
+
+    events = [event async for event in provider.chat([Message(role="user", content="solve")])]
+
+    done = events[-1]
+    assert isinstance(done, DoneEvent)
+    assert done.ensemble_trace["candidate_prefilter"]["applied"] is False
+    assert done.ensemble_trace["selected_candidate_indexes"] == [0, 1, 2, 3]
+    aggregator_prompt = next(call for call in calls if call["model"] == "agg")[
+        "messages"
+    ][-1].content
+    assert "draft from p1" in aggregator_prompt
+    assert "draft from p2" in aggregator_prompt
+    assert "draft from p3" in aggregator_prompt
+    assert "draft from p4" in aggregator_prompt
 
 
 @pytest.mark.asyncio

@@ -83,6 +83,7 @@ GROUP_SPECS: dict[str, dict[str, str]] = {
     "G12": {"kind": "profile", "profile": "g12_k2_replace_gemini"},
     "G13": {"kind": "profile", "profile": "g13_five_proposers"},
     "G14": {"kind": "profile", "profile": "g14_k2_replace_qwen"},
+    "G15": {"kind": "profile", "profile": "g15_g8_top3_prefilter"},
 }
 
 TOOL_MODE_PROVIDER_ONLY = "provider_only"
@@ -971,7 +972,12 @@ def apply_generation_policy_to_profile(profile: Any, policy: dict[str, Any]) -> 
         for proposer in profile.proposers
     ]
     aggregator = profile.aggregator.model_copy(update=member_update)
-    return profile.model_copy(update={"proposers": proposers, "aggregator": aggregator})
+    update: dict[str, Any] = {"proposers": proposers, "aggregator": aggregator}
+    if getattr(profile, "candidate_scorer", None) is not None:
+        update["candidate_scorer"] = profile.candidate_scorer.model_copy(
+            update=member_update
+        )
+    return profile.model_copy(update=update)
 
 
 def compact_chat_config(
@@ -3528,10 +3534,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, default=Path("reports/draco"))
     parser.add_argument(
         "--groups",
-        default=(
-            "B0,B1,B2,B3,B4,B5,B6,B7,"
-            "G1,G2,G3,G4,G5,G6,G7,G8,G9,G10,G11,G12,G13,G14"
-        ),
+        required=True,
+        help="Comma-separated experiment groups to run, for example B0,B1,G3,G8.",
     )
     parser.add_argument("--max-tasks", type=int, default=0)
     parser.add_argument("--concurrency", type=int, default=1)

@@ -367,10 +367,22 @@ async def test_draco_runner_dry_run_writes_jsonl_and_summary(tmp_path: Path) -> 
     assert "huggingface.co" in manifest["tool_policy"]["contamination_blocked_domains"]
 
 
-def test_draco_runner_default_groups_include_g1() -> None:
-    args = build_parser().parse_args(["--input", "draco.jsonl"])
+def test_draco_runner_requires_explicit_groups() -> None:
+    with pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(["--input", "draco.jsonl"])
 
-    assert "G1" in args.groups.split(",")
+    assert exc.value.code == 2
+
+
+def test_draco_runner_explicit_groups_preserve_runtime_defaults() -> None:
+    args = build_parser().parse_args([
+        "--input",
+        "draco.jsonl",
+        "--groups",
+        "G1",
+    ])
+
+    assert args.groups == "G1"
     assert GROUP_SPECS["G1"]["profile"] == "g1_code"
     assert args.judge_repeats == 3
     assert args.judge_concurrency == 1
@@ -389,9 +401,6 @@ def test_draco_runner_default_groups_include_g1() -> None:
 
 
 def test_draco_runner_single_model_baselines_cover_extra_frontiers() -> None:
-    args = build_parser().parse_args(["--input", "draco.jsonl"])
-    default_groups = args.groups.split(",")
-
     expected = {
         "B2": "z-ai/glm-5.2",
         "B4": "deepseek/deepseek-v4-pro",
@@ -399,9 +408,16 @@ def test_draco_runner_single_model_baselines_cover_extra_frontiers() -> None:
         "B6": "qwen/qwen3.7-plus",
         "B7": "google/gemini-3-flash-preview",
     }
+    args = build_parser().parse_args([
+        "--input",
+        "draco.jsonl",
+        "--groups",
+        ",".join(expected),
+    ])
+    requested_groups = args.groups.split(",")
 
     for group, model in expected.items():
-        assert group in default_groups
+        assert group in requested_groups
         assert GROUP_SPECS[group] == {"kind": "single", "model": model}
 
 
@@ -418,6 +434,8 @@ def test_draco_runner_openrouter_server_tools_policy_enforces_conflict_domains()
     args = build_parser().parse_args([
         "--input",
         "draco.jsonl",
+        "--groups",
+        "G3",
         "--tool-mode",
         "openrouter_server_tools",
         "--contamination-blocked-domains",
@@ -449,6 +467,8 @@ def test_draco_runner_local_web_tools_policy_enforces_conflict_domains() -> None
     args = build_parser().parse_args([
         "--input",
         "draco.jsonl",
+        "--groups",
+        "G3",
         "--tool-mode",
         "local_web_tools",
         "--contamination-blocked-domains",
@@ -478,6 +498,8 @@ def test_draco_runner_local_web_tool_context_matches_recorded_budget() -> None:
     args = build_parser().parse_args([
         "--input",
         "draco.jsonl",
+        "--groups",
+        "G3",
         "--tool-mode",
         "local_web_tools",
         "--openrouter-web-search-max-results",
@@ -504,6 +526,8 @@ def test_draco_runner_configures_sandbox_runtime_for_local_web_tools() -> None:
     args = build_parser().parse_args([
         "--input",
         "draco.jsonl",
+        "--groups",
+        "G3",
         "--tool-mode",
         "local_web_tools",
     ])
@@ -537,6 +561,8 @@ async def test_draco_runner_local_web_search_clamps_model_max_results(
     args = build_parser().parse_args([
         "--input",
         "draco.jsonl",
+        "--groups",
+        "G3",
         "--tool-mode",
         "local_web_tools",
         "--openrouter-web-search-max-results",
@@ -572,6 +598,8 @@ async def test_draco_runner_local_web_fetch_clamps_model_max_chars(
     args = build_parser().parse_args([
         "--input",
         "draco.jsonl",
+        "--groups",
+        "G3",
         "--tool-mode",
         "local_web_tools",
         "--openrouter-web-fetch-max-content-tokens",
@@ -624,6 +652,8 @@ async def test_draco_runner_local_web_fetch_uses_configured_sandbox_runtime(
     args = build_parser().parse_args([
         "--input",
         "draco.jsonl",
+        "--groups",
+        "G3",
         "--tool-mode",
         "local_web_tools",
     ])
@@ -667,6 +697,8 @@ def test_draco_runner_configures_local_search_runtime_without_secrets(
     args = build_parser().parse_args([
         "--input",
         "draco.jsonl",
+        "--groups",
+        "G3",
         "--tool-mode",
         "local_web_tools",
         "--openrouter-web-search-max-results",
@@ -853,6 +885,34 @@ def test_draco_runner_generation_policy_overrides_profile_member_temperature() -
     assert provider.aggregator.temperature == 0.0
 
 
+def test_draco_runner_g15_profile_configures_topk_prefilter() -> None:
+    cfg = GatewayConfig()
+    inherited = ProviderConfig(
+        provider="openrouter",
+        model="z-ai/glm-5.2",
+        api_key="sk-test",
+        base_url="https://openrouter.ai/api",
+    )
+
+    provider = build_profile_provider(
+        config=cfg,
+        inherited=inherited,
+        group="G15",
+        profile="g15_g8_top3_prefilter",
+        dry_run=False,
+        generation_policy=generation_thinking_policy(Namespace(generation_thinking="high")),
+    )
+
+    assert provider.candidate_prefilter_top_k == 3
+    assert provider.candidate_scorer is not None
+    assert (
+        provider.candidate_scorer.provider_config.model
+        == "google/gemini-3-flash-preview"
+    )
+    assert provider.candidate_scorer.temperature == 0.0
+    assert provider.candidate_scorer.thinking == "high"
+
+
 @pytest.mark.asyncio
 async def test_draco_runner_collect_run_passes_tools_to_provider() -> None:
     provider = _ToolCaptureProvider()
@@ -875,6 +935,8 @@ async def test_draco_runner_collect_agent_run_executes_local_web_tool_loop() -> 
     args = build_parser().parse_args([
         "--input",
         "draco.jsonl",
+        "--groups",
+        "G3",
         "--tool-mode",
         "local_web_tools",
         "--contamination-blocked-domains",

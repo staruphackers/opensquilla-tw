@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import random
+import re
 import time
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field, replace
@@ -151,6 +153,14 @@ class _AggregatorAccumulator:
         return row
 
 
+@dataclass
+class _PrefilterResult:
+    candidates: list[_CandidateResult]
+    usage_rows: list[dict[str, Any]] = field(default_factory=list)
+    trace: dict[str, Any] = field(default_factory=dict)
+    request_count: int = 0
+
+
 def _normalize_thinking(value: str | None) -> tuple[bool | None, Any | None]:
     if value is None:
         return None, None
@@ -233,6 +243,85 @@ def _candidate_usage_rows(
     ]
 
 
+def _extract_json_payload(text: str) -> Any | None:
+    stripped = text.strip()
+    if not stripped:
+        return None
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        pass
+    fenced = re.search(r"```(?:json)?\s*(.*?)```", stripped, flags=re.DOTALL | re.IGNORECASE)
+    if fenced:
+        try:
+            return json.loads(fenced.group(1).strip())
+        except json.JSONDecodeError:
+            pass
+    decoder = json.JSONDecoder()
+    starts = [index for index in (stripped.find("{"), stripped.find("[")) if index >= 0]
+    for start in sorted(starts):
+        try:
+            payload, _end = decoder.raw_decode(stripped[start:])
+            return payload
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def _candidate_index(value: Any, allowed: set[int]) -> int | None:
+    try:
+        index = int(value)
+    except (TypeError, ValueError):
+        return None
+    return index if index in allowed else None
+
+
+def _ranked_candidate_indexes(
+    text: str,
+    candidates: Sequence[_CandidateResult],
+) -> list[int]:
+    allowed = {candidate.index for candidate in candidates}
+    payload = _extract_json_payload(text)
+    ranked: list[int] = []
+
+    def append(value: Any) -> None:
+        index = _candidate_index(value, allowed)
+        if index is not None and index not in ranked:
+            ranked.append(index)
+
+    if isinstance(payload, dict):
+        for key in (
+            "ranked_candidate_indexes",
+            "selected_candidate_indexes",
+            "candidate_indexes",
+            "ranking",
+        ):
+            values = payload.get(key)
+            if isinstance(values, list):
+                for value in values:
+                    append(value.get("index") if isinstance(value, dict) else value)
+        scores = payload.get("scores")
+        if isinstance(scores, list):
+            scored: list[tuple[float, int]] = []
+            for item in scores:
+                if not isinstance(item, dict):
+                    continue
+                index = _candidate_index(item.get("index"), allowed)
+                if index is None:
+                    continue
+                try:
+                    score = float(item.get("score"))
+                except (TypeError, ValueError):
+                    score = 0.0
+                scored.append((score, index))
+            for _score, index in sorted(scored, reverse=True):
+                append(index)
+    elif isinstance(payload, list):
+        for value in payload:
+            append(value.get("index") if isinstance(value, dict) else value)
+    return ranked
+
+
 def _done_usage_row(
     event: DoneEvent,
     *,
@@ -282,6 +371,8 @@ class EnsembleProvider:
         shuffle_candidates: bool = True,
         record_candidates: bool = False,
         proposer_tools: bool = False,
+        candidate_scorer: EnsembleMemberConfig | None = None,
+        candidate_prefilter_top_k: int = 0,
     ) -> None:
         self.profile_name = profile_name
         self.proposers = list(proposers)
@@ -295,6 +386,8 @@ class EnsembleProvider:
         self.shuffle_candidates = bool(shuffle_candidates)
         self.record_candidates = bool(record_candidates)
         self.proposer_tools = bool(proposer_tools)
+        self.candidate_scorer = candidate_scorer
+        self.candidate_prefilter_top_k = max(0, int(candidate_prefilter_top_k or 0))
 
     def provider_metadata(self) -> ProviderMetadata:
         return ProviderMetadata(
@@ -306,7 +399,10 @@ class EnsembleProvider:
 
     async def list_models(self) -> list[ModelInfo]:
         models: list[ModelInfo] = []
-        for member in [*self.proposers, self.aggregator]:
+        members = [*self.proposers, self.aggregator]
+        if self.candidate_scorer is not None:
+            members.append(self.candidate_scorer)
+        for member in members:
             try:
                 models.extend(await _build_provider(member.provider_config).list_models())
             except Exception:
@@ -361,7 +457,8 @@ class EnsembleProvider:
                 yield event
             return
 
-        aggregator_messages = self._build_aggregator_messages(messages, successful)
+        prefilter = await self._prefilter_candidates(successful, messages, config=config)
+        aggregator_messages = self._build_aggregator_messages(messages, prefilter.candidates)
         aggregator_cfg = _member_chat_config(config, self.aggregator)
         if self.aggregator_timeout_seconds > 0:
             aggregator_cfg = aggregator_cfg.model_copy(
@@ -369,12 +466,16 @@ class EnsembleProvider:
             )
         provider = _build_provider(self.aggregator.provider_config)
         proposer_rows = _candidate_usage_rows(candidates, profile=self.profile_name)
+        prefilter_rows = prefilter.usage_rows
         trace = self._trace_payload(
             candidates,
             successful_count=len(successful),
             fallback_used=False,
             fallback_reason="",
             final_request_role="aggregator",
+            selected_candidates=prefilter.candidates,
+            prefilter_trace=prefilter.trace or None,
+            prefilter_request_count=prefilter.request_count,
         )
 
         def _ensemble_done(event: DoneEvent) -> DoneEvent:
@@ -391,6 +492,7 @@ class EnsembleProvider:
             )
             rows = [
                 *proposer_rows,
+                *prefilter_rows,
                 acc.usage_row(profile=self.profile_name, member=self.aggregator),
             ]
             return replace(
@@ -415,17 +517,18 @@ class EnsembleProvider:
                     "message": message,
                 },
             }
+            rows = [*proposer_rows, *prefilter_rows]
             return DoneEvent(
                 stop_reason=code,
-                input_tokens=_summed_int(proposer_rows, "input_tokens"),
-                output_tokens=_summed_int(proposer_rows, "output_tokens"),
-                reasoning_tokens=_summed_int(proposer_rows, "reasoning_tokens"),
-                cached_tokens=_summed_int(proposer_rows, "cached_tokens"),
-                cache_write_tokens=_summed_int(proposer_rows, "cache_write_tokens"),
-                billed_cost=_summed_float(proposer_rows, "billed_cost"),
+                input_tokens=_summed_int(rows, "input_tokens"),
+                output_tokens=_summed_int(rows, "output_tokens"),
+                reasoning_tokens=_summed_int(rows, "reasoning_tokens"),
+                cached_tokens=_summed_int(rows, "cached_tokens"),
+                cache_write_tokens=_summed_int(rows, "cache_write_tokens"),
+                billed_cost=_summed_float(rows, "billed_cost"),
                 model=self.aggregator.provider_config.model,
-                cost_source=_rollup_cost_source(proposer_rows),
-                model_usage_breakdown=proposer_rows,
+                cost_source=_rollup_cost_source(rows),
+                model_usage_breakdown=rows,
                 ensemble_trace=failure_trace,
             )
 
@@ -548,6 +651,126 @@ class EnsembleProvider:
             result.elapsed_ms = int((time.monotonic() - started) * 1000)
         return result
 
+    async def _prefilter_candidates(
+        self,
+        candidates: Sequence[_CandidateResult],
+        messages: list[Message],
+        *,
+        config: ChatConfig | None,
+    ) -> _PrefilterResult:
+        top_k = self.candidate_prefilter_top_k
+        if top_k <= 0:
+            return _PrefilterResult(candidates=list(candidates))
+        if len(candidates) <= top_k or self.candidate_scorer is None:
+            return _PrefilterResult(
+                candidates=list(candidates),
+                trace={
+                    "enabled": True,
+                    "applied": False,
+                    "top_k": top_k,
+                    "selected_candidate_indexes": [candidate.index for candidate in candidates],
+                },
+            )
+
+        provider = _build_provider(self.candidate_scorer.provider_config)
+        scorer_cfg = _member_chat_config(config, self.candidate_scorer)
+        if self.aggregator_timeout_seconds > 0:
+            scorer_cfg = scorer_cfg.model_copy(update={"timeout": self.aggregator_timeout_seconds})
+
+        text_parts: list[str] = []
+        usage_rows: list[dict[str, Any]] = []
+        error = ""
+        error_code = ""
+        try:
+            stream = provider.chat(
+                self._build_prefilter_messages(messages, candidates, top_k=top_k),
+                tools=None,
+                config=scorer_cfg,
+            )
+            if self.aggregator_timeout_seconds > 0:
+                async with asyncio.timeout(self.aggregator_timeout_seconds):
+                    async for event in stream:
+                        self._collect_prefilter_event(event, text_parts, usage_rows)
+            else:
+                async for event in stream:
+                    self._collect_prefilter_event(event, text_parts, usage_rows)
+        except TimeoutError:
+            error = f"candidate scorer timed out after {self.aggregator_timeout_seconds:g}s"
+            error_code = "candidate_scorer_timeout"
+        except Exception as exc:  # noqa: BLE001 - scorer failure falls back to no filtering
+            error = str(exc)
+            error_code = type(exc).__name__
+
+        ranked = _ranked_candidate_indexes("".join(text_parts), candidates)
+        by_index = {candidate.index: candidate for candidate in candidates}
+        selected = [by_index[index] for index in ranked[:top_k] if index in by_index]
+        applied = len(selected) == min(top_k, len(candidates))
+        if not applied:
+            selected = list(candidates)
+        trace: dict[str, Any] = {
+            "enabled": True,
+            "applied": applied,
+            "top_k": top_k,
+            "scorer_model": self.candidate_scorer.provider_config.model,
+            "ranked_candidate_indexes": ranked,
+            "selected_candidate_indexes": [candidate.index for candidate in selected],
+        }
+        if not applied:
+            trace["fallback_reason"] = (
+                error or "candidate scorer did not return enough parseable indexes"
+            )
+        if error:
+            trace["error"] = error
+            trace["error_code"] = error_code
+        return _PrefilterResult(
+            candidates=selected,
+            usage_rows=usage_rows,
+            trace=trace,
+            request_count=1,
+        )
+
+    def _collect_prefilter_event(
+        self,
+        event: StreamEvent,
+        text_parts: list[str],
+        usage_rows: list[dict[str, Any]],
+    ) -> None:
+        if isinstance(event, TextDeltaEvent):
+            text_parts.append(event.text)
+        elif isinstance(event, DoneEvent):
+            if self.candidate_scorer is None:
+                return
+            usage_rows.append(
+                _done_usage_row(
+                    event,
+                    role="candidate_scorer",
+                    profile=self.profile_name,
+                    label=self.candidate_scorer.label or "candidate_scorer",
+                    provider=self.candidate_scorer.provider_config.provider,
+                    model=self.candidate_scorer.provider_config.model,
+                )
+            )
+        elif isinstance(event, ErrorEvent):
+            if self.candidate_scorer is not None and event.diagnostic_done is not None:
+                usage_rows.append(
+                    _done_usage_row(
+                        event.diagnostic_done,
+                        role="candidate_scorer",
+                        profile=self.profile_name,
+                        label=self.candidate_scorer.label or "candidate_scorer",
+                        provider=self.candidate_scorer.provider_config.provider,
+                        model=self.candidate_scorer.provider_config.model,
+                    )
+                )
+            text_parts.append(
+                json.dumps(
+                    {
+                        "error": event.message,
+                        "error_code": event.code,
+                    }
+                )
+            )
+
     async def _collect_candidate_inner(
         self,
         *,
@@ -602,6 +825,28 @@ class EnsembleProvider:
             result.error_code = "stream_incomplete"
         return result
 
+    def _build_prefilter_messages(
+        self,
+        messages: list[Message],
+        candidates: Sequence[_CandidateResult],
+        *,
+        top_k: int,
+    ) -> list[Message]:
+        ordered = sorted(candidates, key=lambda candidate: candidate.index)
+        lines = [
+            "Rank the candidate drafts for final answer quality.",
+            "Use the original conversation as context, but judge only the candidate drafts.",
+            f"Return JSON only with the best {top_k} zero-based candidate indexes, in order.",
+            'Schema: {"ranked_candidate_indexes":[0],"scores":[{"index":0,"score":0.0}]}',
+            "",
+            "Candidate drafts:",
+        ]
+        for candidate in ordered:
+            lines.append(f'\n<CANDIDATE index="{candidate.index}">')
+            lines.append(candidate.text.strip() or "[empty]")
+            lines.append(f"</CANDIDATE {candidate.index}>")
+        return [*messages, Message(role="user", content="\n".join(lines))]
+
     def _build_aggregator_messages(
         self,
         messages: list[Message],
@@ -636,8 +881,12 @@ class EnsembleProvider:
         fallback_used: bool,
         fallback_reason: str,
         final_request_role: str = "",
+        selected_candidates: Sequence[_CandidateResult] | None = None,
+        prefilter_trace: dict[str, Any] | None = None,
+        prefilter_request_count: int = 0,
     ) -> dict[str, Any]:
-        return {
+        selected = list(selected_candidates or [])
+        row = {
             "mode": "b5_fusion",
             "profile": self.profile_name,
             "successful_proposers": successful_count,
@@ -646,12 +895,25 @@ class EnsembleProvider:
             "fallback_reason": fallback_reason,
             "shuffle_candidates": self.shuffle_candidates,
             "final_request_role": final_request_role,
-            "llm_request_count": len(candidates) + (1 if final_request_role else 0),
+            "llm_request_count": (
+                len(candidates)
+                + int(prefilter_request_count or 0)
+                + (1 if final_request_role else 0)
+            ),
             "candidates": [
                 candidate.trace_row(include_text=self.record_candidates)
                 for candidate in candidates
             ],
         }
+        if self.candidate_prefilter_top_k > 0 or prefilter_trace is not None:
+            row["selected_candidate_count"] = len(selected)
+            row["selected_candidate_indexes"] = [candidate.index for candidate in selected]
+            row["candidate_prefilter"] = prefilter_trace or {
+                "enabled": self.candidate_prefilter_top_k > 0,
+                "applied": False,
+                "top_k": self.candidate_prefilter_top_k,
+            }
+        return row
 
     async def _fallback_or_error(
         self,
@@ -672,6 +934,7 @@ class EnsembleProvider:
             fallback_used=True,
             fallback_reason=reason,
             final_request_role="fallback_single",
+            selected_candidates=[candidate for candidate in candidates if candidate.ok],
         )
         proposer_rows = _candidate_usage_rows(candidates, profile=self.profile_name)
         async for event in self.fallback_provider.chat(messages, tools=tools, config=config):
@@ -772,6 +1035,14 @@ def build_ensemble_provider_from_config(
         inherited_provider_config,
         label="aggregator",
     )
+    scorer_ref = getattr(profile, "candidate_scorer", None)
+    candidate_scorer = None
+    if scorer_ref is not None and str(getattr(scorer_ref, "model", "") or "").strip():
+        candidate_scorer = _member_from_ref(
+            scorer_ref,
+            inherited_provider_config,
+            label="candidate_scorer",
+        )
     return EnsembleProvider(
         profile_name=profile_name,
         proposers=proposers,
@@ -789,4 +1060,6 @@ def build_ensemble_provider_from_config(
         shuffle_candidates=bool(getattr(profile, "shuffle_candidates", True)),
         record_candidates=bool(getattr(profile, "record_candidates", False)),
         proposer_tools=bool(getattr(ensemble_cfg, "proposer_tools", False)),
+        candidate_scorer=candidate_scorer,
+        candidate_prefilter_top_k=int(getattr(profile, "candidate_prefilter_top_k", 0) or 0),
     )
