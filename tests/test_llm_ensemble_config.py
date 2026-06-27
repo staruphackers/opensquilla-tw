@@ -45,6 +45,30 @@ def test_llm_ensemble_config_defaults_disabled_with_profiles() -> None:
         cfg.llm_ensemble.profiles["g6_gpt_aggregator"].aggregator_timeout_seconds
         == 300.0
     )
+    assert cfg.llm_ensemble.profiles["g9_qwen_aggregator"].aggregator.model == (
+        "qwen/qwen3.7-plus"
+    )
+    assert cfg.llm_ensemble.profiles["g10_gemini_aggregator"].aggregator.model == (
+        "google/gemini-3-flash-preview"
+    )
+    assert cfg.llm_ensemble.profiles["g11_deepseek_aggregator"].aggregator.model == (
+        "deepseek/deepseek-v4-pro"
+    )
+    g12_proposers = cfg.llm_ensemble.profiles["g12_k2_replace_gemini"].proposers
+    assert [ref.model for ref in g12_proposers] == [
+        "deepseek/deepseek-v4-pro",
+        "z-ai/glm-5.2",
+        "moonshotai/kimi-k2.7-code",
+        "qwen/qwen3.7-plus",
+    ]
+    assert len(cfg.llm_ensemble.profiles["g13_five_proposers"].proposers) == 5
+    g14_proposers = cfg.llm_ensemble.profiles["g14_k2_replace_qwen"].proposers
+    assert [ref.model for ref in g14_proposers] == [
+        "deepseek/deepseek-v4-pro",
+        "z-ai/glm-5.2",
+        "google/gemini-3-flash-preview",
+        "moonshotai/kimi-k2.7-code",
+    ]
     assert cfg.llm_ensemble.profiles["g3_standard"].record_candidates is False
 
 

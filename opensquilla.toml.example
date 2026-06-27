@@ -177,6 +177,11 @@ proposers = [
 ]
 aggregator = { provider = "openrouter", model = "openai/gpt-5.5", thinking = "high" }
 
+# Built-in second-round DRACO profiles also include:
+# g8_four_proposers, g9_qwen_aggregator, g10_gemini_aggregator,
+# g11_deepseek_aggregator, g12_k2_replace_gemini,
+# g13_five_proposers, and g14_k2_replace_qwen.
+
 [memory]
 # "workspace" stores MEMORY.md and memory/*.md under workspace_dir.
 # SQLite indexes still live under state_dir.

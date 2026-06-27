@@ -77,6 +77,12 @@ GROUP_SPECS: dict[str, dict[str, str]] = {
     "G6": {"kind": "profile", "profile": "g6_gpt_aggregator"},
     "G7": {"kind": "profile", "profile": "g7_two_proposers"},
     "G8": {"kind": "profile", "profile": "g8_four_proposers"},
+    "G9": {"kind": "profile", "profile": "g9_qwen_aggregator"},
+    "G10": {"kind": "profile", "profile": "g10_gemini_aggregator"},
+    "G11": {"kind": "profile", "profile": "g11_deepseek_aggregator"},
+    "G12": {"kind": "profile", "profile": "g12_k2_replace_gemini"},
+    "G13": {"kind": "profile", "profile": "g13_five_proposers"},
+    "G14": {"kind": "profile", "profile": "g14_k2_replace_qwen"},
 }
 
 TOOL_MODE_PROVIDER_ONLY = "provider_only"
@@ -3522,7 +3528,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", type=Path, default=Path("reports/draco"))
     parser.add_argument(
         "--groups",
-        default="B0,B1,B2,B3,B4,B5,B6,B7,G1,G2,G3,G4,G5,G6,G7,G8",
+        default=(
+            "B0,B1,B2,B3,B4,B5,B6,B7,"
+            "G1,G2,G3,G4,G5,G6,G7,G8,G9,G10,G11,G12,G13,G14"
+        ),
     )
     parser.add_argument("--max-tasks", type=int, default=0)
     parser.add_argument("--concurrency", type=int, default=1)

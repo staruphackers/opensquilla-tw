@@ -311,6 +311,12 @@ def _default_llm_ensemble_profiles() -> dict[str, dict[str, Any]]:
         _ensemble_ref("z-ai/glm-5.2", thinking="high"),
         _ensemble_ref("google/gemini-3-flash-preview", thinking="high"),
     ]
+    g8_proposers = [
+        _ensemble_ref("deepseek/deepseek-v4-pro", thinking="high"),
+        _ensemble_ref("z-ai/glm-5.2", thinking="high"),
+        _ensemble_ref("google/gemini-3-flash-preview", thinking="high"),
+        _ensemble_ref("qwen/qwen3.7-plus", thinking="high"),
+    ]
     return {
         "b3_glm_self_fusion": _ensemble_profile(
             [_ensemble_ref("z-ai/glm-5.2", thinking="high", k=3)],
@@ -357,11 +363,43 @@ def _default_llm_ensemble_profiles() -> dict[str, dict[str, Any]]:
             _ensemble_ref("z-ai/glm-5.2", thinking="high"),
         ),
         "g8_four_proposers": _ensemble_profile(
+            list(g8_proposers),
+            _ensemble_ref("z-ai/glm-5.2", thinking="high"),
+        ),
+        "g9_qwen_aggregator": _ensemble_profile(
+            list(g8_proposers),
+            _ensemble_ref("qwen/qwen3.7-plus", thinking="high"),
+        ),
+        "g10_gemini_aggregator": _ensemble_profile(
+            list(g8_proposers),
+            _ensemble_ref("google/gemini-3-flash-preview", thinking="high"),
+        ),
+        "g11_deepseek_aggregator": _ensemble_profile(
+            list(g8_proposers),
+            _ensemble_ref("deepseek/deepseek-v4-pro", thinking="high"),
+        ),
+        "g12_k2_replace_gemini": _ensemble_profile(
+            [
+                _ensemble_ref("deepseek/deepseek-v4-pro", thinking="high"),
+                _ensemble_ref("z-ai/glm-5.2", thinking="high"),
+                _ensemble_ref("moonshotai/kimi-k2.7-code", thinking="high"),
+                _ensemble_ref("qwen/qwen3.7-plus", thinking="high"),
+            ],
+            _ensemble_ref("z-ai/glm-5.2", thinking="high"),
+        ),
+        "g13_five_proposers": _ensemble_profile(
+            [
+                *list(g8_proposers),
+                _ensemble_ref("moonshotai/kimi-k2.7-code", thinking="high"),
+            ],
+            _ensemble_ref("z-ai/glm-5.2", thinking="high"),
+        ),
+        "g14_k2_replace_qwen": _ensemble_profile(
             [
                 _ensemble_ref("deepseek/deepseek-v4-pro", thinking="high"),
                 _ensemble_ref("z-ai/glm-5.2", thinking="high"),
                 _ensemble_ref("google/gemini-3-flash-preview", thinking="high"),
-                _ensemble_ref("qwen/qwen3.7-plus", thinking="high"),
+                _ensemble_ref("moonshotai/kimi-k2.7-code", thinking="high"),
             ],
             _ensemble_ref("z-ai/glm-5.2", thinking="high"),
         ),
