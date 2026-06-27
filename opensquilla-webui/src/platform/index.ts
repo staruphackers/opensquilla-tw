@@ -18,11 +18,14 @@ export function usePlatform(): Platform {
 }
 
 export type {
+  ArtifactNativeOpenResult,
+  ArtifactOpenRequest,
   DesktopSettings,
   DesktopSettingsPayload,
   GatewayStatus,
   Platform,
   PlatformCapabilities,
+  PlatformFilesApi,
   PlatformGatewayApi,
   PlatformId,
   PlatformOnboardingApi,

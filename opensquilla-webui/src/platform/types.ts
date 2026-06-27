@@ -57,6 +57,31 @@ export interface PlatformCapabilities {
   canRestartGateway: boolean
   hasDesktopOnboarding: boolean
   hasWebConfig: boolean
+  /**
+   * The host can open a generated artifact with the OS default application.
+   * Set on desktop, where `window.open` is denied by the shell handler so the
+   * in-browser blob-popup path can never succeed.
+   */
+  canOpenArtifactsNatively: boolean
+}
+
+export interface ArtifactOpenRequest {
+  /** Raw artifact bytes, already fetched (and authenticated) by the renderer. */
+  data: ArrayBuffer
+  /** Original filename; its extension drives the OS default-app association. */
+  name: string
+  /** Content-Type, used as a fallback when the name carries no extension. */
+  mime: string
+}
+
+export interface ArtifactNativeOpenResult {
+  ok: boolean
+  message?: string
+}
+
+export interface PlatformFilesApi {
+  /** Write the bytes to a temp file and open it with the OS default app. */
+  openArtifact?: (payload: ArtifactOpenRequest) => Promise<ArtifactNativeOpenResult>
 }
 
 export interface PlatformGatewayApi {
@@ -83,4 +108,5 @@ export interface Platform {
   gateway: PlatformGatewayApi
   settings: PlatformSettingsApi
   onboarding: PlatformOnboardingApi
+  files: PlatformFilesApi
 }

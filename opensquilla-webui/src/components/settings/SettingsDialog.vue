@@ -102,7 +102,7 @@
       <div class="settings-body">
         <nav class="settings-rail" role="tablist" aria-label="Settings sections" :aria-orientation="railOrientation">
           <button
-            v-for="s in SETTINGS_SECTIONS"
+            v-for="s in visibleSections"
             :id="'settings-rail-' + s.id"
             :key="s.id"
             type="button"
@@ -130,6 +130,11 @@
           <!-- Connection renders regardless of load state: it is how you point
                the UI at a reachable gateway when nothing has loaded yet. -->
           <SetupConnectionPanel v-if="section === 'connection'" />
+
+          <!-- Runtime (desktop only) also renders regardless of load state: it
+               reports the owned gateway and offers restart/reset precisely for
+               when the gateway is down and config never loaded. -->
+          <DesktopRuntimePanel v-else-if="section === 'runtime' && isDesktop" />
 
           <!-- Config-backed sections wait for readiness so their baselines are
                final before any field can be edited. -->
@@ -232,14 +237,21 @@ import SetupCapabilitiesPanel from '@/components/setup/SetupCapabilitiesPanel.vu
 import SettingsAppearancePanel from '@/components/settings/SettingsAppearancePanel.vue'
 import SettingsKeyboardPanel from '@/components/settings/SettingsKeyboardPanel.vue'
 import SettingsAdvancedPanel from '@/components/settings/SettingsAdvancedPanel.vue'
+import DesktopRuntimePanel from '@/components/settings/DesktopRuntimePanel.vue'
 import { useSetupCatalog, SETTINGS_SECTIONS } from '@/composables/setup/useSetupCatalog'
 import { sectionFromRouteParam } from '@/composables/setup/useSettingsSection'
 import { useConfirm } from '@/composables/useConfirm'
+import { usePlatform } from '@/platform'
 import '@/styles/settings-forms.css'
 
 const route = useRoute()
 const router = useRouter()
 const { confirm, confirmState } = useConfirm()
+
+// Desktop owns a local gateway, so it exposes a Runtime section the web build
+// hides. `desktopOnly` sections are filtered out everywhere else.
+const isDesktop = usePlatform().capabilities.isDesktop
+const visibleSections = computed(() => SETTINGS_SECTIONS.filter(s => !s.desktopOnly || isDesktop))
 
 const {
   section,
@@ -342,7 +354,11 @@ function applyRouteSection() {
     if (loaded.value && !userNavigated) selectInitialSection('auto')
     return
   }
-  setSection(sectionFromRouteParam(routeParam.value))
+  const resolved = sectionFromRouteParam(routeParam.value)
+  // A desktopOnly section requested where it is unavailable (e.g. a stale
+  // /settings/runtime deep link on web) has no rail entry or panel branch; fall
+  // back to the default so the dialog never renders an empty body.
+  setSection(visibleSections.value.some(s => s.id === resolved) ? resolved : 'provider')
 }
 
 function copyDisplayPath() {
