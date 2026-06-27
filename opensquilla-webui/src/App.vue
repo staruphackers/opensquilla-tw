@@ -527,10 +527,9 @@ const currentSessionKey = computed(() => {
 // Chat layout applies to both the session view and the draft route.
 const isChatRoute = computed(() => $route.path === '/chat' || $route.path === '/chat/new')
 
-// The web Settings overlay (route-mounted dialog) is open on these routes. It
-// owns its own Escape/focus, so App-level keyboard shortcuts defer to it. On
-// desktop `/settings` is a full page (DesktopSettingsView), not an overlay, so
-// this stays false there.
+// The Settings overlay (route-mounted dialog) is open on these routes. It owns
+// its own Escape/focus, so App-level keyboard shortcuts defer to it. Both web
+// and desktop mount the same overlay now (webConfigEnabled is true on both).
 const settingsOverlayOpen = computed(() =>
   webConfigEnabled && ($route.name === 'settings' || $route.name === 'settings-section'))
 
@@ -814,10 +813,9 @@ function onApprovalsRowClick() {
   }
 }
 
-// Footer settings row. Both platforms own a `/settings` route now (web mounts
-// the overlay dialog; desktop renders its own settings view), so a single push
-// covers both. The desktop route carries `nav: 'bottom'`, so prefer its
-// registered path when present to keep any future bottom-nav ordering authoritative.
+// Footer settings row. Both platforms mount the same `/settings` overlay now, so
+// a single push covers both. bottomRoutes is honored first to keep any future
+// bottom-nav destination authoritative, falling back to the shared overlay.
 function openSettings() {
   handleNavClick()
   router.push(bottomRoutes.value[0]?.path ?? '/settings')

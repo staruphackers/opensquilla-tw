@@ -26,5 +26,8 @@ export function createDesktopPlatform(): Platform {
       save: (payload) => requireDesktopApi().saveOnboarding(payload),
       cancel: () => requireDesktopApi().cancelOnboarding(),
     },
+    files: {
+      openArtifact: (payload) => requireDesktopApi().openArtifact(payload),
+    },
   }
 }

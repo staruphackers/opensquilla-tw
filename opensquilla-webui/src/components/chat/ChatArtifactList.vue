@@ -201,7 +201,8 @@ import {
   type ArtifactPreviewController,
   type ArtifactPreviewState,
 } from '@/composables/chat/useArtifactPreview'
-import { openArtifactBlobUrl } from '@/utils/chat/artifactAccess'
+import { fetchArtifactBlob, openArtifactBlobUrl } from '@/utils/chat/artifactAccess'
+import { usePlatform } from '@/platform'
 import {
   artifactActionLabel,
   artifactCategory,
@@ -226,6 +227,7 @@ defineEmits<{
 }>()
 
 const { pushToast } = useToasts()
+const platform = usePlatform()
 
 const visualArtifacts = computed(() => props.artifacts.filter(artifact => artifactCategory(artifact) === 'visual'))
 const fileArtifacts = computed(() => props.artifacts.filter(artifact => artifactCategory(artifact) !== 'visual'))
@@ -307,8 +309,35 @@ function openPreview(artifact: ArtifactPayload) {
   nextTick(() => lightboxCloseBtn.value?.focus())
 }
 
-// Open a previewable non-image file (pdf/html/text) in a new tab.
+// Open a previewable non-image file (pdf/html/text).
+//
+// Desktop: `window.open` is denied by the Electron shell handler, so the blob
+// popup path below can never succeed. Fetch the bytes (with auth) and hand them
+// to the main process, which writes a temp file and opens it with the OS
+// default app. Web keeps the in-browser new-tab path.
 async function openFile(artifact: ArtifactPayload) {
+  if (platform.capabilities.canOpenArtifactsNatively && platform.files.openArtifact) {
+    const fetched = await fetchArtifactBlob(artifact, {
+      baseOrigin: window.location.origin,
+      sessionKey: props.sessionKey,
+      authToken: props.authToken,
+    })
+    if (!fetched.ok) {
+      pushToast(fetched.message, { tone: 'danger' })
+      return
+    }
+    const data = await fetched.blob.arrayBuffer()
+    const result = await platform.files.openArtifact({
+      data,
+      name: String(artifact.name || artifactFileTitle(artifact) || 'artifact'),
+      mime: fetched.blob.type || String(artifact.mime || ''),
+    })
+    if (!result.ok) {
+      pushToast(result.message || 'Artifact open failed. Use Download instead.', { tone: 'danger' })
+    }
+    return
+  }
+
   const result = await openArtifactBlobUrl(artifact, {
     baseOrigin: window.location.origin,
     sessionKey: props.sessionKey,

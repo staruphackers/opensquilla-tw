@@ -1,9 +1,10 @@
 import { app, BrowserWindow, Menu, ipcMain, nativeTheme, safeStorage, shell } from 'electron'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { createWriteStream, mkdirSync } from 'node:fs'
-import { access, constants, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { access, constants, readFile, readdir, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import net from 'node:net'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 interface GatewayState {
@@ -740,7 +741,90 @@ async function saveDesktopSettings(payload: DesktopSettingsPayload): Promise<Des
 }
 
 async function resetDesktopSettings(): Promise<void> {
+  // Drop the credential AND the generated config so the next launch re-runs
+  // onboarding and reseeds a clean config (the config is now the RPC-owned
+  // source of truth, so it is no longer regenerated on every boot).
   await rm(credentialPath(), { force: true })
+  await rm(desktopConfigPath(), { force: true })
+}
+
+interface ArtifactOpenRequest {
+  data?: ArrayBuffer | Uint8Array
+  name?: unknown
+  mime?: unknown
+}
+
+const MIME_EXTENSIONS: Record<string, string> = {
+  'application/pdf': '.pdf',
+  'text/html': '.html',
+  'application/xhtml+xml': '.xhtml',
+  'text/plain': '.txt',
+  'text/markdown': '.md',
+  'text/csv': '.csv',
+  'application/json': '.json',
+  'application/xml': '.xml',
+  'text/xml': '.xml',
+  'application/zip': '.zip',
+  'image/png': '.png',
+  'image/jpeg': '.jpg',
+  'image/gif': '.gif',
+  'image/webp': '.webp',
+  'image/svg+xml': '.svg',
+}
+
+// basename() already drops directory components; here we only neutralize path
+// separators and OS-reserved characters, preserving unicode letters, dots,
+// dashes and spaces so the extension (and a readable name) survive. The unique
+// prefix added at write time means a leading-dot or reserved name cannot escape
+// the temp directory or shadow a dotfile.
+function safeArtifactFileName(raw: unknown): string {
+  const base = basename(String(raw ?? '')).trim()
+  const cleaned = base.replace(/[/\\:*?"<>|\x00-\x1f]+/g, '_')
+  return cleaned || 'artifact'
+}
+
+// When the name carries no extension, fall back to one implied by the MIME type
+// so shell.openPath can still associate a default application.
+function artifactExtension(name: string, mime: unknown): string {
+  if (/\.[A-Za-z0-9]{1,8}$/.test(name)) return ''
+  const key = String(mime ?? '').split(';', 1)[0].trim().toLowerCase()
+  return MIME_EXTENSIONS[key] || ''
+}
+
+// Best-effort prune so opened artifacts do not accumulate unboundedly in temp.
+async function pruneArtifactCache(dir: string): Promise<void> {
+  try {
+    const now = Date.now()
+    const entries = await readdir(dir)
+    await Promise.all(entries.map(async (entry) => {
+      const full = join(dir, entry)
+      try {
+        const info = await stat(full)
+        if (now - info.mtimeMs > 60 * 60 * 1000) await unlink(full)
+      } catch {}
+    }))
+  } catch {}
+}
+
+async function openArtifactWithDefaultApp(payload: ArtifactOpenRequest): Promise<{ ok: boolean; message?: string }> {
+  const raw = payload?.data
+  if (!raw) return { ok: false, message: 'No artifact data to open.' }
+  try {
+    const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw)
+    const dir = join(app.getPath('temp'), 'opensquilla-artifacts')
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    void pruneArtifactCache(dir)
+    const name = safeArtifactFileName(payload?.name)
+    // A random prefix guarantees a unique, non-colliding, non-dotfile path even
+    // for two opens in the same millisecond.
+    const filePath = join(dir, `${randomUUID()}-${name}${artifactExtension(name, payload?.mime)}`)
+    await writeFile(filePath, Buffer.from(bytes), { mode: 0o600 })
+    const error = await shell.openPath(filePath)
+    if (error) return { ok: false, message: error }
+    return { ok: true }
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) }
+  }
 }
 
 function createApplicationMenu(): void {
@@ -1926,7 +2010,13 @@ function onboardingHtml(): string {
 async function runOnboarding(): Promise<DesktopConnection> {
   const existing = await loadDesktopCredential()
   if (existing && isConnectionReady(existing)) {
-    await writeDesktopConfig(existing)
+    // Seed the gateway config from the saved credential only when it does not
+    // exist yet. Once it exists the Control UI owns it via RPC, so regenerating
+    // it from the credential template here would clobber provider/router/channel
+    // edits made live in Settings on every boot.
+    if (!(await pathExists(desktopConfigPath()))) {
+      await writeDesktopConfig(existing)
+    }
     return existing
   }
 
@@ -2153,7 +2243,9 @@ async function startGateway(): Promise<GatewayState> {
   const apiKey = decryptApiKey(connection)
   if (!apiKey) throw new Error('Saved desktop API key could not be read.')
   const searchApiKey = decryptSearchApiKey(connection)
-  await writeDesktopConfig(connection)
+  // Config is seeded (when missing) inside runOnboarding / the onboarding save,
+  // and is otherwise the RPC-owned source of truth — so it is intentionally NOT
+  // regenerated here on every boot.
 
   sendBootStatus('Starting local runtime')
   const runtime = await resolveGatewayRuntime()
@@ -2256,7 +2348,13 @@ async function createMainWindow(): Promise<BrowserWindow> {
   installEditingContextMenu(window)
 
   window.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url)
+    // Forward real outbound links to the system browser; deny everything else.
+    // Empty/blob/data popups (e.g. the web "open in new tab" artifact pattern)
+    // must NOT reach shell.openExternal — they would be no-ops, and the renderer
+    // opens artifacts through the desktop:artifact:open IPC instead.
+    if (/^https?:\/\//i.test(url) || url.startsWith('mailto:')) {
+      void shell.openExternal(url)
+    }
     return { action: 'deny' }
   })
 
@@ -2339,6 +2437,7 @@ ipcMain.handle('desktop:settings:reset', async () => {
   await resetDesktopSettings()
   return { ok: true }
 })
+ipcMain.handle('desktop:artifact:open', async (_event, payload: ArtifactOpenRequest) => openArtifactWithDefaultApp(payload))
 ipcMain.handle('desktop:boot:state', () => ({
   status: bootStatus,
   error: bootError,

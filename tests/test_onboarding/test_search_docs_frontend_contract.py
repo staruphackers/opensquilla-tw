@@ -42,10 +42,11 @@ def test_search_docs_describe_runtime_provider_matrix() -> None:
 
 def test_desktop_search_surfaces_use_shared_runtime_provider_catalog() -> None:
     main_ts = _read("desktop/electron/src/main.ts")
-    selector_vue = _read("opensquilla-webui/src/components/settings/SearchProviderSelector.vue")
-    settings_vue = _read("opensquilla-webui/src/views/desktop/DesktopSettingsView.vue")
     platform_types = _read("opensquilla-webui/src/platform/types.ts")
 
+    # The desktop native onboarding wizard and the desktop settings snapshot
+    # surface the full runtime search catalog (Bocha/Tavily/Exa), never a
+    # hardcoded brave/duckduckgo-only list.
     for expected in [
         "SEARCH_PROVIDER_CATALOG",
         "BOCHA_SEARCH_API_KEY",
@@ -65,11 +66,25 @@ def test_desktop_search_surfaces_use_shared_runtime_provider_catalog() -> None:
     assert "searchProviders: SEARCH_PROVIDER_CATALOG" in main_ts
     assert "searchProviders?: SearchProviderOption[]" in platform_types
 
-    assert "providers:" in selector_vue
-    assert "v-for=\"provider in providers\"" in selector_vue
-    assert "defineModel<string>" in selector_vue
-    assert "defineModel<'duckduckgo' | 'brave'>" not in selector_vue
+    # The bespoke desktop settings view and its standalone search selector were
+    # removed: desktop now renders the same RPC-backed SettingsDialog as web,
+    # whose Capabilities section drives search from the gateway runtime catalog.
+    # That is the strongest form of "shared runtime provider catalog" — desktop
+    # cannot drift back to a hardcoded list because it owns no search picker.
+    assert not (
+        ROOT / "opensquilla-webui/src/views/desktop/DesktopSettingsView.vue"
+    ).exists()
+    assert not (
+        ROOT / "opensquilla-webui/src/components/settings/SearchProviderSelector.vue"
+    ).exists()
 
-    assert "settings.searchProviders" in settings_vue
-    assert "searchProviderRequiresKey" in settings_vue
-    assert "form.searchProvider === 'brave'" not in settings_vue
+    web_routes = _read("opensquilla-webui/src/router/webRoutes.ts")
+    assert "platforms: ['web', 'desktop']" in web_routes
+
+    desktop_routes = _read("opensquilla-webui/src/router/desktopRoutes.ts")
+    assert "DesktopSettingsView" not in desktop_routes
+
+    settings_dialog = _read(
+        "opensquilla-webui/src/components/settings/SettingsDialog.vue"
+    )
+    assert "SetupCapabilitiesPanel" in settings_dialog
