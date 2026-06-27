@@ -1,0 +1,153 @@
+name: Electron Desktop Installer Assets
+
+"on":
+  push:
+    branches:
+      - codex/electron-installer-action-test
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: electron-desktop-installer-assets-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  OPENSQUILLA_TURN_CALL_LOG: "0"
+
+jobs:
+  build-macos:
+    name: Build macOS Electron installer
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          persist-credentials: false
+
+      - name: Hydrate router assets
+        run: git lfs pull --include="src/opensquilla/squilla_router/models/**"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.12.0"
+          cache: npm
+          cache-dependency-path: |
+            opensquilla-webui/package-lock.json
+            desktop/electron/package-lock.json
+
+      - name: Install Web UI dependencies
+        working-directory: opensquilla-webui
+        run: npm ci
+
+      - name: Install Electron dependencies
+        working-directory: desktop/electron
+        run: npm ci
+
+      - name: Build signed macOS installer
+        working-directory: desktop/electron
+        env:
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          CSC_NAME: ${{ secrets.CSC_NAME }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          GH_TOKEN: ${{ github.token }}
+        run: npm run dist:local -- --publish never
+
+      - name: Verify Electron package
+        working-directory: desktop/electron
+        run: npm run verify:package
+
+      - name: List macOS artifacts
+        run: find dist/desktop-electron -maxdepth 2 -type f -print
+
+      - name: Upload macOS Electron artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: opensquilla-electron-macos
+          path: |
+            dist/desktop-electron/*.dmg
+            dist/desktop-electron/*.zip
+            dist/desktop-electron/*.blockmap
+            dist/desktop-electron/latest-mac.yml
+
+  build-windows:
+    name: Build Windows Electron installer
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          persist-credentials: false
+
+      - name: Hydrate router assets
+        shell: bash
+        run: git lfs pull --include="src/opensquilla/squilla_router/models/**"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.12.0"
+          cache: npm
+          cache-dependency-path: |
+            opensquilla-webui/package-lock.json
+            desktop/electron/package-lock.json
+
+      - name: Install Web UI dependencies
+        working-directory: opensquilla-webui
+        run: npm ci
+
+      - name: Install Electron dependencies
+        working-directory: desktop/electron
+        run: npm ci
+
+      - name: Build Windows installer
+        working-directory: desktop/electron
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npm run dist:local -- --publish never
+
+      - name: Verify Electron package
+        working-directory: desktop/electron
+        run: npm run verify:package
+
+      - name: List Windows artifacts
+        shell: bash
+        run: find dist/desktop-electron -maxdepth 2 -type f -print
+
+      - name: Upload Windows Electron artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: opensquilla-electron-windows
+          path: |
+            dist/desktop-electron/*.exe
+            dist/desktop-electron/*.blockmap
+            dist/desktop-electron/latest.yml

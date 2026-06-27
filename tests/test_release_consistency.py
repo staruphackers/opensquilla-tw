@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tomllib
 from pathlib import Path
 
@@ -22,6 +23,16 @@ def test_lockfile_version_matches_current_release() -> None:
     package = next(item for item in lock["package"] if item["name"] == "opensquilla")
 
     assert package["version"] == CURRENT_VERSION
+
+
+def test_desktop_electron_release_config_matches_current_release() -> None:
+    package = json.loads(Path("desktop/electron/package.json").read_text(encoding="utf-8"))
+    build = package["build"]
+
+    assert package["version"] == CURRENT_VERSION
+    assert build["mac"]["target"] == ["dmg", "zip"]
+    assert build["mac"].get("identity", "auto") is not None
+    assert build["win"]["target"] == ["nsis"]
 
 
 def _dep_names(specs: list[str]) -> set[str]:

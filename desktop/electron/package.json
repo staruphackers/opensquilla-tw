@@ -1,6 +1,6 @@
 {
   "name": "@opensquilla/desktop-electron",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Electron desktop shell for the OpenSquilla Control UI.",
   "type": "module",
@@ -27,6 +27,7 @@
   "build": {
     "appId": "ai.opensquilla.desktop",
     "productName": "OpenSquilla",
+    "artifactName": "OpenSquilla-${version}-${os}-${arch}.${ext}",
     "directories": {
       "output": "../../dist/desktop-electron"
     },
@@ -77,6 +78,16 @@
           "path": "/Applications"
         }
       ]
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true
     }
   }
 }
