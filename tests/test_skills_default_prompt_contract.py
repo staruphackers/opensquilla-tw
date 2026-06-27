@@ -11,6 +11,7 @@ from opensquilla.engine.steps.skills_filter import filter_skills
 from opensquilla.gateway.config import GatewayConfig
 from opensquilla.skills.eligibility import EligibilityContext
 from opensquilla.skills.loader import SkillLoader
+from opensquilla.skills.meta.semantic_guards import semantic_meta_skill_allowed
 
 ROOT = Path(__file__).resolve().parents[1]
 BUNDLED = ROOT / "src" / "opensquilla" / "skills" / "bundled"
@@ -90,6 +91,28 @@ INTERNAL_HELPERS = {
     "stack-trace-python-probe",
     "stack-trace-rust-probe",
 }
+STABLE_META_BOUNDARY_CASES = [
+    (
+        "meta-kid-project-planner",
+        "Help my kid build a child science fair school project with safe materials.",
+        "Help me design an adult craft logo display, not a child school project.",
+    ),
+    (
+        "meta-paper-write",
+        "Draft a paper as a LaTeX manuscript with citations and experiment placeholders.",
+        "Summarize this paper and list the main claims; do not draft a manuscript.",
+    ),
+    (
+        "meta-short-drama",
+        "Generate a short drama from this topic and render the shot list to final MP4.",
+        "Write a short script idea, not a video or MP4.",
+    ),
+    (
+        "meta-skill-creator",
+        "Create a meta-skill that orchestrates existing skills for PDF digest workflows.",
+        "Create a normal standalone skill, not a meta-skill.",
+    ),
+]
 
 
 def _ctx(
@@ -153,6 +176,19 @@ def test_skill_filter_defaults_are_release_safe(monkeypatch: pytest.MonkeyPatch)
 
     assert cfg.skills.filter_enabled is False
     assert cfg.skills.filter_strategy == "lexical"
+
+
+@pytest.mark.parametrize(
+    ("skill_name", "positive_prompt", "negative_prompt"),
+    STABLE_META_BOUNDARY_CASES,
+)
+def test_semantic_guards_cover_stable_bundled_meta_skill_boundaries(
+    skill_name: str,
+    positive_prompt: str,
+    negative_prompt: str,
+) -> None:
+    assert semantic_meta_skill_allowed(skill_name, positive_prompt)
+    assert not semantic_meta_skill_allowed(skill_name, negative_prompt)
 
 
 @pytest.mark.asyncio
@@ -261,6 +297,137 @@ async def test_default_prompt_prefers_matching_meta_skills_over_direct_answers(
     assert "prefer `meta_invoke(name=\"<name>\")` over answering directly" in prompt
     assert "Do not call `skill_view` for kind=\"meta\" entries" in prompt
     assert "multi-skill orchestration" in prompt
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("skill_name", "prompt"),
+    [
+        (
+            "meta-short-drama",
+            "Write a short script idea, not a video or MP4.",
+        ),
+        (
+            "meta-kid-project-planner",
+            "Help me design an adult craft logo display, not a child school project.",
+        ),
+    ],
+)
+async def test_hybrid_filter_hides_neighboring_meta_workflows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    skill_name: str,
+    prompt: str,
+) -> None:
+    loader = SkillLoader(bundled_dir=BUNDLED, snapshot_path=tmp_path / "snapshot.json")
+
+    class FakeRetriever:
+        def retrieve(self, skills, query: str, top_k: int = 5):
+            assert query == prompt
+            by_name = {s.name: s for s in skills}
+            return [by_name[skill_name]][:top_k]
+
+    monkeypatch.setattr(skills_filter_step, "_get_retriever", lambda _cfg: FakeRetriever())
+
+    ctx = _ctx(
+        loader,
+        message=prompt,
+        skills_config=SimpleNamespace(
+            filter_enabled=True,
+            filter_top_k=5,
+            filter_strategy="hybrid",
+            filter_lexical_top_n=20,
+            filter_semantic_top_n=20,
+            filter_rrf_k=60,
+            filter_embedding_model="BAAI/bge-small-zh-v1.5",
+            max_skills_prompt_chars=100_000,
+            injection_mode="system",
+        ),
+    )
+    ctx.config.meta_skill = SimpleNamespace(enabled=True, auto_trigger=True)
+    ctx = await filter_skills(ctx)
+
+    assert skill_name not in ctx.metadata["filtered_skill_ids"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("skill_name", "positive_prompt", "negative_prompt"),
+    STABLE_META_BOUNDARY_CASES,
+)
+async def test_hybrid_filter_applies_stable_meta_boundary_guards_both_directions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    skill_name: str,
+    positive_prompt: str,
+    negative_prompt: str,
+) -> None:
+    monkeypatch.setattr(
+        skills_filter_step,
+        "_elig_ctx",
+        EligibilityContext(
+            os_name="linux",
+            has_bin_cache={
+                "bibtex": True,
+                "codex": True,
+                "curl": True,
+                "ffmpeg": True,
+                "ffprobe": True,
+                "xelatex": True,
+                "nano-pdf": True,
+                "python": True,
+                "python3": True,
+                "tmux": True,
+            },
+        ),
+    )
+    loader = SkillLoader(bundled_dir=BUNDLED, snapshot_path=tmp_path / "snapshot.json")
+
+    class FakeRetriever:
+        prompt = positive_prompt
+
+        def retrieve(self, skills, query: str, top_k: int = 5):
+            assert query == self.prompt
+            by_name = {s.name: s for s in skills}
+            return [by_name[skill_name]][:top_k]
+
+    retriever = FakeRetriever()
+    monkeypatch.setattr(skills_filter_step, "_get_retriever", lambda _cfg: retriever)
+
+    def skills_config() -> SimpleNamespace:
+        return SimpleNamespace(
+            filter_enabled=True,
+            filter_top_k=5,
+            filter_strategy="hybrid",
+            filter_lexical_top_n=20,
+            filter_semantic_top_n=20,
+            filter_rrf_k=60,
+            filter_embedding_model="BAAI/bge-small-zh-v1.5",
+            max_skills_prompt_chars=100_000,
+            injection_mode="system",
+        )
+
+    positive_ctx = _ctx(
+        loader,
+        message=positive_prompt,
+        skills_config=skills_config(),
+    )
+    positive_ctx.config.meta_skill = SimpleNamespace(enabled=True, auto_trigger=True)
+    positive_ctx = await filter_skills(positive_ctx)
+
+    assert skill_name in positive_ctx.metadata["filtered_skill_ids"]
+
+    retriever.prompt = negative_prompt
+    negative_ctx = _ctx(
+        loader,
+        message=negative_prompt,
+        skills_config=skills_config(),
+    )
+    negative_ctx.config.meta_skill = SimpleNamespace(enabled=True, auto_trigger=True)
+    negative_ctx = await filter_skills(negative_ctx)
+
+    assert skill_name not in negative_ctx.metadata["filtered_skill_ids"]
 
 
 @pytest.mark.asyncio

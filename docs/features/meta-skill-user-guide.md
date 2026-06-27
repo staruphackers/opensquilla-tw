@@ -1,4 +1,4 @@
-# OpenSquilla MetaSkill User Guide
+﻿# OpenSquilla MetaSkill User Guide
 
 MetaSkill lets OpenSquilla move from figuring out complex work from scratch on
 every turn to reusable, explicitly launchable, auditable, and improvable task
@@ -292,6 +292,37 @@ Keep it compact first. Do not write a full manuscript unless I ask.
 Expected result: a paper-shaped deliverable, not a generic essay. Citations
 should not be presented as verified sources unless actually verified.
 
+### `meta-short-drama`
+
+Use for short-drama generation workflows that need script, visual prompts,
+clip assembly, subtitles, and a local video artifact.
+
+Good fit:
+
+- short-drama production request;
+- shot list and image prompt planning;
+- consistent character setup;
+- subtitle burn-in;
+- final local MP4 assembly.
+
+High-quality request:
+
+```text
+Use meta-skill `meta-short-drama`.
+
+Create a five-shot short drama about a delivery rider discovering a hidden note
+inside a returned package. Keep the tone warm and suspenseful.
+
+Give me:
+- shot-by-shot script
+- character identity notes
+- visual prompt plan
+- subtitle-ready dialogue
+- final video artifact if generation is available
+```
+
+Expected result: a production workflow, not just a script idea.
+
 ### `meta-skill-creator`
 
 Use to create a new MetaSkill proposal.
@@ -435,4 +466,4 @@ For the authoring protocol, read [`../authoring/meta-skills.md`](../authoring/me
 
 ---
 
-[Docs index](../README.md) · [Product guide](../../README.product.md) · [Improve this page](../contributing-docs.md) · [Report a docs issue](https://github.com/opensquilla/opensquilla/issues/new?template=docs_report.yml)
+[Docs index](../README.md) 路 [Product guide](../../README.product.md) 路 [Improve this page](../contributing-docs.md) 路 [Report a docs issue](https://github.com/opensquilla/opensquilla/issues/new?template=docs_report.yml)

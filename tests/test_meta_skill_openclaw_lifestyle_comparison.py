@@ -25,6 +25,17 @@ SELECTED_SKILLS = [
     "meta-kid-project-planner",
 ]
 
+BUNDLED = Path("src/opensquilla/skills/bundled")
+EXP = Path("src/opensquilla/skills/exp")
+
+
+def _skill_path(skill_name: str) -> Path:
+    for root in (BUNDLED, EXP):
+        path = root / skill_name / "SKILL.md"
+        if path.is_file():
+            return path
+    raise AssertionError(f"missing skill fixture: {skill_name}")
+
 
 def test_lifestyle_catalog_covers_selected_meta_skills_without_exclusions() -> None:
     assert [case.skill_name for case in LIFESTYLE_COMPARISON_CASES] == SELECTED_SKILLS
@@ -42,9 +53,7 @@ def test_selected_meta_skills_are_grounded_in_clawhub_top100_components() -> Non
     }
 
     for skill_name in SELECTED_SKILLS:
-        raw = Path(f"src/opensquilla/skills/bundled/{skill_name}/SKILL.md").read_text(
-            encoding="utf-8"
-        )
+        raw = _skill_path(skill_name).read_text(encoding="utf-8")
         assert "clawhub_top100_composition:" in raw
         assert "Top ClawHub Skills" in raw
         for component in expectations[skill_name]:
@@ -64,7 +73,8 @@ def test_lifestyle_prompts_are_conversational_and_realistic() -> None:
 
 def _bundled_meta_plan(skill_name: str, tmp_path: Path):
     loader = SkillLoader(
-        bundled_dir=Path("src/opensquilla/skills/bundled"),
+        bundled_dir=BUNDLED,
+        extra_dirs=[EXP],
         snapshot_path=tmp_path / "snapshot.json",
     )
     spec = loader.get_by_name(skill_name)

@@ -821,6 +821,30 @@ const SkillsView = (() => {
     return `<span class="sk-card__dep-badge${toneClass}">${_esc(label)}</span>`;
   }
 
+  function _renderRequirements(requirements) {
+    const items = requirements && Array.isArray(requirements.items) ? requirements.items : [];
+    if (!items.length) return '';
+    const rows = items.map(item => {
+      const missing = [];
+      (item.missing_bins || []).forEach(b => missing.push(`<code>${_esc(b)}</code>`));
+      (item.missing_env || []).forEach(e => missing.push(`<code>${_esc(e)}</code>`));
+      const detail = missing.length
+        ? `Missing ${missing.join(', ')}`
+        : (item.detail || item.label || item.kind || 'Ready');
+      const status = item.status || (missing.length ? 'missing' : 'ready');
+      const statusClass = status === 'ready' ? 'sk-chip--ok' : 'sk-chip--warn';
+      const statusLabel = status === 'ready' ? 'ready' : 'needs setup';
+      return `<div class="sk-dialog__req-row">
+        <span class="sk-chip ${statusClass}">${statusLabel}</span>
+        <span class="sk-dialog__req-detail">${detail}</span>
+      </div>`;
+    }).join('');
+    return `<div class="sk-dialog__section">
+      <div class="sk-dialog__section-title">Requirements</div>
+      <div class="sk-dialog__requirements">${rows}</div>
+    </div>`;
+  }
+
   async function _openSkillDialog(skill) {
     const dlg = _el.querySelector('#skill-detail-dialog');
     const body = _el.querySelector('#skill-detail-body');
@@ -863,6 +887,8 @@ const SkillsView = (() => {
     }
     const layerChip = `<span class="sk-chip" title="${_esc(_layerHelp(detail.layer))}">${_esc(_layerLabel(detail.layer))}</span>`;
     const dependencyHtml = _renderDependencySection(detail);
+
+    const requirementsHtml = _renderRequirements(detail.requirements);
 
     let installHtml = '';
     const installs = loading ? [] : _actionableInstallEntries(detail);
@@ -941,6 +967,7 @@ const SkillsView = (() => {
         ${loadErrorHtml}
         ${triggersHtml}
         ${compositionHtml}
+        ${requirementsHtml}
         ${dependencyHtml}
         ${installHtml}
         ${homepage ? `<div class="sk-dialog__section">${homepage}</div>` : ''}

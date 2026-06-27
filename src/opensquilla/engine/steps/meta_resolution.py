@@ -46,6 +46,7 @@ from opensquilla.skills.meta.inputs import (
     meta_input_overrides_from_metadata,
 )
 from opensquilla.skills.meta.parser import MetaPlanError, parse_meta_plan
+from opensquilla.skills.meta.semantic_guards import semantic_meta_skill_allowed
 from opensquilla.skills.meta.types import MetaMatch
 from opensquilla.skills.retrieval import HybridRetriever
 from opensquilla.skills.types import SkillSpec
@@ -778,6 +779,8 @@ def _semantic_meta_candidate(
     if not ranked:
         return None
     chosen_name = getattr(ranked[0], "name", "")
+    if not semantic_meta_skill_allowed(str(chosen_name), str(query)):
+        return None
     for priority, name, plan, _spec in candidates:
         if name == chosen_name:
             return (priority, name, plan, "semantic")

@@ -73,7 +73,6 @@ def test_legacy_tier_target_aliases_resolve_to_canonical_routes() -> None:
     assert target.target_id == "tier:c3"
     assert target.tier == "c3"
 
-
 def test_hold_store_expires_by_explicit_turn_count_and_sliding_idle_time() -> None:
     cfg = _router_cfg(_router_tier_profile_defaults("openrouter"))
     target = resolve_router_control_target(cfg, "tier:c3")
