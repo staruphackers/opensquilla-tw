@@ -30,6 +30,10 @@ def test_desktop_electron_release_config_matches_current_release() -> None:
     build = package["build"]
 
     assert package["version"] == CURRENT_VERSION
+    assert package["repository"] == {
+        "type": "git",
+        "url": "https://github.com/opensquilla/opensquilla.git",
+    }
     assert build["mac"]["target"] == ["dmg", "zip"]
     assert build["mac"].get("identity", "auto") is not None
     assert build["win"]["target"] == ["nsis"]
@@ -43,6 +47,7 @@ def test_electron_installer_workflow_lets_builder_select_macos_signing_identity(
     assert "CSC_LINK: ${{ secrets.MAC_CSC_LINK }}" in workflow
     assert "CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}" in workflow
     assert "CSC_NAME" not in workflow
+    assert "GH_TOKEN" not in workflow
 
 
 def _dep_names(specs: list[str]) -> set[str]:
