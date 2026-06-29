@@ -22,6 +22,10 @@ const themeOptions = [
 const LOCALE_LABELS: Record<LocaleCode, string> = {
   en: 'English',
   'zh-Hans': '中文',
+  ja: '日本語',
+  fr: 'Français',
+  de: 'Deutsch',
+  es: 'Español',
 }
 const localeOptions = SUPPORTED_LOCALES.map((code) => ({ code, label: LOCALE_LABELS[code] }))
 

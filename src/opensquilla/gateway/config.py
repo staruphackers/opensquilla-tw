@@ -105,7 +105,7 @@ class ControlUiConfig(BaseSettings):
     # Default UI locale served on first paint when the browser has no saved
     # preference. The client (localStorage) and a manual switch always override
     # it. Anything zh* clamps to zh-Hans; anything else to en.
-    default_locale: Literal["en", "zh-Hans"] = "en"
+    default_locale: Literal["en", "zh-Hans", "ja", "fr", "de", "es"] = "en"
     allowed_origins: list[str] = Field(default_factory=list)
 
     @field_validator("base_path")
@@ -124,7 +124,13 @@ class ControlUiConfig(BaseSettings):
     @classmethod
     def _normalize_locale(cls, v: object) -> object:
         if isinstance(v, str):
-            return "zh-Hans" if v.strip().lower().startswith("zh") else "en"
+            s = v.strip().lower()
+            if s.startswith("zh"):
+                return "zh-Hans"
+            for code in ("ja", "fr", "de", "es"):
+                if s.startswith(code):
+                    return code
+            return "en"
         return v
 
 

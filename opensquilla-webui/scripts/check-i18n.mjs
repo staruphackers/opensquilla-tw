@@ -12,7 +12,11 @@ import { dirname, resolve } from 'node:path'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const localesDir = resolve(here, '..', 'src', 'locales')
-const OTHER_LOCALES = ['zh-Hans']
+const OTHER_LOCALES = ['zh-Hans', 'ja', 'fr', 'de', 'es']
+// English-leakage (value identical to en) is only a reliable "untranslated"
+// signal for non-Latin scripts. fr/de/es legitimately share many words with
+// English, so we enforce only KEY PARITY there and check leakage for zh-Hans.
+const LEAKAGE_LOCALES = new Set(['zh-Hans'])
 
 function load(name) {
   return JSON.parse(readFileSync(resolve(localesDir, `${name}.json`), 'utf8'))
@@ -37,9 +41,11 @@ for (const loc of OTHER_LOCALES) {
 
   const missing = enKeys.filter((k) => !(k in flat))
   const extra = keys.filter((k) => !(k in enFlat))
-  const untranslated = enKeys.filter(
-    (k) => k in flat && typeof flat[k] === 'string' && flat[k] === enFlat[k] && /[A-Za-z]/.test(flat[k]),
-  )
+  const untranslated = LEAKAGE_LOCALES.has(loc)
+    ? enKeys.filter(
+        (k) => k in flat && typeof flat[k] === 'string' && flat[k] === enFlat[k] && /[A-Za-z]/.test(flat[k]),
+      )
+    : []
 
   if (missing.length) {
     failed = true

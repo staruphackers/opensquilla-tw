@@ -80,14 +80,27 @@ def _request_ws_url(request: Request, config: GatewayConfig) -> str:
     return f"{ws_scheme}://{host}/ws"
 
 
-_SUPPORTED_LOCALES = ("en", "zh-Hans")
+_SUPPORTED_LOCALES = ("en", "zh-Hans", "ja", "fr", "de", "es")
+
+
+def _locale_from_tag(tag: str) -> str | None:
+    """Map a single BCP-47 Accept-Language tag to a supported locale, else None."""
+    t = tag.strip().lower()
+    if not t:
+        return None
+    if t.startswith("zh"):
+        return "zh-Hans"
+    for code in ("ja", "fr", "de", "es", "en"):
+        if t == code or t.startswith(code + "-"):
+            return code
+    return None
 
 
 def _resolve_locale(config: GatewayConfig, request: Request) -> str:
     """Resolve the first-paint locale rendered into <html lang> and #opensquilla-data.
 
     Honors the configured default. Only when that default is the baseline 'en'
-    do we sniff Accept-Language (a zh* preference yields zh-Hans), so an operator
+    do we sniff Accept-Language (the first supported tag wins), so an operator
     who explicitly pins a default is never overridden. The browser's saved
     localStorage choice and the in-app switcher always win client-side.
     """
@@ -96,9 +109,9 @@ def _resolve_locale(config: GatewayConfig, request: Request) -> str:
         return default
     accept = request.headers.get("accept-language", "") or ""
     for part in accept.split(","):
-        token = part.split(";", 1)[0].strip().lower()
-        if token.startswith("zh"):
-            return "zh-Hans"
+        code = _locale_from_tag(part.split(";", 1)[0])
+        if code:
+            return code
     return "en"
 
 

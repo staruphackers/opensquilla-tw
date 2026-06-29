@@ -20,13 +20,17 @@ function flatten(obj: Record<string, unknown>, prefix = '', out: Record<string, 
 }
 
 describe('normalizeLocale', () => {
-  it('maps en and zh variants, rejects the rest', () => {
+  it('maps supported language variants, rejects the rest', () => {
     expect(normalizeLocale('en')).toBe('en')
     expect(normalizeLocale('en-US')).toBe('en')
     expect(normalizeLocale('zh')).toBe('zh-Hans')
     expect(normalizeLocale('zh-CN')).toBe('zh-Hans')
     expect(normalizeLocale('zh-Hans')).toBe('zh-Hans')
-    expect(normalizeLocale('fr')).toBeNull()
+    expect(normalizeLocale('ja-JP')).toBe('ja')
+    expect(normalizeLocale('fr')).toBe('fr')
+    expect(normalizeLocale('de-DE')).toBe('de')
+    expect(normalizeLocale('es-419')).toBe('es')
+    expect(normalizeLocale('ko')).toBeNull()
     expect(normalizeLocale('')).toBeNull()
     expect(normalizeLocale(null)).toBeNull()
   })
@@ -56,7 +60,7 @@ describe('resolveInitialLocale (first match wins)', () => {
   })
 
   it('2. ignores an unsupported saved value and reads #opensquilla-data data-locale', () => {
-    localStorage.setItem('opensquilla-locale', 'fr')
+    localStorage.setItem('opensquilla-locale', 'ko')
     const el = document.createElement('div')
     el.id = 'opensquilla-data'
     el.dataset.locale = 'zh-Hans'
@@ -74,16 +78,22 @@ describe('resolveInitialLocale (first match wins)', () => {
     expect(resolveInitialLocale()).toBe('zh-Hans')
   })
 
+  it('4b. matches a supported navigator language (fr)', () => {
+    vi.stubGlobal('navigator', { languages: ['fr-FR', 'en'], language: 'fr-FR' })
+    expect(resolveInitialLocale()).toBe('fr')
+  })
+
   it('5. defaults to en when nothing matches', () => {
-    vi.stubGlobal('navigator', { languages: ['fr-FR'], language: 'fr-FR' })
+    vi.stubGlobal('navigator', { languages: ['ko-KR'], language: 'ko-KR' })
     expect(resolveInitialLocale()).toBe('en')
   })
 
   it('honors the desktop OS locale (arg) ahead of navigator', () => {
     vi.stubGlobal('navigator', { languages: ['en-US'], language: 'en-US' })
     expect(resolveInitialLocale('zh-CN')).toBe('zh-Hans')
+    expect(resolveInitialLocale('ja-JP')).toBe('ja')
     // an unsupported OS locale falls through to navigator → en
-    expect(resolveInitialLocale('fr-FR')).toBe('en')
+    expect(resolveInitialLocale('ko-KR')).toBe('en')
   })
 
   it('saved preference still beats the OS locale', () => {
@@ -114,7 +124,7 @@ describe('appStore locale state', () => {
 
   it('setLocale ignores unsupported codes (no throw, stays en)', async () => {
     const store = useAppStore()
-    await store.setLocale('fr' as never)
+    await store.setLocale('ko' as never)
     expect(store.locale).toBe('en')
   })
 

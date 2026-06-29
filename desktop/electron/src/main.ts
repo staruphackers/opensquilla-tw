@@ -848,15 +848,20 @@ async function openArtifactWithDefaultApp(payload: ArtifactOpenRequest): Promise
 // the main-process surfaces that live OUTSIDE the BrowserWindow (app-authored
 // menu group labels and the onboarding window title), keyed off the OS locale.
 // Role-based menu items (Cut/Copy/Paste/…) are localized by Electron itself.
-type DesktopLocale = 'en' | 'zh-Hans'
+type DesktopLocale = 'en' | 'zh-Hans' | 'ja' | 'fr' | 'de' | 'es'
 let desktopLocale: DesktopLocale = 'en'
 
 function resolveDesktopLocale(): DesktopLocale {
   const preferred = typeof app.getPreferredSystemLanguages === 'function'
     ? app.getPreferredSystemLanguages()
     : []
-  for (const tag of [...preferred, app.getLocale()]) {
-    if (typeof tag === 'string' && tag.toLowerCase().startsWith('zh')) return 'zh-Hans'
+  for (const raw of [...preferred, app.getLocale()]) {
+    if (typeof raw !== 'string') continue
+    const t = raw.toLowerCase()
+    if (t.startsWith('zh')) return 'zh-Hans'
+    for (const code of ['ja', 'fr', 'de', 'es'] as const) {
+      if (t === code || t.startsWith(code + '-')) return code
+    }
   }
   return 'en'
 }
@@ -873,6 +878,30 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'menu.view': '视图',
     'menu.window': '窗口',
     'window.onboarding': '设置 OpenSquilla',
+  },
+  ja: {
+    'menu.edit': '編集',
+    'menu.view': '表示',
+    'menu.window': 'ウインドウ',
+    'window.onboarding': 'OpenSquilla をセットアップ',
+  },
+  fr: {
+    'menu.edit': 'Édition',
+    'menu.view': 'Affichage',
+    'menu.window': 'Fenêtre',
+    'window.onboarding': 'Configurer OpenSquilla',
+  },
+  de: {
+    'menu.edit': 'Bearbeiten',
+    'menu.view': 'Ansicht',
+    'menu.window': 'Fenster',
+    'window.onboarding': 'OpenSquilla einrichten',
+  },
+  es: {
+    'menu.edit': 'Edición',
+    'menu.view': 'Ver',
+    'menu.window': 'Ventana',
+    'window.onboarding': 'Configurar OpenSquilla',
   },
 }
 
