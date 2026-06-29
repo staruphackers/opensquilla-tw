@@ -6,6 +6,7 @@ import { desktopRoutes } from './desktopRoutes'
 import { sharedRoutes } from './sharedRoutes'
 import { webRoutes } from './webRoutes'
 import { captureContentScroll, contentScrollBehavior } from './scrollMemory'
+import { saveLastRoute } from './lastRoute'
 
 const basePath = (() => {
   const el = document.getElementById('opensquilla-data')
@@ -48,4 +49,6 @@ export function routeTitle(route: RouteLocationNormalized): string {
 
 router.afterEach((to) => {
   document.title = `${routeTitle(to)} — OpenSquilla`
+  // Remember the current view (path only) so the next launch reopens here.
+  saveLastRoute(to.path)
 })
