@@ -584,7 +584,9 @@ def test_windows_high_risk_job_uses_subset_until_full_ci() -> None:
     text = (WORKFLOW_DIR / "ci.yml").read_text(encoding="utf-8")
 
     assert windows_full["name"] == "Windows high-risk/full tests (conditional)"
-    assert windows_full["steps"][0]["with"]["lfs"] == "${{ needs.classify-changes.outputs.full_required == 'true' }}"
+    assert windows_full["steps"][0]["with"]["lfs"] == (
+        "${{ needs.classify-changes.outputs.full_required == 'true' }}"
+    )
     assert 'uv run pytest tests -q -m "${markers}" --durations=50' in text
     assert "tests/test_compat" in text
     assert "tests/test_sandbox" in text
@@ -598,7 +600,9 @@ def test_ubuntu_quality_only_fetches_lfs_for_full_ci() -> None:
     checkout = data["jobs"]["ubuntu-quality"]["steps"][0]
 
     assert checkout["uses"] == "actions/checkout@v4"
-    assert checkout["with"]["lfs"] == "${{ needs.classify-changes.outputs.full_required == 'true' }}"
+    assert checkout["with"]["lfs"] == (
+        "${{ needs.classify-changes.outputs.full_required == 'true' }}"
+    )
 
 
 def test_manual_workflows_reference_existing_test_files() -> None:
