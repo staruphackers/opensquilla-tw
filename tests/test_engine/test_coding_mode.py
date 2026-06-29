@@ -161,20 +161,18 @@ class TestDirectiveInjection:
         assert "exec_command" in suffix
         assert "stdin=" in suffix
         assert "background_process" in suffix
-        assert "sys.stdin.buffer.read()" in suffix
-        # Atomic-and-secure file creation (mkstemp), not a guessed path.
-        assert "tempfile.mkstemp" in suffix
-        # os.fdopen+write handles partial writes from large stdin; raw
-        # os.write can short-write at multi-100KB payloads on some OS.
-        assert "os.fdopen" in suffix
-        # Cross-platform shell-quoting: " on Windows, shlex.quote on POSIX.
-        # Defends against $/`/backslash on POSIX and against the path
-        # itself containing characters that need shell escaping.
-        assert "shlex.quote" in suffix
+        assert "code-task stage-task-file" in suffix
+        # Packaged desktop gateways are not Python interpreters. The staging
+        # recipe must therefore be a code-task subcommand, never
+        # `opensquilla-gateway -c ...`.
+        assert " -c " not in suffix
+        assert "sys.stdin.buffer.read()" not in suffix
         # Both real-repo (case 1) and scratch (case 2) recipes are shown,
         # otherwise weaker models copy the scratch command for repo edits.
         assert "Case 1, real repo" in suffix
         assert "Case 2, scratch" in suffix
+        assert "Case 3, app build from scratch" in suffix
+        assert "--verification-mode build --yes" in suffix
         # Explicit framing of exec_command's exit_code=0 prefix so the
         # agent doesn't try to parse the wrong stdout line.
         assert "exit_code=0" in suffix
@@ -185,25 +183,31 @@ class TestDirectiveInjection:
         assert "del " in suffix and "rm " in suffix  # Windows + POSIX
 
     @pytest.mark.asyncio
-    async def test_directive_uses_resolved_python_not_bare_name(
+    async def test_directive_uses_codetask_stage_task_file_not_python_dash_c(
         self, monkeypatch
     ):
-        """The staging recipe must invoke the SAME interpreter the gateway
-        is running on — not a bare ``python`` that could resolve to a
-        different (or broken) interpreter via PATH. Mirrors how
-        __CODE_TASK_CMD__ is already a fully-qualified path."""
+        """Packaged gateways are CLI binaries, not Python interpreters.
+
+        A desktop build previously rendered the staging recipe as
+        `opensquilla-gateway -c ...`, which Typer rejects with
+        "No such option: -c".  The directive must route staging through the
+        verified code-task command prefix instead.
+        """
         from opensquilla.engine.steps import coding_mode as _cm
+        packaged_code_task = (
+            "/Applications/OpenSquilla.app/Contents/Resources/runtime/"
+            "gateway/opensquilla-gateway code-task"
+        )
         monkeypatch.setattr(
-            _cm, "sys", SimpleNamespace(executable="/fake/venv/bin/python")
+            _cm,
+            "resolve_code_task_command",
+            lambda: packaged_code_task,
         )
 
         ctx = await enforce_coding_mode(self._ctx(True))
         _, suffix = ctx.system_prompt
-        assert "/fake/venv/bin/python -c" in suffix
-        # No bare `python -c` invocation anywhere — always the resolved path.
-        # (Allow the literal word "python" in prose; check it never appears
-        # as a standalone command token.)
-        assert " python -c" not in suffix and "\npython -c" not in suffix
+        assert "opensquilla-gateway code-task stage-task-file" in suffix
+        assert "opensquilla-gateway -c" not in suffix
 
     @pytest.mark.asyncio
     async def test_off_injects_nothing(self):

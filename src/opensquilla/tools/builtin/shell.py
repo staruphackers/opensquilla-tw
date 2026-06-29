@@ -487,7 +487,63 @@ def _bg_session_payload(session: _BgSession) -> dict[str, object]:
     }
     if session.local_urls:
         payload["local_urls"] = list(session.local_urls)
+    code_task = _code_task_status_payload(session)
+    if code_task:
+        payload["code_task"] = code_task
     return payload
+
+
+def _code_task_status_payload(session: _BgSession) -> dict[str, object] | None:
+    if "code-task" not in session.command:
+        return None
+    output = "".join(session.output_lines)
+    marker = _parse_code_task_marker(output)
+    if marker is None:
+        return None
+    status_path = Path(marker["status_path"]).expanduser()
+    payload: dict[str, object] = dict(marker)
+    if status_path.is_file():
+        try:
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            status = {}
+        if isinstance(status, dict):
+            for key in (
+                "phase",
+                "updated",
+                "pid",
+                "current_command",
+                "last_output_at",
+                "quiet_for_seconds",
+                "state",
+                "verified",
+                "error",
+                "final_failure_reason",
+                "installer_path",
+                "log_paths",
+            ):
+                if key in status:
+                    payload[key] = status[key]
+    return payload
+
+
+def _parse_code_task_marker(output: str) -> dict[str, str] | None:
+    for line in output.splitlines():
+        if "[code-task] run started:" not in line or "status=" not in line:
+            continue
+        status_tail = line.split("status=", 1)[1]
+        status_end = status_tail.find("status.json")
+        if status_end < 0:
+            continue
+        status_path = status_tail[: status_end + len("status.json")]
+        payload = {"status_path": status_path}
+        run_match = re.search(r"run_id=([^\s]+)", line)
+        if run_match:
+            payload["run_id"] = run_match.group(1)
+        if "artifact_dir=" in line and " status=" in line:
+            payload["artifact_dir"] = line.split("artifact_dir=", 1)[1].split(" status=", 1)[0]
+        return payload
+    return None
 
 
 def _local_server_urls_from_command(command: str) -> list[str]:

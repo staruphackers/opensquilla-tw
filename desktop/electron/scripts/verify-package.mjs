@@ -79,12 +79,13 @@ function requireGatewayBinary(root, label, platform) {
   return binary
 }
 
-function verifyGatewayCommand(binary, label, args) {
+function verifyGatewayCommand(binary, label, args, options = {}) {
   const result = spawnSync(binary, args, {
     cwd: dirname(binary),
     encoding: 'utf8',
     env: verificationEnv(),
-    timeout: 30000,
+    input: options.input,
+    timeout: options.timeout ?? 30000,
     windowsHide: true,
   })
 
@@ -159,6 +160,9 @@ async function verifyRuntime(root, label, { platform, executeCommands }) {
     if (!binary) return
     verifyGatewayCommand(binary, label, ['--help'])
     verifyGatewayCommand(binary, label, ['code-task', '--help'])
+    verifyGatewayCommand(binary, label, ['code-task', 'stage-task-file'], { input: 'desktop package smoke\n' })
+    verifyGatewayCommand(binary, label, ['code-task', 'smoke-imports'], { timeout: 120000 })
+    verifyGatewayCommand(binary, label, ['code-task', 'smoke-router'], { timeout: 120000 })
   }
 }
 

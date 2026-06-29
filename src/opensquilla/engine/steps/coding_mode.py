@@ -189,7 +189,14 @@ _CODING_MODE_DIRECTIVE_TEMPLATE = (
     "one is still running. Decide success ONLY from the returned result (its "
     "state and build.installer_path, which point into the run directory); the "
     "run prints its run directory on startup and writes live progress to "
-    "<run_dir>/status.json.\n"
+    "<run_dir>/status.json. That status file includes phase, pid, current_command, "
+    "log_paths, last_output_at, and terminal error/final_failure_reason fields; "
+    "for build mode it also reports scaffold_running/scaffold_complete, "
+    "agent_running, verifying, completed, or stalled.\n"
+    "If process(action=\"wait\") returns a non-zero exit, an environment_blocked "
+    "state, or a build result with no installer_path for build mode, STOP and "
+    "report the code-task result. Do NOT manually rebuild the app, copy files, "
+    "or publish a workaround artifact from this session.\n"
     "Do NOT clone the repository yourself and do NOT hand-edit its files in "
     "this session: the file-editing tools (write_file, edit_file, apply_patch, "
     "execute_code, git_commit, create_*) are DISABLED while coding mode is on, and "
@@ -207,18 +214,10 @@ _CODING_MODE_DIRECTIVE_TEMPLATE = (
     "breaks argv on POSIX too. The escape hatch is to send the task "
     "content through a PIPE, which neither shell touches:\n"
     "    1. exec_command(\n"
-    "         command=\"__PYTHON_CMD__ -c \\\"import os, sys, shlex, "
-    "tempfile; fd, p = tempfile.mkstemp(prefix='codetask-task-', "
-    "suffix='.txt'); f = os.fdopen(fd, 'wb'); f.write("
-    "sys.stdin.buffer.read()); f.close(); sys.stdout.write("
-    "'\\\\\\\"' + p + '\\\\\\\"' if os.name == 'nt' else "
-    "shlex.quote(p))\\\"\",\n"
+    "         command=\"__CODE_TASK_CMD__ stage-task-file\",\n"
     "         stdin=\"<task text, any length, any chars, any newlines>\",\n"
     "       )\n"
-    "    # tempfile.mkstemp creates an atomic, 0600 unique file — no "
-    "race, no clobber, no symlink trap. os.fdopen+write handles partial "
-    "writes from a large stdin payload correctly (os.write may "
-    "short-write on long buffers). The script emits a SHELL-SAFE QUOTED "
+    "    # stage-task-file creates an atomic, 0600 unique file and emits a SHELL-SAFE QUOTED "
     "TOKEN on its own stdout line — `\"<path>\"` on Windows (safe for "
     "spaces / & / non-ASCII in ordinary %TEMP% paths; cmd.exe DOES "
     "still expand %VAR% inside double quotes, but %TEMP% itself is "
@@ -237,6 +236,11 @@ _CODING_MODE_DIRECTIVE_TEMPLATE = (
     "    2b. (Case 2, scratch) background_process(\n"
     "          command=\"__CODE_TASK_CMD__ solve --task-file <quoted-"
     "path-from-step-1> --verification-mode scratch --yes\",\n"
+    "          timeout=5400,\n"
+    "        )\n"
+    "    2c. (Case 3, app build from scratch) background_process(\n"
+    "          command=\"__CODE_TASK_CMD__ solve --task-file <quoted-"
+    "path-from-step-1> --verification-mode build --yes\",\n"
     "          timeout=5400,\n"
     "        )\n"
     "Why this works: stdin rides through a real OS pipe — neither cmd.exe "
@@ -278,19 +282,13 @@ def _build_coding_mode_directive() -> str:
     """The coding-mode directive with a resolved, runnable code-task command,
     or a fail-loud directive when code-task cannot be run in this environment.
 
-    Two placeholders are substituted:
+    One placeholder is substituted:
     - ``__CODE_TASK_CMD__`` — the resolved code-task invocation prefix.
-    - ``__PYTHON_CMD__`` — the resolved Python interpreter the gateway is
-      running on. Used by the directive's task-file staging recipe so the
-      agent does not invoke a bare ``python`` whose PATH resolution may
-      surface a different interpreter than the one we just verified.
     """
     cmd = resolve_code_task_command()
     if cmd is None:
         return _CODING_MODE_UNAVAILABLE_DIRECTIVE
-    return _CODING_MODE_DIRECTIVE_TEMPLATE.replace(
-        "__CODE_TASK_CMD__", cmd
-    ).replace("__PYTHON_CMD__", _quote(sys.executable))
+    return _CODING_MODE_DIRECTIVE_TEMPLATE.replace("__CODE_TASK_CMD__", cmd)
 
 
 def _coding_mode_on(ctx: TurnContext) -> bool:
