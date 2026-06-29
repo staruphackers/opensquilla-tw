@@ -379,6 +379,21 @@
       "copyFailed": "Copy failed: {error}",
       "copiedCommand": "Copied command",
       "copiedPath": "Copied path"
+    },
+    "needs": {
+      "noApiKey": "No API key required.",
+      "bundledLocal": "Bundled local embeddings for the default path.",
+      "noEmbedding": "No embedding service; keyword search remains available.",
+      "localOnnx": "Local ONNX embedding assets from the recommended install.",
+      "optionalRemoteFallback": "Optional remote fallback credentials if configured.",
+      "imageProviderModel": "A provider/model id that supports image generation.",
+      "optionalEmbeddingModel": "Optional embedding model override.",
+      "optionalOnnxDir": "Optional ONNX directory override for custom local assets.",
+      "providerModelId": "Provider/model identifier.",
+      "optionalLocaleHint": "Optional locale hint such as zh-CN, en-US, or en-GB.",
+      "offSurfacesError": "off surfaces the original provider error.",
+      "audioEnvVar": "Environment variable to read for audio provider access.",
+      "remoteEmbeddingKey": "Remote embedding API key or env reference."
     }
   },
   "sessions": {
@@ -1491,7 +1506,11 @@
       "dismiss": "Dismiss",
       "outcomeDoneTitle": "Reply sent · run resumed",
       "outcomeBusyDetail": "Your reply is being processed now.",
-      "outcomeDoneDetail": "The agent has accepted this reply and moved on."
+      "outcomeDoneDetail": "The agent has accepted this reply and moved on.",
+      "replyReceived": "Reply received · continuing run…",
+      "sendingReply": "Sending reply…",
+      "sendReply": "Send reply",
+      "sendingContinuing": "Sending reply · continuing run…"
     },
     "composer": {
       "executionMode": "Execution mode",
@@ -1589,6 +1608,15 @@
       "waitResponseBeforeCommand": "Wait for the current response before running {command}.",
       "queueFull": "Queue is full — wait for the current response to finish.",
       "artifactOpenFailed": "Artifact open failed. Use Download instead."
+    },
+    "stream": {
+      "sending": "Sending",
+      "planningNextStep": "Planning next step",
+      "readingContext": "Reading context",
+      "waitingForModel": "Waiting for model",
+      "preparingOutput": "Preparing output",
+      "stillWaiting": "Still waiting for model",
+      "stillWorking": "Still working — last signal {seconds}s ago"
     }
   },
   "shared": {

@@ -14,7 +14,7 @@
     </span>
     <span class="clarify-outcome__copy">
       <span class="clarify-outcome__title">
-        {{ busy ? 'Reply received · continuing run…' : t('chat.clarify.outcomeDoneTitle') }}
+        {{ busy ? t('chat.clarify.replyReceived') : t('chat.clarify.outcomeDoneTitle') }}
       </span>
       <span class="clarify-outcome__detail">
         {{ busy ? t('chat.clarify.outcomeBusyDetail') : t('chat.clarify.outcomeDoneDetail') }}
@@ -108,7 +108,7 @@
           :disabled="busy"
           @click="onSubmit"
         >
-          {{ busy ? 'Sending reply…' : 'Send reply' }}
+          {{ busy ? t('chat.clarify.sendingReply') : t('chat.clarify.sendReply') }}
         </button>
         <button class="btn btn--ghost" type="button" :disabled="busy" @click="$emit('dismiss')">
           {{ t('chat.clarify.dismiss') }}
@@ -121,7 +121,7 @@
         role="status"
         aria-live="polite"
       >
-        Sending reply · continuing run…
+        {{ t('chat.clarify.sendingContinuing') }}
       </p>
       <p v-if="error" class="clarify-card__error" role="alert">{{ error }}</p>
     </footer>

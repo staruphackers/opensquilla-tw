@@ -379,6 +379,21 @@
       "copyFailed": "コピーに失敗しました: {error}",
       "copiedCommand": "コマンドをコピーしました",
       "copiedPath": "パスをコピーしました"
+    },
+    "needs": {
+      "noApiKey": "API キーは不要です。",
+      "bundledLocal": "デフォルトパスでは内蔵のローカル埋め込みを使用します。",
+      "noEmbedding": "埋め込みサービスはありません。キーワード検索は引き続き利用できます。",
+      "localOnnx": "推奨インストールのローカル ONNX 埋め込みアセット。",
+      "optionalRemoteFallback": "設定されている場合のオプションのリモートフォールバック認証情報。",
+      "imageProviderModel": "画像生成に対応するプロバイダー/モデル ID。",
+      "optionalEmbeddingModel": "オプションの埋め込みモデルの上書き。",
+      "optionalOnnxDir": "カスタムローカルアセット用のオプションの ONNX ディレクトリの上書き。",
+      "providerModelId": "プロバイダー/モデル識別子。",
+      "optionalLocaleHint": "zh-CN、en-US、en-GB などのオプションのロケールヒント。",
+      "offSurfacesError": "off は元のプロバイダーエラーを表示します。",
+      "audioEnvVar": "音声プロバイダーへのアクセスに読み取る環境変数。",
+      "remoteEmbeddingKey": "リモート埋め込み API キーまたは環境変数参照。"
     }
   },
   "sessions": {
@@ -1491,7 +1506,11 @@
       "dismiss": "閉じる",
       "outcomeDoneTitle": "返信を送信しました · 実行を再開",
       "outcomeBusyDetail": "返信を現在処理しています。",
-      "outcomeDoneDetail": "エージェントはこの返信を受け入れ、次へ進みました。"
+      "outcomeDoneDetail": "エージェントはこの返信を受け入れ、次へ進みました。",
+      "replyReceived": "返信を受信しました · 実行を継続中…",
+      "sendingReply": "返信を送信中…",
+      "sendReply": "返信を送信",
+      "sendingContinuing": "返信を送信中 · 実行を継続中…"
     },
     "composer": {
       "executionMode": "実行モード",
@@ -1589,6 +1608,15 @@
       "waitResponseBeforeCommand": "{command} を実行する前に現在の応答が完了するまでお待ちください。",
       "queueFull": "キューがいっぱいです — 現在の応答が完了するまでお待ちください。",
       "artifactOpenFailed": "成果物を開けませんでした。代わりにダウンロードを使用してください。"
+    },
+    "stream": {
+      "sending": "送信中",
+      "planningNextStep": "次のステップを計画中",
+      "readingContext": "コンテキストを読み込み中",
+      "waitingForModel": "モデルを待機中",
+      "preparingOutput": "出力を準備中",
+      "stillWaiting": "まだモデルを待機中",
+      "stillWorking": "まだ処理中 — 最後の信号は {seconds} 秒前"
     }
   },
   "shared": {

@@ -379,6 +379,21 @@
       "copyFailed": "Échec de la copie : {error}",
       "copiedCommand": "Commande copiée",
       "copiedPath": "Chemin copié"
+    },
+    "needs": {
+      "noApiKey": "Aucune clé API requise.",
+      "bundledLocal": "Plongements locaux intégrés pour le chemin par défaut.",
+      "noEmbedding": "Aucun service de plongement ; la recherche par mots-clés reste disponible.",
+      "localOnnx": "Ressources de plongement ONNX locales issues de l'installation recommandée.",
+      "optionalRemoteFallback": "Identifiants de repli distant facultatifs si configurés.",
+      "imageProviderModel": "Un ID de fournisseur/modèle prenant en charge la génération d'images.",
+      "optionalEmbeddingModel": "Remplacement facultatif du modèle de plongement.",
+      "optionalOnnxDir": "Remplacement facultatif du répertoire ONNX pour des ressources locales personnalisées.",
+      "providerModelId": "Identifiant du fournisseur/modèle.",
+      "optionalLocaleHint": "Indice de langue facultatif tel que zh-CN, en-US ou en-GB.",
+      "offSurfacesError": "off affiche l'erreur d'origine du fournisseur.",
+      "audioEnvVar": "Variable d'environnement à lire pour l'accès au fournisseur audio.",
+      "remoteEmbeddingKey": "Clé API de plongement distant ou référence d'environnement."
     }
   },
   "sessions": {
@@ -1491,7 +1506,11 @@
       "dismiss": "Ignorer",
       "outcomeDoneTitle": "Réponse envoyée · exécution reprise",
       "outcomeBusyDetail": "Votre réponse est en cours de traitement.",
-      "outcomeDoneDetail": "L'agent a accepté cette réponse et est passé à la suite."
+      "outcomeDoneDetail": "L'agent a accepté cette réponse et est passé à la suite.",
+      "replyReceived": "Réponse reçue · poursuite de l'exécution…",
+      "sendingReply": "Envoi de la réponse…",
+      "sendReply": "Envoyer la réponse",
+      "sendingContinuing": "Envoi de la réponse · poursuite de l'exécution…"
     },
     "composer": {
       "executionMode": "Mode d'exécution",
@@ -1589,6 +1608,15 @@
       "waitResponseBeforeCommand": "Attendez la réponse actuelle avant d'exécuter {command}.",
       "queueFull": "La file d'attente est pleine — attendez la fin de la réponse actuelle.",
       "artifactOpenFailed": "Échec de l'ouverture de l'artefact. Utilisez Télécharger à la place."
+    },
+    "stream": {
+      "sending": "Envoi",
+      "planningNextStep": "Planification de l'étape suivante",
+      "readingContext": "Lecture du contexte",
+      "waitingForModel": "En attente du modèle",
+      "preparingOutput": "Préparation de la sortie",
+      "stillWaiting": "Toujours en attente du modèle",
+      "stillWorking": "Toujours en cours — dernier signal il y a {seconds} s"
     }
   },
   "shared": {

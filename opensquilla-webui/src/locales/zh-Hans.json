@@ -379,6 +379,21 @@
       "copyFailed": "复制失败：{error}",
       "copiedCommand": "已复制命令",
       "copiedPath": "已复制路径"
+    },
+    "needs": {
+      "noApiKey": "无需 API 密钥。",
+      "bundledLocal": "默认路径使用内置本地嵌入。",
+      "noEmbedding": "无嵌入服务；关键词搜索仍可用。",
+      "localOnnx": "来自推荐安装的本地 ONNX 嵌入资源。",
+      "optionalRemoteFallback": "如已配置，可选的远程回退凭据。",
+      "imageProviderModel": "支持图像生成的服务商/模型 ID。",
+      "optionalEmbeddingModel": "可选的嵌入模型覆盖。",
+      "optionalOnnxDir": "自定义本地资源的可选 ONNX 目录覆盖。",
+      "providerModelId": "服务商/模型标识符。",
+      "optionalLocaleHint": "可选的区域提示，如 zh-CN、en-US 或 en-GB。",
+      "offSurfacesError": "off 会显示原始的服务商错误。",
+      "audioEnvVar": "用于读取音频服务商访问凭据的环境变量。",
+      "remoteEmbeddingKey": "远程嵌入 API 密钥或环境变量引用。"
     }
   },
   "sessions": {
@@ -1491,7 +1506,11 @@
       "dismiss": "忽略",
       "outcomeDoneTitle": "回复已发送 · 已恢复运行",
       "outcomeBusyDetail": "正在处理你的回复。",
-      "outcomeDoneDetail": "智能体已接受此回复并继续。"
+      "outcomeDoneDetail": "智能体已接受此回复并继续。",
+      "replyReceived": "已收到回复 · 继续运行…",
+      "sendingReply": "正在发送回复…",
+      "sendReply": "发送回复",
+      "sendingContinuing": "正在发送回复 · 继续运行…"
     },
     "composer": {
       "executionMode": "执行模式",
@@ -1589,6 +1608,15 @@
       "waitResponseBeforeCommand": "请等待当前回复结束后再运行 {command}。",
       "queueFull": "队列已满 — 请等待当前回复结束。",
       "artifactOpenFailed": "产物打开失败。请改为下载。"
+    },
+    "stream": {
+      "sending": "发送中",
+      "planningNextStep": "规划下一步",
+      "readingContext": "读取上下文",
+      "waitingForModel": "等待模型",
+      "preparingOutput": "准备输出",
+      "stillWaiting": "仍在等待模型",
+      "stillWorking": "仍在处理 — 上次信号 {seconds} 秒前"
     }
   },
   "shared": {
