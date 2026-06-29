@@ -243,7 +243,7 @@
       "statusLocal": "Uses local BGE embeddings; no remote key is needed.",
       "statusOllama": "Uses your Ollama server; no API key is needed.",
       "statusAuto": "Local-first memory search; optional remote fallback can be configured.",
-      "statusConfigured": "Remote memory embeddings are configured for new turns.",
+      "statusConfigured": "Remote memory embeddings are configured. Restart required for changes to take effect.",
       "statusNeedsKey": "Remote memory embeddings need a visible provider key before they can run."
     },
     "image": {
@@ -320,7 +320,20 @@
       "resetConfirmBody": "This clears the saved desktop credential and generated config. The next launch re-runs first-time setup.",
       "resetConfirmPrimary": "Reset",
       "resetDone": "Saved setup cleared. Restart the desktop app to re-run setup.",
-      "resetFailed": "Reset failed: {error}"
+      "resetFailed": "Reset failed: {error}",
+      "uninstallLabel": "Danger zone — uninstall OpenSquilla",
+      "uninstallDesc": "Remove the runtime. Keeping your data leaves sessions, config, and secrets on disk; deleting everything is permanent.",
+      "uninstallKeepData": "Remove, keep my data",
+      "uninstallPurge": "Remove and delete everything",
+      "uninstallConfirmTitle": "Uninstall OpenSquilla?",
+      "uninstallConfirmBody": "This removes the OpenSquilla runtime but keeps your data (sessions, config, secrets) on disk.",
+      "uninstallConfirmPrimary": "Uninstall",
+      "uninstallPurgeTitle": "Remove OpenSquilla and delete all data?",
+      "uninstallPurgeBody": "This removes the runtime AND permanently deletes all your data on this machine — sessions, configuration, and secrets. This cannot be undone.",
+      "uninstallPurgePrimary": "Delete everything",
+      "uninstallDone": "OpenSquilla uninstalled. The app will now close.",
+      "uninstallFailed": "Uninstall failed: {detail}",
+      "uninstallCheckLog": "check the gateway log."
     },
     "keyboard": {
       "title": "Keyboard",

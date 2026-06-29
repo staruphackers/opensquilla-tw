@@ -243,7 +243,7 @@
       "statusLocal": "ローカルの BGE 埋め込みを使用します。リモートキーは不要です。",
       "statusOllama": "Ollama サーバーを使用します。API キーは不要です。",
       "statusAuto": "ローカル優先のメモリ検索です。任意でリモートフォールバックを設定できます。",
-      "statusConfigured": "リモートのメモリ埋め込みは新しいターン用に設定されています。",
+      "statusConfigured": "リモートのメモリ埋め込みが設定されています。変更を反映するには再起動が必要です。",
       "statusNeedsKey": "リモートのメモリ埋め込みを実行するには、参照可能なプロバイダーキーが必要です。"
     },
     "image": {
@@ -320,7 +320,20 @@
       "resetConfirmBody": "保存済みのデスクトップ認証情報と生成された設定が消去されます。次回起動時に初回セットアップが再実行されます。",
       "resetConfirmPrimary": "リセット",
       "resetDone": "保存済みのセットアップを消去しました。デスクトップアプリを再起動してセットアップを再実行してください。",
-      "resetFailed": "リセットに失敗しました: {error}"
+      "resetFailed": "リセットに失敗しました: {error}",
+      "uninstallLabel": "危険ゾーン — OpenSquilla をアンインストール",
+      "uninstallDesc": "ランタイムを削除します。データを残すと、セッション・設定・シークレットがディスク上に残ります。すべて削除すると元に戻せません。",
+      "uninstallKeepData": "削除（データは残す）",
+      "uninstallPurge": "すべて削除",
+      "uninstallConfirmTitle": "OpenSquilla をアンインストールしますか？",
+      "uninstallConfirmBody": "OpenSquilla のランタイムを削除しますが、データ（セッション・設定・シークレット）はディスク上に残します。",
+      "uninstallConfirmPrimary": "アンインストール",
+      "uninstallPurgeTitle": "OpenSquilla を削除し、すべてのデータを消去しますか？",
+      "uninstallPurgeBody": "ランタイムを削除し、このマシン上のすべてのデータ（セッション・設定・シークレット）を完全に削除します。この操作は元に戻せません。",
+      "uninstallPurgePrimary": "すべて削除",
+      "uninstallDone": "OpenSquilla をアンインストールしました。アプリを終了します。",
+      "uninstallFailed": "アンインストールに失敗しました：{detail}",
+      "uninstallCheckLog": "ゲートウェイのログを確認してください。"
     },
     "keyboard": {
       "title": "キーボード",

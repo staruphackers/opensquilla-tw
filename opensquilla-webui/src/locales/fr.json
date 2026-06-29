@@ -243,7 +243,7 @@
       "statusLocal": "Utilise les embeddings BGE locaux ; aucune clé distante n'est nécessaire.",
       "statusOllama": "Utilise votre serveur Ollama ; aucune clé API n'est nécessaire.",
       "statusAuto": "Recherche mémoire en priorité locale ; un repli distant facultatif peut être configuré.",
-      "statusConfigured": "Les embeddings de mémoire distants sont configurés pour les nouveaux tours.",
+      "statusConfigured": "Les embeddings de mémoire distants sont configurés. Redémarrage requis pour que les changements prennent effet.",
       "statusNeedsKey": "Les embeddings de mémoire distants nécessitent une clé de fournisseur visible avant de pouvoir fonctionner."
     },
     "image": {
@@ -320,7 +320,20 @@
       "resetConfirmBody": "Ceci efface l'identifiant de bureau enregistré et la configuration générée. Le prochain lancement relancera la configuration initiale.",
       "resetConfirmPrimary": "Réinitialiser",
       "resetDone": "Configuration enregistrée effacée. Redémarrez l'application de bureau pour relancer la configuration.",
-      "resetFailed": "Échec de la réinitialisation : {error}"
+      "resetFailed": "Échec de la réinitialisation : {error}",
+      "uninstallLabel": "Zone sensible — désinstaller OpenSquilla",
+      "uninstallDesc": "Supprimez l'environnement d'exécution. Conserver vos données laisse les sessions, la configuration et les secrets sur le disque ; tout supprimer est définitif.",
+      "uninstallKeepData": "Supprimer, conserver mes données",
+      "uninstallPurge": "Tout supprimer",
+      "uninstallConfirmTitle": "Désinstaller OpenSquilla ?",
+      "uninstallConfirmBody": "Ceci supprime l'environnement d'exécution OpenSquilla mais conserve vos données (sessions, configuration, secrets) sur le disque.",
+      "uninstallConfirmPrimary": "Désinstaller",
+      "uninstallPurgeTitle": "Supprimer OpenSquilla et effacer toutes les données ?",
+      "uninstallPurgeBody": "Ceci supprime l'environnement d'exécution ET efface définitivement toutes vos données sur cette machine — sessions, configuration et secrets. Cette action est irréversible.",
+      "uninstallPurgePrimary": "Tout supprimer",
+      "uninstallDone": "OpenSquilla a été désinstallé. L'application va se fermer.",
+      "uninstallFailed": "Échec de la désinstallation : {detail}",
+      "uninstallCheckLog": "consultez le journal de la passerelle."
     },
     "keyboard": {
       "title": "Clavier",

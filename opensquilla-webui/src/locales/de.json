@@ -243,7 +243,7 @@
       "statusLocal": "Verwendet lokale BGE-Embeddings; kein Remote-Schlüssel erforderlich.",
       "statusOllama": "Verwendet Ihren Ollama-Server; kein API-Schlüssel erforderlich.",
       "statusAuto": "Speichersuche zuerst lokal; ein optionaler Remote-Fallback kann konfiguriert werden.",
-      "statusConfigured": "Remote-Speicher-Embeddings sind für neue Durchläufe konfiguriert.",
+      "statusConfigured": "Remote-Speicher-Embeddings sind konfiguriert. Neustart erforderlich, damit die Änderungen wirksam werden.",
       "statusNeedsKey": "Remote-Speicher-Embeddings benötigen einen sichtbaren Anbieterschlüssel, bevor sie laufen können."
     },
     "image": {
@@ -320,7 +320,20 @@
       "resetConfirmBody": "Dies löscht die gespeicherten Desktop-Zugangsdaten und die generierte Konfiguration. Beim nächsten Start wird die Ersteinrichtung erneut ausgeführt.",
       "resetConfirmPrimary": "Zurücksetzen",
       "resetDone": "Gespeicherte Einrichtung gelöscht. Starten Sie die Desktop-App neu, um die Einrichtung erneut auszuführen.",
-      "resetFailed": "Zurücksetzen fehlgeschlagen: {error}"
+      "resetFailed": "Zurücksetzen fehlgeschlagen: {error}",
+      "uninstallLabel": "Gefahrenzone — OpenSquilla deinstallieren",
+      "uninstallDesc": "Entfernt die Laufzeit. Wenn Sie Ihre Daten behalten, bleiben Sitzungen, Konfiguration und Geheimnisse auf der Festplatte; alles zu löschen ist endgültig.",
+      "uninstallKeepData": "Entfernen, Daten behalten",
+      "uninstallPurge": "Entfernen und alles löschen",
+      "uninstallConfirmTitle": "OpenSquilla deinstallieren?",
+      "uninstallConfirmBody": "Dies entfernt die OpenSquilla-Laufzeit, behält aber Ihre Daten (Sitzungen, Konfiguration, Geheimnisse) auf der Festplatte.",
+      "uninstallConfirmPrimary": "Deinstallieren",
+      "uninstallPurgeTitle": "OpenSquilla entfernen und alle Daten löschen?",
+      "uninstallPurgeBody": "Dies entfernt die Laufzeit UND löscht dauerhaft alle Ihre Daten auf diesem Gerät — Sitzungen, Konfiguration und Geheimnisse. Dies kann nicht rückgängig gemacht werden.",
+      "uninstallPurgePrimary": "Alles löschen",
+      "uninstallDone": "OpenSquilla wurde deinstalliert. Die App wird jetzt geschlossen.",
+      "uninstallFailed": "Deinstallation fehlgeschlagen: {detail}",
+      "uninstallCheckLog": "prüfen Sie das Gateway-Protokoll."
     },
     "keyboard": {
       "title": "Tastatur",

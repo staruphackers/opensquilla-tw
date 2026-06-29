@@ -243,7 +243,7 @@
       "statusLocal": "使用本地 BGE 嵌入；无需远程密钥。",
       "statusOllama": "使用你的 Ollama 服务器；无需 API 密钥。",
       "statusAuto": "本地优先的记忆搜索；可选配置远程回退。",
-      "statusConfigured": "远程记忆嵌入已为新一轮对话配置完成。",
+      "statusConfigured": "远程记忆嵌入已配置。更改需要重启后才能生效。",
       "statusNeedsKey": "远程记忆嵌入需要一个可读取的服务商密钥才能运行。"
     },
     "image": {
@@ -320,7 +320,20 @@
       "resetConfirmBody": "这将清除已保存的桌面凭据和生成的配置。下次启动将重新运行首次设置。",
       "resetConfirmPrimary": "重置",
       "resetDone": "已清除保存的设置。重启桌面应用以重新运行设置。",
-      "resetFailed": "重置失败：{error}"
+      "resetFailed": "重置失败：{error}",
+      "uninstallLabel": "危险区域 — 卸载 OpenSquilla",
+      "uninstallDesc": "移除运行时。保留数据会将会话、配置和密钥留在磁盘上；删除全部将无法恢复。",
+      "uninstallKeepData": "移除，但保留我的数据",
+      "uninstallPurge": "移除并删除全部数据",
+      "uninstallConfirmTitle": "卸载 OpenSquilla？",
+      "uninstallConfirmBody": "这将移除 OpenSquilla 运行时，但会将你的数据（会话、配置、密钥）保留在磁盘上。",
+      "uninstallConfirmPrimary": "卸载",
+      "uninstallPurgeTitle": "移除 OpenSquilla 并删除所有数据？",
+      "uninstallPurgeBody": "这将移除运行时，并永久删除本机上的所有数据——会话、配置和密钥。此操作无法撤销。",
+      "uninstallPurgePrimary": "删除全部",
+      "uninstallDone": "OpenSquilla 已卸载。应用即将关闭。",
+      "uninstallFailed": "卸载失败：{detail}",
+      "uninstallCheckLog": "请查看网关日志。"
     },
     "keyboard": {
       "title": "键盘",

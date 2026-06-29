@@ -114,14 +114,14 @@ async function uninstall(purgeData: boolean) {
   const ok = await confirm(
     purgeData
       ? {
-          title: 'Remove OpenSquilla and delete all data?',
-          body: 'This removes the runtime AND permanently deletes all your data on this machine — sessions, configuration, and secrets. This cannot be undone.',
-          primaryLabel: 'Delete everything',
+          title: t('setup.runtime.uninstallPurgeTitle'),
+          body: t('setup.runtime.uninstallPurgeBody'),
+          primaryLabel: t('setup.runtime.uninstallPurgePrimary'),
         }
       : {
-          title: 'Uninstall OpenSquilla?',
-          body: 'This removes the OpenSquilla runtime but keeps your data (sessions, config, secrets) on disk.',
-          primaryLabel: 'Uninstall',
+          title: t('setup.runtime.uninstallConfirmTitle'),
+          body: t('setup.runtime.uninstallConfirmBody'),
+          primaryLabel: t('setup.runtime.uninstallConfirmPrimary'),
         },
   )
   if (!ok) return
@@ -137,13 +137,13 @@ async function uninstall(purgeData: boolean) {
       return
     }
     if (!result?.ok) {
-      pushToast('Uninstall failed: ' + (result?.detail || 'check the gateway log.'), { tone: 'danger' })
+      pushToast(t('setup.runtime.uninstallFailed', { detail: result?.detail || t('setup.runtime.uninstallCheckLog') }), { tone: 'danger' })
       return
     }
-    pushToast('OpenSquilla uninstalled. The app will now close.')
+    pushToast(t('setup.runtime.uninstallDone'))
     await desktopBridge.quitApp?.()
   } catch (err) {
-    pushToast('Uninstall failed: ' + (err instanceof Error ? err.message : String(err)), { tone: 'danger' })
+    pushToast(t('setup.runtime.uninstallFailed', { detail: err instanceof Error ? err.message : String(err) }), { tone: 'danger' })
   } finally {
     busy.value = false
   }
@@ -194,15 +194,15 @@ onMounted(loadStatus)
 
     <div v-if="canUninstall" class="control-row danger-zone">
       <div class="control-row__label-block">
-        <span class="control-row__label">Danger zone — uninstall OpenSquilla</span>
-        <span class="control-row__desc">Remove the runtime. Keeping your data leaves sessions, config, and secrets on disk; deleting everything is permanent.</span>
+        <span class="control-row__label">{{ t('setup.runtime.uninstallLabel') }}</span>
+        <span class="control-row__desc">{{ t('setup.runtime.uninstallDesc') }}</span>
       </div>
       <div class="control-row__control danger-zone__actions">
         <button type="button" class="btn btn--ghost runtime-reset" :disabled="busy" @click="uninstall(false)">
-          Remove, keep my data
+          {{ t('setup.runtime.uninstallKeepData') }}
         </button>
         <button type="button" class="btn btn--ghost runtime-reset" :disabled="busy" @click="uninstall(true)">
-          Remove and delete everything
+          {{ t('setup.runtime.uninstallPurge') }}
         </button>
       </div>
     </div>
