@@ -4,7 +4,7 @@ import json
 import tomllib
 from pathlib import Path
 
-CURRENT_VERSION = "0.4.0"
+CURRENT_VERSION = "0.4.1"
 CURRENT_TAG = f"v{CURRENT_VERSION}"
 PREVIEW_VERSION = "0.2.0rc1"
 PREVIEW_TAG = f"v{PREVIEW_VERSION}"
@@ -210,14 +210,35 @@ def test_release_workflow_marks_preview_tags_as_prereleases() -> None:
     assert "opensquilla-latest-py3-none-any.whl" not in workflow
 
 
-def test_040_release_notes_prioritize_desktop_and_legacy_portable() -> None:
+def test_historical_040_release_notes_remain_available() -> None:
     notes = Path("docs/releases/0.4.0.md").read_text(encoding="utf-8")
+
+    assert "# OpenSquilla 0.4.0" in notes
+    assert "OpenSquilla-0.4.0-mac-arm64.dmg" in notes
+
+
+def test_current_release_notes_prioritize_desktop_and_legacy_portable() -> None:
+    notes = Path(f"docs/releases/{CURRENT_VERSION}.md").read_text(encoding="utf-8")
 
     assert "## Downloads" in notes
     assert f"OpenSquilla-{CURRENT_VERSION}-mac-arm64.dmg" in notes
+    assert f"OpenSquilla-{CURRENT_VERSION}-mac-arm64.zip" in notes
     assert f"OpenSquilla-{CURRENT_VERSION}-win-x64.exe" in notes
+    assert f"opensquilla-{CURRENT_VERSION}-py3-none-any.whl" in notes
     assert "Legacy Windows portable" in notes
     assert "legacy compatibility" in notes
+    assert "## Upgrading from 0.4.0" in notes
     assert "## Acknowledgements" in notes
     assert "@ab2ence" in notes
-    assert "@nice-code-la" in notes
+
+
+def test_current_contributor_ledger_records_041_attribution_without_repeating_040() -> None:
+    ledger = Path("CONTRIBUTORS.md").read_text(encoding="utf-8")
+    section = ledger.split("## OpenSquilla 0.4.1", 1)[1].split("## OpenSquilla 0.4.0", 1)[0]
+
+    assert "@ab2ence" in section
+    assert "#348" in section
+    assert "#355" in section
+    assert "@nice-code-la" not in section
+    assert "Codex" not in section
+    assert "Claude Code" not in section

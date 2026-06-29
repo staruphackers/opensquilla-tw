@@ -67,8 +67,7 @@ root release README with task-oriented guides.
 
 Documentation improvements are welcome. Start with
 [`contributing-docs.md`](contributing-docs.md) for docs-specific guidance, then
-open a small pull request against `main`. Existing `dev` pull requests may
-continue during the branch transition.
+open a small pull request against `main`.
 
 Fast paths:
 
