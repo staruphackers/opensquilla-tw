@@ -87,6 +87,11 @@ GROUP_SPECS: dict[str, dict[str, str]] = {
     "G16": {"kind": "profile", "profile": "g16_sampled_cheap_proposers"},
     "G17": {"kind": "profile", "profile": "g17_two_layer_moa"},
     "G18": {"kind": "profile", "profile": "g18_select_best_candidate"},
+    "G19": {"kind": "profile", "profile": "g19_g12_top3_prefilter"},
+    "G20": {"kind": "profile", "profile": "g20_g12_top2_prefilter"},
+    "G21": {"kind": "profile", "profile": "g21_g13_top3_prefilter"},
+    "G22": {"kind": "profile", "profile": "g22_g12_glm_top3_prefilter"},
+    "G23": {"kind": "profile", "profile": "g23_g12_plus_gemini_sampled_top3_prefilter"},
 }
 
 TOOL_MODE_PROVIDER_ONLY = "provider_only"

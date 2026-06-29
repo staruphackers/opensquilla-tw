@@ -401,6 +401,39 @@ def test_draco_runner_explicit_groups_preserve_runtime_defaults() -> None:
     assert "arxiv.org" not in parse_domain_list(args.contamination_blocked_domains)
 
 
+def test_draco_runner_existing_experiment_group_specs_are_stable() -> None:
+    expected = {
+        "B0": {"kind": "single", "model": "anthropic/claude-opus-4.8"},
+        "B1": {"kind": "single", "model": "openai/gpt-5.5"},
+        "B2": {"kind": "single", "model": "z-ai/glm-5.2"},
+        "B3": {"kind": "profile", "profile": "b3_glm_self_fusion"},
+        "B4": {"kind": "single", "model": "deepseek/deepseek-v4-pro"},
+        "B5": {"kind": "single", "model": "moonshotai/kimi-k2.7-code"},
+        "B6": {"kind": "single", "model": "qwen/qwen3.7-plus"},
+        "B7": {"kind": "single", "model": "google/gemini-3-flash-preview"},
+        "G1": {"kind": "profile", "profile": "g1_code"},
+        "G2": {"kind": "profile", "profile": "g2_general"},
+        "G3": {"kind": "profile", "profile": "g3_standard"},
+        "G4": {"kind": "profile", "profile": "g4_gemini_aggregator"},
+        "G5": {"kind": "profile", "profile": "g5_opus_aggregator"},
+        "G6": {"kind": "profile", "profile": "g6_gpt_aggregator"},
+        "G7": {"kind": "profile", "profile": "g7_two_proposers"},
+        "G8": {"kind": "profile", "profile": "g8_four_proposers"},
+        "G9": {"kind": "profile", "profile": "g9_qwen_aggregator"},
+        "G10": {"kind": "profile", "profile": "g10_gemini_aggregator"},
+        "G11": {"kind": "profile", "profile": "g11_deepseek_aggregator"},
+        "G12": {"kind": "profile", "profile": "g12_k2_replace_gemini"},
+        "G13": {"kind": "profile", "profile": "g13_five_proposers"},
+        "G14": {"kind": "profile", "profile": "g14_k2_replace_qwen"},
+        "G15": {"kind": "profile", "profile": "g15_g8_top3_prefilter"},
+        "G16": {"kind": "profile", "profile": "g16_sampled_cheap_proposers"},
+        "G17": {"kind": "profile", "profile": "g17_two_layer_moa"},
+        "G18": {"kind": "profile", "profile": "g18_select_best_candidate"},
+    }
+
+    assert {group: GROUP_SPECS[group] for group in expected} == expected
+
+
 def test_draco_runner_single_model_baselines_cover_extra_frontiers() -> None:
     expected = {
         "B2": "z-ai/glm-5.2",
@@ -1127,6 +1160,117 @@ def test_draco_runner_g18_configures_select_best_candidate_strategy() -> None:
         0.0,
         0.0,
     ]
+    assert provider.aggregator.provider_config.model == "z-ai/glm-5.2"
+    assert provider.aggregator.temperature == 0.0
+
+
+@pytest.mark.parametrize(
+    ("group", "profile", "top_k", "scorer_model", "proposer_models", "k_values"),
+    [
+        (
+            "G19",
+            "g19_g12_top3_prefilter",
+            3,
+            "google/gemini-3-flash-preview",
+            [
+                "deepseek/deepseek-v4-pro",
+                "z-ai/glm-5.2",
+                "moonshotai/kimi-k2.7-code",
+                "qwen/qwen3.7-plus",
+            ],
+            [1, 1, 1, 1],
+        ),
+        (
+            "G20",
+            "g20_g12_top2_prefilter",
+            2,
+            "google/gemini-3-flash-preview",
+            [
+                "deepseek/deepseek-v4-pro",
+                "z-ai/glm-5.2",
+                "moonshotai/kimi-k2.7-code",
+                "qwen/qwen3.7-plus",
+            ],
+            [1, 1, 1, 1],
+        ),
+        (
+            "G21",
+            "g21_g13_top3_prefilter",
+            3,
+            "google/gemini-3-flash-preview",
+            [
+                "deepseek/deepseek-v4-pro",
+                "z-ai/glm-5.2",
+                "google/gemini-3-flash-preview",
+                "qwen/qwen3.7-plus",
+                "moonshotai/kimi-k2.7-code",
+            ],
+            [1, 1, 1, 1, 1],
+        ),
+        (
+            "G22",
+            "g22_g12_glm_top3_prefilter",
+            3,
+            "z-ai/glm-5.2",
+            [
+                "deepseek/deepseek-v4-pro",
+                "z-ai/glm-5.2",
+                "moonshotai/kimi-k2.7-code",
+                "qwen/qwen3.7-plus",
+            ],
+            [1, 1, 1, 1],
+        ),
+        (
+            "G23",
+            "g23_g12_plus_gemini_sampled_top3_prefilter",
+            3,
+            "google/gemini-3-flash-preview",
+            [
+                "deepseek/deepseek-v4-pro",
+                "z-ai/glm-5.2",
+                "moonshotai/kimi-k2.7-code",
+                "qwen/qwen3.7-plus",
+                "google/gemini-3-flash-preview",
+            ],
+            [1, 1, 1, 2, 2],
+        ),
+    ],
+)
+def test_draco_runner_g19_g23_configure_prefilter_profiles(
+    group: str,
+    profile: str,
+    top_k: int,
+    scorer_model: str,
+    proposer_models: list[str],
+    k_values: list[int],
+) -> None:
+    cfg = GatewayConfig()
+    inherited = ProviderConfig(
+        provider="openrouter",
+        model="z-ai/glm-5.2",
+        api_key="sk-test",
+        base_url="https://openrouter.ai/api",
+    )
+
+    provider = build_profile_provider(
+        config=cfg,
+        inherited=inherited,
+        group=group,
+        profile=profile,
+        dry_run=False,
+        generation_policy=generation_thinking_policy(Namespace(generation_thinking="high")),
+    )
+
+    assert GROUP_SPECS[group] == {"kind": "profile", "profile": profile}
+    assert provider.output_strategy == "fusion"
+    assert provider.moa_layers == 1
+    assert provider.candidate_prefilter_top_k == top_k
+    assert provider.candidate_scorer is not None
+    assert provider.candidate_scorer.provider_config.model == scorer_model
+    assert provider.candidate_scorer.thinking == "high"
+    assert provider.candidate_scorer.temperature == 0.0
+    assert [member.provider_config.model for member in provider.proposers] == proposer_models
+    assert [member.k for member in provider.proposers] == k_values
     assert provider.aggregator.provider_config.model == "z-ai/glm-5.2"
     assert provider.aggregator.temperature == 0.0
 

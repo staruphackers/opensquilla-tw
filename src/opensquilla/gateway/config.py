@@ -332,6 +332,16 @@ def _default_llm_ensemble_profiles() -> dict[str, dict[str, Any]]:
         _ensemble_ref("google/gemini-3-flash-preview", thinking="high"),
         _ensemble_ref("qwen/qwen3.7-plus", thinking="high"),
     ]
+    g12_proposers = [
+        _ensemble_ref("deepseek/deepseek-v4-pro", thinking="high"),
+        _ensemble_ref("z-ai/glm-5.2", thinking="high"),
+        _ensemble_ref("moonshotai/kimi-k2.7-code", thinking="high"),
+        _ensemble_ref("qwen/qwen3.7-plus", thinking="high"),
+    ]
+    g13_proposers = [
+        *list(g8_proposers),
+        _ensemble_ref("moonshotai/kimi-k2.7-code", thinking="high"),
+    ]
     return {
         "b3_glm_self_fusion": _ensemble_profile(
             [_ensemble_ref("z-ai/glm-5.2", thinking="high", k=3)],
@@ -394,19 +404,11 @@ def _default_llm_ensemble_profiles() -> dict[str, dict[str, Any]]:
             _ensemble_ref("deepseek/deepseek-v4-pro", thinking="high"),
         ),
         "g12_k2_replace_gemini": _ensemble_profile(
-            [
-                _ensemble_ref("deepseek/deepseek-v4-pro", thinking="high"),
-                _ensemble_ref("z-ai/glm-5.2", thinking="high"),
-                _ensemble_ref("moonshotai/kimi-k2.7-code", thinking="high"),
-                _ensemble_ref("qwen/qwen3.7-plus", thinking="high"),
-            ],
+            list(g12_proposers),
             _ensemble_ref("z-ai/glm-5.2", thinking="high"),
         ),
         "g13_five_proposers": _ensemble_profile(
-            [
-                *list(g8_proposers),
-                _ensemble_ref("moonshotai/kimi-k2.7-code", thinking="high"),
-            ],
+            list(g13_proposers),
             _ensemble_ref("z-ai/glm-5.2", thinking="high"),
         ),
         "g14_k2_replace_qwen": _ensemble_profile(
@@ -461,6 +463,69 @@ def _default_llm_ensemble_profiles() -> dict[str, dict[str, Any]]:
             list(g8_proposers),
             _ensemble_ref("z-ai/glm-5.2", thinking="high"),
             output_strategy="select_best_candidate",
+        ),
+        "g19_g12_top3_prefilter": _ensemble_profile(
+            list(g12_proposers),
+            _ensemble_ref("z-ai/glm-5.2", thinking="high"),
+            candidate_scorer=_ensemble_ref("google/gemini-3-flash-preview", thinking="high"),
+            candidate_prefilter_top_k=3,
+        ),
+        "g20_g12_top2_prefilter": _ensemble_profile(
+            list(g12_proposers),
+            _ensemble_ref("z-ai/glm-5.2", thinking="high"),
+            candidate_scorer=_ensemble_ref("google/gemini-3-flash-preview", thinking="high"),
+            candidate_prefilter_top_k=2,
+        ),
+        "g21_g13_top3_prefilter": _ensemble_profile(
+            list(g13_proposers),
+            _ensemble_ref("z-ai/glm-5.2", thinking="high"),
+            candidate_scorer=_ensemble_ref("google/gemini-3-flash-preview", thinking="high"),
+            candidate_prefilter_top_k=3,
+        ),
+        "g22_g12_glm_top3_prefilter": _ensemble_profile(
+            list(g12_proposers),
+            _ensemble_ref("z-ai/glm-5.2", thinking="high"),
+            candidate_scorer=_ensemble_ref("z-ai/glm-5.2", thinking="high"),
+            candidate_prefilter_top_k=3,
+        ),
+        "g23_g12_plus_gemini_sampled_top3_prefilter": _ensemble_profile(
+            [
+                _ensemble_ref(
+                    "deepseek/deepseek-v4-pro",
+                    thinking="high",
+                    temperature=0.0,
+                ),
+                _ensemble_ref(
+                    "z-ai/glm-5.2",
+                    thinking="high",
+                    temperature=0.0,
+                ),
+                _ensemble_ref(
+                    "moonshotai/kimi-k2.7-code",
+                    thinking="high",
+                    temperature=0.0,
+                ),
+                _ensemble_ref(
+                    "qwen/qwen3.7-plus",
+                    thinking="high",
+                    temperature=0.3,
+                    k=2,
+                ),
+                _ensemble_ref(
+                    "google/gemini-3-flash-preview",
+                    thinking="high",
+                    temperature=0.3,
+                    k=2,
+                ),
+            ],
+            _ensemble_ref("z-ai/glm-5.2", thinking="high", temperature=0.0),
+            candidate_scorer=_ensemble_ref(
+                "google/gemini-3-flash-preview",
+                thinking="high",
+                temperature=0.0,
+            ),
+            candidate_prefilter_top_k=3,
+            preserve_member_temperature=True,
         ),
     }
 
