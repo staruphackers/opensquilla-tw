@@ -77,7 +77,7 @@ def test_purge_state_removes_state_keeps_config(tmp_path: Path) -> None:
     inv = _inventory(tmp_path / "home")
     plan = build_plan(inv, PlanOptions(purge_state=True))
     removed = [p for a in plan.actions if a.kind == "remove-path" for p in a.paths]
-    assert any(p.endswith("/state") for p in removed)
+    assert any(Path(p).name == "state" for p in removed)
     assert all("config.toml" not in p and ".env" not in p for p in removed)
     assert any("config.toml" in k for k in plan.keep)
 
@@ -88,7 +88,7 @@ def test_purge_config_removes_secrets_keeps_state(tmp_path: Path) -> None:
     removed = [p for a in plan.actions if a.kind == "remove-path" for p in a.paths]
     assert any(p.endswith("config.toml") for p in removed)
     assert any(p.endswith(".env") for p in removed)
-    assert all(not p.endswith("/state") for p in removed)
+    assert all(Path(p).name != "state" for p in removed)
 
 
 def test_purge_all_schedules_whole_home_removal(monkeypatch, tmp_path: Path) -> None:

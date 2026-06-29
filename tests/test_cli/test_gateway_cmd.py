@@ -957,6 +957,7 @@ def test_terminate_pid_windows_falls_back_to_terminate(monkeypatch) -> None:
     assert killed == [(4321, signal.SIGTERM)]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="SIGKILL is POSIX-only")
 def test_terminate_pid_posix_uses_sigterm_then_sigkill(monkeypatch) -> None:
     monkeypatch.setattr(gateway_lifecycle, "_running_on_windows", lambda: False)
     monkeypatch.setattr(Manager, "_pid_running", lambda self, pid: True)

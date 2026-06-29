@@ -153,7 +153,6 @@ def test_detect_services_reads_unit_files(monkeypatch, tmp_path: Path) -> None:
     unit = tmp_path / ".config/systemd/user/opensquilla.service"
     unit.parent.mkdir(parents=True)
     unit.write_text("[Unit]")
-    monkeypatch.setattr(inventory.os, "name", "posix")
 
     services = inventory.detect_services()
     platforms = {s.platform for s in services}
