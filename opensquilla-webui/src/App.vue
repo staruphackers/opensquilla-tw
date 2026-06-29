@@ -252,7 +252,7 @@
           <Icon name="panel-left-open" :size="16" />
         </button>
       </div>
-      <div class="topbar-right">
+      <div class="topbar-right" ref="topbarRightRef">
         <button
           v-if="appStore.approvalCount > 0"
           class="approval-inline"
@@ -456,6 +456,24 @@ const themeIconName = computed(() => {
 
 const themeMenuOpen = ref(false)
 const themeButtonRef = ref<HTMLButtonElement | null>(null)
+
+// The floating top-bar right cluster (connection pill + language switcher +
+// theme button) is position:fixed and overlays the chat header band. Its width
+// is dynamic — the pill text changes with connection state and the language
+// label changes with locale — so the chat header reserves space from this
+// MEASURED width (published to a CSS var) instead of a hardcoded number that
+// silently drifts when a control is added or the locale changes.
+const topbarRightRef = ref<HTMLElement | null>(null)
+let topbarRightObserver: ResizeObserver | null = null
+
+function publishTopbarRightWidth() {
+  const el = topbarRightRef.value
+  if (!el) return
+  document.documentElement.style.setProperty(
+    '--topbar-right-w',
+    `${Math.ceil(el.getBoundingClientRect().width)}px`,
+  )
+}
 const themeOptions = [
   { mode: 'light', label: 'Light', icon: 'sun' },
   { mode: 'dark', label: 'Dark', icon: 'moon' },
@@ -1078,6 +1096,14 @@ onMounted(() => {
   // Seed now in case the socket is already connected (the `_state` listener
   // covers later reconnects); recovers a request pending before mount.
   if (rpcStore.isConnected) void seedPendingApprovals()
+  // Track the floating top-bar cluster's real width so the chat header reserves
+  // exactly that (locale/state-proof). The CSS var() fallback keeps the prior
+  // fixed reservation when ResizeObserver is unavailable (SSR / old engines).
+  if (typeof ResizeObserver !== 'undefined' && topbarRightRef.value) {
+    topbarRightObserver = new ResizeObserver(() => publishTopbarRightWidth())
+    topbarRightObserver.observe(topbarRightRef.value)
+  }
+  publishTopbarRightWidth()
 })
 
 onUnmounted(() => {
@@ -1092,6 +1118,9 @@ onUnmounted(() => {
   document.title = BASE_TITLE
   window.removeEventListener('resize', syncMobileSidebar)
   window.visualViewport?.removeEventListener('resize', syncMobileKeyboard)
+  topbarRightObserver?.disconnect()
+  topbarRightObserver = null
+  document.documentElement.style.removeProperty('--topbar-right-w')
 })
 
 </script>

@@ -48,12 +48,15 @@
   align-items: center;
   gap: 0.5rem;
   flex-shrink: 0;
-  /* The fixed topbar's right cluster (connection pill, theme) floats over
-     this band at every width and intercepts pointer events; reserve its full
-     width so the header action buttons stay clickable and never sit under the
-     pill — sized for the pill's widest state (DISCONNECTED) plus the theme
-     button and inset, matching the narrow-screen reservation below. */
-  margin-right: 204px;
+  /* The fixed topbar's right cluster (connection pill, language switcher, theme)
+     floats over this band and intercepts pointer events; reserve its MEASURED
+     width (published by App.vue as --topbar-right-w, a ResizeObserver on the
+     cluster) plus a small inset so the header action buttons stay clickable and
+     never sit under the cluster. The width is dynamic — pill state and the
+     locale-named language label both change it — so a hardcoded reservation
+     drifts; the var() fallback reproduces the previous fixed 204px when the
+     variable is unset (SSR / no ResizeObserver / pre-measure frame). */
+  margin-right: calc(var(--topbar-right-w, 188px) + 16px);
 }
 
 .chat-share-banner {
@@ -1093,11 +1096,11 @@
 
   .chat-header {
     /* Keep the header actions clear of the floating topbar cluster (conn pill
-       + theme menu) that overlays this band's right edge on narrow screens.
-       The cluster is right-anchored and intrudes ~194px at its widest — 62px
-       of fixed chrome right of the pill plus the pill in its longest state
-       (DISCONNECTED, ~132px) — so reserve that plus a small margin. */
-    padding: 0.5rem 204px 0.5rem 0.75rem;
+       + language switcher + theme) that overlays this band's right edge on
+       narrow screens. Reserve its MEASURED width (--topbar-right-w, published by
+       App.vue) plus a small inset; the var() fallback reproduces the previous
+       fixed reservation when the variable is unset. */
+    padding: 0.5rem calc(var(--topbar-right-w, 188px) + 16px) 0.5rem 0.75rem;
   }
 
   .chat-header-right {
