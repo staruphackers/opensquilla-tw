@@ -1,11 +1,12 @@
 import { app, BrowserWindow, Menu, ipcMain, nativeTheme, safeStorage, shell } from 'electron'
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { createWriteStream, mkdirSync } from 'node:fs'
+import { createWriteStream, existsSync, mkdirSync } from 'node:fs'
 import { access, constants, readFile, readdir, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import net from 'node:net'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { secretStorageBackendForPolicy, shouldUseChromiumMockKeychainForPolicy } from './secret-storage-policy.js'
 
 interface GatewayState {
   url: string
@@ -128,6 +129,8 @@ let isQuitting = false
 let gatewayStartPromise: Promise<GatewayState> | null = null
 let resolveOnboarding: ((credential: DesktopConnection) => void) | null = null
 let rejectOnboarding: ((error: Error) => void) | null = null
+let secretStorageBackendCache: SecretEncryption | null = null
+let macCodeSignatureDiagnosticCache: string | null = null
 let bootStatus: BootStatus = {
   label: 'Preparing desktop profile',
   at: new Date().toISOString(),
@@ -537,23 +540,65 @@ function routerConfigTomlLines(credential: DesktopConnection): string[] {
   ]
 }
 
-function encryptSecret(secret: string): { value: string; encryption: SecretEncryption } {
-  if (safeStorage.isEncryptionAvailable()) {
-    return {
-      value: safeStorage.encryptString(secret).toString('base64'),
-      encryption: 'safeStorage',
-    }
-  }
+function plainSecret(secret: string): { value: string; encryption: SecretEncryption } {
   return {
     value: Buffer.from(secret, 'utf8').toString('base64'),
     encryption: 'plain',
   }
 }
 
+function macCodeSignatureDiagnostic(): string {
+  if (macCodeSignatureDiagnosticCache !== null) return macCodeSignatureDiagnosticCache
+  if (process.platform !== 'darwin' || !app.isPackaged) return ''
+  const result = spawnSync('/usr/bin/codesign', ['-dv', '--verbose=4', process.execPath], { encoding: 'utf8' })
+  macCodeSignatureDiagnosticCache = `${result.stdout || ''}\n${result.stderr || ''}`
+  return macCodeSignatureDiagnosticCache
+}
+
+function configureChromiumKeychainPolicy(): void {
+  if (shouldUseChromiumMockKeychainForPolicy({
+    envMode: process.env.OPENSQUILLA_DESKTOP_SECRET_STORAGE,
+    platform: process.platform,
+    appPackaged: app.isPackaged,
+    codesignDiagnostic: macCodeSignatureDiagnostic(),
+  })) {
+    app.commandLine.appendSwitch('use-mock-keychain')
+  }
+}
+
+function desktopSecretStorageBackend(): SecretEncryption {
+  if (secretStorageBackendCache) return secretStorageBackendCache
+  const selected = secretStorageBackendForPolicy({
+    envMode: process.env.OPENSQUILLA_DESKTOP_SECRET_STORAGE,
+    platform: process.platform,
+    appPackaged: app.isPackaged,
+    codesignDiagnostic: macCodeSignatureDiagnostic(),
+  })
+  secretStorageBackendCache = selected === 'safeStorage' && safeStorage.isEncryptionAvailable() ? 'safeStorage' : 'plain'
+  return secretStorageBackendCache
+}
+
+function encryptSecret(secret: string): { value: string; encryption: SecretEncryption } {
+  if (desktopSecretStorageBackend() === 'safeStorage') {
+    try {
+      return {
+        value: safeStorage.encryptString(secret).toString('base64'),
+        encryption: 'safeStorage',
+      }
+    } catch {
+      return plainSecret(secret)
+    }
+  }
+  return plainSecret(secret)
+}
+
 function decryptSecret(encryptedValue: string | undefined, encryption: SecretEncryption): string {
   if (!encryptedValue) return ''
   const payload = Buffer.from(encryptedValue, 'base64')
   if (encryption === 'safeStorage') {
+    if (desktopSecretStorageBackend() !== 'safeStorage') {
+      throw new Error('Saved desktop credential requires macOS Keychain, but this local build uses plain credential storage.')
+    }
     return safeStorage.decryptString(payload)
   }
   return payload.toString('utf8')
@@ -639,7 +684,7 @@ async function saveDesktopCredential(payload: OnboardingPayload): Promise<Deskto
   const searchApiKeySecret = resolvedSearchApiKey ? encryptSecret(resolvedSearchApiKey) : null
   const encryptedApiKey = apiKeySecret?.value || ''
   const encryptedSearchApiKey = searchApiKeySecret?.value || ''
-  const encryption = apiKeySecret?.encryption || searchApiKeySecret?.encryption || (safeStorage.isEncryptionAvailable() ? 'safeStorage' : 'plain')
+  const encryption = apiKeySecret?.encryption || searchApiKeySecret?.encryption || 'plain'
 
   if (defaults.requiresApiKey && !encryptedApiKey) throw new Error('API key is required.')
   if (!routerModel && routerMode !== 'disabled') throw new Error('Router tiers require a default model.')
@@ -2098,6 +2143,51 @@ function packagedRuntimeRoot(): string {
   return join(packageRoot, 'runtime')
 }
 
+function pathDelimiter(): string {
+  return process.platform === 'win32' ? ';' : ':'
+}
+
+function splitPathValue(value?: string): string[] {
+  return (value || '').split(pathDelimiter()).filter(Boolean)
+}
+
+function desktopNodeBinCandidates(): string[] {
+  const candidates = process.platform === 'win32'
+    ? [
+        join(packagedRuntimeRoot(), 'node'),
+        process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'Programs', 'nodejs') : '',
+        process.env.ProgramFiles ? join(process.env.ProgramFiles, 'nodejs') : '',
+        process.env['ProgramFiles(x86)'] ? join(process.env['ProgramFiles(x86)'], 'nodejs') : '',
+      ]
+    : [
+        join(packagedRuntimeRoot(), 'node', 'bin'),
+        join(app.getPath('home'), '.local', 'bin'),
+        join(app.getPath('home'), '.npm-global', 'bin'),
+        '/opt/homebrew/bin',
+        '/usr/local/bin',
+      ]
+  const seen = new Set<string>()
+  return candidates.filter((candidate) => {
+    if (!candidate || seen.has(candidate) || !existsSync(candidate)) return false
+    seen.add(candidate)
+    return true
+  })
+}
+
+function desktopChildPath(nodeBinCandidates = desktopNodeBinCandidates()): string {
+  const currentPath = process.env.PATH || process.env.Path || ''
+  const currentParts = splitPathValue(currentPath)
+  const systemParts = process.platform === 'win32' ? [] : ['/usr/bin', '/bin', '/usr/sbin', '/sbin']
+  const orderedParts = [...nodeBinCandidates, ...currentParts, ...systemParts]
+  const seen = new Set<string>()
+  const merged = orderedParts.filter((part) => {
+    if (!part || seen.has(part)) return false
+    seen.add(part)
+    return true
+  })
+  return merged.join(pathDelimiter())
+}
+
 async function resolveGatewayRuntime(): Promise<RuntimeLaunch> {
   const binaryName = process.platform === 'win32' ? 'opensquilla-gateway.exe' : 'opensquilla-gateway'
   const runtimeRoot = join(packagedRuntimeRoot(), 'gateway')
@@ -2266,21 +2356,28 @@ async function startGateway(): Promise<GatewayState> {
   gatewayState.status = 'starting'
   gatewayState.logPath = logPath
 
+  const nodeBinCandidates = desktopNodeBinCandidates()
+  const childPath = desktopChildPath(nodeBinCandidates)
+  const childEnv = {
+    ...process.env,
+    PATH: childPath,
+    ...(process.platform === 'win32' ? { Path: childPath } : {}),
+    [connection.apiKeyEnv]: apiKey,
+    ...(connection.searchApiKeyEnv && searchApiKey ? { [connection.searchApiKeyEnv]: searchApiKey } : {}),
+    OPENSQUILLA_DESKTOP: '1',
+    OPENSQUILLA_INSTALL_METHOD: 'desktop',
+    OPENSQUILLA_GATEWAY_CONFIG_PATH: desktopConfigPath(),
+    OPENSQUILLA_NODE_BIN_DIR: nodeBinCandidates.join(pathDelimiter()),
+    OPENSQUILLA_STATE_DIR: desktopStateDir(),
+    PYTHONUNBUFFERED: '1',
+  }
+
   const child = spawn(
     runtime.command,
     [...runtime.args, '--port', String(port), '--bind', '127.0.0.1', '--config', desktopConfigPath()],
     {
       cwd: runtime.cwd,
-      env: {
-        ...process.env,
-        [connection.apiKeyEnv]: apiKey,
-        ...(connection.searchApiKeyEnv && searchApiKey ? { [connection.searchApiKeyEnv]: searchApiKey } : {}),
-        OPENSQUILLA_DESKTOP: '1',
-        OPENSQUILLA_INSTALL_METHOD: 'desktop',
-        OPENSQUILLA_GATEWAY_CONFIG_PATH: desktopConfigPath(),
-        OPENSQUILLA_STATE_DIR: desktopStateDir(),
-        PYTHONUNBUFFERED: '1',
-      },
+      env: childEnv,
     }
   )
   gatewayProcess = child
@@ -2516,6 +2613,8 @@ app.on('window-all-closed', () => {
 app.on('activate', () => {
   void openOrResumeDesktopApp()
 })
+
+configureChromiumKeychainPolicy()
 
 const gotSingleInstanceLock = app.requestSingleInstanceLock()
 
