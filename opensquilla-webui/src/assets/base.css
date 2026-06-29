@@ -274,11 +274,12 @@ html, body {
   transition: background-color 200ms ease, color 150ms ease;
 }
 
-/* Chinese needs a touch more leading than the Latin 1.5. Driven by <html lang>,
-   which setLocale keeps in sync with the active locale. */
-:lang(zh) {
-  line-height: 1.7;
-}
+/* NOTE: deliberately NO locale-gated layout rules (e.g. `:lang(zh) { line-height }`).
+   A global line-height bump keyed on <html lang> reflows content-sized flex bands
+   and shifts centered modals on a language switch — i.e. layout that changes purely
+   from changing language. CJK reads fine at the base 1.5; if more leading is wanted
+   for dense CJK prose, scope it to specific reading containers (chat markdown), never
+   globally. The CJK font fallback in the stacks above is metric-neutral and stays. */
 
 body::before {
   content: "";
