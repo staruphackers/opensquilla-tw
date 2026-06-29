@@ -597,12 +597,17 @@ def test_windows_high_risk_job_uses_subset_until_full_ci() -> None:
 
 def test_ubuntu_quality_only_fetches_lfs_for_full_ci() -> None:
     data = _workflow("ci.yml")
-    checkout = data["jobs"]["ubuntu-quality"]["steps"][0]
+    ubuntu_steps = data["jobs"]["ubuntu-quality"]["steps"]
+    checkout = ubuntu_steps[0]
+    test_step = next(step for step in ubuntu_steps if step.get("name") == "Test")
 
     assert checkout["uses"] == "actions/checkout@v4"
     assert checkout["with"]["lfs"] == (
         "${{ needs.classify-changes.outputs.full_required == 'true' }}"
     )
+    assert "uv run pytest tests -q" in test_step["run"]
+    assert "tests/test_artifacts.py" not in test_step["run"]
+    assert "--ignore=tests/test_ci/test_router_artifact_manifest.py" in test_step["run"]
 
 
 def test_manual_workflows_reference_existing_test_files() -> None:
