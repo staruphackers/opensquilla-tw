@@ -251,7 +251,7 @@ async function loadData() {
     // Initialize form values from config
     providerForm.initFromConfig(config.value.llm || {}, status.value, runtimeProviders.value)
     behaviorForm.initFromConfig(config.value)
-    routerForm.initFromConfig(config.value.squilla_router || {}, currentRouterProfile.value?.tiers || {})
+    routerForm.initFromConfig(config.value.squilla_router || {}, currentRouterProfile.value?.tiers || {}, currentProvider.value)
     capabilitiesForm.initSearchFromConfig(config.value, searchProviders.value)
     capabilitiesForm.initMemoryFromConfig(config.value)
     capabilitiesForm.initImageFromConfig(config.value, status.value, imageProviders.value)
@@ -420,9 +420,11 @@ const behaviorPanel = behaviorForm.createPanel({
   statusText: behaviorStatusText,
 })
 
+const isOpenrouterProvider = computed(() => currentProvider.value.toLowerCase() === 'openrouter')
 const routerPanel = routerForm.createPanel({
   routerSummary,
   hasSavedProvider,
+  isOpenrouter: isOpenrouterProvider,
   textTiers: TEXT_TIERS,
   tierLabel,
 })

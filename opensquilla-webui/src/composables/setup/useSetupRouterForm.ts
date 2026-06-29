@@ -62,12 +62,14 @@ interface RouterConfig {
   enabled?: boolean
   default_tier?: string
   visual_mode?: string
+  tier_profile?: string | null
   tiers?: Record<string, TierConfig>
 }
 
 interface RouterPanelContext {
   routerSummary: ComputedRef<string>
   hasSavedProvider: ComputedRef<boolean>
+  isOpenrouter: ComputedRef<boolean>
   textTiers: readonly string[]
   tierLabel: (tier: string) => string
 }
@@ -91,8 +93,18 @@ export function useSetupRouterForm() {
   function initFromConfig(
     router: RouterConfig,
     profileTiers: Record<string, TierConfig>,
+    provider = '',
   ) {
-    routerMode.value = router.enabled === false ? 'disabled' : 'recommended'
+    // openrouter-mix is the only enabled router mode whose tier_profile is null,
+    // and it is only valid for the openrouter LLM provider; recommended carries
+    // tier_profile = the provider. Anything else enabled is recommended.
+    if (router.enabled === false) {
+      routerMode.value = 'disabled'
+    } else if (provider.toLowerCase() === 'openrouter' && !router.tier_profile) {
+      routerMode.value = 'openrouter-mix'
+    } else {
+      routerMode.value = 'recommended'
+    }
     routerDefaultTier.value = normalizeRouterTier(router.default_tier || '') || DEFAULT_TEXT_TIER
     routerVisualMode.value = normalizeRouterVisualMode(router.visual_mode)
 
@@ -164,6 +176,7 @@ export function useSetupRouterForm() {
       routerVisualModeDirty: visualModeDirty.value,
       routerVisualModeOptions: routerVisualModeOptions(),
       hasSavedProvider: context.hasSavedProvider.value,
+      canUseOpenrouterMix: context.isOpenrouter.value,
       textTiers: context.textTiers,
       tierRows: tierRows(context.textTiers),
       tierLabel: context.tierLabel,

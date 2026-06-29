@@ -20,6 +20,7 @@ interface RouterPanelContract {
   routerVisualModeDirty: boolean
   routerVisualModeOptions: readonly { value: string; label: string }[]
   hasSavedProvider: boolean
+  canUseOpenrouterMix: boolean
   textTiers: readonly string[]
   tierRows: readonly TierRow[]
   tierLabel: (tier: string) => string
@@ -49,6 +50,7 @@ const emit = defineEmits<{
       <div class="control-row__control">
         <select class="control-input" :value="panel.routerMode" name="setup_router_mode" :disabled="!panel.hasSavedProvider" @change="emit('updateRouterMode', ($event.target as HTMLSelectElement).value)">
           <option value="recommended">SquillaRouter</option>
+          <option v-if="panel.canUseOpenrouterMix || panel.routerMode === 'openrouter-mix'" value="openrouter-mix">{{ t('setup.router.modeOpenrouterMix') }}</option>
           <option value="disabled">{{ t('setup.router.modeDisabled') }}</option>
         </select>
       </div>

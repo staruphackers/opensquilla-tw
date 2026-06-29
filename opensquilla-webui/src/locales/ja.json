@@ -193,7 +193,8 @@
       "visualMode": {
         "real_candidates": "実際のルーティング候補",
         "legacy_grid": "3 ティアのビジュアルパネル"
-      }
+      },
+      "modeOpenrouterMix": "OpenRouter モデルミックス"
     },
     "channels": {
       "title": "チャンネル",

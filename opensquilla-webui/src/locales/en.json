@@ -193,7 +193,8 @@
       "visualMode": {
         "real_candidates": "Real routing candidates",
         "legacy_grid": "Three-tier visual panel"
-      }
+      },
+      "modeOpenrouterMix": "OpenRouter model mix"
     },
     "channels": {
       "title": "Channels",

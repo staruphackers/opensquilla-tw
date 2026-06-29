@@ -193,7 +193,8 @@
       "visualMode": {
         "real_candidates": "Candidatos de enrutamiento reales",
         "legacy_grid": "Panel visual de tres niveles"
-      }
+      },
+      "modeOpenrouterMix": "Mezcla de modelos OpenRouter"
     },
     "channels": {
       "title": "Canales",

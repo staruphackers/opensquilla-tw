@@ -193,7 +193,8 @@
       "visualMode": {
         "real_candidates": "真实路由候选",
         "legacy_grid": "三层可视化面板"
-      }
+      },
+      "modeOpenrouterMix": "OpenRouter 模型混合"
     },
     "channels": {
       "title": "频道",
