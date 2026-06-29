@@ -115,18 +115,8 @@ DEFAULT_OPENROUTER_WEB_SEARCH_CONTEXT_SIZE = "medium"
 DEFAULT_OPENROUTER_WEB_FETCH_ENGINE = "openrouter"
 DEFAULT_OPENROUTER_WEB_FETCH_MAX_USES = 5
 DEFAULT_OPENROUTER_WEB_FETCH_MAX_CONTENT_TOKENS = 50_000
-GENERATION_THINKING_PROFILE = "profile"
-DEFAULT_GENERATION_THINKING = "high"
+DEFAULT_GENERATION_THINKING = "xhigh"
 DEFAULT_GENERATION_TEMPERATURE = 0.0
-SUPPORTED_GENERATION_THINKING = (
-    GENERATION_THINKING_PROFILE,
-    "off",
-    "minimal",
-    "low",
-    "medium",
-    "high",
-    "xhigh",
-)
 DEFAULT_CONTAMINATION_BLOCKED_DOMAINS = (
     "hf.co",
     "huggingface.co",
@@ -904,41 +894,9 @@ def build_benchmark_tool_context(
     )
 
 
-def normalize_generation_thinking(raw: Any) -> str:
-    value = str(raw or DEFAULT_GENERATION_THINKING).strip().lower()
-    if value not in SUPPORTED_GENERATION_THINKING:
-        allowed = ", ".join(SUPPORTED_GENERATION_THINKING)
-        raise ValueError(
-            f"unknown generation thinking policy {value!r}; expected one of {allowed}"
-        )
-    return value
-
-
 def generation_thinking_policy(args: argparse.Namespace | None = None) -> dict[str, Any]:
-    mode = normalize_generation_thinking(
-        getattr(args, "generation_thinking", DEFAULT_GENERATION_THINKING)
-    )
-    if mode == GENERATION_THINKING_PROFILE:
-        return {
-            "generation_thinking": mode,
-            "temperature": DEFAULT_GENERATION_TEMPERATURE,
-            "thinking_enabled": "profile_default",
-            "thinking_level": None,
-            "thinking_budget_tokens": None,
-            "applies_to": (
-                "profile members keep configured thinking; single baselines use "
-                "ChatConfig defaults"
-            ),
-        }
-    if mode == "off":
-        return {
-            "generation_thinking": mode,
-            "temperature": DEFAULT_GENERATION_TEMPERATURE,
-            "thinking_enabled": False,
-            "thinking_level": ThinkingLevel.OFF.value,
-            "thinking_budget_tokens": 0,
-            "applies_to": "single baselines and ensemble members",
-        }
+    _ = args
+    mode = DEFAULT_GENERATION_THINKING
     level = ThinkingLevel(mode)
     return {
         "generation_thinking": mode,
@@ -952,15 +910,6 @@ def generation_thinking_policy(args: argparse.Namespace | None = None) -> dict[s
 
 def generation_chat_config(policy: dict[str, Any]) -> ChatConfig:
     mode = str(policy.get("generation_thinking") or DEFAULT_GENERATION_THINKING)
-    if mode == GENERATION_THINKING_PROFILE:
-        return ChatConfig(temperature=DEFAULT_GENERATION_TEMPERATURE)
-    if mode == "off":
-        return ChatConfig(
-            temperature=DEFAULT_GENERATION_TEMPERATURE,
-            thinking=False,
-            thinking_level=ThinkingLevel.OFF,
-            thinking_budget_tokens=0,
-        )
     level = ThinkingLevel(mode)
     return ChatConfig(
         temperature=DEFAULT_GENERATION_TEMPERATURE,
@@ -973,8 +922,7 @@ def generation_chat_config(policy: dict[str, Any]) -> ChatConfig:
 def apply_generation_policy_to_profile(profile: Any, policy: dict[str, Any]) -> Any:
     mode = str(policy.get("generation_thinking") or DEFAULT_GENERATION_THINKING)
     member_update: dict[str, Any] = {"temperature": DEFAULT_GENERATION_TEMPERATURE}
-    if mode != GENERATION_THINKING_PROFILE:
-        member_update["thinking"] = "off" if mode == "off" else mode
+    member_update["thinking"] = mode
 
     preserve_temperature = bool(getattr(profile, "preserve_member_temperature", False))
 
@@ -999,17 +947,9 @@ def compact_chat_config(
     config: ChatConfig | None,
     policy: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    mode = str((policy or {}).get("generation_thinking") or "")
-    if config is None or mode == GENERATION_THINKING_PROFILE:
-        return {
-            "thinking": "profile_default",
-            "thinking_level": None,
-            "thinking_budget_tokens": None,
-            "temperature": (
-                config.temperature if config is not None else DEFAULT_GENERATION_TEMPERATURE
-            ),
-            "max_tokens": config.max_tokens if config is not None else None,
-        }
+    _ = policy
+    if config is None:
+        config = generation_chat_config(generation_thinking_policy())
     level = config.thinking_level
     return {
         "thinking": config.thinking,
@@ -3229,7 +3169,6 @@ def manifest_args(args: argparse.Namespace) -> dict[str, Any]:
         "judge_candidates",
         "generation_max_attempts",
         "generation_retry_backoff",
-        "generation_thinking",
         "tool_mode",
         "contamination_blocked_domains",
         "openrouter_web_search_engine",
@@ -3333,7 +3272,7 @@ def write_manifest(
     command: dict[str, Any] | None = None,
 ) -> None:
     policy = tool_policy or benchmark_tool_policy(args)
-    generation_policy = generation_thinking_policy(args)
+    generation_policy = generation_thinking_policy()
     payload: dict[str, Any] = {
         "benchmark": "DRACO",
         "runner": "scripts/run_draco_ensemble.py",
@@ -3384,9 +3323,6 @@ async def amain(args: argparse.Namespace) -> int:
     except (TypeError, ValueError) as exc:
         raise ValueError("agent_max_iterations must be an integer") from exc
     args.agent_max_iterations = max(0, args.agent_max_iterations)
-    args.generation_thinking = normalize_generation_thinking(
-        getattr(args, "generation_thinking", DEFAULT_GENERATION_THINKING)
-    )
     args.generation_max_attempts = bounded_generation_attempts(
         getattr(args, "generation_max_attempts", GENERATION_MAX_ATTEMPTS)
     )
@@ -3407,7 +3343,7 @@ async def amain(args: argparse.Namespace) -> int:
             "--tool-mode=local_web_tools, or use --runner-mode=provider for "
             "OpenRouter server-side tools."
         )
-    generation_policy = generation_thinking_policy(args)
+    generation_policy = generation_thinking_policy()
     config = GatewayConfig.load(args.config)
     sandbox_runtime = configure_benchmark_sandbox_runtime(config, tool_policy)
     search_runtime = configure_local_web_search_runtime(config, tool_policy)
@@ -3602,16 +3538,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_GENERATION_RETRY_BACKOFF_SECONDS,
         help="Initial seconds to wait before retrying answer generation; doubles each retry.",
-    )
-    parser.add_argument(
-        "--generation-thinking",
-        choices=SUPPORTED_GENERATION_THINKING,
-        default=DEFAULT_GENERATION_THINKING,
-        help=(
-            "Thinking policy for answer generation. Use 'profile' to preserve "
-            "configured profile defaults; otherwise the chosen level is applied "
-            "to both single baselines and ensemble members."
-        ),
     )
     parser.add_argument(
         "--tool-mode",

@@ -320,7 +320,7 @@ async def test_draco_runner_dry_run_writes_jsonl_and_summary(tmp_path: Path) -> 
     assert g3["total_tool_call_count"] == 0
     assert g3["llm_request_count"] == 3
     assert g3["trajectory_steps"] == 3
-    assert g3["generation_policy"]["generation_thinking"] == "high"
+    assert g3["generation_policy"]["generation_thinking"] == "xhigh"
     assert g3["generation_config"]["thinking"] is True
     assert g3["generation_config"]["temperature"] == 0.0
     assert g3["generation_attempt_count"] == 1
@@ -346,7 +346,7 @@ async def test_draco_runner_dry_run_writes_jsonl_and_summary(tmp_path: Path) -> 
     ]
     assert len(trace_rows) == len(rows)
     assert trace_rows[0]["run_trace"]["events"]
-    assert trace_rows[0]["generation_policy"]["generation_thinking"] == "high"
+    assert trace_rows[0]["generation_policy"]["generation_thinking"] == "xhigh"
     assert trace_rows[0]["generation_attempt_count"] == 1
     assert trace_rows[0]["generation_retry_backoff_s"] == 0.0
     assert "llm_request_count" in trace_rows[0]
@@ -364,7 +364,7 @@ async def test_draco_runner_dry_run_writes_jsonl_and_summary(tmp_path: Path) -> 
     assert manifest["tool_policy"]["tool_mode"] == "provider_only"
     assert manifest["runner_mode"] == "provider"
     assert manifest["agent_max_iterations"] == 12
-    assert manifest["generation_policy"]["generation_thinking"] == "high"
+    assert manifest["generation_policy"]["generation_thinking"] == "xhigh"
     assert "huggingface.co" in manifest["tool_policy"]["contamination_blocked_domains"]
 
 
@@ -390,7 +390,7 @@ def test_draco_runner_explicit_groups_preserve_runtime_defaults() -> None:
     assert args.judge_max_attempts == 3
     assert args.generation_max_attempts == 3
     assert args.generation_retry_backoff == 2.0
-    assert args.generation_thinking == "high"
+    assert not hasattr(args, "generation_thinking")
     assert args.runner_mode == "agent_loop"
     assert args.agent_max_iterations == 12
     assert args.tool_mode == "provider_only"
@@ -399,6 +399,18 @@ def test_draco_runner_explicit_groups_preserve_runtime_defaults() -> None:
     assert "hf.co" in parse_domain_list(args.contamination_blocked_domains)
     assert "huggingface.co" in parse_domain_list(args.contamination_blocked_domains)
     assert "arxiv.org" not in parse_domain_list(args.contamination_blocked_domains)
+
+
+def test_draco_runner_generation_thinking_flag_is_removed() -> None:
+    with pytest.raises(SystemExit):
+        build_parser().parse_args([
+            "--input",
+            "draco.jsonl",
+            "--groups",
+            "G1",
+            "--generation-thinking",
+            "xhigh",
+        ])
 
 
 def test_draco_runner_existing_experiment_group_specs_are_stable() -> None:
@@ -913,7 +925,7 @@ def test_draco_runner_profile_provider_enables_proposer_tools_when_requested() -
     assert provider.proposer_tools is True
 
 
-def test_draco_runner_generation_thinking_policy_overrides_profile_members() -> None:
+def test_draco_runner_generation_thinking_policy_forces_xhigh_members() -> None:
     cfg = GatewayConfig()
     inherited = ProviderConfig(
         provider="openrouter",
@@ -921,7 +933,7 @@ def test_draco_runner_generation_thinking_policy_overrides_profile_members() -> 
         api_key="sk-test",
         base_url="https://openrouter.ai/api",
     )
-    policy = generation_thinking_policy(Namespace(generation_thinking="off"))
+    policy = generation_thinking_policy()
 
     provider = build_profile_provider(
         config=cfg,
@@ -936,8 +948,8 @@ def test_draco_runner_generation_thinking_policy_overrides_profile_members() -> 
     assert provider.shuffle_candidates is False
     assert provider.proposer_timeout_seconds == 120.0
     assert provider.aggregator_timeout_seconds == 300.0
-    assert [member.thinking for member in provider.proposers] == ["off", "off", "off"]
-    assert provider.aggregator.thinking == "off"
+    assert [member.thinking for member in provider.proposers] == ["xhigh"] * 3
+    assert provider.aggregator.thinking == "xhigh"
 
 
 def test_draco_runner_profile_timeouts_expand_with_requested_timeout() -> None:
@@ -1007,7 +1019,7 @@ def test_draco_runner_generation_policy_overrides_profile_member_temperature() -
             "aggregator": profile.aggregator.model_copy(update={"temperature": 0.7}),
         }
     )
-    policy = generation_thinking_policy(Namespace(generation_thinking="profile"))
+    policy = generation_thinking_policy()
 
     provider = build_profile_provider(
         config=cfg,
@@ -1037,7 +1049,7 @@ def test_draco_runner_g15_profile_configures_topk_prefilter() -> None:
         group="G15",
         profile="g15_g8_top3_prefilter",
         dry_run=False,
-        generation_policy=generation_thinking_policy(Namespace(generation_thinking="high")),
+        generation_policy=generation_thinking_policy(),
     )
 
     assert provider.candidate_prefilter_top_k == 3
@@ -1047,7 +1059,7 @@ def test_draco_runner_g15_profile_configures_topk_prefilter() -> None:
         == "google/gemini-3-flash-preview"
     )
     assert provider.candidate_scorer.temperature == 0.0
-    assert provider.candidate_scorer.thinking == "high"
+    assert provider.candidate_scorer.thinking == "xhigh"
 
 
 def test_draco_runner_g16_preserves_profile_sampling_temperature() -> None:
@@ -1065,7 +1077,7 @@ def test_draco_runner_g16_preserves_profile_sampling_temperature() -> None:
         group="G16",
         profile="g16_sampled_cheap_proposers",
         dry_run=False,
-        generation_policy=generation_thinking_policy(Namespace(generation_thinking="high")),
+        generation_policy=generation_thinking_policy(),
     )
 
     assert [member.provider_config.model for member in provider.proposers] == [
@@ -1082,10 +1094,10 @@ def test_draco_runner_g16_preserves_profile_sampling_temperature() -> None:
         0.3,
     ]
     assert [member.thinking for member in provider.proposers] == [
-        "high",
-        "high",
-        "high",
-        "high",
+        "xhigh",
+        "xhigh",
+        "xhigh",
+        "xhigh",
     ]
     assert provider.aggregator.provider_config.model == "z-ai/glm-5.2"
     assert provider.aggregator.temperature == 0.0
@@ -1106,7 +1118,7 @@ def test_draco_runner_g17_configures_two_layer_moa() -> None:
         group="G17",
         profile="g17_two_layer_moa",
         dry_run=False,
-        generation_policy=generation_thinking_policy(Namespace(generation_thinking="high")),
+        generation_policy=generation_thinking_policy(),
     )
 
     assert provider.moa_layers == 2
@@ -1142,7 +1154,7 @@ def test_draco_runner_g18_configures_select_best_candidate_strategy() -> None:
         group="G18",
         profile="g18_select_best_candidate",
         dry_run=False,
-        generation_policy=generation_thinking_policy(Namespace(generation_thinking="high")),
+        generation_policy=generation_thinking_policy(),
     )
 
     assert provider.output_strategy == "select_best_candidate"
@@ -1258,7 +1270,7 @@ def test_draco_runner_g19_g23_configure_prefilter_profiles(
         group=group,
         profile=profile,
         dry_run=False,
-        generation_policy=generation_thinking_policy(Namespace(generation_thinking="high")),
+        generation_policy=generation_thinking_policy(),
     )
 
     assert GROUP_SPECS[group] == {"kind": "profile", "profile": profile}
@@ -1267,11 +1279,15 @@ def test_draco_runner_g19_g23_configure_prefilter_profiles(
     assert provider.candidate_prefilter_top_k == top_k
     assert provider.candidate_scorer is not None
     assert provider.candidate_scorer.provider_config.model == scorer_model
-    assert provider.candidate_scorer.thinking == "high"
+    assert provider.candidate_scorer.thinking == "xhigh"
     assert provider.candidate_scorer.temperature == 0.0
     assert [member.provider_config.model for member in provider.proposers] == proposer_models
+    assert [member.thinking for member in provider.proposers] == ["xhigh"] * len(
+        proposer_models
+    )
     assert [member.k for member in provider.proposers] == k_values
     assert provider.aggregator.provider_config.model == "z-ai/glm-5.2"
+    assert provider.aggregator.thinking == "xhigh"
     assert provider.aggregator.temperature == 0.0
 
 
@@ -1311,7 +1327,7 @@ async def test_draco_runner_collect_agent_run_executes_local_web_tool_loop() -> 
         "research this",
         timeout=10.0,
         config=generation_chat_config(
-            generation_thinking_policy(Namespace(generation_thinking="off"))
+            generation_thinking_policy()
         ),
         tools=benchmark_tools_for_policy(policy),
         tool_policy=policy,
@@ -1335,25 +1351,27 @@ async def test_draco_runner_collect_agent_run_executes_local_web_tool_loop() -> 
     )
 
 
-def test_draco_runner_generation_chat_config_uses_explicit_high_by_default() -> None:
-    policy = generation_thinking_policy(Namespace(generation_thinking="high"))
+def test_draco_runner_generation_chat_config_uses_xhigh_by_default() -> None:
+    policy = generation_thinking_policy()
 
     config = generation_chat_config(policy)
 
     assert config is not None
     assert config.thinking is True
-    assert str(config.thinking_level) == "high"
-    assert config.thinking_budget_tokens == 20_000
+    assert str(config.thinking_level) == "xhigh"
+    assert config.thinking_budget_tokens == 50_000
     assert config.temperature == 0.0
 
 
-def test_draco_runner_compact_generation_config_marks_profile_thinking() -> None:
-    policy = generation_thinking_policy(Namespace(generation_thinking="profile"))
+def test_draco_runner_compact_generation_config_marks_xhigh_thinking() -> None:
+    policy = generation_thinking_policy()
     config = generation_chat_config(policy)
 
     compact = compact_chat_config(config, policy)
 
-    assert compact["thinking"] == "profile_default"
+    assert compact["thinking"] is True
+    assert compact["thinking_level"] == "xhigh"
+    assert compact["thinking_budget_tokens"] == 50_000
     assert compact["temperature"] == 0.0
 
 
@@ -1809,7 +1827,7 @@ async def test_run_one_skips_judge_when_generation_is_not_done(monkeypatch) -> N
         judge_max_attempts=3,
         timeout=10.0,
         tool_policy={"tool_mode": "provider_only", "tools_enabled": False},
-        generation_policy=generation_thinking_policy(Namespace(generation_thinking="high")),
+        generation_policy=generation_thinking_policy(),
         generation_max_attempts=1,
         generation_retry_backoff=0.0,
     )
