@@ -25,7 +25,7 @@ import shlex
 import shutil
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import structlog
 
@@ -34,6 +34,7 @@ from opensquilla.engine.pipeline import TurnContext
 log = structlog.get_logger(__name__)
 
 _CODE_TASK_PREFLIGHT_TIMEOUT = 15.0
+_PACKAGED_GATEWAY_EXECUTABLES = {"opensquilla-gateway", "opensquilla-gateway.exe"}
 
 
 def _runs_code_task(argv: list[str]) -> bool:
@@ -91,6 +92,13 @@ def _quote(path: str) -> str:
     return shlex.quote(path)
 
 
+def _is_packaged_gateway_executable(path: str) -> bool:
+    name = Path(path).name
+    if name == path and ("\\" in path or ":" in path):
+        name = PureWindowsPath(path).name
+    return name.lower() in _PACKAGED_GATEWAY_EXECUTABLES
+
+
 def _resolve_code_task_command_uncached() -> str | None:
     base = Path(sys.executable).parent
     # 1) The console script next to the running interpreter. On Windows it is
@@ -102,7 +110,7 @@ def _resolve_code_task_command_uncached() -> str | None:
     # 2) Packaged desktop gateways are PyInstaller CLI binaries
     #    (opensquilla-gateway[.exe]), so sys.executable itself may own
     #    ``code-task`` even though it is not named ``opensquilla``.
-    if _runs_code_task([sys.executable]):
+    if _is_packaged_gateway_executable(sys.executable) and _runs_code_task([sys.executable]):
         return f"{_quote(sys.executable)} code-task"
     # 3) Module invocation via the EXACT interpreter the gateway runs on. ``-P``
     #    (Python 3.11+) keeps a cwd ``opensquilla`` package from shadowing the

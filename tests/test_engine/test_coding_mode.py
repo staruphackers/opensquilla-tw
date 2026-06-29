@@ -292,8 +292,9 @@ class TestPackagedCodeTaskResolution:
         from opensquilla.engine.steps import coding_mode as cm
 
         cm._reset_resolution_cache()
-        exe_name = "opensquilla-gateway.exe" if sys.platform == "win32" else "opensquilla-gateway"
-        exe = tmp_path / exe_name
+        app_dir = tmp_path / "OpenSquilla App"
+        app_dir.mkdir()
+        exe = app_dir / "opensquilla-gateway"
         exe.write_text("")
         exe.chmod(0o755)
         monkeypatch.setattr(cm.sys, "executable", str(exe))
@@ -301,6 +302,39 @@ class TestPackagedCodeTaskResolution:
         monkeypatch.setattr(cm, "_runs_code_task", lambda argv: argv == [str(exe)])
 
         assert cm.resolve_code_task_command() == f"{cm._quote(str(exe))} code-task"
+
+        cm._reset_resolution_cache()
+
+    def test_uses_current_windows_gateway_executable_path(self, monkeypatch):
+        from opensquilla.engine.steps import coding_mode as cm
+
+        cm._reset_resolution_cache()
+        exe = r"C:\Program Files\OpenSquilla\opensquilla-gateway.exe"
+        monkeypatch.setattr(cm.sys, "executable", exe)
+        monkeypatch.setattr(cm.shutil, "which", lambda name: None)
+        monkeypatch.setattr(cm, "_runs_code_task", lambda argv: argv == [exe])
+
+        assert cm.resolve_code_task_command() == f"{cm._quote(exe)} code-task"
+
+        cm._reset_resolution_cache()
+
+    def test_does_not_accept_direct_probe_for_plain_python(self, monkeypatch, tmp_path):
+        from opensquilla.engine.steps import coding_mode as cm
+
+        cm._reset_resolution_cache()
+        py = str(tmp_path / "python")
+        monkeypatch.setattr(cm.sys, "executable", py)
+        monkeypatch.setattr(cm.shutil, "which", lambda name: None)
+        calls: list[list[str]] = []
+
+        def fake_runs(argv: list[str]) -> bool:
+            calls.append(argv)
+            return argv == [py]
+
+        monkeypatch.setattr(cm, "_runs_code_task", fake_runs)
+
+        assert cm.resolve_code_task_command() is None
+        assert [py] not in calls
 
         cm._reset_resolution_cache()
 
