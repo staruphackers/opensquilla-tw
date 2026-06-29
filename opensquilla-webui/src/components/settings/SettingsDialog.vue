@@ -174,6 +174,9 @@
               @channel-type-change="onChannelTypeChange"
               @update-channel-field="updateChannelField"
               @save="saveChannel"
+              @enable-channel="enableChannel"
+              @disable-channel="disableChannel"
+              @remove-channel="removeChannel"
             />
             <SetupCapabilitiesPanel
               v-else-if="section === 'capabilities'"
@@ -298,6 +301,9 @@ const {
   saveBehavior,
   saveRouter,
   saveChannel,
+  enableChannel,
+  disableChannel,
+  removeChannel,
   saveSearch,
   saveMemory,
   saveImage,

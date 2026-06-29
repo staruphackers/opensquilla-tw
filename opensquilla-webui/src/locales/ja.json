@@ -205,7 +205,14 @@
       "connected": "接続済み",
       "actionNeeded": "対応が必要",
       "connecting": "接続中",
-      "none": "チャンネルが設定されていません。"
+      "none": "チャンネルが設定されていません。",
+      "disabled": "無効",
+      "enable": "有効化",
+      "disable": "無効化",
+      "remove": "削除",
+      "removeConfirmTitle": "このチャンネルを削除しますか？",
+      "removeConfirmBody": "{name} を設定から削除します。反映には再起動が必要です。",
+      "removeConfirmPrimary": "削除"
     },
     "search": {
       "title": "ウェブ検索",
@@ -400,7 +407,10 @@
       "envSavedReference": "{surface} は ${envKey} の参照を保存しました。ゲートウェイの再起動に備えて設定したままにしてください。",
       "copyFailed": "コピーに失敗しました: {error}",
       "copiedCommand": "コマンドをコピーしました",
-      "copiedPath": "パスをコピーしました"
+      "copiedPath": "パスをコピーしました",
+      "channelRemoved": "チャンネルを削除しました。再起動が必要です。",
+      "channelEnabled": "チャンネルを有効化しました。再起動が必要です。",
+      "channelDisabled": "チャンネルを無効化しました。再起動が必要です。"
     },
     "needs": {
       "noApiKey": "API キーは不要です。",

@@ -10,6 +10,7 @@ import { useSettingsSection } from '@/composables/setup/useSettingsSection'
 import { SETTINGS_SECTIONS, type SettingsSectionId } from '@/composables/setup/settingsSections'
 import { useRpcStore } from '@/stores/rpc'
 import { useToasts } from '@/composables/useToasts'
+import { useConfirm } from '@/composables/useConfirm'
 import { saveFailedMessage } from '@/lib/rpcErrors'
 import { copyTextWithFallback } from '@/utils/browser'
 import { TEXT_TIERS, routerTierLabel } from '@/utils/chat/routerTiers'
@@ -77,6 +78,7 @@ interface ChannelStatusRow {
   connected?: boolean
   status?: string
   configured?: boolean
+  enabled?: boolean
 }
 
 interface TierConfig {
@@ -195,6 +197,7 @@ export function useSetupCatalog() {
 
 const rpc = useRpcStore()
 const { pushToast } = useToasts()
+const { confirm } = useConfirm()
 const t = i18n.global.t
 
 const catalog = ref<OnboardingCatalog>({})
@@ -989,6 +992,43 @@ async function saveChannel() {
   }
 }
 
+// Lifecycle actions on already-configured channels. The enable/disable/remove
+// RPCs all require a gateway restart to take effect; refresh only the runtime
+// list (loadChannelStatus) so the in-progress entry draft is preserved.
+async function setChannelEnabled(name: string, enabled: boolean) {
+  try {
+    await rpc.call(enabled ? 'onboarding.channel.enable' : 'onboarding.channel.disable', { name })
+    pushToast(enabled ? t('setup.toast.channelEnabled') : t('setup.toast.channelDisabled'))
+    await loadChannelStatus()
+  } catch (err) {
+    pushToast(saveFailedMessage(err), { tone: 'danger' })
+  }
+}
+
+function enableChannel(name: string) {
+  return setChannelEnabled(name, true)
+}
+
+function disableChannel(name: string) {
+  return setChannelEnabled(name, false)
+}
+
+async function removeChannel(name: string) {
+  const ok = await confirm({
+    title: t('setup.channels.removeConfirmTitle'),
+    body: t('setup.channels.removeConfirmBody', { name }),
+    primaryLabel: t('setup.channels.removeConfirmPrimary'),
+  })
+  if (!ok) return
+  try {
+    await rpc.call('onboarding.channel.remove', { name })
+    pushToast(t('setup.toast.channelRemoved'))
+    await loadChannelStatus()
+  } catch (err) {
+    pushToast(saveFailedMessage(err), { tone: 'danger' })
+  }
+}
+
 async function saveSearch() {
   const params = capabilitiesForm.searchPayload()
   try {
@@ -1151,6 +1191,9 @@ async function copyConfigPath() {
     saveBehavior,
     saveRouter,
     saveChannel,
+    enableChannel,
+    disableChannel,
+    removeChannel,
     saveSearch,
     saveMemory,
     saveImage,

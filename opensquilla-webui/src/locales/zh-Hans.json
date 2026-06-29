@@ -205,7 +205,14 @@
       "connected": "已连接",
       "actionNeeded": "需要处理",
       "connecting": "连接中",
-      "none": "尚未配置任何频道。"
+      "none": "尚未配置任何频道。",
+      "disabled": "已禁用",
+      "enable": "启用",
+      "disable": "禁用",
+      "remove": "移除",
+      "removeConfirmTitle": "移除此频道？",
+      "removeConfirmBody": "{name} 将从配置中移除。需要重启后才能生效。",
+      "removeConfirmPrimary": "移除"
     },
     "search": {
       "title": "网页搜索",
@@ -400,7 +407,10 @@
       "envSavedReference": "{surface}已保存 ${envKey} 引用。请在网关重启时保持其设置。",
       "copyFailed": "复制失败：{error}",
       "copiedCommand": "已复制命令",
-      "copiedPath": "已复制路径"
+      "copiedPath": "已复制路径",
+      "channelRemoved": "频道已移除。需要重启。",
+      "channelEnabled": "频道已启用。需要重启。",
+      "channelDisabled": "频道已禁用。需要重启。"
     },
     "needs": {
       "noApiKey": "无需 API 密钥。",

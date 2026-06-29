@@ -205,7 +205,14 @@
       "connected": "Connected",
       "actionNeeded": "Action needed",
       "connecting": "connecting",
-      "none": "No channels configured."
+      "none": "No channels configured.",
+      "disabled": "Disabled",
+      "enable": "Enable",
+      "disable": "Disable",
+      "remove": "Remove",
+      "removeConfirmTitle": "Remove this channel?",
+      "removeConfirmBody": "{name} will be removed from the configuration. Restart required to take effect.",
+      "removeConfirmPrimary": "Remove"
     },
     "search": {
       "title": "Web search",
@@ -400,7 +407,10 @@
       "envSavedReference": "{surface} saved ${envKey} reference. Keep it set for gateway restarts.",
       "copyFailed": "Copy failed: {error}",
       "copiedCommand": "Copied command",
-      "copiedPath": "Copied path"
+      "copiedPath": "Copied path",
+      "channelRemoved": "Channel removed. Restart required.",
+      "channelEnabled": "Channel enabled. Restart required.",
+      "channelDisabled": "Channel disabled. Restart required."
     },
     "needs": {
       "noApiKey": "No API key required.",

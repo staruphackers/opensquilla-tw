@@ -205,7 +205,14 @@
       "connected": "Conectado",
       "actionNeeded": "Acción necesaria",
       "connecting": "conectando",
-      "none": "No hay canales configurados."
+      "none": "No hay canales configurados.",
+      "disabled": "Desactivado",
+      "enable": "Activar",
+      "disable": "Desactivar",
+      "remove": "Eliminar",
+      "removeConfirmTitle": "¿Eliminar este canal?",
+      "removeConfirmBody": "{name} se eliminará de la configuración. Se requiere reiniciar para que surta efecto.",
+      "removeConfirmPrimary": "Eliminar"
     },
     "search": {
       "title": "Búsqueda web",
@@ -400,7 +407,10 @@
       "envSavedReference": "{surface} guardó la referencia de ${envKey}. Mantenla establecida para los reinicios de la puerta de enlace.",
       "copyFailed": "Error al copiar: {error}",
       "copiedCommand": "Comando copiado",
-      "copiedPath": "Ruta copiada"
+      "copiedPath": "Ruta copiada",
+      "channelRemoved": "Canal eliminado. Se requiere reiniciar.",
+      "channelEnabled": "Canal activado. Se requiere reiniciar.",
+      "channelDisabled": "Canal desactivado. Se requiere reiniciar."
     },
     "needs": {
       "noApiKey": "No se requiere clave API.",

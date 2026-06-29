@@ -205,7 +205,14 @@
       "connected": "Verbunden",
       "actionNeeded": "Aktion erforderlich",
       "connecting": "wird verbunden",
-      "none": "Keine Kanäle konfiguriert."
+      "none": "Keine Kanäle konfiguriert.",
+      "disabled": "Deaktiviert",
+      "enable": "Aktivieren",
+      "disable": "Deaktivieren",
+      "remove": "Entfernen",
+      "removeConfirmTitle": "Diesen Kanal entfernen?",
+      "removeConfirmBody": "{name} wird aus der Konfiguration entfernt. Neustart erforderlich, damit es wirksam wird.",
+      "removeConfirmPrimary": "Entfernen"
     },
     "search": {
       "title": "Websuche",
@@ -400,7 +407,10 @@
       "envSavedReference": "{surface} hat die Referenz ${envKey} gespeichert. Lassen Sie sie für Gateway-Neustarts gesetzt.",
       "copyFailed": "Kopieren fehlgeschlagen: {error}",
       "copiedCommand": "Befehl kopiert",
-      "copiedPath": "Pfad kopiert"
+      "copiedPath": "Pfad kopiert",
+      "channelRemoved": "Kanal entfernt. Neustart erforderlich.",
+      "channelEnabled": "Kanal aktiviert. Neustart erforderlich.",
+      "channelDisabled": "Kanal deaktiviert. Neustart erforderlich."
     },
     "needs": {
       "noApiKey": "Kein API-Schlüssel erforderlich.",

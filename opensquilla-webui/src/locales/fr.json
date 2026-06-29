@@ -205,7 +205,14 @@
       "connected": "Connecté",
       "actionNeeded": "Action requise",
       "connecting": "connexion en cours",
-      "none": "Aucun canal configuré."
+      "none": "Aucun canal configuré.",
+      "disabled": "Désactivé",
+      "enable": "Activer",
+      "disable": "Désactiver",
+      "remove": "Supprimer",
+      "removeConfirmTitle": "Supprimer ce canal ?",
+      "removeConfirmBody": "{name} sera supprimé de la configuration. Redémarrage requis pour prendre effet.",
+      "removeConfirmPrimary": "Supprimer"
     },
     "search": {
       "title": "Recherche web",
@@ -400,7 +407,10 @@
       "envSavedReference": "{surface} a enregistré la référence ${envKey}. Gardez-la définie pour les redémarrages de la passerelle.",
       "copyFailed": "Échec de la copie : {error}",
       "copiedCommand": "Commande copiée",
-      "copiedPath": "Chemin copié"
+      "copiedPath": "Chemin copié",
+      "channelRemoved": "Canal supprimé. Redémarrage requis.",
+      "channelEnabled": "Canal activé. Redémarrage requis.",
+      "channelDisabled": "Canal désactivé. Redémarrage requis."
     },
     "needs": {
       "noApiKey": "Aucune clé API requise.",
