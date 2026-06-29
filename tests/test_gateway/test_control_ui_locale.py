@@ -22,9 +22,16 @@ def test_accept_language_zh_yields_zh_hans():
     assert control_ui._resolve_locale(cfg, _req("zh-CN,zh;q=0.9,en;q=0.8")) == "zh-Hans"
 
 
-def test_accept_language_non_zh_falls_back_to_en():
+def test_accept_language_supported_non_en():
     cfg = GatewayConfig()
-    assert control_ui._resolve_locale(cfg, _req("fr-FR,fr;q=0.9")) == "en"
+    assert control_ui._resolve_locale(cfg, _req("fr-FR,fr;q=0.9")) == "fr"
+    assert control_ui._resolve_locale(cfg, _req("ja-JP")) == "ja"
+
+
+def test_accept_language_unsupported_falls_back_to_en():
+    cfg = GatewayConfig()
+    # Korean is not a supported locale → default en
+    assert control_ui._resolve_locale(cfg, _req("ko-KR,ko;q=0.9")) == "en"
 
 
 def test_configured_default_wins_over_accept_language():
@@ -42,7 +49,9 @@ def test_config_clamps_arbitrary_locale_values():
     assert ControlUiConfig(default_locale="zh").default_locale == "zh-Hans"
     assert ControlUiConfig(default_locale="zh-TW").default_locale == "zh-Hans"
     assert ControlUiConfig(default_locale="ZH-hans").default_locale == "zh-Hans"
-    assert ControlUiConfig(default_locale="fr").default_locale == "en"
+    assert ControlUiConfig(default_locale="fr").default_locale == "fr"
+    assert ControlUiConfig(default_locale="ja-JP").default_locale == "ja"
+    assert ControlUiConfig(default_locale="ko").default_locale == "en"
     assert ControlUiConfig().default_locale == "en"
 
 
