@@ -20,7 +20,12 @@ def test_help_runs():
 
 
 def test_solve_help_lists_inputs():
-    result = runner.invoke(codetask_app, ["solve", "--help"])
+    result = runner.invoke(
+        codetask_app,
+        ["solve", "--help"],
+        env={"COLUMNS": "120", "NO_COLOR": "1", "TERM": "dumb"},
+        terminal_width=120,
+    )
     assert result.exit_code == 0
     for opt in ("--repo", "--issue", "--task", "--task-file"):
         assert opt in result.output
