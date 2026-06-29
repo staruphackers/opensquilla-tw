@@ -736,6 +736,30 @@ async def _write_exec_stdin(proc: Any, stdin_bytes: bytes | None) -> None:
             proc.stdin.close()
 
 
+async def _wait_exec_stdin_writer(writer_task: asyncio.Task[None], timeout: float) -> bool:
+    done, _ = await asyncio.wait({writer_task}, timeout=max(0.0, timeout))
+    if writer_task not in done:
+        return False
+    with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+        await writer_task
+    return True
+
+
+async def _cancel_exec_stdin_writer(proc: Any, writer_task: asyncio.Task[None] | None) -> None:
+    if writer_task is None or writer_task.done():
+        return
+    if proc.stdin is not None and not proc.stdin.is_closing():
+        proc.stdin.close()
+    writer_task.cancel()
+    with contextlib.suppress(
+        TimeoutError,
+        asyncio.CancelledError,
+        BrokenPipeError,
+        ConnectionResetError,
+    ):
+        await asyncio.wait_for(writer_task, timeout=0.05)
+
+
 async def _run_host_shell_command(
     command: str,
     *,
@@ -765,18 +789,26 @@ async def _run_host_shell_command(
             timeout_result = f"[timeout after {effective_timeout}s]\ncommand: {command}"
 
             proc = await asyncio.create_subprocess_shell(command, **subprocess_kwargs)
+            stdin_writer: asyncio.Task[None] | None = None
             remaining = deadline - loop.time()
             if remaining <= 0:
                 await _terminate_exec_process_tree(proc)
                 return timeout_result
             try:
-                await asyncio.wait_for(_write_exec_stdin(proc, stdin_bytes), timeout=remaining)
+                if stdin_bytes is not None:
+                    stdin_writer = asyncio.create_task(_write_exec_stdin(proc, stdin_bytes))
+                    if not await _wait_exec_stdin_writer(stdin_writer, remaining):
+                        await _cancel_exec_stdin_writer(proc, stdin_writer)
+                        await _terminate_exec_process_tree(proc)
+                        return timeout_result
             except TimeoutError:
+                await _cancel_exec_stdin_writer(proc, stdin_writer)
                 await _terminate_exec_process_tree(proc)
                 return timeout_result
 
             remaining = deadline - loop.time()
             if remaining <= 0 or not await _wait_exec_process(proc, remaining):
+                await _cancel_exec_stdin_writer(proc, stdin_writer)
                 await _terminate_exec_process_tree(proc)
                 return timeout_result
             if os.name == "posix":
