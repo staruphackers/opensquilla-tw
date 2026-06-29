@@ -163,7 +163,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
-          lfs: true
+          lfs: ${{ needs.classify-changes.outputs.full_required == 'true' }}
 
       - name: Configure runtime directories
         shell: bash
@@ -251,8 +251,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          lfs: true
 
       - name: Configure runtime directories
         shell: bash
@@ -287,7 +285,7 @@ jobs:
             -q
 
   windows-full:
-    name: Windows full test suite (conditional)
+    name: Windows high-risk/full tests (conditional)
     needs: classify-changes
     if: ${{ needs.classify-changes.outputs.windows_full_required == 'true' || needs.classify-changes.outputs.full_required == 'true' }}
     runs-on: windows-latest
@@ -302,7 +300,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
         with:
-          lfs: true
+          lfs: ${{ needs.classify-changes.outputs.full_required == 'true' }}
 
       - name: Configure runtime directories
         shell: bash
@@ -321,11 +319,13 @@ jobs:
           enable-cache: true
 
       - name: Set up Bun
+        if: ${{ needs.classify-changes.outputs.tui_changed == 'true' || needs.classify-changes.outputs.full_required == 'true' }}
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
       - name: Install OpenTUI host dependencies
+        if: ${{ needs.classify-changes.outputs.tui_changed == 'true' || needs.classify-changes.outputs.full_required == 'true' }}
         shell: bash
         run: bun install --frozen-lockfile --cwd=src/opensquilla/cli/tui/opentui/package
 
@@ -335,7 +335,26 @@ jobs:
 
       - name: Test
         shell: bash
-        run: uv run pytest tests -q
+        run: |
+          set -euo pipefail
+          markers="not llm and not live_search and not live_channel and not webui_browser and not tui_real_terminal and not local_golden and not agent_context_boundary and not llm_router_acc"
+
+          if [[ "${{ needs.classify-changes.outputs.full_required }}" == "true" ]]; then
+            uv run pytest tests -q -m "${markers}" --durations=50
+          else
+            uv run pytest \
+              tests/test_artifacts.py \
+              tests/test_compat \
+              tests/test_desktop \
+              tests/test_sandbox \
+              tests/test_tools/test_path_aliases.py \
+              tests/test_tools/test_path_policy.py \
+              tests/test_tools/test_shell_approval_policy.py \
+              tests/test_tools/test_shell_background_seatbelt.py \
+              tests/test_tools/test_shell_policy_windows.py \
+              tests/test_tools/test_shell_process_isolation.py \
+              -q -m "${markers}" --durations=50
+          fi
 
   release-packaging:
     name: Release packaging contracts

@@ -191,7 +191,7 @@ def test_default_ci_blocks_pull_requests_and_main_and_dev_pushes() -> None:
     assert "OpenTUI package tests" in text
     assert "Ubuntu quality gate" in text
     assert "Windows compatibility smoke tests" in text
-    assert "Windows full test suite" in text
+    assert "Windows high-risk/full tests" in text
     assert "Release packaging contracts" in text
     assert "CI result" in text
     assert 'push)\n              printf \'.ci/run-all\\n\' > "${changed_files}"' in text
@@ -570,10 +570,35 @@ def test_windows_smoke_does_not_install_bun_by_default() -> None:
     windows_steps = jobs["windows-compat"]["steps"]
     assert all(step.get("uses") != "oven-sh/setup-bun@v2" for step in windows_steps)
     assert all("OpenTUI" not in step.get("name", "") for step in windows_steps)
+    assert "lfs" not in windows_steps[0].get("with", {})
 
     tui_steps = jobs["tui-check"]["steps"]
     assert any(step.get("uses") == "oven-sh/setup-bun@v2" for step in tui_steps)
     assert any("bun run test:bun" in step.get("run", "") for step in tui_steps)
+
+
+def test_windows_high_risk_job_uses_subset_until_full_ci() -> None:
+    data = _workflow("ci.yml")
+    jobs = data["jobs"]
+    windows_full = jobs["windows-full"]
+    text = (WORKFLOW_DIR / "ci.yml").read_text(encoding="utf-8")
+
+    assert windows_full["name"] == "Windows high-risk/full tests (conditional)"
+    assert windows_full["steps"][0]["with"]["lfs"] == "${{ needs.classify-changes.outputs.full_required == 'true' }}"
+    assert 'uv run pytest tests -q -m "${markers}" --durations=50' in text
+    assert "tests/test_compat" in text
+    assert "tests/test_sandbox" in text
+    assert "tests/test_tools/test_shell_policy_windows.py" in text
+    assert "tests/test_tools/test_shell_background_seatbelt.py" in text
+    assert "needs.classify-changes.outputs.tui_changed == 'true'" in text
+
+
+def test_ubuntu_quality_only_fetches_lfs_for_full_ci() -> None:
+    data = _workflow("ci.yml")
+    checkout = data["jobs"]["ubuntu-quality"]["steps"][0]
+
+    assert checkout["uses"] == "actions/checkout@v4"
+    assert checkout["with"]["lfs"] == "${{ needs.classify-changes.outputs.full_required == 'true' }}"
 
 
 def test_manual_workflows_reference_existing_test_files() -> None:
