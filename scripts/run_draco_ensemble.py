@@ -69,6 +69,11 @@ GROUP_SPECS: dict[str, dict[str, str]] = {
     "B5": {"kind": "single", "model": "moonshotai/kimi-k2.7-code"},
     "B6": {"kind": "single", "model": "qwen/qwen3.7-max"},
     "B7": {"kind": "single", "model": "google/gemini-3.1-pro-preview"},
+    "B8": {
+        "kind": "single",
+        "model": "z-ai/glm-5.2",
+        "server_tool_profile": "openrouter_fusion",
+    },
     "G1": {"kind": "profile", "profile": "g1_code"},
     "G2": {"kind": "profile", "profile": "g2_general"},
     "G3": {"kind": "profile", "profile": "g3_standard"},
@@ -115,6 +120,17 @@ DEFAULT_OPENROUTER_WEB_SEARCH_CONTEXT_SIZE = "medium"
 DEFAULT_OPENROUTER_WEB_FETCH_ENGINE = "openrouter"
 DEFAULT_OPENROUTER_WEB_FETCH_MAX_USES = 5
 DEFAULT_OPENROUTER_WEB_FETCH_MAX_CONTENT_TOKENS = 50_000
+DEFAULT_OPENROUTER_FUSION_ANALYSIS_MODELS = (
+    "deepseek/deepseek-v4-pro",
+    "z-ai/glm-5.2",
+    "google/gemini-3.1-pro-preview",
+    "qwen/qwen3.7-max",
+)
+DEFAULT_OPENROUTER_FUSION_MODEL = "z-ai/glm-5.2"
+DEFAULT_OPENROUTER_FUSION_MAX_TOOL_CALLS = 12
+DEFAULT_OPENROUTER_FUSION_MAX_COMPLETION_TOKENS = 16_384
+DEFAULT_OPENROUTER_FUSION_REASONING_EFFORT = "xhigh"
+DEFAULT_OPENROUTER_FUSION_TEMPERATURE = 0.0
 GENERATION_THINKING_MODEL_MAX = "model_max"
 DEFAULT_GENERATION_THINKING = GENERATION_THINKING_MODEL_MAX
 DEFAULT_GENERATION_THINKING_FALLBACK = "xhigh"
@@ -357,6 +373,54 @@ def positive_int_value(raw: Any, *, default: int, field: str) -> int:
     return parsed
 
 
+def bounded_int_value(
+    raw: Any,
+    *,
+    default: int,
+    field: str,
+    minimum: int,
+    maximum: int,
+) -> int:
+    value = positive_int_value(raw, default=default, field=field)
+    if value < minimum or value > maximum:
+        raise ValueError(f"{field} must be between {minimum} and {maximum}")
+    return value
+
+
+def parse_csv_values(raw: Any, *, default: tuple[str, ...] = ()) -> list[str]:
+    value = raw if raw is not None else ",".join(default)
+    if isinstance(value, str):
+        candidates = value.split(",")
+    elif isinstance(value, tuple | list):
+        candidates = list(value)
+    else:
+        candidates = [str(value)]
+    items: list[str] = []
+    for candidate in candidates:
+        item = str(candidate).strip()
+        if item and item not in items:
+            items.append(item)
+    return items
+
+
+def float_range_value(
+    raw: Any,
+    *,
+    default: float,
+    field: str,
+    minimum: float,
+    maximum: float,
+) -> float:
+    value = default if raw is None else raw
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{field} must be a number") from exc
+    if parsed < minimum or parsed > maximum:
+        raise ValueError(f"{field} must be between {minimum} and {maximum}")
+    return parsed
+
+
 def approx_chars_for_content_tokens(tokens: int) -> int:
     return max(100, int(tokens) * 4)
 
@@ -430,6 +494,61 @@ def openrouter_server_tool_settings(
     return {
         "web_search": web_search,
         "web_fetch": web_fetch,
+    }
+
+
+def openrouter_fusion_tool_settings(args: argparse.Namespace | None) -> dict[str, Any]:
+    analysis_models = parse_csv_values(
+        getattr(args, "openrouter_fusion_analysis_models", None),
+        default=DEFAULT_OPENROUTER_FUSION_ANALYSIS_MODELS,
+    )
+    if not 1 <= len(analysis_models) <= 8:
+        raise ValueError("openrouter_fusion_analysis_models must contain 1 to 8 models")
+    judge_model = str(
+        getattr(args, "openrouter_fusion_model", DEFAULT_OPENROUTER_FUSION_MODEL)
+        or DEFAULT_OPENROUTER_FUSION_MODEL
+    ).strip()
+    if not judge_model:
+        raise ValueError("openrouter_fusion_model must not be empty")
+    reasoning_effort = str(
+        getattr(
+            args,
+            "openrouter_fusion_reasoning_effort",
+            DEFAULT_OPENROUTER_FUSION_REASONING_EFFORT,
+        )
+        or DEFAULT_OPENROUTER_FUSION_REASONING_EFFORT
+    ).strip().lower()
+    if reasoning_effort not in {"minimal", "low", "medium", "high", "xhigh", "max"}:
+        raise ValueError(
+            "openrouter_fusion_reasoning_effort must be one of: "
+            "minimal, low, medium, high, xhigh, max"
+        )
+    return {
+        "type": "openrouter:fusion",
+        "parameters": {
+            "analysis_models": analysis_models,
+            "model": judge_model,
+            "max_tool_calls": bounded_int_value(
+                getattr(args, "openrouter_fusion_max_tool_calls", None),
+                default=DEFAULT_OPENROUTER_FUSION_MAX_TOOL_CALLS,
+                field="openrouter_fusion_max_tool_calls",
+                minimum=1,
+                maximum=16,
+            ),
+            "max_completion_tokens": positive_int_value(
+                getattr(args, "openrouter_fusion_max_completion_tokens", None),
+                default=DEFAULT_OPENROUTER_FUSION_MAX_COMPLETION_TOKENS,
+                field="openrouter_fusion_max_completion_tokens",
+            ),
+            "reasoning": {"effort": reasoning_effort},
+            "temperature": float_range_value(
+                getattr(args, "openrouter_fusion_temperature", None),
+                default=DEFAULT_OPENROUTER_FUSION_TEMPERATURE,
+                field="openrouter_fusion_temperature",
+                minimum=0.0,
+                maximum=2.0,
+            ),
+        },
     }
 
 
@@ -516,66 +635,149 @@ def benchmark_tool_policy(args: argparse.Namespace | None = None) -> dict[str, A
     }
 
 
+def group_uses_openrouter_fusion(group: str) -> bool:
+    spec = GROUP_SPECS[group]
+    return spec.get("server_tool_profile") == "openrouter_fusion"
+
+
+def validate_runner_mode_for_groups(runner_mode: str, groups: list[str]) -> None:
+    if runner_mode != RUNNER_MODE_AGENT_LOOP:
+        return
+    fusion_groups = [group for group in groups if group_uses_openrouter_fusion(group)]
+    if fusion_groups:
+        raise ValueError(
+            "OpenRouter Fusion experiment groups are provider-level server-side "
+            "agent baselines; run "
+            f"{','.join(fusion_groups)} with --runner-mode=provider"
+        )
+
+
+def benchmark_tool_policy_for_group(
+    tool_policy: dict[str, Any],
+    group: str,
+    *,
+    args: argparse.Namespace | None = None,
+) -> dict[str, Any]:
+    if not group_uses_openrouter_fusion(group):
+        return tool_policy
+    fusion_tool = openrouter_fusion_tool_settings(args)
+    fusion_tool_name = str(fusion_tool.get("type") or "openrouter:fusion")
+    return {
+        **tool_policy,
+        "tools_enabled": True,
+        "tool_names": [fusion_tool_name],
+        "openrouter_fusion_enabled": True,
+        "openrouter_fusion_only": True,
+        "openrouter_fusion_tool": fusion_tool,
+        "openrouter_fusion_tool_choice": "required",
+        "contamination_controls": {
+            **dict(tool_policy.get("contamination_controls") or {}),
+            "fusion_status": "internal_web_domain_controls_not_exposed",
+            "fusion_internal_web_tools": (
+                "openrouter_fusion_enables_internal_web_search_and_fetch; "
+                "domain exclusion is not exposed in the documented fusion parameters"
+            ),
+        },
+    }
+
+
+def benchmark_tool_policies_for_groups(
+    tool_policy: dict[str, Any],
+    groups: list[str],
+    *,
+    args: argparse.Namespace | None = None,
+) -> dict[str, dict[str, Any]]:
+    return {
+        group: benchmark_tool_policy_for_group(tool_policy, group, args=args)
+        for group in groups
+    }
+
+
+def _local_web_tool_definitions() -> list[ToolDefinition]:
+    return [
+        ToolDefinition(
+            name="web_search",
+            description=(
+                "Search the web and return result titles, URLs, and snippets. "
+                "Benchmark leakage domains are excluded and filtered."
+            ),
+            input_schema=ToolInputSchema(
+                properties={
+                    "query": {"type": "string", "description": "Search query."},
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Maximum number of results to return.",
+                    },
+                },
+                required=["query"],
+            ),
+        ),
+        ToolDefinition(
+            name="web_fetch",
+            description=(
+                "Fetch a URL and extract readable content. Benchmark leakage "
+                "domains are blocked."
+            ),
+            input_schema=ToolInputSchema(
+                properties={
+                    "url": {"type": "string", "description": "URL to fetch."},
+                    "extract_mode": {
+                        "type": "string",
+                        "description": "Extraction mode, usually markdown.",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Maximum characters to return.",
+                    },
+                },
+                required=["url"],
+            ),
+        ),
+    ]
+
+
+def _provider_tool_definition(
+    provider_tool: dict[str, Any],
+    *,
+    description: str,
+) -> ToolDefinition:
+    tool_type = str(provider_tool.get("type") or "")
+    return ToolDefinition(
+        name=tool_type,
+        description=description,
+        input_schema=ToolInputSchema(),
+        provider_tool=provider_tool,
+    )
+
+
 def benchmark_tools_for_policy(tool_policy: dict[str, Any]) -> list[ToolDefinition] | None:
-    if not tool_policy.get("tools_enabled"):
+    fusion_enabled = bool(tool_policy.get("openrouter_fusion_enabled"))
+    if not tool_policy.get("tools_enabled") and not fusion_enabled:
         return None
-    if tool_policy.get("tool_mode") == TOOL_MODE_LOCAL_WEB_TOOLS:
-        return [
-            ToolDefinition(
-                name="web_search",
-                description=(
-                    "Search the web and return result titles, URLs, and snippets. "
-                    "Benchmark leakage domains are excluded and filtered."
-                ),
-                input_schema=ToolInputSchema(
-                    properties={
-                        "query": {"type": "string", "description": "Search query."},
-                        "max_results": {
-                            "type": "integer",
-                            "description": "Maximum number of results to return.",
-                        },
-                    },
-                    required=["query"],
-                ),
-            ),
-            ToolDefinition(
-                name="web_fetch",
-                description=(
-                    "Fetch a URL and extract readable content. Benchmark leakage "
-                    "domains are blocked."
-                ),
-                input_schema=ToolInputSchema(
-                    properties={
-                        "url": {"type": "string", "description": "URL to fetch."},
-                        "extract_mode": {
-                            "type": "string",
-                            "description": "Extraction mode, usually markdown.",
-                        },
-                        "max_chars": {
-                            "type": "integer",
-                            "description": "Maximum characters to return.",
-                        },
-                    },
-                    required=["url"],
-                ),
-            ),
-        ]
-    server_tools = tool_policy.get("openrouter_server_tools") or {}
     tools: list[ToolDefinition] = []
-    for key, description in (
-        ("web_search", "OpenRouter server-side web search."),
-        ("web_fetch", "OpenRouter server-side web fetch."),
+    if (
+        tool_policy.get("tool_mode") == TOOL_MODE_LOCAL_WEB_TOOLS
+        and not tool_policy.get("openrouter_fusion_only")
     ):
-        provider_tool = server_tools.get(key)
-        if not isinstance(provider_tool, dict):
-            continue
-        tool_type = str(provider_tool.get("type") or key)
+        tools.extend(_local_web_tool_definitions())
+    server_tools = tool_policy.get("openrouter_server_tools") or {}
+    if not tool_policy.get("openrouter_fusion_only"):
+        for key, description in (
+            ("web_search", "OpenRouter server-side web search."),
+            ("web_fetch", "OpenRouter server-side web fetch."),
+        ):
+            provider_tool = server_tools.get(key)
+            if not isinstance(provider_tool, dict):
+                continue
+            tools.append(_provider_tool_definition(provider_tool, description=description))
+    fusion_tool = tool_policy.get("openrouter_fusion_tool")
+    if fusion_enabled and isinstance(fusion_tool, dict):
         tools.append(
-            ToolDefinition(
-                name=tool_type,
-                description=description,
-                input_schema=ToolInputSchema(),
-                provider_tool=provider_tool,
+            _provider_tool_definition(
+                fusion_tool,
+                description=(
+                    "OpenRouter Fusion server-side multi-model deliberation."
+                ),
             )
         )
     return tools or None
@@ -950,6 +1152,7 @@ def generation_chat_config(
     policy: dict[str, Any],
     *,
     model: str | None = None,
+    tool_choice: Any | None = None,
 ) -> ChatConfig:
     mode = generation_thinking_for_model(model, policy)
     level = ThinkingLevel(mode)
@@ -958,6 +1161,7 @@ def generation_chat_config(
         thinking=True,
         thinking_level=level,
         thinking_budget_tokens=THINKING_BUDGETS[level],
+        tool_choice=tool_choice,
     )
 
 
@@ -2537,6 +2741,7 @@ async def run_one(
     generation_config = generation_chat_config(
         generation_policy,
         model=spec["model"] if spec["kind"] == "single" else None,
+        tool_choice=tool_policy.get("openrouter_fusion_tool_choice"),
     )
     try:
         if spec["kind"] == "single":
@@ -3118,6 +3323,25 @@ def render_markdown(
             f"Runner mode: `{runner_mode}`; tool mode: `{policy.get('tool_mode') or RUNNER_MODE}`; "
             "external research tools are not attached."
         )
+    group_tool_policies = policy.get("group_tool_policies") or {}
+    fusion_groups = [
+        str(group)
+        for group, group_policy in group_tool_policies.items()
+        if isinstance(group_policy, dict) and group_policy.get("openrouter_fusion_enabled")
+    ]
+    fusion_line = ""
+    if fusion_groups:
+        if not policy.get("tools_enabled"):
+            tool_line = (
+                f"Runner mode: `{runner_mode}`; tool mode: `{policy.get('tool_mode') or RUNNER_MODE}`; "
+                "no global external research tools are attached."
+            )
+        fusion_line = (
+            "OpenRouter Fusion groups: "
+            f"`{', '.join(sorted(fusion_groups))}` use only `openrouter:fusion` "
+            "with `tool_choice=required`; Fusion's internal web_search/web_fetch "
+            "domain controls are not exposed in the documented tool parameters."
+        )
     generation_budget_note = f"budget: `{generation.get('thinking_budget_tokens')}`"
     if generation.get("max_thinking_budget_tokens") is not None:
         generation_budget_note = (
@@ -3142,6 +3366,7 @@ def render_markdown(
         f"temperature: `{generation.get('temperature')}`).",
         f"Agent max iterations: `{agent_max_iterations}`.",
         tool_line,
+        *([fusion_line] if fusion_line else []),
         "Contamination blocked domains: "
         f"`{', '.join(blocked_domains) if blocked_domains else '(none)'}`.",
         "",
@@ -3231,6 +3456,12 @@ def manifest_args(args: argparse.Namespace) -> dict[str, Any]:
         "openrouter_web_fetch_engine",
         "openrouter_web_fetch_max_uses",
         "openrouter_web_fetch_max_content_tokens",
+        "openrouter_fusion_analysis_models",
+        "openrouter_fusion_model",
+        "openrouter_fusion_max_tool_calls",
+        "openrouter_fusion_max_completion_tokens",
+        "openrouter_fusion_reasoning_effort",
+        "openrouter_fusion_temperature",
     ]
     payload: dict[str, Any] = {}
     for key in keys:
@@ -3368,6 +3599,7 @@ async def amain(args: argparse.Namespace) -> int:
     ).strip()
     if args.runner_mode not in SUPPORTED_RUNNER_MODES:
         raise ValueError(f"unknown runner mode: {args.runner_mode}")
+    validate_runner_mode_for_groups(args.runner_mode, groups)
     try:
         args.agent_max_iterations = int(
             getattr(args, "agent_max_iterations", DEFAULT_AGENT_MAX_ITERATIONS)
@@ -3407,8 +3639,16 @@ async def amain(args: argparse.Namespace) -> int:
         if sandbox_runtime:
             local_web_tools["sandbox_runtime"] = sandbox_runtime
         tool_policy = {**tool_policy, "local_web_tools": local_web_tools}
-    benchmark_tools = benchmark_tools_for_policy(tool_policy)
     inherited = inherited_provider_config(config)
+    group_tool_policies = benchmark_tool_policies_for_groups(
+        tool_policy,
+        groups,
+        args=args,
+    )
+    manifest_tool_policy = {
+        **tool_policy,
+        "group_tool_policies": group_tool_policies,
+    }
     if (
         tool_policy.get("tools_enabled")
         and tool_policy.get("tool_mode") == TOOL_MODE_OPENROUTER_SERVER_TOOLS
@@ -3418,6 +3658,12 @@ async def amain(args: argparse.Namespace) -> int:
         raise ValueError(
             "--tool-mode=openrouter_server_tools requires an OpenRouter runtime provider"
         )
+    if (
+        any(policy.get("openrouter_fusion_enabled") for policy in group_tool_policies.values())
+        and inherited.provider != "openrouter"
+        and not getattr(args, "dry_run", False)
+    ):
+        raise ValueError("OpenRouter Fusion experiment groups require an OpenRouter runtime provider")
     judge_provider = None
     if args.judge_model:
         judge_provider = build_single_provider(
@@ -3455,11 +3701,13 @@ async def amain(args: argparse.Namespace) -> int:
         tasks=tasks,
         groups=groups,
         artifacts=artifacts,
-        tool_policy=tool_policy,
+        tool_policy=manifest_tool_policy,
         command=command,
     )
 
     async def _guarded(task: dict[str, Any], group: str) -> dict[str, Any]:
+        group_tool_policy = group_tool_policies[group]
+        group_tools = benchmark_tools_for_policy(group_tool_policy)
         async with semaphore:
             return await run_one(
                 task=task,
@@ -3473,7 +3721,7 @@ async def amain(args: argparse.Namespace) -> int:
                 judge_concurrency=getattr(args, "judge_concurrency", 1),
                 judge_max_attempts=getattr(args, "judge_max_attempts", JUDGE_MAX_ATTEMPTS),
                 timeout=args.timeout,
-                tool_policy=tool_policy,
+                tool_policy=group_tool_policy,
                 generation_policy=generation_policy,
                 runner_mode=args.runner_mode,
                 output_dir=output_dir,
@@ -3486,7 +3734,7 @@ async def amain(args: argparse.Namespace) -> int:
                     "generation_retry_backoff",
                     DEFAULT_GENERATION_RETRY_BACKOFF_SECONDS,
                 ),
-                tools=benchmark_tools,
+                tools=group_tools,
             )
 
     pending = [_guarded(task, group) for task in tasks for group in groups]
@@ -3508,7 +3756,7 @@ async def amain(args: argparse.Namespace) -> int:
         render_markdown(
             summary,
             jsonl_path,
-            tool_policy=tool_policy,
+            tool_policy=manifest_tool_policy,
             generation_policy=generation_policy,
             runner_mode=args.runner_mode,
             agent_max_iterations=args.agent_max_iterations,
@@ -3531,7 +3779,7 @@ async def amain(args: argparse.Namespace) -> int:
         rows_written=len(rows),
         artifacts=artifacts,
         summary=summary,
-        tool_policy=tool_policy,
+        tool_policy=manifest_tool_policy,
         command=command,
     )
     print(f"wrote {jsonl_path}")
@@ -3650,6 +3898,45 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_OPENROUTER_WEB_FETCH_MAX_CONTENT_TOKENS,
         help="Maximum content tokens returned by OpenRouter web_fetch.",
+    )
+    parser.add_argument(
+        "--openrouter-fusion-analysis-models",
+        default=",".join(DEFAULT_OPENROUTER_FUSION_ANALYSIS_MODELS),
+        help=(
+            "Comma-separated OpenRouter Fusion panel models. Used by B8; "
+            "OpenRouter documents 1 to 8 models."
+        ),
+    )
+    parser.add_argument(
+        "--openrouter-fusion-model",
+        default=DEFAULT_OPENROUTER_FUSION_MODEL,
+        help="OpenRouter Fusion judge model. Used by B8.",
+    )
+    parser.add_argument(
+        "--openrouter-fusion-max-tool-calls",
+        type=int,
+        default=DEFAULT_OPENROUTER_FUSION_MAX_TOOL_CALLS,
+        help=(
+            "Maximum OpenRouter web_search/web_fetch steps for each Fusion "
+            "panel model and judge call; range 1 to 16."
+        ),
+    )
+    parser.add_argument(
+        "--openrouter-fusion-max-completion-tokens",
+        type=int,
+        default=DEFAULT_OPENROUTER_FUSION_MAX_COMPLETION_TOKENS,
+        help="Maximum completion tokens for each inner Fusion panel/judge call.",
+    )
+    parser.add_argument(
+        "--openrouter-fusion-reasoning-effort",
+        default=DEFAULT_OPENROUTER_FUSION_REASONING_EFFORT,
+        help="Reasoning effort forwarded to OpenRouter Fusion panel and judge calls.",
+    )
+    parser.add_argument(
+        "--openrouter-fusion-temperature",
+        type=float,
+        default=DEFAULT_OPENROUTER_FUSION_TEMPERATURE,
+        help="Temperature forwarded to OpenRouter Fusion panel calls.",
     )
     return parser
 

@@ -26,6 +26,7 @@ from scripts.run_draco_ensemble import (
     amain,
     aggregate_agent_ensemble_trace,
     benchmark_tool_policy,
+    benchmark_tool_policy_for_group,
     benchmark_tools_for_policy,
     configure_benchmark_sandbox_runtime,
     build_parser,
@@ -51,6 +52,7 @@ from scripts.run_draco_ensemble import (
     run_result_summary,
     score_criterion_judgments,
     summarize,
+    validate_runner_mode_for_groups,
 )
 
 
@@ -212,9 +214,11 @@ class _ToolCaptureProvider:
 
     def __init__(self) -> None:
         self.seen_tools = None
+        self.seen_config = None
 
     async def chat(self, messages: list[Message], tools=None, config=None):  # noqa: ANN001, ARG002
         self.seen_tools = tools
+        self.seen_config = config
         yield TextDeltaEvent(text="ok")
         yield DoneEvent(model="tool-capture")
 
@@ -397,6 +401,9 @@ def test_draco_runner_explicit_groups_preserve_runtime_defaults() -> None:
     assert args.tool_mode == "provider_only"
     assert args.openrouter_web_search_engine == "exa"
     assert args.openrouter_web_fetch_engine == "openrouter"
+    assert args.openrouter_fusion_model == "z-ai/glm-5.2"
+    assert args.openrouter_fusion_max_tool_calls == 12
+    assert args.openrouter_fusion_reasoning_effort == "xhigh"
     assert "hf.co" in parse_domain_list(args.contamination_blocked_domains)
     assert "huggingface.co" in parse_domain_list(args.contamination_blocked_domains)
     assert "arxiv.org" not in parse_domain_list(args.contamination_blocked_domains)
@@ -539,6 +546,126 @@ def test_draco_runner_local_web_tools_policy_enforces_conflict_domains() -> None
     assert policy["local_web_tools"]["web_fetch"]["max_content_chars"] == 200_000
     assert tools is not None
     assert [tool.name for tool in tools] == ["web_search", "web_fetch"]
+
+
+def test_draco_runner_b8_enables_openrouter_fusion_group_tool() -> None:
+    args = build_parser().parse_args([
+        "--input",
+        "draco.jsonl",
+        "--groups",
+        "B8",
+        "--openrouter-fusion-analysis-models",
+        "deepseek/deepseek-v4-pro,z-ai/glm-5.2",
+        "--openrouter-fusion-model",
+        "z-ai/glm-5.2",
+        "--openrouter-fusion-max-tool-calls",
+        "6",
+        "--openrouter-fusion-reasoning-effort",
+        "high",
+    ])
+    base_policy = benchmark_tool_policy(args)
+    group_policy = benchmark_tool_policy_for_group(base_policy, "B8", args=args)
+    tools = benchmark_tools_for_policy(group_policy)
+
+    assert GROUP_SPECS["B8"] == {
+        "kind": "single",
+        "model": "z-ai/glm-5.2",
+        "server_tool_profile": "openrouter_fusion",
+    }
+    assert "openrouter_fusion_tool" not in base_policy
+    assert benchmark_tool_policy_for_group(base_policy, "B0") is base_policy
+    assert group_policy["tools_enabled"] is True
+    assert group_policy["tool_names"] == ["openrouter:fusion"]
+    assert group_policy["openrouter_fusion_tool_choice"] == "required"
+    assert "fusion_internal_web_tools" in group_policy["contamination_controls"]
+    assert tools is not None
+    assert [tool.name for tool in tools] == ["openrouter:fusion"]
+    provider_tool = tools[0].provider_tool
+    assert provider_tool is not None
+    assert provider_tool["type"] == "openrouter:fusion"
+    assert provider_tool["parameters"]["analysis_models"] == [
+        "deepseek/deepseek-v4-pro",
+        "z-ai/glm-5.2",
+    ]
+    assert provider_tool["parameters"]["model"] == "z-ai/glm-5.2"
+    assert provider_tool["parameters"]["max_tool_calls"] == 6
+    assert provider_tool["parameters"]["reasoning"] == {"effort": "high"}
+
+
+def test_draco_runner_b8_default_fusion_parameters_match_g8_shape() -> None:
+    args = build_parser().parse_args([
+        "--input",
+        "draco.jsonl",
+        "--groups",
+        "B8",
+    ])
+    group_policy = benchmark_tool_policy_for_group(
+        benchmark_tool_policy(args),
+        "B8",
+        args=args,
+    )
+    tools = benchmark_tools_for_policy(group_policy)
+
+    assert tools is not None
+    provider_tool = tools[0].provider_tool
+    assert provider_tool is not None
+    assert provider_tool["parameters"]["analysis_models"] == [
+        "deepseek/deepseek-v4-pro",
+        "z-ai/glm-5.2",
+        "google/gemini-3.1-pro-preview",
+        "qwen/qwen3.7-max",
+    ]
+    assert provider_tool["parameters"]["model"] == "z-ai/glm-5.2"
+    assert provider_tool["parameters"]["max_tool_calls"] == 12
+    assert provider_tool["parameters"]["max_completion_tokens"] == 16_384
+    assert provider_tool["parameters"]["reasoning"] == {"effort": "xhigh"}
+    assert provider_tool["parameters"]["temperature"] == 0.0
+
+
+def test_draco_runner_b8_uses_fusion_only_under_local_web_tool_mode() -> None:
+    args = build_parser().parse_args([
+        "--input",
+        "draco.jsonl",
+        "--groups",
+        "B8",
+        "--tool-mode",
+        "local_web_tools",
+    ])
+    group_policy = benchmark_tool_policy_for_group(
+        benchmark_tool_policy(args),
+        "B8",
+        args=args,
+    )
+    tools = benchmark_tools_for_policy(group_policy)
+
+    assert group_policy["tool_names"] == ["openrouter:fusion"]
+    assert group_policy["openrouter_fusion_only"] is True
+    assert tools is not None
+    assert [tool.name for tool in tools] == ["openrouter:fusion"]
+
+
+def test_draco_runner_b8_rejects_agent_loop_runner_mode() -> None:
+    with pytest.raises(ValueError, match="--runner-mode=provider"):
+        validate_runner_mode_for_groups("agent_loop", ["B8"])
+
+    validate_runner_mode_for_groups("provider", ["B8"])
+    validate_runner_mode_for_groups("agent_loop", ["B0", "G3"])
+
+
+def test_draco_runner_ignores_fusion_args_for_non_fusion_groups() -> None:
+    args = build_parser().parse_args([
+        "--input",
+        "draco.jsonl",
+        "--groups",
+        "B0",
+        "--openrouter-fusion-analysis-models",
+        "",
+    ])
+
+    policy = benchmark_tool_policy(args)
+
+    assert policy["tool_mode"] == "provider_only"
+    assert "openrouter_fusion_tool" not in policy
 
 
 def test_draco_runner_local_web_tool_context_matches_recorded_budget() -> None:
@@ -1311,6 +1438,44 @@ async def test_draco_runner_collect_run_passes_tools_to_provider() -> None:
 
     assert run.final_text == "ok"
     assert provider.seen_tools == [tool]
+
+
+@pytest.mark.asyncio
+async def test_draco_runner_b8_provider_mode_forces_fusion_tool() -> None:
+    args = build_parser().parse_args([
+        "--input",
+        "draco.jsonl",
+        "--groups",
+        "B8",
+        "--runner-mode",
+        "provider",
+    ])
+    group_policy = benchmark_tool_policy_for_group(
+        benchmark_tool_policy(args),
+        "B8",
+        args=args,
+    )
+    tools = benchmark_tools_for_policy(group_policy)
+    provider = _ToolCaptureProvider()
+
+    run = await collect_run(
+        provider,
+        "research this",
+        timeout=10.0,
+        config=generation_chat_config(
+            generation_thinking_policy(),
+            model="z-ai/glm-5.2",
+            tool_choice=group_policy.get("openrouter_fusion_tool_choice"),
+        ),
+        tools=tools,
+    )
+
+    assert run.final_text == "ok"
+    assert tools is not None
+    assert provider.seen_tools == tools
+    assert [tool.name for tool in provider.seen_tools] == ["openrouter:fusion"]
+    assert provider.seen_tools[0].provider_tool["type"] == "openrouter:fusion"  # type: ignore[index]
+    assert provider.seen_config.tool_choice == "required"
 
 
 @pytest.mark.asyncio
