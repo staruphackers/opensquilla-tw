@@ -102,7 +102,7 @@ def test_execute_aborts_when_gateway_cannot_stop(monkeypatch, tmp_path: Path) ->
     monkeypatch.setattr(
         actions,
         "_quiesce_gateway",
-        lambda inv: ActionResult("stop-gateway", "running", ok=False, detail="unmanaged"),
+        lambda inv, _ls=None: ActionResult("stop-gateway", "running", ok=False, detail="unmanaged"),
     )
     plan = UninstallPlan(method="pip", home=str(home))
     plan.actions = [
@@ -123,7 +123,7 @@ def test_execute_removes_paths_after_successful_quiesce(monkeypatch, tmp_path: P
     monkeypatch.setattr(
         actions,
         "_quiesce_gateway",
-        lambda inv: ActionResult("stop-gateway", "stopped", ok=True),
+        lambda inv, _ls=None: ActionResult("stop-gateway", "stopped", ok=True),
     )
     plan = UninstallPlan(method="pip", home=str(home))
     plan.actions = [
@@ -140,7 +140,9 @@ def test_execute_runs_package_uninstall(monkeypatch, tmp_path: Path) -> None:
     home.mkdir()
     calls: list[list[str]] = []
     monkeypatch.setattr(
-        actions, "_quiesce_gateway", lambda inv: ActionResult("stop-gateway", "ok", ok=True)
+        actions,
+        "_quiesce_gateway",
+        lambda inv, _ls=None: ActionResult("stop-gateway", "ok", ok=True),
     )
     monkeypatch.setattr(actions, "_run_one", lambda cmd: calls.append(cmd) or 0)
     plan = UninstallPlan(method="pip", home=str(home))
@@ -163,7 +165,9 @@ def test_execute_unregister_service_removes_unit(monkeypatch, tmp_path: Path) ->
     unit.parent.mkdir(parents=True)
     unit.write_text("[Unit]")
     monkeypatch.setattr(
-        actions, "_quiesce_gateway", lambda inv: ActionResult("stop-gateway", "ok", ok=True)
+        actions,
+        "_quiesce_gateway",
+        lambda inv, _ls=None: ActionResult("stop-gateway", "ok", ok=True),
     )
     monkeypatch.setattr(actions, "_run_one", lambda cmd: 0)
     plan = UninstallPlan(method="pip", home=str(tmp_path / "home"))

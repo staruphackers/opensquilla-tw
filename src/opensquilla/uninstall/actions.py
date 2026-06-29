@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,11 @@ from typing import Any
 from opensquilla.uninstall import safety
 from opensquilla.uninstall.inventory import Inventory
 from opensquilla.uninstall.plan import Action, UninstallPlan
+
+# Injected by the CLI layer so the uninstall core never imports `cli` (avoids a
+# cli<->uninstall import cycle). Given (host, port, config_path, shutdown_timeout),
+# stop the lifecycle-managed gateway and return (state, exit_code, message).
+LifecycleStop = Callable[[str, int, "str | None", float], "tuple[str, int, str]"]
 
 
 @dataclass
@@ -56,9 +62,20 @@ class ExecutionResult:
         }
 
 
-def execute(plan: UninstallPlan, inventory: Inventory) -> ExecutionResult:
+def execute(
+    plan: UninstallPlan,
+    inventory: Inventory,
+    *,
+    lifecycle_stop: LifecycleStop | None = None,
+) -> ExecutionResult:
     """Execute ``plan``. Returns an :class:`ExecutionResult` (never raises for
-    expected failures; collects per-action outcomes)."""
+    expected failures; collects per-action outcomes).
+
+    ``lifecycle_stop`` is supplied by the CLI to stop the lifecycle-managed
+    gateway (kept out of this package to avoid a cli<->uninstall import cycle).
+    When omitted, only the port-independent ``gateway.pid`` liveness backstop
+    runs — still fail-closed, but it cannot actively stop a managed process.
+    """
     result = ExecutionResult()
     home = inventory.home
     # Explicit allowlist of roots a `remove-tree` may target: the home itself and
@@ -71,7 +88,7 @@ def execute(plan: UninstallPlan, inventory: Inventory) -> ExecutionResult:
 
     for action in plan.actions:
         if action.kind == "stop-gateway":
-            r = _quiesce_gateway(inventory)
+            r = _quiesce_gateway(inventory, lifecycle_stop)
             result.results.append(r)
             if not r.ok:
                 # A live gateway we could not stop — do NOT delete files under a
@@ -106,57 +123,42 @@ def execute(plan: UninstallPlan, inventory: Inventory) -> ExecutionResult:
     return result
 
 
-def _quiesce_gateway(inventory: Inventory) -> ActionResult:
+def _quiesce_gateway(
+    inventory: Inventory, lifecycle_stop: LifecycleStop | None = None
+) -> ActionResult:
     """Stop the gateway before any deletion. Fail CLOSED: when liveness cannot be
     determined, refuse (ok=False) so files are never deleted under a live process.
-
-    Only a genuinely absent lifecycle module (ImportError) is treated as "nothing
-    to stop"; every other error blocks the uninstall.
     """
     try:
-        from opensquilla.cli.gateway_lifecycle import GatewayLifecycleManager
-    except ImportError:
-        return ActionResult(
-            "stop-gateway", "Gateway runtime not present", ok=True, detail="no lifecycle module"
-        )
-
-    try:
-        from opensquilla.gateway.boot import gateway_shutdown_deadline
-
         host, port, state_dirs = _gateway_quiesce_targets(inventory)
-        mgr = GatewayLifecycleManager(
-            host=host,
-            port=port,
-            config_path=str(inventory.config_path) if inventory.config_path else None,
-            shutdown_timeout=gateway_shutdown_deadline(),  # don't SIGKILL mid-drain
-        )
-        status = mgr.status()
-        if status.state in ("unmanaged", "target_mismatch"):
-            return ActionResult(
-                "stop-gateway",
-                "A gateway is running that this command cannot stop",
-                ok=False,
-                detail=(
-                    f"state={status.state}; stop it manually (opensquilla gateway stop) and re-run."
-                ),
+
+        # 1. Stop the lifecycle-managed gateway via the CLI-provided callable.
+        if lifecycle_stop is not None:
+            from opensquilla.gateway.boot import gateway_shutdown_deadline
+
+            config_path = str(inventory.config_path) if inventory.config_path else None
+            state, exit_code, message = lifecycle_stop(
+                host, port, config_path, gateway_shutdown_deadline()
             )
-        stopped_state = status.state
-        if status.state not in ("not_started", "stale"):
-            stop = mgr.stop()
-            if stop.exit_code != 0:
+            if state in ("unmanaged", "target_mismatch"):
+                return ActionResult(
+                    "stop-gateway",
+                    "A gateway is running that this command cannot stop",
+                    ok=False,
+                    detail=f"state={state}; stop it (opensquilla gateway stop) and re-run.",
+                )
+            if state not in ("not_started", "stale") and exit_code != 0:
                 return ActionResult(
                     "stop-gateway",
                     "Could not stop the running gateway",
                     ok=False,
-                    detail=stop.message or stop.state,
+                    detail=message or state,
                 )
-            stopped_state = stop.state
 
-        # Port-independent backstop: a live gateway.pid (written by EVERY gateway
+        # 2. Port-independent backstop: a live gateway.pid (written by EVERY gateway
         # run — foreground / desktop / unmanaged — unlike the lifecycle gateway.json
         # that only `gateway start` writes) means a gateway still holds this
-        # profile. The lifecycle stop above only covers the managed case, so refuse
-        # to delete if any live pid remains.
+        # profile, so refuse to delete if any live pid remains.
         live = _live_gateway_pid(state_dirs)
         if live is not None:
             return ActionResult(
@@ -166,13 +168,7 @@ def _quiesce_gateway(inventory: Inventory) -> ActionResult:
                 detail=f"pid {live} is alive; stop it (opensquilla gateway stop) and re-run.",
             )
 
-        running = stopped_state not in ("not_started", "stale")
-        return ActionResult(
-            "stop-gateway",
-            "Gateway stopped" if running else "Gateway not running",
-            ok=True,
-            detail=stopped_state,
-        )
+        return ActionResult("stop-gateway", "Gateway quiesced", ok=True, detail="ok")
     except Exception as exc:  # noqa: BLE001 — destructive op: unknown state must block
         return ActionResult(
             "stop-gateway",

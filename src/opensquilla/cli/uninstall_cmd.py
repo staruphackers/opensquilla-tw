@@ -12,6 +12,27 @@ from __future__ import annotations
 import typer
 
 
+def _lifecycle_stop(
+    host: str, port: int, config_path: str | None, shutdown_timeout: float
+) -> tuple[str, int, str]:
+    """Stop the lifecycle-managed gateway; injected into the uninstall core so the
+    `uninstall` package never imports `cli` (avoids a cli<->uninstall cycle).
+
+    Returns (state, exit_code, message). The core treats unmanaged/target_mismatch
+    as "refuse" and a non-zero exit on a running gateway as "could not stop".
+    """
+    from opensquilla.cli.gateway_lifecycle import GatewayLifecycleManager
+
+    mgr = GatewayLifecycleManager(
+        host=host, port=port, config_path=config_path, shutdown_timeout=shutdown_timeout
+    )
+    status = mgr.status()
+    if status.state in ("not_started", "stale", "unmanaged", "target_mismatch"):
+        return (status.state, status.exit_code, status.message or "")
+    stop = mgr.stop()
+    return (stop.state, stop.exit_code, stop.message or "")
+
+
 def uninstall_command(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Show what would be removed and kept; do nothing."
@@ -110,7 +131,7 @@ def uninstall_command(
             else:
                 typer.confirm("Proceed with uninstall (your data is kept)?", abort=True)
 
-    result = execute(plan, inventory)
+    result = execute(plan, inventory, lifecycle_stop=_lifecycle_stop)
 
     if json_output:
         print_json(

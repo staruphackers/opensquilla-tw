@@ -76,7 +76,7 @@ def test_yes_json_executes(monkeypatch, tmp_path: Path) -> None:
     _patch_discover(monkeypatch, tmp_path / "home")
     captured = {}
 
-    def _fake_execute(plan, inventory):
+    def _fake_execute(plan, inventory, **_kwargs):
         captured["ran"] = True
         return ExecutionResult(
             results=[ActionResult("run-package-uninstall", "ok", ok=True)], ok=True
@@ -123,7 +123,7 @@ def test_yes_purge_all_with_phrase_executes(monkeypatch, tmp_path: Path) -> None
     _patch_discover(monkeypatch, tmp_path / "home")
     captured = {}
 
-    def _fake_execute(plan, inventory):
+    def _fake_execute(plan, inventory, **_kwargs):
         captured["ran"] = True
         return ExecutionResult(results=[], ok=True)
 
@@ -142,7 +142,7 @@ def test_purge_all_proceeds_on_correct_phrase(monkeypatch, tmp_path: Path) -> No
     monkeypatch.setattr(codetask_cmd, "_stdin_is_tty", lambda: True)
     captured = {}
 
-    def _fake_execute(plan, inventory):
+    def _fake_execute(plan, inventory, **_kwargs):
         captured["ran"] = True
         return ExecutionResult(results=[], ok=True)
 
