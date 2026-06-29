@@ -170,9 +170,10 @@
             <SetupEnsemblePanel
               v-else-if="section === 'ensemble'"
               :panel="ensemblePanel"
-              @update-enabled="setEnsembleEnabled"
               @update-proposer-field="updateEnsembleProposerField"
               @update-aggregator-field="updateEnsembleAggregatorField"
+              @add-proposer="addEnsembleProposer"
+              @remove-proposer="removeEnsembleProposer"
               @reset="resetEnsembleDefaults"
               @save="saveEnsemble"
             />
@@ -292,9 +293,10 @@ const {
   setRouterMode,
   setRouterDefaultTier,
   setRouterVisualMode,
-  setEnsembleEnabled,
   updateEnsembleProposerField,
   updateEnsembleAggregatorField,
+  addEnsembleProposer,
+  removeEnsembleProposer,
   resetEnsembleDefaults,
   selectChannelType,
   updateProviderField,
