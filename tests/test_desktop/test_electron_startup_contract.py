@@ -96,6 +96,21 @@ def test_start_gateway_reuses_healthy_gateway_before_spawn() -> None:
     assert "stopGateway()" in start
 
 
+def test_start_gateway_enriches_child_path_for_code_task_builds() -> None:
+    main_ts = _read("desktop/electron/src/main.ts")
+    start = _section(
+        main_ts,
+        "async function startGateway",
+        "async function loadControlUi",
+    )
+
+    assert "function desktopChildPath" in main_ts
+    assert "function desktopNodeBinCandidates" in main_ts
+    assert "packagedRuntimeRoot(), 'node', 'bin'" in main_ts
+    assert "OPENSQUILLA_NODE_BIN_DIR" in start
+    assert "PATH: childPath" in start
+
+
 def test_package_verifier_hard_fails_stale_runtime_and_boot_contract() -> None:
     verifier = _read("desktop/electron/scripts/verify-package.mjs")
     package_json = json.loads(_read("desktop/electron/package.json"))
@@ -116,9 +131,40 @@ def test_package_verifier_hard_fails_stale_runtime_and_boot_contract() -> None:
     ]:
         assert expected in verifier
 
+def test_desktop_gateway_build_and_verifier_cover_runtime_capabilities() -> None:
+    build_gateway = _read("desktop/electron/scripts/build-gateway.mjs")
+    verifier = _read("desktop/electron/scripts/verify-package.mjs")
 
-def test_desktop_native_artifact_open_blocks_active_documents() -> None:
+    for extra in ["recommended", "mcp", "msg", "matrix", "document-extras"]:
+        assert f"'{extra}'" in build_gateway
+    for module in ["joblib", "sklearn", "lightgbm", "tokenizers", "tiktoken", "onnxruntime", "mcp"]:
+        assert f"'{module}'" in build_gateway
+    assert "'--collect-all',\n  'sklearn'" not in build_gateway
+    assert "'--collect-all',\n  'lightgbm'" not in build_gateway
+    assert "'--collect-binaries',\n  'sklearn'" in build_gateway
+    assert "lib_lightgbm.dylib" in build_gateway
+    assert "libomp.dylib" in build_gateway
+    assert "Git LFS pointer file, not the real router artifact" in build_gateway
+    assert "git lfs pull --include=" in build_gateway
+    assert "findFilesByName(runtimeGatewayDir, 'libomp.dylib')" in build_gateway
+    assert "install_name_tool" in build_gateway
+    assert "codesign" in build_gateway
+    assert "'--force', '--sign', '-'" in build_gateway
+    assert "@loader_path/libomp.dylib" in build_gateway
+    assert "verifyMacLightgbmRuntime" in verifier
+    assert "lightgbm/lib/lib_lightgbm.dylib" in verifier
+    assert "bundled libomp.dylib" in verifier
+    assert "otool" in verifier
+    assert "@loader_path/libomp.dylib" in verifier
+    assert "code-task', 'stage-task-file'" in verifier
+    assert "code-task', 'smoke-imports'" in verifier
+    assert "code-task', 'smoke-router'" in verifier
+    assert "timeout: 120000" in verifier
+
+
+def test_desktop_native_artifact_open_allows_active_documents_with_file_extensions() -> None:
     main_ts = _read("desktop/electron/src/main.ts")
+    artifact_list_vue = _read("opensquilla-webui/src/components/chat/ChatArtifactList.vue")
     mime_extensions = _section(main_ts, "const MIME_EXTENSIONS", "}\n\n")
     native_open = _section(
         main_ts,
@@ -126,7 +172,35 @@ def test_desktop_native_artifact_open_blocks_active_documents() -> None:
         "function createApplicationMenu",
     )
 
-    assert "'text/html'" not in mime_extensions
-    assert "'application/xhtml+xml'" not in mime_extensions
-    assert "function isActiveDocumentArtifactRequest" in main_ts
-    assert "isActiveDocumentArtifactRequest(name, payload?.mime)" in native_open
+    assert "'text/html': '.html'" in mime_extensions
+    assert "'application/xhtml+xml': '.xhtml'" in mime_extensions
+    assert "function isActiveDocumentArtifactRequest" not in main_ts
+    assert "shell.openPath(filePath)" in native_open
+    assert "isActiveDocumentArtifact(artifact, fetched.blob)" not in artifact_list_vue
+
+
+def test_desktop_cleanup_does_not_claim_os_app_uninstall() -> None:
+    main_ts = _read("desktop/electron/src/main.ts")
+    panel_vue = _read("opensquilla-webui/src/components/settings/DesktopRuntimePanel.vue")
+    en_locale = json.loads(_read("opensquilla-webui/src/locales/en.json"))
+    zh_locale = json.loads(_read("opensquilla-webui/src/locales/zh-Hans.json"))
+
+    cleanup = _section(
+        main_ts,
+        "// ── Desktop data cleanup",
+        "ipcMain.handle('desktop:boot:state'",
+    )
+
+    assert "OPENSQUILLA_INSTALL_METHOD: 'desktop'" in cleanup
+    assert "OPENSQUILLA_STATE_DIR: desktopHome()" in cleanup
+    assert "remove the installed .app / NSIS application" in cleanup
+    assert "installed app itself will remain" in cleanup
+    assert "does not remove the installed app bundle itself" in panel_vue
+
+    en_runtime = en_locale["setup"]["runtime"]
+    zh_runtime = zh_locale["setup"]["runtime"]
+    assert "desktop data cleanup" in en_runtime["uninstallLabel"]
+    assert "uninstalled" not in en_runtime["uninstallDone"].lower()
+    assert "remove OpenSquilla through your OS" in en_runtime["uninstallDone"]
+    assert "清理桌面本地数据" in zh_runtime["uninstallLabel"]
+    assert "已卸载" not in zh_runtime["uninstallDone"]

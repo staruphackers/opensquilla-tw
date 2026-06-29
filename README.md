@@ -91,6 +91,14 @@ startup logs a `DLL load failed` error, install it manually (see
 [Troubleshooting](#troubleshooting)). OpenSquilla keeps running with
 direct single-model routing until it is installed.
 
+On macOS terminal installs, SquillaRouter's LightGBM runtime may also
+need the system OpenMP library. The signed desktop app bundles the
+runtime it needs, but **Quick terminal install** does not install
+Homebrew/system libraries. If startup logs `Library not loaded:
+@rpath/libomp.dylib`, run `brew install libomp`, then restart the
+gateway. OpenSquilla keeps running with direct single-model routing
+until it is installed.
+
 Install links: [Git](https://git-scm.com/downloads) ·
 [Git LFS](https://git-lfs.com/) ·
 [uv](https://docs.astral.sh/uv/getting-started/installation/).
@@ -184,7 +192,10 @@ This installs the OpenSquilla wheel from the release URL, then lets
 `uv` download the dependencies declared by the selected extras. The
 default `recommended` extra includes SquillaRouter runtime dependencies
 such as ONNX Runtime, LightGBM, NumPy, and tokenizers, so a first install
-needs network access unless those wheels are already cached.
+needs network access unless those wheels are already cached. `uv` does
+not install system native runtimes such as macOS `libomp` or the Windows
+Visual C++ Redistributable; see [Troubleshooting](#troubleshooting) if
+the router runtime reports a native-library load error.
 
 **3. Configure and run.**
 
@@ -332,6 +343,28 @@ In this mode, prefix every `opensquilla` command in
 development checkout through a user-local `opensquilla` command — that
 command runs in a different Python environment.
 
+### Uninstall
+
+Remove OpenSquilla with `opensquilla uninstall`. It keeps your data by default
+and removes only the program:
+
+```sh
+opensquilla uninstall --dry-run   # preview what would be removed and kept
+opensquilla uninstall             # remove the program, keep your data
+```
+
+To delete data too, opt in explicitly:
+
+```sh
+opensquilla uninstall --purge-state    # sessions, logs, cache, scheduler, memory
+opensquilla uninstall --purge-config   # config.toml and secrets (.env)
+opensquilla uninstall --purge-all      # everything (asks you to type a confirmation)
+```
+
+The running gateway is drained and stopped first, deletion stays inside the
+OpenSquilla home, and Docker/desktop installs get guided removal steps instead.
+See [`docs/cli.md`](docs/cli.md#uninstall) for the full reference.
+
 ---
 
 ## Installation Privacy
@@ -344,22 +377,23 @@ block startup.
 What is sent:
 
 - schema version
-- random locally generated `install_id`
+- locally generated stable `install_id` digest
 - OpenSquilla version
 - event type (`install` or `version_seen`)
 - install method (`pip`, `source`, `docker`, `desktop`, or `unknown`)
 - operating system, OS version, CPU architecture, and Python major/minor
   version
 - first-seen and sent timestamps
+- CI/test-environment marker (`ci_environment`)
 
-The `install_id` is random and is not derived from your account, device name,
-hostname, or local paths.
+The `install_id` is a local one-way SHA-256 digest derived from usable MAC
+addresses, then local IP addresses when no MAC is available, with a random
+persisted fallback. Raw MAC/IP values are not uploaded.
 
-What is not sent: usernames, email addresses, hostnames, local paths, API keys,
-provider configuration, chat history, session data, memory, agent content, file
-names, or file contents. HTTP servers can technically observe source IP
-addresses at the transport layer; IP addresses are not part of the payload and
-should not be used as an install-count field by the collector.
+What is not sent: usernames, hostnames, paths, API keys, provider config,
+chat/session/memory/agent content, file names, or file contents. Source IP may
+be visible to HTTP servers at the transport layer, but is not part of the
+payload.
 
 To opt out:
 
@@ -658,6 +692,25 @@ totals for the full run.
 ---
 
 ## Troubleshooting
+
+<details>
+<summary>macOS: <code>Library not loaded: @rpath/libomp.dylib</code></summary>
+
+If startup logs `Library not loaded: @rpath/libomp.dylib` from
+`lightgbm/lib/lib_lightgbm.dylib`, OpenSquilla keeps running with
+direct single-model routing, but the bundled `SquillaRouter` runtime
+stays inactive until the macOS OpenMP runtime is installed.
+
+The signed desktop app bundles the native runtime it needs. If you used
+Quick terminal install or source install from a shell, install `libomp`
+with Homebrew and restart the gateway:
+
+```sh
+brew install libomp
+opensquilla gateway restart
+```
+
+</details>
 
 <details>
 <summary>Windows: <code>DLL load failed</code> / Visual C++ runtime</summary>

@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
 contextBridge.exposeInMainWorld('opensquillaDesktop', {
+  getOsLocale: () => ipcRenderer.invoke('desktop:os-locale'),
   getGatewayStatus: () => ipcRenderer.invoke('gateway:status'),
   revealGatewayLog: () => ipcRenderer.invoke('gateway:reveal-log'),
   getDesktopSettings: () => ipcRenderer.invoke('desktop:settings:get'),
@@ -13,6 +14,8 @@ contextBridge.exposeInMainWorld('opensquillaDesktop', {
   getBootState: () => ipcRenderer.invoke('desktop:boot:state'),
   retryStartup: () => ipcRenderer.invoke('desktop:boot:retry'),
   quitApp: () => ipcRenderer.invoke('desktop:boot:quit'),
+  uninstallSummary: () => ipcRenderer.invoke('desktop:uninstall:summary'),
+  uninstallRun: (payload: unknown) => ipcRenderer.invoke('desktop:uninstall:run', payload),
   onBootStatus: (callback: (payload: unknown) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload)
     ipcRenderer.on('desktop:boot:status', listener)

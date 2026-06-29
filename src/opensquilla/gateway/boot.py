@@ -56,6 +56,44 @@ from opensquilla.session.terminal_reply import build_terminal_reply, sanitize_ag
 log = structlog.get_logger(__name__)
 
 
+GATEWAY_GRACEFUL_TIMEOUT_ENV = "OPENSQUILLA_GATEWAY_GRACEFUL_TIMEOUT"
+_DEFAULT_GRACEFUL_TIMEOUT_S = 30.0
+_MAX_GRACEFUL_TIMEOUT_S = 120.0
+
+
+def gateway_graceful_timeout() -> float:
+    """Per-phase graceful drain budget in seconds, env-overridable and bounded.
+
+    Used by :meth:`GatewayServer.close` for both the in-flight turn drain and the
+    background-completion drain. Bounded so the worst-case shutdown window stays
+    predictable, letting the CLI/desktop kill paths pick a SIGKILL deadline that
+    always exceeds it (see :func:`gateway_shutdown_deadline`). Override with
+    ``OPENSQUILLA_GATEWAY_GRACEFUL_TIMEOUT`` (seconds).
+    """
+    raw = os.environ.get(GATEWAY_GRACEFUL_TIMEOUT_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_GRACEFUL_TIMEOUT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DEFAULT_GRACEFUL_TIMEOUT_S
+    if value <= 0:
+        return _DEFAULT_GRACEFUL_TIMEOUT_S
+    return min(value, _MAX_GRACEFUL_TIMEOUT_S)
+
+
+def gateway_shutdown_deadline() -> float:
+    """Recommended SIGKILL deadline (seconds) for the CLI/desktop kill paths.
+
+    :meth:`GatewayServer.close` runs two sequential drain phases (in-flight turns,
+    then background completions), each bounded by :func:`gateway_graceful_timeout`,
+    plus channel/WS/MCP teardown and a 5s server-task join. The sum is padded so a
+    clean drain never races the force-kill. Derives from the same env knob, so
+    raising the drain budget automatically widens the kill window.
+    """
+    return gateway_graceful_timeout() * 2 + 15.0
+
+
 class _FlushReceiptSessionStorage(Protocol):
     async def get_session(self, session_key: str) -> Any | None: ...
 
@@ -836,6 +874,7 @@ async def dispatch_task_runtime_turn(
             idle_timeout=stream_idle_timeout,
             heartbeat_interval=heartbeat_interval,
             stream_event_sink=getattr(run, "stream_event_sink", None),
+            task_id=getattr(run, "task_id", None),
         )
     except TaskRuntimeStreamError as exc:
         if exc.code in {
@@ -1011,8 +1050,15 @@ async def _emit_task_runtime_stream_events(
     idle_timeout: float | None = 180.0,
     heartbeat_interval: float | None = None,
     stream_event_sink: Any = None,
+    task_id: str | None = None,
 ) -> None:
-    """Emit turn events and fail the task if the stream reports an error."""
+    """Emit turn events and fail the task if the stream reports an error.
+
+    ``task_id`` is stamped onto every emitted ``session.event.*`` payload so
+    the WebUI can bind the live stream to a single turn. Without it, a stale
+    task's late ``tool_use_start`` / ``error`` / ``done`` events are
+    indistinguishable from the current turn's and leak into it (issue #344).
+    """
     from dataclasses import asdict, is_dataclass
 
     from opensquilla.engine.stream_wrappers import wrap_stream
@@ -1083,6 +1129,8 @@ async def _emit_task_runtime_stream_events(
             event_dict["terminal_message"] = terminal_message
             event_dict["terminal_reason"] = terminal_payload["terminal_reason"]
             event_dict["error_message"] = safe_error_message
+        if task_id:
+            event_dict["task_id"] = task_id
         await event_emitter(
             session_key,
             f"session.event.{event_kind}",
@@ -1193,15 +1241,18 @@ class GatewayServer:
             # Drain in-flight turns FIRST so replies are not lost.
             # task_runtime.shutdown() waits for all running turns to complete before
             # returning; only then do we stop channel delivery.
+            drain_budget = gateway_graceful_timeout()
             if self._services is not None and self._services.task_runtime is not None:
                 try:
-                    await self._services.task_runtime.shutdown(graceful=True, graceful_timeout=30.0)
+                    await self._services.task_runtime.shutdown(
+                        graceful=True, graceful_timeout=drain_budget
+                    )
                 except Exception:
                     pass
 
             if self._background_completion_manager is not None:
                 try:
-                    await self._background_completion_manager.close(timeout=30.0)
+                    await self._background_completion_manager.close(timeout=drain_budget)
                 except Exception:
                     log.debug("gateway.background_completion_close_failed", exc_info=True)
                 try:
@@ -1235,21 +1286,28 @@ class GatewayServer:
             except ImportError:
                 pass
 
-            if self._server is not None:
-                self._server.should_exit = True
-
-            if self._task is not None:
-                try:
-                    await asyncio.wait_for(self._task, timeout=5.0)
-                except TimeoutError:
-                    self._task.cancel()
-
-            if self._services is not None:
-                await self._services.close()
-
             log.info("gateway.stopped", reason=reason)
         finally:
-            self._release_pid_lock()
+            # Always stop the serve task so it is never left pending, even when a
+            # teardown step above raised (close() is now invoked on every shutdown,
+            # not only on Ctrl+C, so the serve task is typically still running). A
+            # teardown exception still propagates after this runs; the pid lock is
+            # released regardless in the inner finally.
+            try:
+                if self._server is not None:
+                    self._server.should_exit = True
+                if self._task is not None:
+                    try:
+                        await asyncio.wait_for(self._task, timeout=5.0)
+                    except TimeoutError:
+                        self._task.cancel()
+                if self._services is not None:
+                    try:
+                        await self._services.close()
+                    except Exception:
+                        log.debug("gateway.services_close_failed", exc_info=True)
+            finally:
+                self._release_pid_lock()
 
 
 def build_flush_service(
@@ -1527,6 +1585,25 @@ def validate_squilla_router_runtime(config: GatewayConfig) -> None:
     log.info("build_services.squilla_router_bundle_ready", bundle_dir=str(bundle_dir))
 
 
+def validate_squilla_router_runtime_deep(config: GatewayConfig) -> None:
+    """Validate router assets and load the ML runtime once."""
+    validate_squilla_router_runtime(config)
+    router_cfg = getattr(config, "squilla_router", None)
+    if router_cfg is None or not getattr(router_cfg, "enabled", False):
+        return
+
+    strategy = _preload_squilla_router_strategy(router_cfg)
+    if getattr(strategy, "_available", False):
+        return
+
+    error = getattr(strategy, "error", None)
+    if isinstance(error, BaseException):
+        raise RuntimeError(f"V4 Phase 3 router did not become available: {error}") from error
+    if error is not None:
+        raise RuntimeError(f"V4 Phase 3 router did not become available: {error}")
+    raise RuntimeError("V4 Phase 3 router did not become available")
+
+
 def _preload_squilla_router_strategy(router_cfg: Any) -> object:
     from opensquilla.engine.steps.squilla_router import preload_strategy
 
@@ -1549,10 +1626,13 @@ async def preload_squilla_router_runtime(config: GatewayConfig) -> None:
             raise RuntimeError("V4 Phase 3 router did not become available")
         log.warning("gateway.squilla_router_preload_unavailable", bundle_dir=str(bundle_dir))
     except Exception as exc:  # noqa: BLE001
+        from opensquilla.router_runtime_diagnostics import classify_router_runtime_error
+
         log.warning(
             "gateway.squilla_router_preload_failed",
             bundle_dir=str(bundle_dir),
             error=str(exc),
+            runtime_error_kind=classify_router_runtime_error(exc),
         )
 
 
@@ -2928,6 +3008,14 @@ async def start_gateway_server(
             **uvicorn_kwargs,
         )
         server = uvicorn.Server(uv_config)
+        # The run command (cli.gateway_cmd._run) installs its own SIGINT/SIGTERM
+        # handlers that trigger GatewayServer.close() — the only path that drains
+        # in-flight agent turns and background completions. uvicorn's default
+        # handlers would race ours and exit without that drain, so suppress them
+        # and let the embedding process own shutdown signalling.
+        # setattr (not direct assignment) so this is robust to uvicorn type stubs
+        # that don't expose install_signal_handlers — it exists at runtime.
+        setattr(server, "install_signal_handlers", lambda: None)  # noqa: B010
         server_handle._server = server
 
         task = create_background_task(server.serve())

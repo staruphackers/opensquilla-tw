@@ -158,6 +158,8 @@ export interface SessionEventPayload {
   sessionKey?: string
   epoch?: number
   stream_seq?: number
+  task_id?: string
+  taskId?: string
   reason?: string
   status?: string
   run_status?: string
@@ -191,6 +193,11 @@ export interface ToolUsePayload extends SessionEventPayload {
   json_fragment?: string
   jsonFragment?: string
   fragment?: string
+  // Server wall-clock tool start time (epoch ms). Present on tool_use_start so a
+  // running tool's elapsed timer survives page switches / stream replay instead of
+  // restarting from a fresh local clock on remount (issue #329). 0/absent => use
+  // the local clock.
+  started_at?: number
 }
 
 export interface ToolDeltaPayload extends ToolUsePayload {
@@ -241,6 +248,8 @@ export interface ChatSendParams {
 
 export interface ChatSendResponse {
   sessionKey?: string
+  task_id?: string
+  taskId?: string
 }
 
 export interface ChatHistoryMessage {

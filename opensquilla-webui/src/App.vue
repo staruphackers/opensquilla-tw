@@ -13,7 +13,7 @@
       docked: appStore.sidebarOpen,
       hovered: appStore.sidebarHovered,
     }"
-    aria-label="Primary"
+    :aria-label="t('chrome.primaryNav')"
     id="sidebar-nav"
     @mouseleave="onHoverLeave"
   >
@@ -22,7 +22,7 @@
       <router-link
         to="/"
         class="sidebar-brand-link"
-        aria-label="OpenSquilla home"
+        :aria-label="t('chrome.brandHome')"
         @click="handleNavClick"
       >
         <img class="sidebar-brand-mark" :src="brandMarkUrl" alt="" aria-hidden="true" />
@@ -47,7 +47,7 @@
         @click="startNewChatInstant"
       >
         <Icon name="plus" :size="16" />
-        <span class="sidebar-new-session__label">New chat</span>
+        <span class="sidebar-new-session__label">{{ t('chrome.newChat') }}</span>
         <!-- Badge tracks the configured binding and hides when the shortcut is
              disabled (Settings → Keyboard), so it never advertises a dead key. -->
         <kbd v-if="newChatHint" class="sidebar-kbd" aria-hidden="true">{{ newChatHint }}</kbd>
@@ -70,7 +70,7 @@
     <!-- Always-visible grouped nav index. Bounded and self-scrolling under a
          short viewport so it never squeezes Recents, which owns the elastic
          space below; every destination stays a labelled text row. -->
-    <div class="sidebar-section sidebar-core" role="navigation" aria-label="Control navigation">
+    <div class="sidebar-section sidebar-core" role="navigation" :aria-label="t('chrome.controlNav')">
       <!-- Pinned level-1 rows (Sessions / Cron / Skills), single-sourced from the
            Work band of the route taxonomy so promoting a route is a one-line meta
            edit and the rail, the mobile drawer, and the palette never drift. -->
@@ -125,7 +125,7 @@
         @click="toggleMore"
       >
         <Icon name="menu" :size="16" />
-        <span class="sidebar-fn-label">More</span>
+        <span class="sidebar-fn-label">{{ t('chrome.more') }}</span>
         <span
           v-if="appStore.approvalCount > 0"
           class="sidebar-count-badge"
@@ -159,7 +159,7 @@
         @click="openSettings"
       >
         <Icon name="settings" :size="16" />
-        <span class="sidebar-fn-label">Settings</span>
+        <span class="sidebar-fn-label">{{ t('chrome.settings') }}</span>
       </button>
     </div>
   </nav>
@@ -192,7 +192,7 @@
       class="sidebar-more-popover"
       :style="moreStyle"
       role="dialog"
-      aria-label="More destinations"
+      :aria-label="t('chrome.moreDestinations')"
     >
       <template v-for="section in consoleSections" :key="section.group">
         <p class="sidebar-nav-group-label">{{ section.label }}</p>
@@ -206,7 +206,7 @@
             @click="onMoreApprovals"
           >
             <Icon name="approvals" :size="16" />
-            <span class="sidebar-fn-label">Approvals</span>
+            <span class="sidebar-fn-label">{{ t('nav.approvals') }}</span>
             <span
               v-if="appStore.approvalCount > 0"
               class="sidebar-count-badge"
@@ -231,6 +231,7 @@
 
   <!-- Main content -->
   <div
+    ref="mainRef"
     class="main"
     :class="{
       docked: appStore.sidebarOpen,
@@ -245,45 +246,46 @@
         <button
           v-show="!appStore.sidebarOpen"
           class="sidebar-dock-toggle topbar-toggle"
-          title="Expand sidebar"
-          aria-label="Expand sidebar"
+          :title="t('chrome.expandSidebar')"
+          :aria-label="t('chrome.expandSidebar')"
           @click="toggleDock"
         >
           <Icon name="panel-left-open" :size="16" />
         </button>
       </div>
-      <div class="topbar-right">
+      <div ref="topbarRightRef" class="topbar-right">
         <button
           v-if="appStore.approvalCount > 0"
           class="approval-inline"
           @click="openBlockedApprovalSession"
-          title="Open the blocked session"
+          :title="t('chrome.openBlockedSession')"
         >
-          Approval required
+          {{ t('chrome.approvalRequired') }}
         </button>
         <button
           v-if="webConfigEnabled"
           type="button"
           class="conn-pill conn-pill--link"
           :class="rpcStore.state"
-          :title="`Connection: ${rpcStore.state} — manage in Settings`"
-          aria-label="Manage gateway connection"
+          :title="t('chrome.connectionTitle', { state: connectionStateLabel })"
+          :aria-label="t('chrome.manageConnection')"
           @click="openConnectionSettings"
-        >{{ rpcStore.state }}</button>
-        <span v-else class="conn-pill" :class="rpcStore.state">{{ rpcStore.state }}</span>
+        >{{ connectionStateLabel }}</button>
+        <span v-else class="conn-pill" :class="rpcStore.state">{{ connectionStateLabel }}</span>
+        <LanguageSwitcher />
         <div class="theme-menu-wrap">
           <button
             ref="themeButtonRef"
             class="btn btn--icon btn--ghost"
-            title="Theme"
-            aria-label="Theme"
+            :title="t('chrome.theme')"
+            :aria-label="t('chrome.theme')"
             aria-haspopup="menu"
             :aria-expanded="themeMenuOpen"
             @click.stop="themeMenuOpen = !themeMenuOpen"
           >
             <Icon :name="themeIconName" :size="16" />
           </button>
-          <div v-if="themeMenuOpen" class="theme-menu" role="menu" aria-label="Theme">
+          <div v-if="themeMenuOpen" class="theme-menu" role="menu" :aria-label="t('chrome.theme')">
             <button
               v-for="opt in themeOptions"
               :key="opt.mode"
@@ -294,7 +296,7 @@
               @click="pickTheme(opt.mode)"
             >
               <Icon :name="opt.icon" :size="15" />
-              <span>{{ opt.label }}</span>
+              <span>{{ t('chrome.themeMode.' + opt.mode) }}</span>
               <Icon v-if="appStore.theme === opt.mode" class="theme-menu__check" name="check" :size="14" />
             </button>
           </div>
@@ -319,7 +321,7 @@
   <nav
     class="mobile-tabbar"
     :class="{ 'is-keyboard-open': mobileKeyboardOpen }"
-    aria-label="Primary mobile"
+    :aria-label="t('chrome.primaryMobile')"
   >
     <router-link
       to="/chat"
@@ -328,7 +330,7 @@
       @click="handleNavClick"
     >
       <Icon name="chat" :size="20" />
-      <span class="mobile-tab__label">Chat</span>
+      <span class="mobile-tab__label">{{ t('nav.chat') }}</span>
     </router-link>
     <router-link
       to="/sessions"
@@ -337,7 +339,7 @@
       @click="handleNavClick"
     >
       <Icon name="sessions" :size="20" />
-      <span class="mobile-tab__label">Sessions</span>
+      <span class="mobile-tab__label">{{ t('nav.sessions') }}</span>
     </router-link>
     <router-link
       to="/approvals"
@@ -346,7 +348,7 @@
       @click="handleNavClick"
     >
       <Icon name="approvals" :size="20" />
-      <span class="mobile-tab__label">Approvals</span>
+      <span class="mobile-tab__label">{{ t('nav.approvals') }}</span>
       <span v-if="appStore.approvalCount > 0" class="mobile-tab__badge">{{ appStore.approvalCount }}</span>
     </router-link>
     <button
@@ -356,7 +358,7 @@
       @click="appStore.setSidebarOpen(true)"
     >
       <Icon name="menu" :size="20" />
-      <span class="mobile-tab__label">More</span>
+      <span class="mobile-tab__label">{{ t('chrome.more') }}</span>
     </button>
   </nav>
 
@@ -371,8 +373,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { useI18n } from 'vue-i18n'
+import { routeTitle } from './router'
 import { getPlatform } from '@/platform'
 import { useDialogA11y } from '@/composables/useDialogA11y'
 import { useAppStore, type ThemeMode, type PendingApproval } from './stores/app'
@@ -391,11 +395,13 @@ import ConfirmModal from './components/ConfirmModal.vue'
 import SidebarConversations from './components/SidebarConversations.vue'
 import SidebarSetupBanner from './components/SidebarSetupBanner.vue'
 import CommandPalette from './components/CommandPalette.vue'
+import LanguageSwitcher from './components/LanguageSwitcher.vue'
 import { useDocumentEvent } from './composables/useDocumentEvent'
 import { useAgentOptions } from './composables/useAgentOptions'
 import { useToasts } from './composables/useToasts'
 import { useNavigation } from './app/useNavigation'
 import { normalizeAgentId } from './utils/chat/sessionKeys'
+import { installSessionNavigationDiagConsole, recordSessionNavigationDiag } from './utils/chat/sessionNavigationDiag'
 import type { RpcEventHandler } from '@/lib/rpc'
 import { isMacPlatform } from './utils/browser'
 import { useShortcutsStore } from './stores/shortcuts'
@@ -404,12 +410,29 @@ import { bindingMatches, formatBinding } from './utils/keychord'
 const appStore = useAppStore()
 const rpcStore = useRpcStore()
 const shortcutsStore = useShortcutsStore()
+const { t } = useI18n()
 const $route = useRoute()
+
+// Localized connection-state label for the topbar pill and its tooltip. The
+// store state ('connected' | 'connecting' | 'disconnected') is a stable key, not
+// display text; CSS uppercases the result (a no-op for CJK scripts).
+const connectionStateLabel = computed(() => t(`chrome.connectionState.${rpcStore.state}`))
 const router = useRouter()
+
+// afterEach only fires on navigation, so a same-route language switch needs an
+// explicit re-localize of the tab title.
+watch(() => appStore.locale, () => {
+  document.title = `${routeTitle($route)} — OpenSquilla`
+  // The language switcher prints the locale's own name, so switching locales
+  // resizes the topbar cluster; re-measure once the new label has laid out.
+  void nextTick(syncTopbarReserve)
+})
 const { allSessions, sessionListError, isLoading, loadSessions } = useSessions()
 const { consoleSections, bottomRoutes, workNav } = useNavigation()
 const { pushToast } = useToasts()
 const webConfigEnabled = getPlatform().capabilities.hasWebConfig
+
+installSessionNavigationDiagConsole()
 
 // Shared agents.list state + fetch (singleton): App.vue and ChatView's
 // in-draft switcher use the same list and one fetch.
@@ -442,6 +465,68 @@ const themeIconName = computed(() => {
 
 const themeMenuOpen = ref(false)
 const themeButtonRef = ref<HTMLButtonElement | null>(null)
+
+// The floating topbar's right cluster (connection pill + language switcher +
+// theme menu) is absolutely positioned and overlays the chat header band. Its
+// width is dynamic — it grows with the connection state string, the pending-
+// approval button, and (the regression source) the locale's own language label
+// ("中文" vs "Français") — so a hardcoded reservation can never stay correct.
+// Measure the band the cluster occupies (from the main panel's right edge) plus
+// a breathing gap and publish it as --topbar-right-reserve; chat-view.css
+// consumes it so header actions never slide under the pill in any locale.
+//
+// The connection pill is special: its text flips between the connected /
+// connecting / disconnected states at runtime (uppercased by CSS) WITHOUT a
+// layout pass that would re-run this measurement in time, and a flip to a wider
+// state label must not momentarily occlude the actions. So the pill is always
+// reserved at its widest state — measured across the localized labels of all
+// three states in the active locale (the e2e occlusion probe in share.spec.ts
+// runs in the default 'en' locale, where the widest is "DISCONNECTED") — while
+// the rest of the cluster is measured live.
+const mainRef = ref<HTMLElement | null>(null)
+const topbarRightRef = ref<HTMLElement | null>(null)
+let topbarReserveObserver: ResizeObserver | null = null
+let pillMeasureCanvas: HTMLCanvasElement | null = null
+
+const CONNECTION_STATES = ['connected', 'connecting', 'disconnected'] as const
+
+function widestPillWidth(pill: Element): number {
+  const cs = getComputedStyle(pill)
+  const chrome =
+    parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) +
+    parseFloat(cs.borderLeftWidth) + parseFloat(cs.borderRightWidth)
+  if (!pillMeasureCanvas) pillMeasureCanvas = document.createElement('canvas')
+  const ctx = pillMeasureCanvas.getContext('2d')
+  if (!ctx) return pill.getBoundingClientRect().width
+  ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`
+  const letterSpacing = parseFloat(cs.letterSpacing) || 0
+  let widest = 0
+  for (const state of CONNECTION_STATES) {
+    // toUpperCase mirrors the pill's text-transform so Latin labels measure at
+    // their rendered width; it is a no-op for CJK labels.
+    const text = t(`chrome.connectionState.${state}`).toUpperCase()
+    const width = ctx.measureText(text).width + letterSpacing * text.length + chrome
+    if (width > widest) widest = width
+  }
+  return widest
+}
+
+function syncTopbarReserve() {
+  const main = mainRef.value
+  const cluster = topbarRightRef.value
+  if (!main || !cluster) return
+  const mainRect = main.getBoundingClientRect()
+  const gap = 16
+  const pill = cluster.querySelector('.conn-pill')
+  // Chrome to the right of the pill (language switcher + theme + topbar inset)
+  // is measured live so it tracks the locale label width; the pill itself is
+  // reserved at its widest state. Fall back to the cluster's live left edge if
+  // the pill is somehow absent.
+  const reserve = pill
+    ? mainRect.right - pill.getBoundingClientRect().right + widestPillWidth(pill) + gap
+    : mainRect.right - cluster.getBoundingClientRect().left + gap
+  main.style.setProperty('--topbar-right-reserve', `${Math.max(0, Math.round(reserve))}px`)
+}
 const themeOptions = [
   { mode: 'light', label: 'Light', icon: 'sun' },
   { mode: 'dark', label: 'Dark', icon: 'moon' },
@@ -526,6 +611,11 @@ const currentSessionKey = computed(() => {
 
 // Chat layout applies to both the session view and the draft route.
 const isChatRoute = computed(() => $route.path === '/chat' || $route.path === '/chat/new')
+
+// Entering the chat route swaps the topbar into its chat inset and mounts the
+// chat header that consumes --topbar-right-reserve; re-measure so the fresh
+// header gets an accurate reservation (a size-only observer won't fire here).
+watch(isChatRoute, () => void nextTick(syncTopbarReserve))
 
 // The Settings overlay (route-mounted dialog) is open on these routes. It owns
 // its own Escape/focus, so App-level keyboard shortcuts defer to it. Both web
@@ -716,11 +806,15 @@ function onPaletteToggleTheme() {
 }
 
 function onPaletteSelectSession(key: string) {
-  switchToSession(key)
+  switchToSession(key, 'command_palette.select_session')
 }
 
-function switchToSession(key: string) {
+function switchToSession(key: string, source = 'app.switchToSession') {
   if (!key) return
+  recordSessionNavigationDiag(source, {
+    from: currentSessionKey.value,
+    to: key,
+  })
   router.push({ path: '/chat', query: { session: key } })
   if (appStore.sidebarHovered) {
     appStore.setSidebarHovered(false)
@@ -795,7 +889,7 @@ async function onDeleteSession(key: string) {
 function openBlockedApprovalSession() {
   const oldest = appStore.oldestPendingWithSession
   if (oldest?.sessionKey) {
-    switchToSession(oldest.sessionKey)
+    switchToSession(oldest.sessionKey, 'approval.openBlockedSession')
     return
   }
   router.push('/approvals')
@@ -1052,6 +1146,15 @@ onMounted(() => {
   syncMobileSidebar()
   window.addEventListener('resize', syncMobileSidebar)
   window.visualViewport?.addEventListener('resize', syncMobileKeyboard)
+  // Re-measure the topbar reserve whenever the panel or the cluster itself
+  // changes size (window resize, sidebar dock, approval button, font swap).
+  if (typeof ResizeObserver !== 'undefined') {
+    topbarReserveObserver = new ResizeObserver(() => syncTopbarReserve())
+    if (mainRef.value) topbarReserveObserver.observe(mainRef.value)
+    if (topbarRightRef.value) topbarReserveObserver.observe(topbarRightRef.value)
+  }
+  window.addEventListener('resize', syncTopbarReserve)
+  syncTopbarReserve()
   loadAgents()
   loadSessions()
   rpcUnsubSessionsChanged = rpcStore.on('sessions.changed', scheduleSessionRefresh)
@@ -1063,6 +1166,11 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  if (topbarReserveObserver) {
+    topbarReserveObserver.disconnect()
+    topbarReserveObserver = null
+  }
+  window.removeEventListener('resize', syncTopbarReserve)
   if (hoverLeaveTimer) clearTimeout(hoverLeaveTimer)
   if (sessionRefreshTimer) clearTimeout(sessionRefreshTimer)
   if (rpcUnsubSessionsChanged) rpcUnsubSessionsChanged()

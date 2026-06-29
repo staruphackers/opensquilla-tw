@@ -6,7 +6,7 @@
         <Icon name="info" :size="16" />
       </span>
       <div class="msg-error-card__body">
-        <span class="msg-error-card__heading">Turn failed</span>
+        <span class="msg-error-card__heading">{{ t('chat.turnFailed') }}</span>
         <span v-if="message.text" class="msg-error-card__text">{{ message.text }}</span>
       </div>
       <time v-if="timeIso" class="msg-error-card__time" :datetime="timeIso" :title="timeFull">{{ timeAbs }}</time>
@@ -24,7 +24,7 @@
         </details>
       </template>
       <template v-else-if="message.text">
-        {{ message.text }}
+        <span class="msg-system__text">{{ message.text }}</span>
       </template>
       <time v-if="timeIso" class="msg-system-time" :datetime="timeIso" :title="timeFull">{{ timeAbs }}</time>
     </div>
@@ -33,9 +33,12 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
 import type { ChatRenderedMessage } from '@/types/chat'
 import { absoluteTime, fullTime, isoTime } from '@/utils/messageTime'
+
+const { t } = useI18n()
 
 const props = defineProps<{
   message: ChatRenderedMessage
@@ -72,6 +75,11 @@ const timeFull = computed(() => fullTime(props.message.ts))
 .msg-system-label {
   font-weight: 600;
   margin-right: 0.375rem;
+}
+
+.msg-system__text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 /* Quiet, hover-revealed timestamp on the centered status pill. */
@@ -138,7 +146,8 @@ const timeFull = computed(() => fullTime(props.message.ts))
   font-size: 0.8125rem;
   color: var(--text-muted);
   line-height: 1.5;
-  word-break: break-word;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .msg-error-card__time {
@@ -197,6 +206,8 @@ const timeFull = computed(() => fullTime(props.message.ts))
   background: var(--bg-hover);
   border-radius: 0.25rem;
   font-size: 0.8125rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   overflow-x: auto;
   max-height: 200px;
   overflow-y: auto;

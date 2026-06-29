@@ -13,6 +13,10 @@ from typing import Any
 import structlog
 import yaml
 
+from opensquilla.router_runtime_diagnostics import (
+    classify_router_runtime_error,
+    router_runtime_hint,
+)
 from opensquilla.router_tiers import (
     DEFAULT_TEXT_TIER,
     ROUTE_CLASS_TO_TIER,
@@ -22,6 +26,7 @@ from opensquilla.squilla_router.controller import TIER_ORDER, select_localized_p
 log = structlog.get_logger(__name__)
 
 _ROUTE_CLASS_TO_TIER: dict[str, str] = dict(ROUTE_CLASS_TO_TIER)
+_GIT_LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
 
 
 def default_bundle_dir() -> Path:
@@ -79,17 +84,13 @@ class V4Phase3Strategy:
         try:
             self._init_runtime(use_aux_head=use_aux_head)
         except Exception as exc:
-            missing_dep = isinstance(exc, ImportError) or isinstance(exc.__cause__, ImportError)
+            error_kind = classify_router_runtime_error(exc)
             log.error(
                 "v4_phase3.init_failed",
                 bundle_dir=str(self.bundle_dir),
                 error=str(exc),
-                hint=(
-                    "router ML runtime missing; install opensquilla[recommended] "
-                    "to enable v4_phase3 routing"
-                    if missing_dep
-                    else None
-                ),
+                runtime_error_kind=error_kind,
+                hint=router_runtime_hint(error_kind),
             )
             if require_router_runtime:
                 raise RuntimeError(f"failed to initialize V4 Phase 3 router: {exc}") from exc
@@ -124,6 +125,45 @@ class V4Phase3Strategy:
         missing = [name for name in required if not (self.bundle_dir / name).exists()]
         if missing:
             raise FileNotFoundError(f"missing V4 bundle files: {missing}")
+        self._validate_artifact_manifest()
+
+    def _validate_artifact_manifest(self) -> None:
+        manifest_path = self.bundle_dir / "artifact_manifest.json"
+        if not manifest_path.exists():
+            return
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        problems: list[str] = []
+        for entry in manifest.get("files", []):
+            raw_path = str(entry.get("path") or "")
+            if not raw_path:
+                continue
+            rel_path = Path(raw_path)
+            if rel_path.is_absolute() or ".." in rel_path.parts:
+                problems.append(f"{raw_path}: invalid manifest path")
+                continue
+
+            path = self.bundle_dir / rel_path
+            if not path.exists():
+                problems.append(f"{raw_path}: missing")
+                continue
+
+            expected_size = entry.get("size_bytes")
+            if isinstance(expected_size, int) and path.stat().st_size != expected_size:
+                problems.append(
+                    f"{raw_path}: size {path.stat().st_size} != manifest {expected_size}"
+                )
+                continue
+
+            with path.open("rb") as handle:
+                if handle.read(len(_GIT_LFS_POINTER_PREFIX)) == _GIT_LFS_POINTER_PREFIX:
+                    problems.append(f"{raw_path}: Git LFS pointer, not model data")
+
+        if problems:
+            detail = "; ".join(problems[:5])
+            if len(problems) > 5:
+                detail += f"; ... {len(problems) - 5} more"
+            raise RuntimeError(f"incomplete V4 router artifact bundle: {detail}")
 
     def _read_model_version(self) -> str:
         for name in ("version.json", "inference_manifest.json"):

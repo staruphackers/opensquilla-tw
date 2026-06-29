@@ -102,6 +102,10 @@ class ControlUiConfig(BaseSettings):
     enabled: bool = True
     base_path: str = "/control"
     frontend: Literal["vue", "legacy"] = "vue"
+    # Default UI locale served on first paint when the browser has no saved
+    # preference. The client (localStorage) and a manual switch always override
+    # it. Anything zh* clamps to zh-Hans; anything else to en.
+    default_locale: Literal["en", "zh-Hans", "ja", "fr", "de", "es"] = "en"
     allowed_origins: list[str] = Field(default_factory=list)
 
     @field_validator("base_path")
@@ -114,6 +118,19 @@ class ControlUiConfig(BaseSettings):
     def _normalize_frontend(cls, v: object) -> object:
         if isinstance(v, str):
             return v.strip().lower()
+        return v
+
+    @field_validator("default_locale", mode="before")
+    @classmethod
+    def _normalize_locale(cls, v: object) -> object:
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s.startswith("zh"):
+                return "zh-Hans"
+            for code in ("ja", "fr", "de", "es"):
+                if s.startswith(code):
+                    return code
+            return "en"
         return v
 
 
@@ -631,6 +648,7 @@ ROUTER_TIER_PROFILE_IDS = frozenset(
         "deepseek",
         "gemini",
         "volcengine",
+        "byteplus",
         "openai",
         "zhipu",
         "moonshot",
@@ -919,6 +937,48 @@ def _router_tier_profile_defaults(profile: str | None) -> dict:
                 "description": (
                     "Volcengine highest route: Doubao Seed 2.0 Code Preview for the "
                     "hardest coding and code-review routes."
+                ),
+                "supports_image": False,
+                "thinking_level": "high",
+            },
+        },
+        "byteplus": {
+            "c0": {
+                "provider": "byteplus",
+                "model": "seed-2-0-lite-260228",
+                "description": (
+                    "BytePlus fast route: Seed 2.0 Lite for low-latency, "
+                    "low-cost simple text tasks."
+                ),
+                "supports_image": False,
+                "thinking_level": "off",
+            },
+            "c1": {
+                "provider": "byteplus",
+                "model": "seed-2-0-lite-260228",
+                "description": (
+                    "BytePlus balanced route: Seed 2.0 Lite for normal agent "
+                    "work with provider thinking available."
+                ),
+                "supports_image": False,
+                "thinking_level": "low",
+            },
+            "c2": {
+                "provider": "byteplus",
+                "model": "seed-2-0-lite-260228",
+                "description": (
+                    "BytePlus strong route: Seed 2.0 Lite with medium thinking "
+                    "for multi-step text tasks."
+                ),
+                "supports_image": False,
+                "thinking_level": "medium",
+            },
+            "c3": {
+                "provider": "byteplus",
+                "model": "seed-2-0-lite-260228",
+                "description": (
+                    "BytePlus highest route: Seed 2.0 Lite with high thinking "
+                    "for harder long-horizon text tasks."
                 ),
                 "supports_image": False,
                 "thinking_level": "high",
