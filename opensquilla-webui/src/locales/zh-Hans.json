@@ -267,7 +267,10 @@
       "pasteKey": "粘贴音频服务商密钥",
       "statusDisabled": "在启用此能力之前，语音和音频工具对智能体不可见。",
       "statusReady": "网关读取到密钥后，语音和音频工具将在新一轮对话中提供。",
-      "statusNeedsKey": "音频已启用，但在智能体使用前仍需要一个音频服务商密钥。"
+      "statusNeedsKey": "音频已启用，但在智能体使用前仍需要一个音频服务商密钥。",
+      "ttsVoice": "TTS 语音",
+      "ttsModel": "TTS 模型",
+      "languageCode": "语言代码"
     },
     "connection": {
       "title": "连接",

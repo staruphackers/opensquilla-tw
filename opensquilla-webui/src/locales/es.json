@@ -267,7 +267,10 @@
       "pasteKey": "pega una clave de proveedor de audio",
       "statusDisabled": "Las herramientas de voz y audio están ocultas para los agentes hasta que se active esta capacidad.",
       "statusReady": "Las herramientas de voz y audio estarán disponibles en nuevos turnos una vez que la puerta de enlace vea la clave.",
-      "statusNeedsKey": "El audio está activado pero aún necesita una clave de proveedor de audio antes de que los agentes puedan usarlo."
+      "statusNeedsKey": "El audio está activado pero aún necesita una clave de proveedor de audio antes de que los agentes puedan usarlo.",
+      "ttsVoice": "Voz TTS",
+      "ttsModel": "Modelo TTS",
+      "languageCode": "Código de idioma"
     },
     "connection": {
       "title": "Conexión",

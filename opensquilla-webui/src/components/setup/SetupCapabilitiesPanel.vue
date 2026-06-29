@@ -44,6 +44,10 @@ interface CapabilitiesPanelContract {
     audioEnabled: boolean
     audioApiKey: string
     audioApiKeyEnv: string
+    audioBaseUrl: string
+    audioTtsVoice: string
+    audioTtsModel: string
+    audioLanguageCode: string
   }
   options: {
     searchProviders: ProviderOption[]
@@ -357,6 +361,30 @@ function onImageProviderSelect(event: Event) {
           <div class="control-row__label-block"><span class="control-row__label">{{ t('setup.common.apiKeyEnv') }}</span></div>
           <div class="control-row__control">
             <input class="control-input" :value="panel.form.audioApiKeyEnv" name="setup_audio_api_key_env" placeholder="ELEVENLABS_API_KEY" @input="emit('updateField', 'audio', 'apiKeyEnv', ($event.target as HTMLInputElement).value)">
+          </div>
+        </label>
+        <label class="control-row">
+          <div class="control-row__label-block"><span class="control-row__label">{{ t('setup.audio.ttsVoice') }}</span></div>
+          <div class="control-row__control">
+            <input class="control-input" :value="panel.form.audioTtsVoice" name="setup_audio_tts_voice" :placeholder="t('setup.common.leaveBlankKeep')" @input="emit('updateField', 'audio', 'ttsVoice', ($event.target as HTMLInputElement).value)">
+          </div>
+        </label>
+        <label class="control-row">
+          <div class="control-row__label-block"><span class="control-row__label">{{ t('setup.audio.ttsModel') }}</span></div>
+          <div class="control-row__control">
+            <input class="control-input" :value="panel.form.audioTtsModel" name="setup_audio_tts_model" :placeholder="t('setup.common.leaveBlankKeep')" @input="emit('updateField', 'audio', 'ttsModel', ($event.target as HTMLInputElement).value)">
+          </div>
+        </label>
+        <label class="control-row">
+          <div class="control-row__label-block"><span class="control-row__label">{{ t('setup.common.baseUrl') }}</span></div>
+          <div class="control-row__control">
+            <input class="control-input" :value="panel.form.audioBaseUrl" name="setup_audio_base_url" :placeholder="t('setup.common.leaveBlankKeep')" @input="emit('updateField', 'audio', 'baseUrl', ($event.target as HTMLInputElement).value)">
+          </div>
+        </label>
+        <label class="control-row">
+          <div class="control-row__label-block"><span class="control-row__label">{{ t('setup.audio.languageCode') }}</span></div>
+          <div class="control-row__control">
+            <input class="control-input" :value="panel.form.audioLanguageCode" name="setup_audio_language_code" placeholder="zh-CN, en-US…" @input="emit('updateField', 'audio', 'languageCode', ($event.target as HTMLInputElement).value)">
           </div>
         </label>
       </template>

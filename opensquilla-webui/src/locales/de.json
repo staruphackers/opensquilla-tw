@@ -267,7 +267,10 @@
       "pasteKey": "einen Audio-Anbieterschlüssel einfügen",
       "statusDisabled": "Sprach- und Audiowerkzeuge sind für Agenten ausgeblendet, bis diese Fähigkeit aktiviert wird.",
       "statusReady": "Sprach- und Audiowerkzeuge werden in neuen Durchläufen verfügbar sein, sobald das Gateway den Schlüssel sieht.",
-      "statusNeedsKey": "Audio ist aktiviert, benötigt aber noch einen Audio-Anbieterschlüssel, bevor Agenten es verwenden können."
+      "statusNeedsKey": "Audio ist aktiviert, benötigt aber noch einen Audio-Anbieterschlüssel, bevor Agenten es verwenden können.",
+      "ttsVoice": "TTS-Stimme",
+      "ttsModel": "TTS-Modell",
+      "languageCode": "Sprachcode"
     },
     "connection": {
       "title": "Verbindung",

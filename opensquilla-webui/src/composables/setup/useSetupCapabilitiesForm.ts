@@ -74,6 +74,10 @@ interface CapabilitiesPanelContext {
   audioEnabled: Ref<boolean>
   audioApiKey: Ref<string>
   audioApiKeyEnv: Ref<string>
+  audioBaseUrl: Ref<string>
+  audioTtsVoice: Ref<string>
+  audioTtsModel: Ref<string>
+  audioLanguageCode: Ref<string>
   audioStatusText: ComputedRef<string>
   audioBadgeTone: ComputedRef<string>
   audioBadgeLabel: ComputedRef<string>
@@ -360,6 +364,10 @@ export function useSetupCapabilitiesForm() {
         audioEnabled: context.audioEnabled.value,
         audioApiKey: context.audioApiKey.value,
         audioApiKeyEnv: context.audioApiKeyEnv.value,
+        audioBaseUrl: context.audioBaseUrl.value,
+        audioTtsVoice: context.audioTtsVoice.value,
+        audioTtsModel: context.audioTtsModel.value,
+        audioLanguageCode: context.audioLanguageCode.value,
       },
       options: {
         searchProviders: context.searchProviders.value,

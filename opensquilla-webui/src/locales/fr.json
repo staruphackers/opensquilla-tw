@@ -267,7 +267,10 @@
       "pasteKey": "collez une clé de fournisseur audio",
       "statusDisabled": "Les outils vocaux et audio sont masqués aux agents tant que cette capacité n'est pas activée.",
       "statusReady": "Les outils vocaux et audio seront disponibles dans les nouveaux tours une fois que la passerelle verra la clé.",
-      "statusNeedsKey": "L'audio est activé mais nécessite encore une clé de fournisseur audio avant que les agents puissent l'utiliser."
+      "statusNeedsKey": "L'audio est activé mais nécessite encore une clé de fournisseur audio avant que les agents puissent l'utiliser.",
+      "ttsVoice": "Voix TTS",
+      "ttsModel": "Modèle TTS",
+      "languageCode": "Code de langue"
     },
     "connection": {
       "title": "Connexion",

@@ -267,7 +267,10 @@
       "pasteKey": "paste an audio provider key",
       "statusDisabled": "Voice and audio tools are hidden from agents until this capability is enabled.",
       "statusReady": "Voice and audio tools will be available in new turns once the gateway sees the key.",
-      "statusNeedsKey": "Audio is enabled but still needs an audio provider key before agents can use it."
+      "statusNeedsKey": "Audio is enabled but still needs an audio provider key before agents can use it.",
+      "ttsVoice": "TTS voice",
+      "ttsModel": "TTS model",
+      "languageCode": "Language code"
     },
     "connection": {
       "title": "Connection",
