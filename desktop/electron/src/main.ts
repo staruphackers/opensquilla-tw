@@ -2515,14 +2515,81 @@ async function openOrResumeDesktopApp(): Promise<void> {
   }
 }
 
+// SIGKILL deadline for the owned gateway child. The Python gateway drains
+// in-flight agent turns and background completions on shutdown (up to two
+// graceful phases plus teardown — see gateway_shutdown_deadline()), so the
+// force-kill must exceed that worst case or the drain is cut off mid-write.
+// Keep in sync with the default OPENSQUILLA_GATEWAY_GRACEFUL_TIMEOUT (30s).
+const GATEWAY_SHUTDOWN_KILL_AFTER_MS = 75_000
+// Short SIGKILL backstop after a hard terminate (TerminateProcess / SIGTERM)
+// when the graceful path was skipped or already overran its deadline.
+const GATEWAY_HARD_KILL_BACKSTOP_MS = 5_000
+
+// Ask the gateway to shut down gracefully over its owner-only HTTP endpoint,
+// which runs the full GatewayServer.close() drain before exiting. The desktop
+// child is loopback (no-auth owner), so no token is needed. Best-effort:
+// returns false if the gateway is unreachable or rejects the request.
+async function requestGatewayShutdown(url: string): Promise<boolean> {
+  if (!url) return false
+  try {
+    const response = await fetch(`${url}/api/system/shutdown`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+      signal: AbortSignal.timeout(2000),
+    })
+    return response.ok
+  } catch {
+    return false
+  }
+}
+
 function stopGateway(): void {
   if (!gatewayProcess || !gatewayState.owned) return
   const child = gatewayProcess
+  const url = gatewayState.url
   gatewayProcess = null
+
+  const hardTerminate = () => {
+    if (child.killed) return
+    child.kill('SIGTERM')
+    setTimeout(() => {
+      if (!child.killed) child.kill('SIGKILL')
+    }, GATEWAY_HARD_KILL_BACKSTOP_MS).unref()
+  }
+
+  // The Windows HTTP graceful path is async (fetch + timers) and only works
+  // while the main process stays alive to drive it. On app quit (isQuitting) the
+  // process is about to exit, so that fire-and-forget work would race teardown
+  // and orphan the child — leaving it holding the listen port + PID lock and
+  // breaking the next launch. So only take the graceful path when NOT quitting;
+  // on quit, fall through to a synchronous TerminateProcess.
+  if (process.platform === 'win32' && !isQuitting) {
+    // Windows has no real SIGTERM — child.kill('SIGTERM') maps to an immediate
+    // TerminateProcess that skips the drain. Trigger the HTTP graceful path,
+    // wait for the child to exit on its own, and only force-terminate if it
+    // overruns the deadline or the gateway never accepted the request.
+    let exited = false
+    child.once('exit', () => {
+      exited = true
+    })
+    void requestGatewayShutdown(url).then((accepted) => {
+      if (!accepted && !exited) hardTerminate()
+    })
+    setTimeout(() => {
+      if (!exited) hardTerminate()
+    }, GATEWAY_SHUTDOWN_KILL_AFTER_MS).unref()
+    return
+  }
+
+  // POSIX: SIGTERM triggers the gateway's graceful drain directly (the detached
+  // child drains and exits on its own after the main process is gone).
+  // Windows-on-quit: SIGTERM maps to a synchronous TerminateProcess, killing the
+  // child before the main process exits — no drain, but no orphan either.
   child.kill('SIGTERM')
   setTimeout(() => {
     if (!child.killed) child.kill('SIGKILL')
-  }, 4000).unref()
+  }, GATEWAY_SHUTDOWN_KILL_AFTER_MS).unref()
 }
 
 ipcMain.handle('gateway:status', () => ({ ...gatewayState }))
