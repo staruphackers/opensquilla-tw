@@ -51,6 +51,7 @@ _UA_FALLBACK = (
 
 _TRANSIENT_STATUSES: frozenset[int] = frozenset({403, 408, 425, 429, 500, 502, 503, 504})
 _RETRY_DELAY_SECONDS = 0.25
+_FETCH_USER_AGENTS = (_UA_PRIMARY, _UA_FALLBACK, _UA_PRIMARY)
 _WEB_FETCH_DEFAULT_MAX_CHARS = 20_000
 _WEB_FETCH_MAX_CHARS_ENV = "OPENSQUILLA_WEB_FETCH_MAX_CHARS"
 _MAX_REDIRECTS = 5
@@ -263,31 +264,65 @@ async def web_fetch(
             )
 
     last_error: str | None = None
-    for attempt_idx, user_agent in enumerate((_UA_PRIMARY, _UA_FALLBACK)):
+    last_error_class = ""
+    for attempt_idx, user_agent in enumerate(_FETCH_USER_AGENTS):
         try:
             status, final_url, content_type, raw_html = await _do_fetch(user_agent)
         except SSRFBlockedError:
             raise
-        except httpx.TimeoutException:
-            raise
-        except Exception as exc:
+        except httpx.TimeoutException as exc:
             last_error = str(exc)
-            if attempt_idx == 0:
+            last_error_class = exc.__class__.__name__
+            if attempt_idx < len(_FETCH_USER_AGENTS) - 1:
                 await asyncio.sleep(_RETRY_DELAY_SECONDS)
                 continue
-            result: dict[str, Any] = {
-                "url": url,
-                "final_url": url,
-                "status": 0,
-                "content_type": "",
-                "title": "",
-                "extract_mode": extract_mode,
-                "extractor": "none",
-                "truncated": False,
-                "length": 0,
-                "text": "",
-                "error": last_error,
-            }
+            result = _fetch_error_result(
+                url=url,
+                extract_mode=extract_mode,
+                error=last_error or "Timed out while fetching URL",
+                error_class=last_error_class or "TimeoutException",
+                attempts=len(_FETCH_USER_AGENTS),
+                retry_allowed=True,
+                hint=(
+                    "The upstream site timed out repeatedly. Try another URL "
+                    "from search results or use another source for the same facts."
+                ),
+            )
+            return json.dumps(result, ensure_ascii=False)
+        except httpx.RequestError as exc:
+            last_error = str(exc)
+            last_error_class = exc.__class__.__name__
+            if attempt_idx < len(_FETCH_USER_AGENTS) - 1:
+                await asyncio.sleep(_RETRY_DELAY_SECONDS)
+                continue
+            result = _fetch_error_result(
+                url=url,
+                extract_mode=extract_mode,
+                error=last_error or "Network error while fetching URL",
+                error_class=last_error_class or "RequestError",
+                attempts=len(_FETCH_USER_AGENTS),
+                retry_allowed=True,
+                hint=(
+                    "The upstream connection failed repeatedly. Try another URL "
+                    "from search results or use another source for the same facts."
+                ),
+            )
+            return json.dumps(result, ensure_ascii=False)
+        except Exception as exc:
+            last_error = str(exc)
+            last_error_class = exc.__class__.__name__
+            if attempt_idx < len(_FETCH_USER_AGENTS) - 1:
+                await asyncio.sleep(_RETRY_DELAY_SECONDS)
+                continue
+            result = _fetch_error_result(
+                url=url,
+                extract_mode=extract_mode,
+                error=last_error or "Failed to fetch URL",
+                error_class=last_error_class or "FetchError",
+                attempts=len(_FETCH_USER_AGENTS),
+                retry_allowed=False,
+                hint="Try a different URL or adjust the path.",
+            )
             return json.dumps(result, ensure_ascii=False)
 
         is_transient = status in _TRANSIENT_STATUSES
@@ -389,6 +424,35 @@ async def web_fetch(
     }
     _cache[cache_key] = result
     return json.dumps(_apply_max_chars(result, effective_max_chars), ensure_ascii=False)
+
+
+def _fetch_error_result(
+    *,
+    url: str,
+    extract_mode: str,
+    error: str,
+    error_class: str,
+    attempts: int,
+    retry_allowed: bool,
+    hint: str,
+) -> dict[str, Any]:
+    return {
+        "url": url,
+        "final_url": url,
+        "status": 0,
+        "content_type": "",
+        "title": "",
+        "extract_mode": extract_mode,
+        "extractor": "none",
+        "truncated": False,
+        "length": 0,
+        "text": "",
+        "error": error,
+        "error_class": error_class,
+        "attempts": attempts,
+        "retry_allowed": retry_allowed,
+        "hint": hint,
+    }
 
 
 def _wrap_content(source: str, content: str) -> str:
