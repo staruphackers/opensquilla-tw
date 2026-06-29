@@ -467,8 +467,9 @@ def _image_generation_api_key_source(
     return "none"
 
 
+ImageOutputFormat = Literal["png", "jpeg", "webp"]
 _VALID_IMAGE_SIZES = ("1024x1024", "1536x1024", "1024x1536")
-_VALID_IMAGE_OUTPUT_FORMATS = ("png", "jpeg", "webp")
+_VALID_IMAGE_OUTPUT_FORMATS: tuple[ImageOutputFormat, ...] = ("png", "jpeg", "webp")
 
 
 def upsert_image_generation_provider(
@@ -561,7 +562,7 @@ def upsert_image_generation_provider(
     new_cfg.image_generation.enabled = bool(enabled)
     new_cfg.image_generation.primary = primary_model
     new_cfg.image_generation.size = effective_size
-    new_cfg.image_generation.output_format = effective_output_format
+    new_cfg.image_generation.output_format = cast(ImageOutputFormat, effective_output_format)
     new_cfg.image_generation.fallbacks = effective_fallbacks
     next_provider_cfg = _image_generation_provider_config(new_cfg, provider_id)
     next_provider_cfg.api_key = effective_api_key
