@@ -37,7 +37,7 @@ def test_detect_uses_receipt_hint_only_when_unknown(monkeypatch) -> None:
         "OPENSQUILLA_RUNNING_IN_CONTAINER",
     ):
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setattr(inventory, "_in_container", lambda: False)
+    monkeypatch.setattr(inventory, "_docker_image_install", lambda: False)
     monkeypatch.setattr(inventory, "_portable_venv_dir", lambda: None)
     monkeypatch.setattr(inventory, "_is_editable_install", lambda: False)
     monkeypatch.setattr(inventory, "_venv_ancestry", lambda: None)

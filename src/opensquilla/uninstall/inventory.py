@@ -108,13 +108,23 @@ def _env_truthy(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in _TRUTHY
 
 
-def _in_container() -> bool:
-    if _env_truthy("OPENSQUILLA_RUNNING_IN_CONTAINER"):
-        return True
+# The Dockerfile pins the container's state root here (OPENSQUILLA_STATE_DIR).
+_DOCKER_DATA_ROOT = Path("/var/lib/opensquilla")
+
+
+def _docker_image_install() -> bool:
+    """True only for a genuine OpenSquilla docker image.
+
+    A plain pip/uv install that merely runs inside a CI runner or devcontainer
+    (which also has ``/.dockerenv``) is NOT a docker install and must stay
+    uninstallable — so require the state root to be the image's data root too.
+    """
     try:
-        return Path("/.dockerenv").exists()
+        if not Path("/.dockerenv").exists():
+            return False
     except OSError:
         return False
+    return default_opensquilla_home() == _DOCKER_DATA_ROOT
 
 
 def _module_root() -> Path:
@@ -201,17 +211,22 @@ def detect_install_method(receipt_hint: str | None = None) -> str:
     """
     explicit = os.environ.get("OPENSQUILLA_INSTALL_METHOD", "").strip().lower()
 
-    if explicit == "docker" or _in_container():
+    if explicit == "docker":
         return METHOD_DOCKER
     if explicit == "desktop" or _env_truthy("OPENSQUILLA_DESKTOP"):
         return METHOD_DESKTOP
+    if _env_truthy("OPENSQUILLA_RUNNING_IN_CONTAINER") or _docker_image_install():
+        return METHOD_DOCKER
     if _portable_venv_dir() is not None:
         return METHOD_PORTABLE
-    if _is_editable_install():
-        return METHOD_SOURCE
+    # Venv ancestry (uv-tool / pipx) is checked BEFORE the editable heuristic so
+    # an editable install inside a uv/pipx venv removes via the right manager
+    # rather than being misclassified as a plain source checkout.
     venv_kind = _venv_ancestry()
     if venv_kind is not None:
         return venv_kind
+    if _is_editable_install():
+        return METHOD_SOURCE
     if _has_distribution():
         return METHOD_PIP
     # Honor an explicit override (telemetry uses "source" for source-editable).

@@ -27,18 +27,31 @@ def _isolate_detection(monkeypatch) -> None:
         "OPENSQUILLA_RUNNING_IN_CONTAINER",
     ):
         monkeypatch.delenv(var, raising=False)
-    monkeypatch.setattr(inventory, "_in_container", lambda: False)
+    monkeypatch.setattr(inventory, "_docker_image_install", lambda: False)
     monkeypatch.setattr(inventory, "_portable_venv_dir", lambda: None)
     monkeypatch.setattr(inventory, "_is_editable_install", lambda: False)
     monkeypatch.setattr(inventory, "_venv_ancestry", lambda: None)
     monkeypatch.setattr(inventory, "_has_distribution", lambda: True)
 
 
-def test_detect_docker_first(monkeypatch) -> None:
+def test_detect_docker_image_layout(monkeypatch) -> None:
     _isolate_detection(monkeypatch)
-    monkeypatch.setattr(inventory, "_in_container", lambda: True)
+    monkeypatch.setattr(inventory, "_docker_image_install", lambda: True)
     monkeypatch.setattr(inventory, "_is_editable_install", lambda: True)  # ignored under docker
     assert inventory.detect_install_method() == METHOD_DOCKER
+
+
+def test_running_in_container_env_is_docker(monkeypatch) -> None:
+    _isolate_detection(monkeypatch)
+    monkeypatch.setenv("OPENSQUILLA_RUNNING_IN_CONTAINER", "1")
+    assert inventory.detect_install_method() == METHOD_DOCKER
+
+
+def test_pip_install_in_plain_container_is_not_docker(monkeypatch) -> None:
+    # A devcontainer/CI pip install (has /.dockerenv but normal home, no signal)
+    # must NOT be misdetected as docker — otherwise removal is wrongly refused.
+    _isolate_detection(monkeypatch)  # _docker_image_install -> False, has dist -> True
+    assert inventory.detect_install_method() == METHOD_PIP
 
 
 def test_detect_desktop_env(monkeypatch) -> None:

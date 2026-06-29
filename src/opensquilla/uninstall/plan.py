@@ -71,10 +71,6 @@ class UninstallPlan:
     manual: list[Action] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
-    @property
-    def destructive_actions(self) -> list[Action]:
-        return [a for a in self.actions if a.kind != "stop-gateway"]
-
     def to_payload(self) -> dict[str, Any]:
         return {
             "method": self.method,
@@ -231,16 +227,19 @@ def _plan_data_purge(inventory: Inventory, options: PlanOptions, plan: Uninstall
 
         if bucket.outside_home:
             # Relocated outside the home (e.g. via an absolute env override) —
-            # may point into user-owned trees, so never auto-delete.
-            plan.manual.append(
-                Action(
-                    "manual",
-                    f"{bucket.name} is outside the OpenSquilla home",
-                    paths=[str(p) for p in existing],
-                    reason="Located outside the OpenSquilla home (relocated via env/"
-                    "config); remove manually if you intend to.",
+            # may point into user-owned trees, so never auto-delete. Only surface
+            # it as a manual step when the user actually intends to purge data;
+            # on a default keep-all uninstall it would just be noise.
+            if options.any_purge:
+                plan.manual.append(
+                    Action(
+                        "manual",
+                        f"{bucket.name} is outside the OpenSquilla home",
+                        paths=[str(p) for p in existing],
+                        reason="Located outside the OpenSquilla home (relocated via env/"
+                        "config); remove manually if you intend to.",
+                    )
                 )
-            )
             continue
 
         if purge_whole_home:
