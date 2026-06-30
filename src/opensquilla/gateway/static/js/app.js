@@ -35,6 +35,7 @@ const App = (() => {
     Router.register('/agents', (el) => _renderStandardView(AgentsView, el), () => AgentsView.destroy(), { title: 'Agents' });
     Router.register('/cron', (el) => _renderStandardView(CronView, el), () => CronView.destroy(), { title: 'Cron' });
     Router.register('/usage', (el) => _renderStandardView(UsageView, el), () => UsageView.destroy(), { title: 'Usage' });
+    Router.register('/rag', (el) => _renderStandardView(RagView, el), () => RagView.destroy(), { title: 'RAG' });
     Router.register('/config', (el) => _renderStandardView(ConfigView, el), () => ConfigView.destroy(), { title: 'Config' });
     Router.register('/setup', (el) => _renderStandardView(SetupView, el), () => SetupView.destroy(), { title: 'Setup' });
     Router.register('/channels', (el) => _renderStandardView(ChannelsView, el), () => ChannelsView.destroy(), { title: 'Channels' });
@@ -79,6 +80,7 @@ const App = (() => {
         <a class="nav-item" href="#" data-path="/sessions">${icons.sessions()} Sessions</a>
         <a class="nav-item" href="#" data-path="/agents">${icons.agents()} Agents</a>
         <a class="nav-item" href="#" data-path="/usage">${icons.usage()} Usage</a>
+        <a class="nav-item" href="#" data-path="/rag">${icons.search()} RAG</a>
         <a class="nav-item" href="#" data-path="/cron">${icons.cron()} Cron</a>
         <div class="nav-group-label">Settings</div>
         <a class="nav-item" href="#" data-path="/config">${icons.config()} Config</a>
