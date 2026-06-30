@@ -148,6 +148,18 @@ async def test_ensemble_runs_proposers_text_only_and_aggregator_with_tools(
     aggregator_call = next(call for call in calls if call["model"] == "agg")
     assert aggregator_call["tools"] == [tool]
     assert "Candidate drafts" in aggregator_call["messages"][-1].content
+    requests = done.ensemble_trace["requests"]
+    assert [request["role"] for request in requests] == [
+        "proposer",
+        "proposer",
+        "aggregator",
+    ]
+    assert [request["model"] for request in requests] == ["p1", "p2", "agg"]
+    assert requests[0]["messages"][0]["content"] == "solve it"
+    assert requests[0]["params"]["effective_config"]["timeout"] == 120.0
+    assert requests[-1]["tool_count"] == 1
+    assert requests[-1]["tools"][0]["name"] == "search"
+    assert "Candidate drafts" in requests[-1]["messages"][-1]["content"]
 
 
 @pytest.mark.asyncio
@@ -569,6 +581,13 @@ async def test_ensemble_all_failed_uses_single_model_fallback(
     assert done.ensemble_trace["fallback_used"] is True
     assert done.ensemble_trace["successful_proposers"] == 0
     assert [row["model"] for row in done.model_usage_breakdown] == ["fallback-model"]
+    assert [request["role"] for request in done.ensemble_trace["requests"]] == [
+        "proposer",
+        "proposer",
+        "fallback_single",
+    ]
+    assert done.ensemble_trace["requests"][-1]["model"] == "fallback-model"
+    assert done.ensemble_trace["requests"][-1]["messages"][0]["content"] == "solve"
 
 
 @pytest.mark.asyncio
@@ -605,6 +624,11 @@ async def test_ensemble_insufficient_success_fallback_includes_proposer_usage(
     assert done.output_tokens == 4
     assert [row["model"] for row in done.model_usage_breakdown] == ["p1", "fallback-model"]
     assert [row["role"] for row in done.model_usage_breakdown] == [
+        "proposer",
+        "fallback_single",
+    ]
+    assert [request["role"] for request in done.ensemble_trace["requests"]] == [
+        "proposer",
         "proposer",
         "fallback_single",
     ]

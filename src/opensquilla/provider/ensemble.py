@@ -32,6 +32,19 @@ from .types import (
 )
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+REQUEST_TRACE_MESSAGE_MAX_CHARS = _env_int(
+    "OPENSQUILLA_ENSEMBLE_TRACE_MESSAGE_MAX_CHARS",
+    12000,
+)
+
+
 @dataclass(frozen=True)
 class EnsembleMemberConfig:
     """A provider plus per-call generation overrides for one ensemble member."""
@@ -65,6 +78,7 @@ class _CandidateResult:
     ttft_ms: int | None = None
     error: str = ""
     error_code: str = ""
+    request: dict[str, Any] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -207,6 +221,154 @@ def _truncate_text(text: str, max_chars: int) -> str:
         return text
     marker = "\n\n[truncated]"
     return text[: max(0, max_chars - len(marker))] + marker
+
+
+def _trace_text(text: str, max_chars: int = REQUEST_TRACE_MESSAGE_MAX_CHARS) -> dict[str, Any]:
+    return {
+        "content": _truncate_text(text, max_chars),
+        "content_chars": len(text),
+        "truncated": max_chars > 0 and len(text) > max_chars,
+    }
+
+
+def _jsonable(value: Any) -> Any:
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return model_dump(mode="json")
+    if isinstance(value, list):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, tuple):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _jsonable(val) for key, val in value.items()}
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return repr(value)
+
+
+def _content_to_trace_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    return json.dumps(_jsonable(content), ensure_ascii=False, sort_keys=True)
+
+
+def _message_trace_rows(messages: Sequence[Message]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for index, message in enumerate(messages):
+        row = {
+            "index": index,
+            "role": message.role,
+            **_trace_text(_content_to_trace_text(message.content)),
+        }
+        if message.reasoning_content:
+            reasoning = _trace_text(message.reasoning_content)
+            row["reasoning_content"] = reasoning["content"]
+            row["reasoning_content_chars"] = reasoning["content_chars"]
+            row["reasoning_truncated"] = reasoning["truncated"]
+        rows.append(row)
+    return rows
+
+
+def _config_trace(config: ChatConfig | None) -> dict[str, Any]:
+    if config is None:
+        return {}
+    fields = (
+        "max_tokens",
+        "temperature",
+        "thinking",
+        "thinking_budget_tokens",
+        "thinking_level",
+        "timeout",
+        "cache_mode",
+        "tool_choice",
+        "provider_request_max_chars",
+    )
+    return {field: _jsonable(getattr(config, field)) for field in fields}
+
+
+def _tool_trace_rows(tools: Sequence[ToolDefinition] | None) -> list[dict[str, Any]]:
+    rows = []
+    for tool in tools or []:
+        rows.append(
+            {
+                "name": getattr(tool, "name", ""),
+                "description_chars": len(getattr(tool, "description", "") or ""),
+            }
+        )
+    return rows
+
+
+def _request_trace(
+    *,
+    role: str,
+    profile: str,
+    member: EnsembleMemberConfig,
+    messages: Sequence[Message],
+    tools: Sequence[ToolDefinition] | None,
+    config: ChatConfig | None,
+    label: str = "",
+    sample_index: int = 0,
+    layer_index: int | None = None,
+) -> dict[str, Any]:
+    cfg = member.provider_config
+    row: dict[str, Any] = {
+        "role": role,
+        "profile": profile,
+        "label": label or member.label or role,
+        "provider": cfg.provider,
+        "model": cfg.model,
+        "sample_index": sample_index,
+        "params": {
+            "member_temperature": member.temperature,
+            "member_max_tokens": member.max_tokens,
+            "member_thinking": member.thinking,
+            "member_k": member.k,
+            "effective_config": _config_trace(config),
+        },
+        "tool_count": len(tools or []),
+        "tools": _tool_trace_rows(tools),
+        "messages": _message_trace_rows(messages),
+    }
+    if layer_index is not None:
+        row["layer_index"] = layer_index
+    return row
+
+
+def _append_request_trace(trace: dict[str, Any], request: dict[str, Any]) -> None:
+    if not request:
+        return
+    trace.setdefault("requests", []).append(request)
+
+
+def _fallback_request_trace(
+    *,
+    profile: str,
+    provider: LLMProvider,
+    messages: Sequence[Message],
+    tools: Sequence[ToolDefinition] | None,
+    config: ChatConfig | None,
+) -> dict[str, Any]:
+    return {
+        "role": "fallback_single",
+        "profile": profile,
+        "label": "fallback",
+        "provider": str(getattr(provider, "provider_name", "fallback")),
+        "model": str(getattr(provider, "model", "")),
+        "sample_index": 0,
+        "params": {"effective_config": _config_trace(config)},
+        "tool_count": len(tools or []),
+        "tools": _tool_trace_rows(tools),
+        "messages": _message_trace_rows(messages),
+    }
+
+
+def _fill_last_request_model(trace: dict[str, Any], *, role: str, model: str) -> None:
+    if not model:
+        return
+    for request in reversed(trace.get("requests", [])):
+        if isinstance(request, dict) and request.get("role") == role and not request.get("model"):
+            request["model"] = model
+            return
 
 
 def _rollup_cost_source(rows: Sequence[dict[str, Any]]) -> str:
@@ -566,12 +728,18 @@ class EnsembleProvider:
         error = ""
         error_code = ""
         got_done = False
+        selector_messages = self._build_selector_messages(messages, candidates)
+        request_trace = _request_trace(
+            role="candidate_selector",
+            profile=self.profile_name,
+            member=self.aggregator,
+            messages=selector_messages,
+            tools=None,
+            config=config,
+            label="candidate_selector",
+        )
         try:
-            stream = provider.chat(
-                self._build_selector_messages(messages, candidates),
-                tools=None,
-                config=config,
-            )
+            stream = provider.chat(selector_messages, tools=None, config=config)
             if self.aggregator_timeout_seconds > 0:
                 async with asyncio.timeout(self.aggregator_timeout_seconds):
                     async for event in stream:
@@ -618,6 +786,7 @@ class EnsembleProvider:
             "selector_model": self.aggregator.provider_config.model,
             "ranked_candidate_indexes": ranked,
             "selected_candidate_index": selected.index,
+            "request": request_trace,
         }
         if not applied:
             if error:
@@ -739,6 +908,19 @@ class EnsembleProvider:
                     layer_index=layer_index,
                 )
             )
+            _append_request_trace(
+                trace,
+                _request_trace(
+                    role=f"aggregator_layer_{layer_index}",
+                    profile=self.profile_name,
+                    member=self.aggregator,
+                    messages=layer_messages,
+                    tools=None,
+                    config=config,
+                    label=f"aggregator_layer_{layer_index}",
+                    layer_index=layer_index,
+                ),
+            )
             text, usage_row, error_message, error_code = await self._collect_moa_text_layer(
                 provider=provider,
                 messages=layer_messages,
@@ -826,6 +1008,18 @@ class EnsembleProvider:
 
         yielded_done = False
         try:
+            _append_request_trace(
+                trace,
+                _request_trace(
+                    role=label,
+                    profile=self.profile_name,
+                    member=self.aggregator,
+                    messages=messages,
+                    tools=tools,
+                    config=config,
+                    label=label,
+                ),
+            )
             stream = provider.chat(messages, tools=tools, config=config)
             if self.aggregator_timeout_seconds > 0:
                 async with asyncio.timeout(self.aggregator_timeout_seconds):
@@ -1134,12 +1328,18 @@ class EnsembleProvider:
         usage_rows: list[dict[str, Any]] = []
         error = ""
         error_code = ""
+        prefilter_messages = self._build_prefilter_messages(messages, candidates, top_k=top_k)
+        request_trace = _request_trace(
+            role="candidate_scorer",
+            profile=self.profile_name,
+            member=self.candidate_scorer,
+            messages=prefilter_messages,
+            tools=None,
+            config=scorer_cfg,
+            label=self.candidate_scorer.label or "candidate_scorer",
+        )
         try:
-            stream = provider.chat(
-                self._build_prefilter_messages(messages, candidates, top_k=top_k),
-                tools=None,
-                config=scorer_cfg,
-            )
+            stream = provider.chat(prefilter_messages, tools=None, config=scorer_cfg)
             if self.aggregator_timeout_seconds > 0:
                 async with asyncio.timeout(self.aggregator_timeout_seconds):
                     async for event in stream:
@@ -1167,6 +1367,7 @@ class EnsembleProvider:
             "scorer_model": self.candidate_scorer.provider_config.model,
             "ranked_candidate_indexes": ranked,
             "selected_candidate_indexes": [candidate.index for candidate in selected],
+            "request": request_trace,
         }
         if not applied:
             trace["fallback_reason"] = (
@@ -1238,6 +1439,16 @@ class EnsembleProvider:
         chat_cfg = _member_chat_config(config, member)
         if self.proposer_timeout_seconds > 0:
             chat_cfg = chat_cfg.model_copy(update={"timeout": self.proposer_timeout_seconds})
+        result.request = _request_trace(
+            role="proposer",
+            profile=self.profile_name,
+            member=member,
+            messages=messages,
+            tools=tools,
+            config=chat_cfg,
+            label=result.label,
+            sample_index=result.sample_index,
+        )
         text_parts: list[str] = []
         tool_parts: list[str] = []
         got_done = False
@@ -1410,6 +1621,13 @@ class EnsembleProvider:
                 for candidate in candidates
             ],
         }
+        requests = [candidate.request for candidate in candidates if candidate.request]
+        if prefilter_trace and prefilter_trace.get("request"):
+            requests.append(prefilter_trace["request"])
+        if selection_trace and selection_trace.get("request"):
+            requests.append(selection_trace["request"])
+        if requests:
+            row["requests"] = requests
         if moa_layers > 1:
             row["moa_layers"] = moa_layers
             row["moa_refine_count"] = moa_layers - 1
@@ -1454,9 +1672,24 @@ class EnsembleProvider:
             final_request_role="fallback_single",
             selected_candidates=[candidate for candidate in candidates if candidate.ok],
         )
+        _append_request_trace(
+            trace,
+            _fallback_request_trace(
+                profile=self.profile_name,
+                provider=self.fallback_provider,
+                messages=messages,
+                tools=tools,
+                config=config,
+            ),
+        )
         proposer_rows = _candidate_usage_rows(candidates, profile=self.profile_name)
         async for event in self.fallback_provider.chat(messages, tools=tools, config=config):
             if isinstance(event, DoneEvent):
+                _fill_last_request_model(
+                    trace,
+                    role="fallback_single",
+                    model=event.model,
+                )
                 fallback_row = _done_usage_row(
                     event,
                     role="fallback_single",
