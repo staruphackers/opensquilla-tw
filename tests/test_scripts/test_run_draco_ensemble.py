@@ -399,6 +399,8 @@ def test_draco_runner_explicit_groups_preserve_runtime_defaults() -> None:
     assert args.runner_mode == "agent_loop"
     assert args.agent_max_iterations == 12
     assert args.tool_mode == "provider_only"
+    assert args.local_web_search_provider == "duckduckgo"
+    assert args.local_web_search_api_key_env == ""
     assert args.openrouter_web_search_engine == "exa"
     assert args.openrouter_web_fetch_engine == "openrouter"
     assert args.openrouter_fusion_model == "z-ai/glm-5.2"
@@ -855,7 +857,7 @@ async def test_draco_runner_local_web_fetch_uses_configured_sandbox_runtime(
     assert "runtime_unconfigured" not in raw
 
 
-def test_draco_runner_configures_local_search_runtime_without_secrets(
+def test_draco_runner_default_local_search_runtime_stays_duckduckgo_with_brave_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[dict[str, object]] = []
@@ -875,6 +877,52 @@ def test_draco_runner_configures_local_search_runtime_without_secrets(
         "G3",
         "--tool-mode",
         "local_web_tools",
+    ])
+
+    runtime = configure_local_web_search_runtime(
+        GatewayConfig(
+            search_max_results=2,
+            search_api_key="stale-config-key",
+            search_api_key_env="BRAVE_SEARCH_API_KEY",
+        ),
+        benchmark_tool_policy(args),
+    )
+
+    assert calls
+    assert calls[0]["provider_name"] == "duckduckgo"
+    assert calls[0]["api_key"] == ""
+    assert runtime["provider"] == "duckduckgo"
+    assert runtime["api_key_configured"] is False
+    assert runtime["api_key_source"] == ""
+    assert runtime["api_key_env"] == ""
+    assert "stale-config-key" not in json.dumps(runtime)
+    assert "brave-secret" not in json.dumps(runtime)
+
+
+def test_draco_runner_configures_brave_local_search_runtime_without_secrets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def _fake_configure_search(**kwargs: object) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "brave-secret")
+    monkeypatch.setattr(
+        "opensquilla.tools.builtin.web.configure_search",
+        _fake_configure_search,
+    )
+    args = build_parser().parse_args([
+        "--input",
+        "draco.jsonl",
+        "--groups",
+        "G3",
+        "--tool-mode",
+        "local_web_tools",
+        "--local-web-search-provider",
+        "brave",
+        "--local-web-search-api-key-env",
+        "BRAVE_SEARCH_API_KEY",
         "--openrouter-web-search-max-results",
         "7",
     ])
@@ -888,10 +936,35 @@ def test_draco_runner_configures_local_search_runtime_without_secrets(
     assert calls[0]["provider_name"] == "brave"
     assert calls[0]["api_key"] == "brave-secret"
     assert calls[0]["max_results"] == 7
+    assert runtime["configured_provider"] == "brave"
     assert runtime["provider"] == "brave"
     assert runtime["max_results"] == 7
     assert runtime["api_key_configured"] is True
+    assert runtime["api_key_source"] == "env:BRAVE_SEARCH_API_KEY"
+    assert runtime["api_key_env"] == "BRAVE_SEARCH_API_KEY"
     assert "brave-secret" not in json.dumps(runtime)
+
+
+def test_draco_runner_brave_local_search_requires_api_key_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("BRAVE_SEARCH_API_KEY", raising=False)
+    args = build_parser().parse_args([
+        "--input",
+        "draco.jsonl",
+        "--groups",
+        "G3",
+        "--tool-mode",
+        "local_web_tools",
+        "--local-web-search-provider",
+        "brave",
+    ])
+
+    with pytest.raises(ValueError, match="requires an API key"):
+        configure_local_web_search_runtime(
+            GatewayConfig(search_max_results=2),
+            benchmark_tool_policy(args),
+        )
 
 
 def test_draco_runner_candidate_texts_can_scope_to_final_agent_call() -> None:

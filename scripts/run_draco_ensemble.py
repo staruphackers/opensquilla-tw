@@ -117,6 +117,8 @@ DEFAULT_OPENROUTER_WEB_SEARCH_ENGINE = "exa"
 DEFAULT_OPENROUTER_WEB_SEARCH_MAX_RESULTS = 5
 DEFAULT_OPENROUTER_WEB_SEARCH_MAX_TOTAL_RESULTS = 10
 DEFAULT_OPENROUTER_WEB_SEARCH_CONTEXT_SIZE = "medium"
+DEFAULT_LOCAL_WEB_SEARCH_PROVIDER = "duckduckgo"
+SUPPORTED_LOCAL_WEB_SEARCH_PROVIDERS = ("duckduckgo", "brave")
 DEFAULT_OPENROUTER_WEB_FETCH_ENGINE = "openrouter"
 DEFAULT_OPENROUTER_WEB_FETCH_MAX_USES = 5
 DEFAULT_OPENROUTER_WEB_FETCH_MAX_CONTENT_TOKENS = 50_000
@@ -569,6 +571,18 @@ def benchmark_tool_policy(args: argparse.Namespace | None = None) -> dict[str, A
             default=DEFAULT_OPENROUTER_WEB_SEARCH_MAX_RESULTS,
             field="openrouter_web_search_max_results",
         )
+        local_search_provider = str(
+            getattr(args, "local_web_search_provider", DEFAULT_LOCAL_WEB_SEARCH_PROVIDER)
+            or DEFAULT_LOCAL_WEB_SEARCH_PROVIDER
+        ).strip() or DEFAULT_LOCAL_WEB_SEARCH_PROVIDER
+        if local_search_provider not in SUPPORTED_LOCAL_WEB_SEARCH_PROVIDERS:
+            raise ValueError(
+                "local_web_search_provider must be one of: "
+                f"{', '.join(SUPPORTED_LOCAL_WEB_SEARCH_PROVIDERS)}"
+            )
+        local_search_api_key_env = str(
+            getattr(args, "local_web_search_api_key_env", "") or ""
+        ).strip()
         local_fetch_max_content_tokens = positive_int_value(
             getattr(args, "openrouter_web_fetch_max_content_tokens", None),
             default=DEFAULT_OPENROUTER_WEB_FETCH_MAX_CONTENT_TOKENS,
@@ -582,6 +596,8 @@ def benchmark_tool_policy(args: argparse.Namespace | None = None) -> dict[str, A
                 "web_search": {
                     "excluded_domains": blocked_domains,
                     "max_results": local_search_max_results,
+                    "provider": local_search_provider,
+                    "api_key_env": local_search_api_key_env,
                 },
                 "web_fetch": {
                     "blocked_domains": blocked_domains,
@@ -793,6 +809,26 @@ def local_web_search_max_results(tool_policy: dict[str, Any]) -> int:
     )
 
 
+def local_web_search_provider(tool_policy: dict[str, Any]) -> str:
+    local_policy = tool_policy.get("local_web_tools") or {}
+    search_defaults = local_policy.get("web_search") or {}
+    provider = str(
+        search_defaults.get("provider") or DEFAULT_LOCAL_WEB_SEARCH_PROVIDER
+    ).strip() or DEFAULT_LOCAL_WEB_SEARCH_PROVIDER
+    if provider not in SUPPORTED_LOCAL_WEB_SEARCH_PROVIDERS:
+        raise ValueError(
+            "local_web_search_provider must be one of: "
+            f"{', '.join(SUPPORTED_LOCAL_WEB_SEARCH_PROVIDERS)}"
+        )
+    return provider
+
+
+def local_web_search_api_key_env(tool_policy: dict[str, Any]) -> str:
+    local_policy = tool_policy.get("local_web_tools") or {}
+    search_defaults = local_policy.get("web_search") or {}
+    return str(search_defaults.get("api_key_env") or "").strip()
+
+
 def local_web_fetch_max_chars(tool_policy: dict[str, Any]) -> int:
     local_policy = tool_policy.get("local_web_tools") or {}
     fetch_defaults = local_policy.get("web_fetch") or {}
@@ -841,32 +877,36 @@ def configure_local_web_search_runtime(
     from opensquilla.search.registry import get_provider_spec
     from opensquilla.tools.builtin.web import configure_search
 
-    configured_provider = str(
-        getattr(config, "search_provider", "duckduckgo") or "duckduckgo"
-    ).strip() or "duckduckgo"
+    configured_provider = local_web_search_provider(tool_policy)
     provider = configured_provider
-    api_key = str(getattr(config, "search_api_key", "") or "").strip()
-    api_key_source = "config" if api_key else ""
-    env_key = str(getattr(config, "search_api_key_env", "") or "").strip()
-    if not api_key:
-        try:
-            spec = get_provider_spec(provider)
+    env_key = local_web_search_api_key_env(tool_policy)
+    if not env_key:
+        env_key = str(getattr(config, "search_api_key_env", "") or "").strip()
+    try:
+        spec = get_provider_spec(provider)
+    except Exception as exc:
+        raise ValueError(f"unknown local web search provider: {provider}") from exc
+    if not spec.runtime_supported:
+        raise ValueError(f"local web search provider is not runtime-supported: {provider}")
+    api_key = ""
+    api_key_source = ""
+    if spec.requires_api_key:
+        api_key = str(getattr(config, "search_api_key", "") or "").strip()
+        api_key_source = "config" if api_key else ""
+        if not api_key:
             if not env_key:
                 env_key = str(getattr(spec, "env_key", "") or "").strip()
-        except Exception:
-            env_key = env_key or ""
-        if env_key and os.environ.get(env_key):
-            api_key = str(os.environ.get(env_key) or "")
-            api_key_source = f"env:{env_key}"
-
-    brave_env_key = "BRAVE_SEARCH_API_KEY"
-    if provider == "duckduckgo":
-        brave_env_key_present = bool(os.environ.get(brave_env_key))
-        if api_key or brave_env_key_present:
-            provider = "brave"
-            if not api_key and brave_env_key_present:
-                api_key = str(os.environ.get(brave_env_key) or "")
-                api_key_source = f"env:{brave_env_key}"
+            if env_key and os.environ.get(env_key):
+                api_key = str(os.environ.get(env_key) or "")
+                api_key_source = f"env:{env_key}"
+        if not api_key:
+            env_hint = env_key or getattr(spec, "env_key", "") or "the provider API key env var"
+            raise ValueError(
+                f"local web search provider '{provider}' requires an API key; "
+                f"set {env_hint} or choose --local-web-search-provider duckduckgo"
+            )
+    else:
+        env_key = ""
 
     runtime_max_results = local_web_search_max_results(tool_policy)
     proxy = str(getattr(config, "search_proxy", "") or "").strip()
@@ -888,6 +928,7 @@ def configure_local_web_search_runtime(
         "max_results": runtime_max_results,
         "api_key_configured": bool(api_key),
         "api_key_source": api_key_source,
+        "api_key_env": env_key,
         "proxy_configured": bool(proxy),
         "use_env_proxy": use_env_proxy,
         "fallback_policy": fallback_policy,
@@ -3449,6 +3490,8 @@ def manifest_args(args: argparse.Namespace) -> dict[str, Any]:
         "generation_retry_backoff",
         "tool_mode",
         "contamination_blocked_domains",
+        "local_web_search_provider",
+        "local_web_search_api_key_env",
         "openrouter_web_search_engine",
         "openrouter_web_search_max_results",
         "openrouter_web_search_max_total_results",
@@ -3857,6 +3900,24 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Comma-separated benchmark leakage domains to exclude from web search "
             "and block from web fetch when research tools are wired."
+        ),
+    )
+    parser.add_argument(
+        "--local-web-search-provider",
+        choices=SUPPORTED_LOCAL_WEB_SEARCH_PROVIDERS,
+        default=DEFAULT_LOCAL_WEB_SEARCH_PROVIDER,
+        help=(
+            "Provider for executable local web_search when "
+            "--tool-mode=local_web_tools."
+        ),
+    )
+    parser.add_argument(
+        "--local-web-search-api-key-env",
+        default="",
+        help=(
+            "Environment variable that contains the local web_search provider API key. "
+            "Use BRAVE_SEARCH_API_KEY for --local-web-search-provider=brave. "
+            "The key value is never written to benchmark command/manifest files."
         ),
     )
     parser.add_argument(
