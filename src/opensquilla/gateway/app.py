@@ -50,6 +50,7 @@ def create_gateway_app(
     memory_managers: dict[str, Any] | None = None,
     memory_stores: dict[str, Any] | None = None,
     memory_retrievers: dict[str, Any] | None = None,
+    rag_manager: Any = None,
     extra_routes: list[Route] | None = None,
 ) -> Starlette:
     """Build and return the Starlette ASGI application."""
@@ -254,6 +255,7 @@ def create_gateway_app(
             memory_managers=memory_managers or {},
             memory_stores=memory_stores or {},
             memory_retrievers=memory_retrievers or {},
+            rag_manager=rag_manager,
         )
 
     async def api_channels_status(request: Request) -> JSONResponse:
@@ -496,6 +498,7 @@ def create_gateway_app(
             memory_managers=memory_managers,
             memory_stores=memory_stores,
             memory_retrievers=memory_retrievers,
+            rag_manager=rag_manager,
         )
 
     # ── Routes ───────────────────────────────────────────────────────────────
@@ -558,6 +561,10 @@ def create_gateway_app(
     )
 
     register_upload_routes(app, config=config, store=get_upload_store())
+    from opensquilla.gateway.rag_imports import register_rag_import_routes  # noqa: PLC0415
+
+    register_rag_import_routes(app, config=config, rag_manager=rag_manager)
+
     from opensquilla.gateway.artifacts import register_artifact_routes  # noqa: PLC0415
     from opensquilla.gateway.attachments import register_attachment_routes  # noqa: PLC0415
     from opensquilla.gateway.audio_transcription import (  # noqa: PLC0415

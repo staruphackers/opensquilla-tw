@@ -88,6 +88,7 @@ class RpcContext:
     memory_managers: dict[str, Any] = field(default_factory=dict)
     memory_stores: dict[str, Any] = field(default_factory=dict)
     memory_retrievers: dict[str, Any] = field(default_factory=dict)
+    rag_manager: Any = None  # RagManager | None (injected at boot)
     originating_envelope: Any = None  # Channel RouteEnvelope for RPC side effects
 
     @property
