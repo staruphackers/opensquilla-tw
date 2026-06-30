@@ -130,6 +130,25 @@ async def test_tools_rpc_visibility_respects_principal_ownership(method: str) ->
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["tools.catalog", "tools.effective"])
+async def test_rag_tools_rpc_exposes_read_only_tools_to_non_owner_agents(method: str) -> None:
+    from opensquilla.rag.tools import create_rag_tools
+
+    registry = ToolRegistry()
+    create_rag_tools(rag_manager=object(), registry=registry)
+
+    result = await get_dispatcher().dispatch(
+        "r1",
+        method,
+        {"callerKind": "agent"},
+        _ctx(tool_registry=registry, is_owner=False),
+    )
+
+    assert result.error is None, result.error
+    assert {"rag_search", "rag_get"} <= _tool_names(result.payload)
+
+
+@pytest.mark.asyncio
 async def test_tools_catalog_without_runtime_params_respects_principal_ownership() -> None:
     registry = _registry_with_owner_only_probe()
 

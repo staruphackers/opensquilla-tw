@@ -95,7 +95,7 @@ class LargeRagManager:
         }
 
 
-def test_rag_tools_are_owner_only():
+def test_rag_tools_are_visible_to_non_owner_agents():
     registry = ToolRegistry()
     create_rag_tools(rag_manager=FakeRagManager(), registry=registry)
 
@@ -107,7 +107,7 @@ def test_rag_tools_are_owner_only():
     )
 
     assert {tool.name for tool in owner_defs} >= {"rag_search", "rag_get"}
-    assert "rag_search" not in {tool.name for tool in non_owner_defs}
+    assert {tool.name for tool in non_owner_defs} >= {"rag_search", "rag_get"}
 
 
 @pytest.mark.asyncio
