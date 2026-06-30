@@ -131,6 +131,7 @@ def _validate_pr_target(
     title: str = "Example change",
     labels: list[str] | None = None,
     changed_files: list[str] | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     event_path = tmp_path / "event.json"
     changed_files_path = tmp_path / "changed-files.txt"
@@ -163,6 +164,8 @@ def _validate_pr_target(
     )
     if changed_files is not None:
         env["PR_CHANGED_FILES_PATH"] = changed_files_path.as_posix()
+    if extra_env is not None:
+        env.update(extra_env)
     return subprocess.run(
         [_bash_executable(), PR_TARGET_VALIDATOR.as_posix()],
         env=env,
@@ -322,6 +325,76 @@ def test_pr_target_validator_blocks_unknown_target_branches(tmp_path: Path) -> N
     assert "Ordinary pull requests should target main" in result.stderr
 
 
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", repo.as_posix(), *args], check=True)
+
+
+def _write_commit(repo: Path, path: str, content: str, message: str) -> None:
+    target = repo / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    _git(repo, "add", path)
+    _git(repo, "commit", "-m", message)
+
+
+def _history_repo(tmp_path: Path) -> Path:
+    repo = tmp_path / "history-repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "ci@example.invalid")
+    _git(repo, "config", "user.name", "CI")
+    _git(repo, "checkout", "-b", "main")
+    _write_commit(repo, "README.md", "base\n", "base")
+    return repo
+
+
+def test_pr_target_validator_allows_related_history(tmp_path: Path) -> None:
+    repo = _history_repo(tmp_path)
+    _git(repo, "checkout", "-b", "feature/related")
+    _write_commit(repo, "feature.txt", "related\n", "related")
+
+    result = _validate_pr_target(
+        tmp_path,
+        base="main",
+        head="feature/related",
+        extra_env={
+            "PR_HISTORY_REPO_PATH": repo.as_posix(),
+            "PR_HISTORY_BASE_REF": "main",
+            "PR_HISTORY_HEAD_REF": "feature/related",
+        },
+    )
+
+    assert result.returncode == 0
+    assert "shares a common ancestor with main" in result.stdout
+
+
+def test_pr_target_validator_blocks_unrelated_history(tmp_path: Path) -> None:
+    repo = _history_repo(tmp_path)
+    _git(repo, "checkout", "--orphan", "feature/unrelated")
+    for child in repo.iterdir():
+        if child.name != ".git":
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+    _write_commit(repo, "other.txt", "unrelated\n", "unrelated")
+
+    result = _validate_pr_target(
+        tmp_path,
+        base="main",
+        head="feature/unrelated",
+        extra_env={
+            "PR_HISTORY_REPO_PATH": repo.as_posix(),
+            "PR_HISTORY_BASE_REF": "main",
+            "PR_HISTORY_HEAD_REF": "feature/unrelated",
+        },
+    )
+
+    assert result.returncode == 1
+    assert "no common ancestor with main" in result.stderr
+    assert "Recreate the branch from the current main" in result.stderr
+
+
 def test_pr_target_validator_handles_missing_event_path() -> None:
     env = os.environ.copy()
     env.pop("GITHUB_EVENT_PATH", None)
@@ -352,6 +425,8 @@ def test_pr_target_branch_workflow_runs_trusted_base_validator() -> None:
     assert "github.event.repository.default_branch" in text
     assert "hashFiles('.github/scripts/validate-pr-target-branch.sh') == ''" in text
     assert "github.event.pull_request.head.sha" in text
+    assert "PR_BASE_SHA" in text
+    assert "PR_HEAD_SHA" in text
     assert "pull-requests: read" in text
     assert "PR_LABELS" in text
     assert "PR_NUMBER" in text
