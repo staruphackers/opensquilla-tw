@@ -62,7 +62,7 @@ from opensquilla.tools.types import CallerKind, InteractionMode, ToolContext, To
 
 GROUP_SPECS: dict[str, dict[str, str]] = {
     "B0": {"kind": "single", "model": "anthropic/claude-opus-4.8"},
-    "B1": {"kind": "single", "model": "openai/gpt-5.5-pro"},
+    "B1": {"kind": "single", "model": "openai/gpt-5.5"},
     "B2": {"kind": "single", "model": "z-ai/glm-5.2"},
     "B3": {"kind": "profile", "profile": "b3_glm_self_fusion"},
     "B4": {"kind": "single", "model": "deepseek/deepseek-v4-pro"},
