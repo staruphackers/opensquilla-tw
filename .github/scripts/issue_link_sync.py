@@ -17,7 +17,8 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 HAS_LINKED_PR_LABEL = "has-linked-pr"
-MERGED_TO_DEV_LABEL = "merged-to-dev"
+MERGED_TO_STAGING_LABEL = "merged-to-staging"
+LEGACY_MERGED_TO_DEV_LABEL = "merged-to-dev"
 NEEDS_VERIFICATION_LABEL = "needs-verification"
 
 LABEL_DEFINITIONS = {
@@ -25,9 +26,9 @@ LABEL_DEFINITIONS = {
         "color": "C5DEF5",
         "description": "An open pull request is linked to this issue",
     },
-    MERGED_TO_DEV_LABEL: {
+    MERGED_TO_STAGING_LABEL: {
         "color": "5319E7",
-        "description": "A related fix has merged to dev but has not necessarily shipped",
+        "description": "A related fix has merged to staging but has not shipped",
     },
     NEEDS_VERIFICATION_LABEL: {
         "color": "C5DEF5",
@@ -83,6 +84,7 @@ class IssueSyncAction(NamedTuple):
     kind: str
     pr_number: int
     pr_url: str
+    base_ref: str = ""
 
 
 class GitHubClient:
@@ -260,13 +262,16 @@ def plan_issue_sync_actions(event: dict[str, Any]) -> tuple[IssueSyncAction, ...
     if action != "closed":
         return ()
 
-    if pr.get("merged") is True and (pr.get("base") or {}).get("ref") == "dev":
+    base_ref = str((pr.get("base") or {}).get("ref") or "")
+
+    if pr.get("merged") is True and base_ref == "main":
         closing_actions = tuple(
             IssueSyncAction(
                 issue_number=issue_number,
-                kind="merged_to_dev",
+                kind="merged_to_main",
                 pr_number=pr_number,
                 pr_url=pr_url,
+                base_ref=base_ref,
             )
             for issue_number in parsed.closing
         )
@@ -277,6 +282,32 @@ def plan_issue_sync_actions(event: dict[str, Any]) -> tuple[IssueSyncAction, ...
                 kind="remove_linked_pr",
                 pr_number=pr_number,
                 pr_url=pr_url,
+                base_ref=base_ref,
+            )
+            for issue_number in parsed.references
+            if issue_number not in closing_issue_numbers
+        )
+        return (*closing_actions, *reference_cleanup_actions)
+
+    if pr.get("merged") is True:
+        closing_actions = tuple(
+            IssueSyncAction(
+                issue_number=issue_number,
+                kind="merged_to_staging",
+                pr_number=pr_number,
+                pr_url=pr_url,
+                base_ref=base_ref,
+            )
+            for issue_number in parsed.closing
+        )
+        closing_issue_numbers = set(parsed.closing)
+        reference_cleanup_actions = tuple(
+            IssueSyncAction(
+                issue_number=issue_number,
+                kind="remove_linked_pr",
+                pr_number=pr_number,
+                pr_url=pr_url,
+                base_ref=base_ref,
             )
             for issue_number in parsed.references
             if issue_number not in closing_issue_numbers
@@ -294,15 +325,7 @@ def plan_issue_sync_actions(event: dict[str, Any]) -> tuple[IssueSyncAction, ...
             for issue_number in parsed.all
         )
 
-    return tuple(
-        IssueSyncAction(
-            issue_number=issue_number,
-            kind="remove_linked_pr",
-            pr_number=pr_number,
-            pr_url=pr_url,
-        )
-        for issue_number in parsed.all
-    )
+    return ()
 
 
 def comment_marker(*, kind: str, pr_number: int) -> str:
@@ -314,12 +337,14 @@ def has_marker(comments: list[dict[str, Any]], marker: str) -> bool:
     return any(marker in str(comment.get("body") or "") for comment in comments)
 
 
-def _merged_to_dev_comment(action: IssueSyncAction) -> str:
+def _merged_to_staging_comment(action: IssueSyncAction) -> str:
     marker = comment_marker(kind=action.kind, pr_number=action.pr_number)
+    base_ref = action.base_ref or "a staging branch"
     return (
         f"{marker}\n"
-        f"The linked fix for this issue has merged to `dev` via #{action.pr_number} "
-        f"({action.pr_url}). Keeping it open for verification before release."
+        f"The linked fix for this issue has merged to `{base_ref}` via "
+        f"#{action.pr_number} ({action.pr_url}). Keeping it open for "
+        "verification before mainline release."
     )
 
 
@@ -328,15 +353,22 @@ def apply_action(client: GitHubClient, action: IssueSyncAction) -> None:
         client.add_labels(action.issue_number, [HAS_LINKED_PR_LABEL])
         return
 
-    if action.kind == "merged_to_dev":
+    if action.kind == "merged_to_staging":
         client.add_labels(
             action.issue_number,
-            [MERGED_TO_DEV_LABEL, NEEDS_VERIFICATION_LABEL],
+            [MERGED_TO_STAGING_LABEL, NEEDS_VERIFICATION_LABEL],
         )
         client.remove_label(action.issue_number, HAS_LINKED_PR_LABEL)
         marker = comment_marker(kind=action.kind, pr_number=action.pr_number)
         if not has_marker(client.list_comments(action.issue_number), marker):
-            client.create_comment(action.issue_number, _merged_to_dev_comment(action))
+            client.create_comment(action.issue_number, _merged_to_staging_comment(action))
+        return
+
+    if action.kind == "merged_to_main":
+        client.remove_label(action.issue_number, HAS_LINKED_PR_LABEL)
+        client.remove_label(action.issue_number, MERGED_TO_STAGING_LABEL)
+        client.remove_label(action.issue_number, LEGACY_MERGED_TO_DEV_LABEL)
+        client.remove_label(action.issue_number, NEEDS_VERIFICATION_LABEL)
         return
 
     if action.kind in {"closed_unmerged", "remove_linked_pr"}:

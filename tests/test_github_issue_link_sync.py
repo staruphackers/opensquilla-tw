@@ -98,7 +98,7 @@ def test_parse_linked_issues_deduplicates_and_ignores_pr_style_urls() -> None:
     assert parsed.all == (100, 101)
 
 
-def test_plan_merged_dev_pr_updates_only_closing_issues() -> None:
+def test_plan_merged_staging_pr_updates_only_closing_issues() -> None:
     sync = _load_sync_module()
 
     actions = sync.plan_issue_sync_actions(
@@ -120,15 +120,17 @@ def test_plan_merged_dev_pr_updates_only_closing_issues() -> None:
     assert actions == (
         sync.IssueSyncAction(
             issue_number=100,
-            kind="merged_to_dev",
+            kind="merged_to_staging",
             pr_number=DUMMY_MERGED_DEV_PR,
             pr_url=DUMMY_MERGED_DEV_PR_URL,
+            base_ref="dev",
         ),
         sync.IssueSyncAction(
             issue_number=200,
             kind="remove_linked_pr",
             pr_number=DUMMY_MERGED_DEV_PR,
             pr_url=DUMMY_MERGED_DEV_PR_URL,
+            base_ref="dev",
         ),
     )
 
@@ -169,7 +171,7 @@ def test_plan_open_or_updated_pr_adds_linked_pr_label_to_all_linked_issues() -> 
         )
 
 
-def test_plan_merged_main_pr_removes_linked_pr_label_without_dev_status() -> None:
+def test_plan_merged_main_pr_uses_mainline_cleanup_for_closing_issues() -> None:
     sync = _load_sync_module()
 
     actions = sync.plan_issue_sync_actions(
@@ -191,15 +193,17 @@ def test_plan_merged_main_pr_removes_linked_pr_label_without_dev_status() -> Non
     assert actions == (
         sync.IssueSyncAction(
             issue_number=100,
-            kind="remove_linked_pr",
+            kind="merged_to_main",
             pr_number=DUMMY_MERGED_MAIN_PR,
             pr_url=DUMMY_MERGED_MAIN_PR_URL,
+            base_ref="main",
         ),
         sync.IssueSyncAction(
             issue_number=200,
             kind="remove_linked_pr",
             pr_number=DUMMY_MERGED_MAIN_PR,
             pr_url=DUMMY_MERGED_MAIN_PR_URL,
+            base_ref="main",
         ),
     )
 
@@ -239,54 +243,76 @@ def test_plan_closed_unmerged_pr_removes_linked_pr_label_from_all_linked_issues(
     )
 
 
-def test_comment_marker_is_pr_scoped_for_idempotent_merged_to_dev_comments() -> None:
+def test_comment_marker_is_pr_scoped_for_idempotent_merged_to_staging_comments() -> None:
     sync = _load_sync_module()
 
-    marker = sync.comment_marker(kind="merged_to_dev", pr_number=DUMMY_MERGED_DEV_PR)
+    marker = sync.comment_marker(kind="merged_to_staging", pr_number=DUMMY_MERGED_DEV_PR)
 
-    assert marker == "<!-- opensquilla-issue-link-sync:merged-to-dev:pr-9001 -->"
+    assert marker == "<!-- opensquilla-issue-link-sync:merged-to-staging:pr-9001 -->"
     assert sync.has_marker([{"body": f"{marker}\nThis is already posted."}], marker)
     assert not sync.has_marker(
-        [{"body": "<!-- opensquilla-issue-link-sync:merged-to-dev:pr-9000 -->"}],
+        [{"body": "<!-- opensquilla-issue-link-sync:merged-to-staging:pr-9000 -->"}],
         marker,
     )
 
 
-def test_apply_merged_dev_action_labels_removes_open_pr_label_and_comments_once() -> None:
+def test_apply_merged_staging_action_labels_removes_open_pr_label_and_comments_once() -> None:
     sync = _load_sync_module()
     action = sync.IssueSyncAction(
         issue_number=100,
-        kind="merged_to_dev",
+        kind="merged_to_staging",
         pr_number=DUMMY_MERGED_DEV_PR,
         pr_url=DUMMY_MERGED_DEV_PR_URL,
+        base_ref="dev",
     )
     client = RecordingClient()
 
     sync.apply_action(client, action)
 
     assert client.calls == [
-        ("add_labels", 100, ("merged-to-dev", "needs-verification")),
+        ("add_labels", 100, ("merged-to-staging", "needs-verification")),
         ("remove_label", 100, "has-linked-pr"),
         ("list_comments", 100),
         (
             "create_comment",
             100,
-            "<!-- opensquilla-issue-link-sync:merged-to-dev:pr-9001 -->\n"
+            "<!-- opensquilla-issue-link-sync:merged-to-staging:pr-9001 -->\n"
             "The linked fix for this issue has merged to `dev` via #9001 "
             f"({DUMMY_MERGED_DEV_PR_URL}). "
-            "Keeping it open for verification before release.",
+            "Keeping it open for verification before mainline release.",
         ),
     ]
 
-    marker = sync.comment_marker(kind="merged_to_dev", pr_number=DUMMY_MERGED_DEV_PR)
+    marker = sync.comment_marker(kind="merged_to_staging", pr_number=DUMMY_MERGED_DEV_PR)
     client = RecordingClient(comments=[{"body": marker}])
 
     sync.apply_action(client, action)
 
     assert client.calls == [
-        ("add_labels", 100, ("merged-to-dev", "needs-verification")),
+        ("add_labels", 100, ("merged-to-staging", "needs-verification")),
         ("remove_label", 100, "has-linked-pr"),
         ("list_comments", 100),
+    ]
+
+
+def test_apply_merged_main_action_clears_open_staging_and_legacy_dev_labels() -> None:
+    sync = _load_sync_module()
+    action = sync.IssueSyncAction(
+        issue_number=100,
+        kind="merged_to_main",
+        pr_number=DUMMY_MERGED_MAIN_PR,
+        pr_url=DUMMY_MERGED_MAIN_PR_URL,
+        base_ref="main",
+    )
+    client = RecordingClient()
+
+    sync.apply_action(client, action)
+
+    assert client.calls == [
+        ("remove_label", 100, "has-linked-pr"),
+        ("remove_label", 100, "merged-to-staging"),
+        ("remove_label", 100, "merged-to-dev"),
+        ("remove_label", 100, "needs-verification"),
     ]
 
 
@@ -340,7 +366,7 @@ def test_list_comments_reads_all_pages_before_idempotency_check() -> None:
     client = PaginatedGitHubClient(
         [
             [{"body": f"old comment {index}"} for index in range(100)],
-            [{"body": "<!-- opensquilla-issue-link-sync:merged-to-dev:pr-9001 -->"}],
+            [{"body": "<!-- opensquilla-issue-link-sync:merged-to-staging:pr-9001 -->"}],
         ]
     )
 
@@ -348,7 +374,7 @@ def test_list_comments_reads_all_pages_before_idempotency_check() -> None:
 
     assert sync.has_marker(
         comments,
-        "<!-- opensquilla-issue-link-sync:merged-to-dev:pr-9001 -->",
+        "<!-- opensquilla-issue-link-sync:merged-to-staging:pr-9001 -->",
     )
     assert client.paths == [
         "/issues/100/comments?per_page=100&page=1",

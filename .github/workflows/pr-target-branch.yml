@@ -35,3 +35,15 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           GH_TOKEN: ${{ github.token }}
         run: bash .github/scripts/validate-pr-target-branch.sh
+
+      - name: Check out bootstrap review gate before first merge
+        if: ${{ hashFiles('.github/scripts/validate_pr_review_gate.py') == '' }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Validate risk-based review requirement
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/validate_pr_review_gate.py

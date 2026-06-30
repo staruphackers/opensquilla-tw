@@ -13,6 +13,7 @@ import yaml
 WORKFLOW_DIR = Path(".github/workflows")
 CLASSIFIER = Path(".github/scripts/classify-ci-changes.sh")
 PR_TARGET_VALIDATOR = Path(".github/scripts/validate-pr-target-branch.sh")
+PR_REVIEW_GATE = Path(".github/scripts/validate_pr_review_gate.py")
 PR_BODY_LINT = Path(".github/scripts/validate_pr_body.py")
 TEST_PATH_RE = re.compile(r"tests/[A-Za-z0-9_./-]+\.py")
 
@@ -354,6 +355,10 @@ def test_pr_target_branch_workflow_runs_trusted_base_validator() -> None:
     assert "PR_LABELS" in text
     assert "PR_NUMBER" in text
     assert ".github/scripts/validate-pr-target-branch.sh" in text
+    assert "Validate risk-based review requirement" in text
+    assert "hashFiles('.github/scripts/validate_pr_review_gate.py') == ''" in text
+    assert PR_REVIEW_GATE.as_posix() in text
+    assert "GITHUB_TOKEN: ${{ github.token }}" in text
 
 
 def test_pr_body_lint_workflow_warns_from_trusted_base() -> None:
