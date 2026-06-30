@@ -542,6 +542,7 @@ async def handle_ws_connection(
     memory_managers: dict[str, Any] | None = None,
     memory_stores: dict[str, Any] | None = None,
     memory_retrievers: dict[str, Any] | None = None,
+    rag_manager: Any = None,
 ) -> None:
     """Main WebSocket connection handler."""
     conn_id = str(uuid.uuid4())
@@ -696,6 +697,7 @@ async def handle_ws_connection(
             memory_managers,
             memory_stores,
             memory_retrievers,
+            rag_manager,
         )
     except WebSocketDisconnect:
         pass
@@ -753,6 +755,7 @@ async def _message_loop(
     memory_managers: dict[str, Any] | None = None,
     memory_stores: dict[str, Any] | None = None,
     memory_retrievers: dict[str, Any] | None = None,
+    rag_manager: Any = None,
 ) -> None:
     ws = conn.ws
     keepalive_timeout = max(0.0, float(getattr(config, "client_ws_keepalive_timeout_s", 0.0)))
@@ -819,6 +822,7 @@ async def _message_loop(
                 memory_managers=memory_managers or {},
                 memory_stores=memory_stores or {},
                 memory_retrievers=memory_retrievers or {},
+                rag_manager=rag_manager,
             )
             res = await dispatcher.dispatch(req_id, method, params, ctx)
             await conn.send_res(res)

@@ -492,6 +492,7 @@ class ServiceContainer:
     memory_watchers: list[MemoryFileWatcher] = field(default_factory=list)
     memory_retrievers: dict[str, Any] = field(default_factory=dict)
     turn_capture_services: dict[str, Any] = field(default_factory=dict)
+    rag_manager: Any = None
     flush_service: Any = None  # SessionFlushService | None (gated by OPENSQUILLA_SESSION_FLUSH)
     memory_repair_service: Any = None
     meta_run_writer: Any = None
@@ -621,6 +622,11 @@ class ServiceContainer:
         for store in self.memory_stores.values():
             try:
                 await store.close()
+            except Exception:
+                pass
+        if self.rag_manager is not None:
+            try:
+                await self.rag_manager.close()
             except Exception:
                 pass
         if self.session_manager is not None:
@@ -1797,6 +1803,7 @@ async def build_services(
     memory_sync_managers: dict[str, Any] = {}
     turn_capture_services: dict[str, Any] = {}
     memory_watchers: list[Any] = []
+    rag_manager: Any = None
     _turn_runner_ref: list = []
     try:
         from opensquilla.memory.manager import build_memory_managers
@@ -1840,6 +1847,21 @@ async def build_services(
             log.info("build_services.memory_tools_registered", agents=list(memory_stores))
     except Exception as e:
         log.warning("build_services.memory_tools_failed", error=str(e))
+
+    # ── Local document RAG (boot order 18b) ─────────────────────────
+    try:
+        from opensquilla.rag.manager import build_rag_manager
+        from opensquilla.rag.tools import create_rag_tools
+
+        rag_manager = await build_rag_manager(config)
+        if rag_manager is not None:
+            create_rag_tools(rag_manager=rag_manager, registry=tool_registry)
+            log.info("build_services.rag_ready")
+        else:
+            log.info("build_services.rag_disabled")
+    except Exception as e:
+        log.warning("build_services.rag_failed", error=str(e))
+        rag_manager = None
 
     # ── Skill loader (boot order 19) ────────────────────────────────
     skill_loader = None
@@ -2073,6 +2095,7 @@ async def build_services(
         memory_watchers=memory_watchers,
         memory_retrievers=memory_retrievers,
         turn_capture_services=turn_capture_services,
+        rag_manager=rag_manager,
         flush_service=flush_service,
         memory_repair_service=memory_repair_service,
         meta_run_writer=meta_run_writer,
@@ -2904,6 +2927,7 @@ async def start_gateway_server(
         memory_managers=svc.memory_managers,
         memory_stores=svc.memory_stores,
         memory_retrievers=svc.memory_retrievers,
+        rag_manager=svc.rag_manager,
         extra_routes=webhook_routes or None,
     )
     app.state.gateway_ready = False
