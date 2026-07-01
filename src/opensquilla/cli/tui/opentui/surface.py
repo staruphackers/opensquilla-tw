@@ -334,19 +334,26 @@ def _router_plugin_state_from_toolbar(toolbar: dict[str, object]) -> RouterPlugi
 
 
 def _router_context_from_toolbar(toolbar: dict[str, object]) -> str:
-    usage = toolbar.get("router_usage")
-    if not usage:
-        return "-"
-
-    usage_text = str(usage)
-    session_input = _coerce_nonnegative_int(toolbar.get("router_session_input"))
+    # Show context-window occupancy as "used/window" (e.g. "18.5k/200k"): this
+    # turn's input tokens (the full prompt) against the model's context window.
+    # Falls back to the raw in/out usage when either number is unavailable.
+    input_tokens = _coerce_nonnegative_int(toolbar.get("router_input_tokens"))
     context_window = _coerce_positive_int(toolbar.get("router_context_window"))
-    if session_input is None or context_window is None:
-        return usage_text
+    if input_tokens is not None and context_window is not None:
+        return f"{_format_ctx_tokens(input_tokens)}/{_format_ctx_tokens(context_window)}"
 
-    pressure = min(max(session_input / context_window, 0.0), 1.0)
-    percent = int(pressure * 100 + 0.5)
-    return f"{percent}% · {usage_text}"
+    usage = toolbar.get("router_usage")
+    return str(usage) if usage else "-"
+
+
+def _format_ctx_tokens(value: int) -> str:
+    # 200000 -> "200k", 18469 -> "18.5k", 856 -> "856". Whole thousands drop the
+    # decimal so the window reads as a clean "200k" rather than "200.0k".
+    if value < 1000:
+        return str(value)
+    if value % 1000 == 0:
+        return f"{value // 1000}k"
+    return f"{value / 1000:.1f}k"
 
 
 def _coerce_nonnegative_int(value: object | None) -> int | None:

@@ -321,39 +321,40 @@ def test_router_plugin_state_carries_observe_source_and_usage() -> None:
     assert payload["context"] == "1.2k/856"
 
 
-def test_router_plugin_state_formats_cumulative_context_usage_percent() -> None:
+def test_router_plugin_state_formats_context_as_used_over_window() -> None:
     bridge = FakeOpenTuiBridge()
     output = OpenTuiOutputHandle(bridge, approval_surface=Surface.CLI_GATEWAY)
 
-    output.set_toolbar("router_hud", "observe standard -> fake-terminal 80%")
+    output.set_toolbar("router_hud", "observe standard -> fake-terminal")
     output.set_toolbar("router_hud_style", "dim")
-    output.set_toolbar("router_usage", "1/2")
-    output.set_toolbar("router_session_input", 84_000)
+    output.set_toolbar("router_usage", "18.5k/200")
+    output.set_toolbar("router_input_tokens", 18_469)
     output.set_toolbar("router_context_window", 200_000)
     output.invalidate()
 
     (_, payload) = bridge.sent[0]
-    assert payload["context"] == "42% · 1/2"
+    # This turn's input over the window; whole-thousand window drops the decimal.
+    assert payload["context"] == "18.5k/200k"
 
 
 @pytest.mark.parametrize(
-    ("session_input", "context_window"),
+    ("input_tokens", "context_window"),
     [
         (None, 200_000),
-        (84_000, None),
+        (18_469, None),
     ],
 )
 def test_router_plugin_state_falls_back_to_turn_usage_without_context_data(
-    session_input: int | None,
+    input_tokens: int | None,
     context_window: int | None,
 ) -> None:
     bridge = FakeOpenTuiBridge()
     output = OpenTuiOutputHandle(bridge, approval_surface=Surface.CLI_GATEWAY)
 
-    output.set_toolbar("router_hud", "observe standard -> fake-terminal 80%")
+    output.set_toolbar("router_hud", "observe standard -> fake-terminal")
     output.set_toolbar("router_hud_style", "dim")
     output.set_toolbar("router_usage", "1/2")
-    output.set_toolbar("router_session_input", session_input)
+    output.set_toolbar("router_input_tokens", input_tokens)
     output.set_toolbar("router_context_window", context_window)
     output.invalidate()
 
@@ -373,19 +374,20 @@ def test_router_plugin_state_context_stays_pending_without_usage() -> None:
     assert payload["context"] == "-"
 
 
-def test_router_plugin_state_clamps_context_usage_percent() -> None:
+def test_router_plugin_state_context_over_budget_shows_used_over_window() -> None:
     bridge = FakeOpenTuiBridge()
     output = OpenTuiOutputHandle(bridge, approval_surface=Surface.CLI_GATEWAY)
 
-    output.set_toolbar("router_hud", "observe standard -> fake-terminal 80%")
+    output.set_toolbar("router_hud", "observe standard -> fake-terminal")
     output.set_toolbar("router_hud_style", "dim")
     output.set_toolbar("router_usage", "1.2k/856")
-    output.set_toolbar("router_session_input", 250_000)
+    output.set_toolbar("router_input_tokens", 250_000)
     output.set_toolbar("router_context_window", 200_000)
     output.invalidate()
 
     (_, payload) = bridge.sent[0]
-    assert payload["context"] == "100% · 1.2k/856"
+    # Even when input exceeds the window, show the honest raw figures.
+    assert payload["context"] == "250k/200k"
 
 
 def test_router_plugin_state_fallback_keeps_defaults_and_usage() -> None:

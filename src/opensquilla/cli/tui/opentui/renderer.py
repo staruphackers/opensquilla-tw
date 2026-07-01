@@ -121,9 +121,7 @@ class OpenTuiStreamRenderer:
         if self._open_text_id is None:
             self._open_text_id = self._next_block_id()
             self._open_text_presentation = kind
-            await self._emit(
-                "block.begin", BlockBegin(id=self._open_text_id, kind=kind, meta={})
-            )
+            await self._emit("block.begin", BlockBegin(id=self._open_text_id, kind=kind, meta={}))
         await self._emit("block.append", BlockAppend(id=self._open_text_id, delta=delta))
 
     async def aappend_reasoning(self, delta: str) -> None:
@@ -179,9 +177,7 @@ class OpenTuiStreamRenderer:
             self._tool_block_ids[tool_use_id] = block_id
         self._last_tool_block_id = block_id
         self._tool_start_times[block_id] = time.monotonic()
-        await self._emit(
-            "turn.status", TurnStatusState(phase="tool", label=name, active=True)
-        )
+        await self._emit("turn.status", TurnStatusState(phase="tool", label=name, active=True))
         await self._emit(
             "block.begin",
             BlockBegin(id=block_id, kind="tool", meta={"name": name, "args": summary}),
@@ -253,9 +249,7 @@ class OpenTuiStreamRenderer:
         )
         await self._emit("block.end", BlockEnd(id=usage_id))
         await self._emit("turn.end", TurnEnd(id=self._turn_id, cancelled=cancelled))
-        await self._emit(
-            "turn.status", TurnStatusState(phase="idle", label="ready", active=False)
-        )
+        await self._emit("turn.status", TurnStatusState(phase="idle", label="ready", active=False))
         await self._emit_raw("composer.set", {"disabled": False})
         self._publish_usage_to_router_toolbar(usage)
 
@@ -271,12 +265,21 @@ class OpenTuiStreamRenderer:
         if in_tok is None and out_tok is None:
             return
         self._set_router_session_input(_session_input_tokens(usage))
+        # This turn's input tokens = the full prompt actually sent (system + history
+        # + message), i.e. how much of the context window is occupied right now.
+        # The ctx field renders this against the window as "used/window".
+        self._set_router_input_tokens(in_tok)
         self._set_router_usage(f"{_format_tokens(in_tok)}/{_format_tokens(out_tok)}")
 
     def _set_router_session_input(self, value: object | None) -> None:
         set_toolbar = getattr(self.output_handle, "set_toolbar", None)
         if callable(set_toolbar):
             set_toolbar("router_session_input", value)
+
+    def _set_router_input_tokens(self, value: object | None) -> None:
+        set_toolbar = getattr(self.output_handle, "set_toolbar", None)
+        if callable(set_toolbar):
+            set_toolbar("router_input_tokens", value)
 
     def _set_router_usage(self, value: object | None) -> None:
         set_toolbar = getattr(self.output_handle, "set_toolbar", None)
