@@ -19,5 +19,9 @@ export function createAnswerBlock(ctx) {
     append(delta) { text += String(delta); if (md) md.content = stripTerminalControls(text); renderer.requestRender?.(); },
     update() {},
     end() { if (md) md.streaming = false; renderer.requestRender?.(); },
+    // Live /theme switch: re-point the body fg at the (in-place updated) THEME.
+    // Syntax-highlighted spans track the shared syntaxStyle, which main refreshes
+    // on the same theme event, so only the base foreground needs resetting here.
+    recolor() { if (md) md.fg = THEME.text; },
   };
 }

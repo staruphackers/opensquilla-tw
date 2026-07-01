@@ -15,6 +15,7 @@ export function createToolBlock(ctx) {
   let tail = "";          // " <args>" inline after the name
   let durationTail = "";  // " · <duration>" appended on completion
   let resultAdded = false;
+  let runState = "running"; // "running" | "ok" | "error" — so a live /theme recolors
 
   function lineContent(glyph) {
     return `${TOOL_INDENT}${glyph} ${name}${tail}${durationTail}`;
@@ -51,6 +52,7 @@ export function createToolBlock(ctx) {
       const status = patch?.status;
       if (patch?.duration) durationTail = `${DURATION_SEP}${stripTerminalControls(String(patch.duration))}`;
       if (status === "ok" || status === "error") {
+        runState = status;
         const glyph = status === "error" ? "✗" : "✓";
         if (node) { node.content = lineContent(glyph); node.fg = status === "error" ? STATUS.error : STATUS.ok; node._done = true; }
         if (status === "error" && resultNode) resultNode.fg = STATUS.detailError;
@@ -58,5 +60,11 @@ export function createToolBlock(ctx) {
       renderer.requestRender?.();
     },
     end() { if (node) node._done = true; },
+    // Live /theme switch: re-derive the run-state colors from the (in-place
+    // updated) STATUS palette for the current state.
+    recolor() {
+      if (node) node.fg = runState === "error" ? STATUS.error : runState === "ok" ? STATUS.ok : STATUS.running;
+      if (resultNode) resultNode.fg = runState === "error" ? STATUS.detailError : STATUS.detail;
+    },
   };
 }
