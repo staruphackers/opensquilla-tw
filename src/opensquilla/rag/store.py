@@ -791,8 +791,8 @@ class RagStore:
         SELECT chunk_id, distance
         FROM rag_chunks_vec
         WHERE embedding MATCH ?
+          AND k = ?
         ORDER BY distance
-        LIMIT ?
         """
         try:
             async with db.execute(
