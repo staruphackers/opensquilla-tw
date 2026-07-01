@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from opensquilla.cli.chat.turn import UsageSummary
@@ -67,6 +69,27 @@ async def test_intermediate_text_is_thinking_final_text_is_answer_card() -> None
     assert [kind for kind, _id in begins] == ["thinking", "answer"]
     tool_begins = [p for t, p in handle.sent if t == "block.begin" and p.get("kind") == "tool"]
     assert tool_begins and tool_begins[0]["meta"]["name"] == "web_search"
+
+
+@pytest.mark.asyncio
+async def test_new_turn_clears_previous_router_context_occupancy() -> None:
+    # ctx shows this turn's input tokens as context occupancy. The toolbar is
+    # shared across turns (renderers are per-turn), so a new turn must clear the
+    # previous turn's router_input_tokens or it leaks into ctx until this turn
+    # finalizes.
+    handle = _ToolbarRecordingHandle()
+    r1 = OpenTuiStreamRenderer(output_handle=handle)
+    r1.__enter__()
+    await r1.aappend_text("hi", presentation="answer")
+    await r1.afinalize(
+        SimpleNamespace(input_tokens=18_469, output_tokens=157, model="m", session_totals=None)
+    )
+    assert handle.toolbar.get("router_input_tokens") == 18_469
+
+    r2 = OpenTuiStreamRenderer(output_handle=handle)
+    r2.__enter__()
+    await r2.aappend_text("next", presentation="answer")  # triggers _ensure_begin
+    assert "router_input_tokens" not in handle.toolbar
 
 
 @pytest.mark.asyncio

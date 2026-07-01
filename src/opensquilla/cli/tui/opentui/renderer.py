@@ -65,7 +65,11 @@ class OpenTuiStreamRenderer:
             return
         self._began = True
         self._turn_id = f"t{next(_turn_ids)}"
+        # Clear the previous turn's usage figures at the start of a new turn so the
+        # ctx field shows "-" (pending) rather than leaking the last turn's context
+        # occupancy until this turn finalizes.
         self._set_router_session_input(None)
+        self._set_router_input_tokens(None)
         self._set_router_usage(None)
         await self._emit("turn.begin", TurnBegin(id=self._turn_id))
         await self._emit(
