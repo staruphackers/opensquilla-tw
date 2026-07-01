@@ -4551,13 +4551,22 @@ class TurnRunner:
 
         # Apply routed model back to cloned selector (local, not shared)
         if turn.model and cloned_selector is not None:
-            from opensquilla.engine.selector_override import apply_model_override
+            from opensquilla.engine.selector_override import (
+                apply_model_override,
+                cross_provider_tier_config,
+            )
 
             provider = apply_model_override(
                 cloned_selector,
                 turn.model,
                 turn_metadata=turn.metadata,
                 realign_routed_model=False,
+                tier_provider_config=cross_provider_tier_config(
+                    self._config,
+                    turn.metadata,
+                    turn.model,
+                    active_provider_id=getattr(cloned_selector, "active_provider_id", ""),
+                ),
             )
 
         return turn, provider

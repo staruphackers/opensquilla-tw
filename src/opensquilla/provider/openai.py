@@ -526,6 +526,7 @@ def _build_openai_messages(
     *,
     include_reasoning_content: bool = True,
     require_assistant_reasoning_content: bool = False,
+    replay_provider_state: bool = True,
 ) -> list[dict[str, Any]]:
     """Convert a opensquilla Message into one or more OpenAI-format message dicts.
 
@@ -595,8 +596,9 @@ def _build_openai_messages(
     if tool_calls:
         # Gemini requires thought_signature on the first tool_call in each
         # step of the current turn. Attach it if a ContentBlockThinking with
-        # a signature preceded the tool_use blocks.
-        if thinking_signature and tool_calls:
+        # a signature preceded the tool_use blocks — but never replay a
+        # signature to a provider that did not mint it.
+        if thinking_signature and tool_calls and replay_provider_state:
             tool_calls[0]["extra_content"] = {
                 "google": {"thought_signature": thinking_signature},
             }
@@ -650,6 +652,7 @@ class OpenAIProvider:
         provider_kind: str | None = None,
         provider_routing: Mapping[str, str] | None = None,
         compat: OpenAICompatPolicy | None = None,
+        replay_provider_state: bool = True,
     ) -> None:
         self._api_key = clean_header_secret(api_key, label="LLM API key")
         self._model = model
@@ -659,6 +662,7 @@ class OpenAIProvider:
         inferred_kind = "openrouter" if "openrouter.ai" in self._base_url else "openai"
         self._provider_kind = provider_kind or inferred_kind
         self._compat = compat or compat_policy_for_kind(self._provider_kind)
+        self._replay_provider_state = replay_provider_state
         self._provider_routing: Mapping[str, str] = provider_routing or {}
 
     @property
@@ -748,6 +752,7 @@ class OpenAIProvider:
                     require_assistant_reasoning_content=(
                         _requires_assistant_reasoning_content(self._compat, self._model)
                     ),
+                    replay_provider_state=self._replay_provider_state,
                 )
             )
 

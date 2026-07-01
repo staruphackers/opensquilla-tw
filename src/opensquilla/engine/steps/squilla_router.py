@@ -593,22 +593,36 @@ def _flag_tier_provider_mismatch(
     *,
     routing_applied: bool,
 ) -> None:
-    """Warn when a routed tier names a provider other than the active one.
+    """Record the routed tier's provider; warn on unexecutable mismatches.
 
-    Cross-provider tier execution does not exist yet: the selector applies
-    the routed model while keeping the primary provider's credentials, so a
-    tier naming another provider is a silent misroute. Surface it loudly in
-    logs and telemetry until per-tier providers are actually supported.
+    The tier's provider is always published as ``routed_provider`` so the
+    selector-apply site can execute it when ``cross_provider_tiers`` is
+    enabled. With the flag off, a tier naming another provider is a silent
+    misroute (the routed model runs on the active provider's credentials) —
+    surface it loudly in logs and telemetry.
     """
     if not routing_applied:
         return
     tier = TierConfig.from_value(tiers.get(tier_name))
+    if tier.provider:
+        ctx.metadata["routed_provider"] = tier.provider.lower()
     active_provider = str(
         getattr(getattr(ctx.config, "llm", None), "provider", "") or ""
     ).strip().lower()
     if not tier.provider or not active_provider:
         return
     if tier.provider.lower() == active_provider:
+        return
+    router_cfg = getattr(ctx.config, "squilla_router", None)
+    if bool(getattr(router_cfg, "cross_provider_tiers", False)):
+        log.info(
+            "squilla_router.cross_provider_tier_routed",
+            tier=tier_name,
+            tier_provider=tier.provider,
+            active_provider=active_provider,
+            model=tier.model,
+            session=ctx.session_key,
+        )
         return
     ctx.metadata["router_tier_provider_mismatch"] = tier.provider
     log.warning(

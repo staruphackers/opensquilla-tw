@@ -187,13 +187,40 @@ def _validate_router_tiers(tiers: dict[str, Any], default_tier: str) -> None:
             raise ValueError(f"router tier {tier_name!r} requires model")
 
 
-def _cross_provider_tier_warnings(tiers: dict[str, Any], active_provider: str) -> list[str]:
+def _tier_provider_credentials_resolvable(
+    provider_id: str,
+    llm_profiles: dict[str, Any] | None,
+) -> bool:
+    from opensquilla.provider.registry import UnknownProviderError, get_provider_spec
+
+    try:
+        spec = get_provider_spec(provider_id)
+    except UnknownProviderError:
+        return False
+    if not spec.runtime_supported:
+        return False
+    profile = (llm_profiles or {}).get(provider_id)
+    if str(getattr(profile, "api_key", "") or "").strip():
+        return True
+    if not spec.requires_api_key():
+        return True
+    env_name = str(getattr(profile, "api_key_env", "") or "").strip() or spec.env_key
+    return bool(env_name and env_name != "OAuth" and os.environ.get(env_name))
+
+
+def _cross_provider_tier_warnings(
+    tiers: dict[str, Any],
+    active_provider: str,
+    *,
+    cross_provider_enabled: bool = False,
+    llm_profiles: dict[str, Any] | None = None,
+) -> list[str]:
     """Warn about tiers naming a provider other than the active LLM provider.
 
-    Cross-provider tier execution does not exist yet: at runtime such a
-    tier's model id is requested from the active provider with the active
-    credentials. The config still saves (it may be forward-looking), but
-    silently accepting it hid real misroutes.
+    Flag off: such a tier's model id is silently requested from the active
+    provider with the active credentials — warn about the misroute. Flag on:
+    the tier executes on its own provider, so the check flips to credential
+    resolvability (profile or env; secrets are never guessed).
     """
     if not active_provider:
         return []
@@ -203,12 +230,21 @@ def _cross_provider_tier_warnings(tiers: dict[str, Any], active_provider: str) -
         if not isinstance(tier, dict):
             continue
         tier_provider = str(tier.get("provider") or "").strip().lower()
-        if tier_provider and tier_provider != active_provider:
+        if not tier_provider or tier_provider == active_provider:
+            continue
+        if not cross_provider_enabled:
             warnings.append(
                 f"Router tier '{tier_name}' names provider '{tier_provider}', but the "
                 f"active LLM provider is '{active_provider}'. Cross-provider routing is "
-                f"not supported yet, so this tier's model will be requested from "
-                f"'{active_provider}'."
+                f"not enabled (squilla_router.cross_provider_tiers), so this tier's "
+                f"model will be requested from '{active_provider}'."
+            )
+        elif not _tier_provider_credentials_resolvable(tier_provider, llm_profiles):
+            warnings.append(
+                f"Router tier '{tier_name}' routes to provider '{tier_provider}' but no "
+                f"credentials resolve for it. Add [llm_profiles.{tier_provider}] with "
+                f"api_key or api_key_env, or export the provider's default env key; "
+                f"until then the tier falls back to '{active_provider}'."
             )
     return warnings
 
@@ -366,6 +402,8 @@ def upsert_router(
         warnings = _cross_provider_tier_warnings(
             cast(dict[str, Any], router_payload.get("tiers") or {}),
             provider,
+            cross_provider_enabled=bool(router_payload.get("cross_provider_tiers")),
+            llm_profiles=getattr(config, "llm_profiles", None),
         )
 
     new_cfg = _clone(config)

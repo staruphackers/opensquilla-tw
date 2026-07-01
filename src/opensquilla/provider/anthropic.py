@@ -120,7 +120,12 @@ def _has_document_block(messages: list[Message]) -> bool:
     return False
 
 
-def _build_message_payload(msg: Message, model: str | None = None) -> dict[str, Any]:
+def _build_message_payload(
+    msg: Message,
+    model: str | None = None,
+    *,
+    replay_provider_state: bool = True,
+) -> dict[str, Any]:
     if isinstance(msg.content, str):
         return {"role": msg.role, "content": msg.content}
     parts: list[dict[str, Any]] = []
@@ -173,6 +178,12 @@ def _build_message_payload(msg: Message, model: str | None = None) -> dict[str, 
                 doc_block["title"] = block.title
             parts.append(doc_block)
         elif block.type == "thinking":
+            if not replay_provider_state:
+                # Cross-provider execution: signatures are validated against
+                # the exact minting turn; a foreign signature is a hard 400.
+                # Unsigned thinking replay is likewise rejected with tools,
+                # so the whole block is dropped rather than degraded.
+                continue
             thinking_block: dict[str, Any] = {
                 "type": "thinking",
                 "thinking": block.thinking,
@@ -281,11 +292,13 @@ class AnthropicProvider:
         model: str = "claude-sonnet-4-6",
         base_url: str = _ANTHROPIC_API_BASE,
         proxy: str | None = None,
+        replay_provider_state: bool = True,
     ) -> None:
         self._api_key = api_key
         self._model = model
         self._base_url = base_url.rstrip("/")
         self._proxy = proxy or None
+        self._replay_provider_state = replay_provider_state
 
     @property
     def model(self) -> str:
@@ -331,7 +344,14 @@ class AnthropicProvider:
                     "budget_tokens": budget_tokens,
                 }
 
-        built_messages = [_build_message_payload(m, model=self._model) for m in messages]
+        built_messages = [
+            _build_message_payload(
+                m,
+                model=self._model,
+                replay_provider_state=self._replay_provider_state,
+            )
+            for m in messages
+        ]
         request_has_document = any(
             isinstance(m.get("content"), list)
             and any(isinstance(p, dict) and p.get("type") == "document" for p in m["content"])

@@ -149,7 +149,26 @@ def test_cross_provider_tier_warning_text() -> None:
     assert len(warnings) == 1
     assert "'c2'" in warnings[0]
     assert "'openai'" in warnings[0]
-    assert "not supported yet" in warnings[0]
+    assert "not enabled" in warnings[0]
+
+
+def test_cross_provider_warning_flips_to_credential_check_when_enabled(monkeypatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    tiers = {"c2": {"provider": "openai", "model": "gpt-5.5"}}
+    warnings = _cross_provider_tier_warnings(
+        tiers, "openrouter", cross_provider_enabled=True, llm_profiles=None
+    )
+    assert len(warnings) == 1
+    assert "no credentials resolve" in warnings[0]
+    assert "llm_profiles.openai" in warnings[0]
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+    assert (
+        _cross_provider_tier_warnings(
+            tiers, "openrouter", cross_provider_enabled=True, llm_profiles=None
+        )
+        == []
+    )
 
 
 def test_upsert_router_surfaces_cross_provider_warning() -> None:
