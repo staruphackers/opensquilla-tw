@@ -487,7 +487,11 @@ class PromptAssemblerStage:
             # into the stage's module-top namespace.
             from opensquilla.engine.runtime import _SelectorFallbackProvider
 
-            provider = _SelectorFallbackProvider(provider, inp.cloned_selector)
+            provider = _SelectorFallbackProvider(
+                provider,
+                inp.cloned_selector,
+                turn_metadata=turn.metadata,
+            )
 
         # 7. Resolve final prompt + cache breakpoints
         (

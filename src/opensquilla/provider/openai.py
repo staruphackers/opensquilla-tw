@@ -57,6 +57,10 @@ _PLAIN_JSON_TOOL_PREFIX_RE = re.compile(
 )
 
 _OPENAI_TOOL_STATUS_OUTPUT_MAX_CHARS = 4000
+# Text-to-tool-call synthesis exists for MiniMax's plain-text protocol and for
+# OpenRouter upstreams that leak it. A model on any other provider that ends
+# its prose with `identifier{...json...}` must NOT get a synthetic tool call.
+_TEXT_TOOL_SYNTHESIS_PROVIDER_KINDS = frozenset({"minimax", "openrouter"})
 _VOLCENGINE_UNSUPPORTED_TOOL_SCHEMA_KEYWORDS = frozenset(
     {
         "minLength",
@@ -398,17 +402,20 @@ def _provider_billed_cost(provider_kind: str, raw_billed_cost: float) -> tuple[f
 def _resolve_tool_call_index(
     tc: Mapping[str, Any],
     pending_calls: Mapping[int, dict[str, Any]],
-    *,
-    provider_kind: str,
 ) -> int:
+    """Resolve the accumulator slot for a streamed tool-call delta.
+
+    Most upstreams send an explicit ``index``, but some (Gemini's
+    OpenAI-compat endpoint, assorted local gateways) omit it: fall back to
+    matching the provider-supplied id against known calls, then to opening a
+    new slot — a missing index must never fail the stream.
+    """
     if "index" in tc:
         return _coerce_int(tc["index"])
-    if provider_kind != "gemini":
-        raise KeyError("index")
     tool_call_id = tc.get("id")
     if isinstance(tool_call_id, str) and tool_call_id:
         for idx, call in pending_calls.items():
-            if call.get("id") == tool_call_id:
+            if tool_call_id in (call.get("id"), call.get("wire_id")):
                 return idx
         return max(pending_calls.keys(), default=-1) + 1
     if len(pending_calls) == 1:
@@ -1134,14 +1141,11 @@ class OpenAIProvider:
 
                             # Tool calls (may stream over multiple chunks)
                             for tc in delta.get("tool_calls", []):
-                                idx = _resolve_tool_call_index(
-                                    tc,
-                                    pending_calls,
-                                    provider_kind=self._provider_kind,
-                                )
+                                idx = _resolve_tool_call_index(tc, pending_calls)
                                 if idx not in pending_calls:
                                     pending_calls[idx] = {
                                         "id": tc.get("id", f"call_{uuid4().hex[:12]}"),
+                                        "wire_id": tc.get("id"),
                                         "name": tc.get("function", {}).get("name", ""),
                                         "parts": [],
                                         "thought_signature": None,
@@ -1152,9 +1156,13 @@ class OpenAIProvider:
                                         tool_name=pending_calls[idx]["name"],
                                     )
                                 else:
-                                    # id/name may arrive in later chunks
+                                    # The public id is frozen once the
+                                    # ToolUseStartEvent is emitted — keep a
+                                    # late-arriving provider id only for index
+                                    # matching so Start/Delta/End always agree
+                                    # on tool_use_id.
                                     if tc.get("id"):
-                                        pending_calls[idx]["id"] = tc["id"]
+                                        pending_calls[idx]["wire_id"] = tc["id"]
                                     fname = tc.get("function", {}).get("name", "")
                                     if fname:
                                         pending_calls[idx]["name"] = fname
@@ -1195,9 +1203,15 @@ class OpenAIProvider:
                     # Last-resort MiniMax compatibility: some OpenRouter
                     # upstreams leak native MiniMax XML tool calls as text
                     # instead of structured tool_calls. Only synthesize calls
-                    # when no structured calls arrived, tools were offered, and
-                    # the parsed tool name is explicitly allowed by this turn.
-                    if not pending_calls and tools and assistant_text_parts:
+                    # for provider kinds known to leak the text protocol, when
+                    # no structured calls arrived, tools were offered, and the
+                    # parsed tool name is explicitly allowed by this turn.
+                    if (
+                        not pending_calls
+                        and tools
+                        and assistant_text_parts
+                        and self._provider_kind in _TEXT_TOOL_SYNTHESIS_PROVIDER_KINDS
+                    ):
                         full_text = "".join(assistant_text_parts)
                         for event in _synthesize_text_tool_events(full_text, tools):
                             emitted_stream_event = True
@@ -1256,18 +1270,39 @@ class OpenAIProvider:
                     phase="llm_fallback",
                     message="OpenRouter stream timed out; retrying without streaming.",
                 )
-                async for fallback_event in self._complete_non_stream(
-                    payload=payload,
-                    headers=headers,
-                    cfg=cfg,
-                    tools=tools,
-                    timeout_exc=exc,
-                ):
-                    yield fallback_event
+                try:
+                    async for fallback_event in self._complete_non_stream(
+                        payload=payload,
+                        headers=headers,
+                        cfg=cfg,
+                        tools=tools,
+                        timeout_exc=exc,
+                    ):
+                        yield fallback_event
+                except Exception as fallback_exc:  # noqa: BLE001 - see contract note below
+                    log.exception(
+                        "provider.stream_internal_error",
+                        provider=self._provider_kind,
+                        model=self._model,
+                    )
+                    yield ErrorEvent(
+                        message=f"Provider response handling failed: {fallback_exc}",
+                        code="provider_internal",
+                    )
                 return
             yield ErrorEvent(message=f"Request timed out: {exc}", code="timeout")
         except httpx.RequestError as exc:
             yield ErrorEvent(message=f"Request error: {exc}", code="request_error")
+        except Exception as exc:  # noqa: BLE001 - chat() contract: ErrorEvent instead of raising
+            log.exception(
+                "provider.stream_internal_error",
+                provider=self._provider_kind,
+                model=self._model,
+            )
+            yield ErrorEvent(
+                message=f"Provider response handling failed: {exc}",
+                code="provider_internal",
+            )
 
     async def _complete_non_stream(
         self,
@@ -1392,7 +1427,12 @@ class OpenAIProvider:
                     if isinstance(sig, str) and sig:
                         non_stream_thought_sig = sig
 
-        if not emitted_structured_tool and tools and assistant_text_parts:
+        if (
+            not emitted_structured_tool
+            and tools
+            and assistant_text_parts
+            and self._provider_kind in _TEXT_TOOL_SYNTHESIS_PROVIDER_KINDS
+        ):
             for event in _synthesize_text_tool_events("".join(assistant_text_parts), tools):
                 yield event
 

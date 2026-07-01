@@ -1173,9 +1173,15 @@ def _drop_unpaired_tool_use_segments(segments: list[dict[str, Any]]) -> list[dic
 class _SelectorFallbackProvider:
     """Provider wrapper that switches to selector fallback on pre-content errors."""
 
-    def __init__(self, provider: Any, selector: Any) -> None:
+    def __init__(
+        self,
+        provider: Any,
+        selector: Any,
+        turn_metadata: dict[str, Any] | None = None,
+    ) -> None:
         self._provider = provider
         self._selector = selector
+        self._turn_metadata = turn_metadata
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._provider, name)
@@ -1184,11 +1190,37 @@ class _SelectorFallbackProvider:
     def provider_name(self) -> str:
         return getattr(self._provider, "provider_name", "")
 
+    def _realign_routed_model_after_fallback(self) -> None:
+        """Failover changed the running model — telemetry must follow.
+
+        Same invariant as the explicit-model realignment in
+        PromptAssemblerStage: ``routed_model`` (read by RouterDecisionEvent
+        and comprehensive-savings pricing) must name the model that actually
+        runs, and route-savings figures computed for the abandoned model no
+        longer apply.
+        """
+        metadata = self._turn_metadata
+        if metadata is None:
+            return
+        current_config = getattr(self._selector, "current_config", None)
+        model = str(getattr(current_config, "model", "") or "")
+        if not model or metadata.get("routed_model") in (None, model):
+            return
+        metadata["routed_model"] = model
+        for savings_key in (
+            "savings_pct",
+            "savings_max_price_per_m",
+            "savings_routed_price_per_m",
+        ):
+            if savings_key in metadata:
+                metadata[savings_key] = 0.0
+
     def fallback_after_invalid_response(self, reason: str) -> bool:
         try:
             self._provider = self._selector.next_fallback_after_failure(RuntimeError(reason))
         except Exception:
             return False
+        self._realign_routed_model_after_fallback()
         return True
 
     def chat(
@@ -1230,6 +1262,7 @@ class _SelectorFallbackProvider:
                         yield buffered_event
                     yield event
                     return
+                self._realign_routed_model_after_fallback()
                 async for fallback_event in self._provider.chat(
                     messages,
                     tools=tools,

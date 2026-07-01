@@ -406,6 +406,9 @@ class AnthropicProvider:
         tool_names: dict[str, str] = {}
         # Maps Anthropic's global content block index → tool_use_id
         index_to_tid: dict[int, str] = {}
+        # tool_use ids whose content_block_stop arrived (a truncated stream
+        # may leave calls open; they are closed after the loop).
+        closed_tool_ids: set[str] = set()
         base_input_tokens = 0
         input_tokens = 0
         output_tokens = 0
@@ -504,6 +507,7 @@ class AnthropicProvider:
                             index = event.get("index", -1)
                             tid = index_to_tid.get(index)
                             if tid is not None:
+                                closed_tool_ids.add(tid)
                                 full_json = "".join(tool_buffers[tid])
                                 try:
                                     args = json.loads(full_json) if full_json else {}
@@ -541,21 +545,50 @@ class AnthropicProvider:
                             stop_reason = event.get("delta", {}).get("stop_reason", "end_turn")
 
                         elif etype == "message_stop":
-                            reasoning_content = reasoning.finalize()
-                            yield DoneEvent(
-                                stop_reason=stop_reason,
-                                input_tokens=input_tokens,
-                                output_tokens=output_tokens,
-                                reasoning_content=reasoning_content,
-                                thinking_signature=thinking_signature,
-                                cached_tokens=cached_tokens,
-                                cache_write_tokens=cache_creation_tokens,
-                            )
+                            break
+
+                    # Termination contract: a stream that ends without
+                    # message_stop (upstream close, gateway drop) must still
+                    # close open tool calls and yield DoneEvent — the
+                    # generator never falls off the end silently.
+                    for tid in index_to_tid.values():
+                        if tid in closed_tool_ids:
+                            continue
+                        full_json = "".join(tool_buffers.get(tid, []))
+                        try:
+                            args = json.loads(full_json) if full_json else {}
+                        except json.JSONDecodeError:
+                            args = {"_raw": full_json}
+                        yield ToolUseEndEvent(
+                            tool_use_id=tid,
+                            tool_name=tool_names.get(tid, ""),
+                            arguments=args,
+                        )
+                    reasoning_content = reasoning.finalize()
+                    yield DoneEvent(
+                        stop_reason=stop_reason,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        reasoning_content=reasoning_content,
+                        thinking_signature=thinking_signature,
+                        cached_tokens=cached_tokens,
+                        cache_write_tokens=cache_creation_tokens,
+                    )
 
         except httpx.TimeoutException as exc:
             yield ErrorEvent(message=f"Request timed out: {exc}", code="timeout")
         except httpx.RequestError as exc:
             yield ErrorEvent(message=f"Request error: {exc}", code="request_error")
+        except Exception as exc:  # noqa: BLE001 - chat() contract: ErrorEvent instead of raising
+            log.exception(
+                "provider.stream_internal_error",
+                provider=self.provider_name,
+                model=self._model,
+            )
+            yield ErrorEvent(
+                message=f"Provider response handling failed: {exc}",
+                code="provider_internal",
+            )
 
     async def list_models(self) -> list[ModelInfo]:
         return [ModelInfo(provider=self.provider_name, **m) for m in _KNOWN_MODELS]

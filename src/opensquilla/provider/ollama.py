@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
+import structlog
 
 from opensquilla.env import trust_env as _trust_env
 from opensquilla.secrets import clean_header_secret
@@ -24,6 +25,8 @@ from .types import (
     ToolUseEndEvent,
     ToolUseStartEvent,
 )
+
+log = structlog.get_logger(__name__)
 
 _OLLAMA_DEFAULT_BASE = "http://localhost:11434"
 # Ollama's server default num_ctx is 2048, which silently truncates the front of
@@ -204,7 +207,10 @@ class OllamaProvider:
                     if response.status_code != 200:
                         body = await response.aread()
                         yield ErrorEvent(
-                            message=f"HTTP {response.status_code}: {body.decode()}",
+                            message=(
+                                f"HTTP {response.status_code}: "
+                                f"{body.decode('utf-8', errors='replace')}"
+                            ),
                             code=str(response.status_code),
                         )
                         return
@@ -261,6 +267,16 @@ class OllamaProvider:
             yield ErrorEvent(message=f"Request timed out: {exc}", code="timeout")
         except httpx.RequestError as exc:
             yield ErrorEvent(message=f"Request error: {exc}", code="request_error")
+        except Exception as exc:  # noqa: BLE001 - chat() contract: ErrorEvent instead of raising
+            log.exception(
+                "provider.stream_internal_error",
+                provider=self.provider_name,
+                model=self._model,
+            )
+            yield ErrorEvent(
+                message=f"Provider response handling failed: {exc}",
+                code="provider_internal",
+            )
 
     async def list_models(self) -> list[ModelInfo]:
         try:
