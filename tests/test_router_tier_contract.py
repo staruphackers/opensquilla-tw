@@ -246,6 +246,8 @@ def test_upsert_router_redacts_acronym_style_tier_secrets() -> None:
                 "APIKEY": "sk-caps",
                 "API_KEY": "sk-shout",
                 "AccessTOKEN": "tok-caps",
+                "key": "sk-bare",
+                "KEY": "sk-bare-caps",
                 # Ordinary words must NOT be redacted by the fallback.
                 "monkey": "keep-me",
             }
@@ -256,4 +258,6 @@ def test_upsert_router_redacts_acronym_style_tier_secrets() -> None:
     assert echoed["APIKEY"] == "***"
     assert echoed["API_KEY"] == "***"
     assert echoed["AccessTOKEN"] == "***"
+    assert echoed["key"] == "***"
+    assert echoed["KEY"] == "***"
     assert echoed["monkey"] == "keep-me"

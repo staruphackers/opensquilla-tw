@@ -20,7 +20,11 @@ def redact_provider_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-_TIER_SECRET_EXACT_KEYS = frozenset({"api_key", "token", "secret", "password", "authorization"})
+# "key" is safe here as an EXACT name (key/KEY/Key) — the ambiguity concern
+# (monkey) only applies to suffix matching, which stays "_key"-anchored.
+_TIER_SECRET_EXACT_KEYS = frozenset(
+    {"key", "api_key", "token", "secret", "password", "authorization"}
+)
 _TIER_SECRET_SUFFIXES = ("_key", "_token", "_secret", "_password")
 # Separator-free fallback for acronym runs no boundary rule can split
 # (APIKEY). Deliberately excludes the bare "key" suffix so ordinary words
