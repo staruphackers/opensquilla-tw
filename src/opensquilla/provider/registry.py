@@ -252,6 +252,13 @@ for _provider_spec in [
     _spec("lm_studio", "openai_compat", "lm_studio", default_base_url="http://localhost:1234/v1"),
     _spec("ovms", "openai_compat", "ovms", default_base_url="http://localhost:8000/v3"),
     _spec(
+        "litellm_proxy",
+        "openai_compat",
+        "litellm_proxy",
+        "LITELLM_API_KEY",
+        "http://localhost:4000/v1",
+    ),
+    _spec(
         "volcengine_coding_plan",
         "openai_compat",
         "openai",

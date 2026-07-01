@@ -67,7 +67,7 @@ EXPECTED_VERIFIED = {
 EXPECTED_EXPERIMENTAL = {
     "azure", "bailian_coding", "minimax", "minimax_openai", "minimax_cn",
     "minimax_global", "mistral", "groq", "aihubmix", "vllm",
-    "lm_studio", "siliconflow", "ovms",
+    "lm_studio", "siliconflow", "ovms", "litellm_proxy",
 }
 EXPECTED_SUPPORTED = EXPECTED_VERIFIED | EXPECTED_EXPERIMENTAL
 # No runtime support at all (coding-plan/OAuth stubs): never configurable.

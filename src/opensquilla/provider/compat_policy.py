@@ -62,6 +62,15 @@ class OpenAICompatPolicy:
     stream_timeout_fallback: bool = False
     log_payload_cache_shape: bool = False
 
+    # Gateway proxies with their own routing (LiteLLM): pin the requested
+    # model by disabling the gateway's cross-model fallbacks per request, so
+    # SquillaRouter stays the single routing authority.
+    sends_disable_fallbacks: bool = False
+
+    # Response headers that report which deployment actually served the
+    # request (logged for attribution; a routing deviation must be visible).
+    attribution_response_headers: tuple[str, ...] = ()
+
     # Reasoning continuity: replay assistant reasoning_content when the model
     # capabilities declare this reasoning format.
     replay_reasoning_format: str = ""
@@ -165,6 +174,17 @@ _POLICIES_BY_KIND: dict[str, OpenAICompatPolicy] = {
     ),
     "lm_studio": OpenAICompatPolicy(display_name="LM Studio"),
     "ovms": OpenAICompatPolicy(display_name="OpenVINO Model Server"),
+    "litellm_proxy": OpenAICompatPolicy(
+        display_name="LiteLLM Proxy",
+        sends_disable_fallbacks=True,
+        attribution_response_headers=(
+            "x-litellm-model-id",
+            "x-litellm-model-api-base",
+            "x-litellm-model-group",
+            "x-litellm-attempted-retries",
+            "x-litellm-attempted-fallbacks",
+        ),
+    ),
 }
 
 _DEFAULT_POLICY = OpenAICompatPolicy()

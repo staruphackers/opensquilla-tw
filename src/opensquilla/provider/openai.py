@@ -768,6 +768,10 @@ class OpenAIProvider:
             payload["max_tokens"] = cfg.max_tokens
         if self._compat.sends_usage_include:
             payload["usage"] = {"include": True}
+        if self._compat.sends_disable_fallbacks:
+            # Gateway proxies must not silently substitute another model:
+            # SquillaRouter is the single routing authority.
+            payload["disable_fallbacks"] = True
         if (
             self._compat.anthropic_top_level_cache
             and cfg.cache_mode in {"auto", "on"}
@@ -978,6 +982,23 @@ class OpenAIProvider:
                     headers=headers,
                     json=payload,
                 ) as response:
+                    if self._compat.attribution_response_headers:
+                        attribution = {
+                            name: response.headers[name]
+                            for name in self._compat.attribution_response_headers
+                            if name in response.headers
+                        }
+                        if attribution:
+                            fallbacks_taken = _coerce_int(
+                                attribution.get("x-litellm-attempted-fallbacks")
+                            )
+                            log_fn = log.warning if fallbacks_taken > 0 else log.info
+                            log_fn(
+                                "provider.gateway_attribution",
+                                provider=self._provider_kind,
+                                requested_model=self._model,
+                                **{k.replace("-", "_"): v for k, v in attribution.items()},
+                            )
                     if response.status_code != 200:
                         body = await response.aread()
                         message = _format_chat_http_error(
