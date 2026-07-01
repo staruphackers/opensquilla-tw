@@ -3374,6 +3374,7 @@ const { autoUpdater } = electronUpdater
 
 let autoUpdaterReady = false
 let manualUpdateCheck = false
+let updateDownloadInProgress = false
 let updateApplying = false
 
 function autoUpdateSupported(): boolean {
@@ -3384,6 +3385,10 @@ function autoUpdateSupported(): boolean {
     return true
   }
   return false
+}
+
+function nativeAutoUpdateEnabled(): boolean {
+  return autoUpdateSupported() && macUpdateLocationOk()
 }
 
 // macOS Squirrel cannot swap an app that runs from a read-only/translocated
@@ -3408,15 +3413,29 @@ function showUpdateDialog(
   return win ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options)
 }
 
+function showUpdateError(err: unknown): void {
+  const shouldReport = manualUpdateCheck || updateDownloadInProgress
+  manualUpdateCheck = false
+  updateDownloadInProgress = false
+  if (!shouldReport) return
+  void showUpdateDialog({
+    type: 'error',
+    buttons: ['OK'],
+    title: desktopT('update.errorTitle'),
+    message: desktopT('update.errorTitle'),
+    detail: String(err instanceof Error ? err.message : err ?? ''),
+  })
+}
+
 function initAutoUpdater(): void {
   if (autoUpdaterReady || !autoUpdateSupported()) return
   autoUpdaterReady = true
 
   // Consent-based: the bundled gateway + ML runtime make updates large, so we
-  // never download without asking. A downloaded-but-deferred update still
-  // applies on the next normal quit.
+  // never download without asking. We also keep installation on the explicit
+  // restart path so applyDownloadedUpdate() can drain the owned gateway first.
   autoUpdater.autoDownload = false
-  autoUpdater.autoInstallOnAppQuit = true
+  autoUpdater.autoInstallOnAppQuit = false
   autoUpdater.logger = {
     info: (m: unknown) => console.log('[updater]', m),
     warn: (m: unknown) => console.warn('[updater]', m),
@@ -3435,14 +3454,20 @@ function initAutoUpdater(): void {
       message: desktopT('update.newVersionTitle'),
       detail: desktopTv('update.newVersionDetail', version),
     }).then(({ response }) => {
-      manualUpdateCheck = false
-      if (response === 0) {
-        autoUpdater.downloadUpdate().catch((err) => console.error('[updater] download failed', err))
+      if (response !== 0) {
+        manualUpdateCheck = false
+        return
       }
+      updateDownloadInProgress = true
+      autoUpdater.downloadUpdate().catch((err) => {
+        console.error('[updater] download failed', err)
+        showUpdateError(err)
+      })
     })
   })
 
   autoUpdater.on('update-not-available', () => {
+    updateDownloadInProgress = false
     if (!manualUpdateCheck) return
     manualUpdateCheck = false
     void showUpdateDialog({
@@ -3455,6 +3480,8 @@ function initAutoUpdater(): void {
   })
 
   autoUpdater.on('update-downloaded', (info) => {
+    manualUpdateCheck = false
+    updateDownloadInProgress = false
     const version = String(info?.version ?? '')
     void showUpdateDialog({
       type: 'info',
@@ -3471,15 +3498,7 @@ function initAutoUpdater(): void {
 
   autoUpdater.on('error', (err) => {
     console.error('[updater] error', err)
-    if (!manualUpdateCheck) return
-    manualUpdateCheck = false
-    void showUpdateDialog({
-      type: 'error',
-      buttons: ['OK'],
-      title: desktopT('update.errorTitle'),
-      message: desktopT('update.errorTitle'),
-      detail: String(err?.message ?? err ?? ''),
-    })
+    showUpdateError(err)
   })
 }
 
@@ -3505,8 +3524,8 @@ async function checkForUpdates(manual: boolean): Promise<void> {
   try {
     await autoUpdater.checkForUpdates()
   } catch (err) {
-    // The 'error' event handles user-facing reporting for manual checks.
     console.error('[updater] checkForUpdates failed', err)
+    showUpdateError(err)
   }
 }
 
@@ -3532,13 +3551,12 @@ async function applyDownloadedUpdate(): Promise<void> {
   autoUpdater.quitAndInstall(false, true)
 }
 
-// Lets the gateway-served Control UI know whether THIS desktop build applies
-// updates natively. The web "a newer version is available" banner suppresses
-// itself only when this is true, so platforms without native auto-update yet
-// (e.g. unsigned Windows) still show the passive notice — and the banner
-// auto-hides on those platforms the moment autoUpdateSupported() starts
-// returning true for them (after Windows code signing lands), with no UI change.
-ipcMain.handle('desktop:update:supported', () => autoUpdateSupported())
+// Lets the gateway-served Control UI know whether THIS desktop runtime can
+// apply updates natively right now. The web "a newer version is available"
+// banner suppresses itself only when this is true, so unsupported platforms
+// (e.g. unsigned Windows, or macOS running outside /Applications) still show
+// the passive notice.
+ipcMain.handle('desktop:update:supported', () => nativeAutoUpdateEnabled())
 ipcMain.handle('desktop:os-locale', () => desktopLocale)
 ipcMain.handle('gateway:status', () => ({ ...gatewayState }))
 ipcMain.handle('gateway:reveal-log', async () => {

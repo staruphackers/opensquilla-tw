@@ -135,6 +135,23 @@ def test_disabled_env_skips_network(tmp_path: Path, monkeypatch) -> None:
     assert fetch.calls == []
 
 
+def test_disabled_env_skips_forced_network_check(tmp_path: Path, monkeypatch) -> None:
+    _enable(monkeypatch)
+    monkeypatch.setenv(update_check.UPDATE_CHECK_DISABLED_ENV, "1")
+    fetch = _fake_fetch("0.5.0")
+    monkeypatch.setattr(update_check, "_fetch_latest_release", fetch)
+
+    info = update_check.refresh_update_check(
+        state_path=tmp_path / "update_check.json",
+        version="0.4.1",
+        force=True,
+    )
+
+    assert info.disabled is True
+    assert info.update_available is False
+    assert fetch.calls == []
+
+
 def test_telemetry_disable_also_silences_update_check(tmp_path: Path, monkeypatch) -> None:
     _enable(monkeypatch)
     monkeypatch.setenv(update_check.TELEMETRY_DISABLED_ENV, "1")
@@ -147,6 +164,18 @@ def test_telemetry_disable_also_silences_update_check(tmp_path: Path, monkeypatc
 
     assert info.disabled is True
     assert fetch.calls == []
+
+
+def test_get_cached_honors_disabled_env_after_prior_check(tmp_path: Path, monkeypatch) -> None:
+    _enable(monkeypatch)
+    monkeypatch.setattr(update_check, "_fetch_latest_release", _fake_fetch("0.5.0"))
+    state_path = tmp_path / "update_check.json"
+    update_check.refresh_update_check(state_path=state_path, version="0.4.1")
+
+    monkeypatch.setenv(update_check.UPDATE_CHECK_DISABLED_ENV, "1")
+    info = update_check.get_cached_update_info(state_path=state_path, version="0.4.1")
+
+    assert info is None
 
 
 def test_get_cached_recomputes_against_current_version(tmp_path: Path, monkeypatch) -> None:

@@ -108,7 +108,7 @@ def refresh_update_check(
     path = _state_path(config=config, explicit=state_path)
 
     skip_reason = _skip_reason()
-    if skip_reason and not force:
+    if skip_reason:
         info = UpdateCheckInfo(
             current_version=current,
             latest_version=None,
@@ -215,6 +215,17 @@ def get_cached_update_info(
     completed.
     """
     current = (version or __version__ or "unknown").strip() or "unknown"
+    if _skip_reason():
+        _store_cache(
+            UpdateCheckInfo(
+                current_version=current,
+                latest_version=None,
+                update_available=False,
+                release_url=_releases_page(),
+                disabled=True,
+            )
+        )
+        return None
 
     with _CACHE_LOCK:
         cached = _CACHED_INFO

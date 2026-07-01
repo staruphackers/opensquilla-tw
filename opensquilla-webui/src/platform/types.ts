@@ -117,7 +117,8 @@ export interface Platform {
   getOsLocale: () => Promise<string | undefined>
   /**
    * Whether THIS host applies updates natively (electron-updater). Web always
-   * returns false; desktop returns the shell's live `autoUpdateSupported()`.
+   * returns false; desktop returns the shell's live native-update capability,
+   * including runtime guards such as macOS requiring /Applications.
    * The passive "newer version available" banner suppresses itself only when
    * this is true, so surfaces without native auto-update (the browser, and
    * desktop platforms not yet covered — e.g. unsigned Windows) keep the notice.
