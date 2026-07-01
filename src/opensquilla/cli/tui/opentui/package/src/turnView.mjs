@@ -27,6 +27,9 @@ export function createTurnView(deps, id) {
   // turn end (or when a trailing out-of-card block such as usage begins).
   let cardBody = null;
   let cardTop = null; // the "╭─ squilla ─…" header rule (width-dependent)
+  let cardGap = null; // the leading "│" gap row above the header
+  let cardBot = null; // the "╰────" footer rule
+  const gapRows = []; // prose<->procedure spacer rows (detailText)
   let cardOpen = false;
   let cardClosed = false;
   let lastInCardKind = null; // for prose<->procedure spacing inside the card
@@ -35,7 +38,8 @@ export function createTurnView(deps, id) {
   function openCard() {
     if (cardOpen) return;
     cardOpen = true;
-    box.add(new TextRenderable(renderer, { id: `turn-${id}-cardgap`, content: `${TOOL_INDENT}│`, fg: THEME.detailText }));
+    cardGap = new TextRenderable(renderer, { id: `turn-${id}-cardgap`, content: `${TOOL_INDENT}│`, fg: THEME.detailText });
+    box.add(cardGap);
     cardTop = new TextRenderable(renderer, { id: `turn-${id}-cardtop`, content: cardHeaderRule("squilla", renderer.terminalWidth), fg: THEME.answerFrame });
     box.add(cardTop);
     cardBody = new BoxRenderable(renderer, { id: `turn-${id}-cardbody`, width: "100%", flexDirection: "column", border: ["left"], borderColor: THEME.answerFrame, paddingLeft: 1, flexShrink: 0 });
@@ -45,7 +49,8 @@ export function createTurnView(deps, id) {
   function closeCard() {
     if (!cardOpen || cardClosed) return;
     cardClosed = true;
-    box.add(new TextRenderable(renderer, { id: `turn-${id}-cardbot`, content: `╰${CARD_RULE_SHORT}`, fg: THEME.answerFrame }));
+    cardBot = new TextRenderable(renderer, { id: `turn-${id}-cardbot`, content: `╰${CARD_RULE_SHORT}`, fg: THEME.answerFrame });
+    box.add(cardBot);
     renderer.requestRender?.();
   }
 
@@ -67,7 +72,9 @@ export function createTurnView(deps, id) {
         // rows tight — mirrors opencode's part spacing without an even gap
         // between every step. The card border keeps the gutter continuous.
         if (lastInCardKind !== null && (kind === "answer") !== (lastInCardKind === "answer")) {
-          cardBody.add(new TextRenderable(renderer, { id: `turn-${id}-gap-${gapSeq++}`, content: TOOL_INDENT, fg: THEME.detailText }));
+          const gap = new TextRenderable(renderer, { id: `turn-${id}-gap-${gapSeq++}`, content: TOOL_INDENT, fg: THEME.detailText });
+          cardBody.add(gap);
+          gapRows.push(gap);
         }
         lastInCardKind = kind;
       } else {
@@ -105,6 +112,18 @@ export function createTurnView(deps, id) {
       if (cardTop) cardTop.content = cardHeaderRule("squilla", renderer.terminalWidth);
       for (const entry of blocks.values()) entry.r.relayout?.();
       renderer.requestRender?.();
+    },
+    // Live /theme switch: re-point this turn's card chrome at the (in-place
+    // updated) THEME, then let each block recolor its own nodes. Existing
+    // renderables captured their fg at creation, so without this a dark→light
+    // switch leaves prior transcript unreadable on the new background.
+    recolor() {
+      if (cardGap) cardGap.fg = THEME.detailText;
+      if (cardTop) cardTop.fg = THEME.answerFrame;
+      if (cardBody) cardBody.borderColor = THEME.answerFrame;
+      if (cardBot) cardBot.fg = THEME.answerFrame;
+      for (const gap of gapRows) gap.fg = THEME.detailText;
+      for (const entry of blocks.values()) entry.r.recolor?.();
     },
     refreshPulse(frame) {
       const toolGlyph = STATUS_PULSE_FRAMES.tool[frame % STATUS_PULSE_FRAMES.tool.length];

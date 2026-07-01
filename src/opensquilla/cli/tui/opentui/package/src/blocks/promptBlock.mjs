@@ -4,9 +4,10 @@ import { CARD_RULE_SHORT, cardHeaderRule, stripTerminalControls } from "../primi
 export function createPromptBlock(ctx) {
   const { renderer, TextRenderable, box, idPrefix } = ctx;
   let top = null; // the "╭─ prompt ─…" header rule (width-dependent)
+  const nodes = []; // every prompt-accent node, so a live /theme can recolor them
   const add = (suffix, content) => {
     const n = new TextRenderable(renderer, { id: `${idPrefix}-${suffix}`, content, fg: THEME.promptAccent });
-    box.add(n); return n;
+    box.add(n); nodes.push(n); return n;
   };
   return {
     begin(meta) {
@@ -21,5 +22,7 @@ export function createPromptBlock(ctx) {
     relayout() {
       if (top) top.content = cardHeaderRule("prompt", renderer.terminalWidth);
     },
+    // Live /theme switch: re-point every prompt node at the updated accent.
+    recolor() { for (const n of nodes) n.fg = THEME.promptAccent; },
   };
 }

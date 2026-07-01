@@ -38,5 +38,8 @@ export function createThinkingBlock(ctx) {
     append(delta) { text += String(delta); render(); },
     update() {},
     end() {},
+    // Live /theme switch: re-run render(), which recreates the lines reading the
+    // (in-place updated) THEME.thinkingAccent.
+    recolor() { render(); },
   };
 }

@@ -133,6 +133,17 @@ async function main() {
   let scrollbackSeq = 0;
   let statusActive = false;
   let pulseFrame = 0;
+
+  // A live /theme switch mutates THEME/STATUS in place and fires this event.
+  // Already-rendered turn nodes captured their fg at creation, so recolor every
+  // turn's chrome + blocks here; the syntaxStyle listener above handles markdown
+  // spans. Force a full repaint so the new background lands cleanly under old
+  // cells. (No turns exist at the initial applyTheme, so this is a no-op then.)
+  onThemeApplied(() => {
+    for (const t of turns) t.recolor?.();
+    renderer.forceFullRepaintRequested = true;
+    renderer.requestRender?.();
+  });
   const turnDeps = { renderer, BoxRenderable, TextRenderable, MarkdownRenderable, syntaxStyle, conversationBox };
   const ensureTurn = (id) => {
     if (!activeTurn || activeTurn.ended) {
