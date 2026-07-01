@@ -12,6 +12,7 @@ import structlog
 from opensquilla.env import trust_env as _trust_env
 from opensquilla.secrets import clean_header_secret
 
+from .stream_assembly import ToolStreamAccumulator
 from .types import (
     ChatConfig,
     DoneEvent,
@@ -21,9 +22,6 @@ from .types import (
     StreamEvent,
     TextDeltaEvent,
     ToolDefinition,
-    ToolUseDeltaEvent,
-    ToolUseEndEvent,
-    ToolUseStartEvent,
 )
 
 log = structlog.get_logger(__name__)
@@ -247,15 +245,23 @@ class OllamaProvider:
                             output_tokens = chunk.get("eval_count", 0)
 
                     # Emit tool events after streaming completes
-                    for call in pending_tool_calls:
-                        yield ToolUseStartEvent(tool_use_id=call["id"], tool_name=call["name"])
-                        args_json = json.dumps(call["arguments"])
-                        yield ToolUseDeltaEvent(tool_use_id=call["id"], json_fragment=args_json)
-                        yield ToolUseEndEvent(
+                    tools_acc = ToolStreamAccumulator()
+                    for key, call in enumerate(pending_tool_calls):
+                        for tool_event in tools_acc.start(
+                            key,
                             tool_use_id=call["id"],
                             tool_name=call["name"],
-                            arguments=call["arguments"],
-                        )
+                        ):
+                            yield tool_event
+                        for tool_event in tools_acc.append(key, json.dumps(call["arguments"])):
+                            yield tool_event
+                        # Ollama already delivers parsed arguments — they are
+                        # authoritative, not reassembled from fragments.
+                        for tool_event in tools_acc.finish_with_arguments(
+                            key,
+                            call["arguments"],
+                        ):
+                            yield tool_event
 
                     yield DoneEvent(
                         stop_reason="stop",

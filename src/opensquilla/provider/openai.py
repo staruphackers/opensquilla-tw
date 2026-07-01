@@ -29,7 +29,7 @@ from .request_proof import (
     ProviderRequestBudgetExceededError,
     prove_provider_payload_from_env,
 )
-from .stream_assembly import ReasoningAccumulator
+from .stream_assembly import ReasoningAccumulator, ToolStreamAccumulator
 from .types import (
     ChatConfig,
     DoneEvent,
@@ -41,7 +41,6 @@ from .types import (
     StreamEvent,
     TextDeltaEvent,
     ToolDefinition,
-    ToolUseDeltaEvent,
     ToolUseEndEvent,
     ToolUseStartEvent,
 )
@@ -401,7 +400,7 @@ def _provider_billed_cost(provider_kind: str, raw_billed_cost: float) -> tuple[f
 
 def _resolve_tool_call_index(
     tc: Mapping[str, Any],
-    pending_calls: Mapping[int, dict[str, Any]],
+    tools_acc: ToolStreamAccumulator,
 ) -> int:
     """Resolve the accumulator slot for a streamed tool-call delta.
 
@@ -414,13 +413,14 @@ def _resolve_tool_call_index(
         return _coerce_int(tc["index"])
     tool_call_id = tc.get("id")
     if isinstance(tool_call_id, str) and tool_call_id:
-        for idx, call in pending_calls.items():
-            if tool_call_id in (call.get("id"), call.get("wire_id")):
-                return idx
-        return max(pending_calls.keys(), default=-1) + 1
-    if len(pending_calls) == 1:
-        return cast(int, next(iter(pending_calls)))
-    return max(pending_calls.keys(), default=-1) + 1
+        key = tools_acc.find_key_for_tool_call_id(tool_call_id)
+        if key is not None:
+            return cast(int, key)
+        return tools_acc.next_int_key()
+    single = tools_acc.single_key()
+    if single is not None:
+        return cast(int, single)
+    return tools_acc.next_int_key()
 
 
 def _stream_timeout(timeout: float) -> httpx.Timeout:
@@ -970,11 +970,10 @@ class OpenAIProvider:
         if self._org_id:
             headers["OpenAI-Organization"] = self._org_id
 
-        # tool_call accumulator: index -> {id, name, json_parts}
-        pending_calls: dict[int, dict[str, Any]] = {}
+        tools_acc = ToolStreamAccumulator()
         # Gemini thought_signature streamed on a non-FC text delta. Kept
-        # separate from pending_calls (whose keys MUST stay int — see
-        # _resolve_tool_call_index's max(keys)+1) so a str key can never
+        # separate from the tool accumulator (whose keys MUST stay int — see
+        # _resolve_tool_call_index's next_int_key) so a str key can never
         # poison the next-index computation with a TypeError.
         streamed_thought_signature: str | None = None
         reasoning = ReasoningAccumulator()
@@ -1134,38 +1133,23 @@ class OpenAIProvider:
                             # Gemini thought_signature on non-FC deltas
                             # (streamed thinking path): Gemini sends it on
                             # the top-level delta instead of attaching it to
-                            # a tool_call. Keep it out of pending_calls.
+                            # a tool_call. Keep it out of the tool accumulator.
                             ts_delta = delta.get("thought_signature")
                             if isinstance(ts_delta, str) and ts_delta:
                                 streamed_thought_signature = ts_delta
 
                             # Tool calls (may stream over multiple chunks)
                             for tc in delta.get("tool_calls", []):
-                                idx = _resolve_tool_call_index(tc, pending_calls)
-                                if idx not in pending_calls:
-                                    pending_calls[idx] = {
-                                        "id": tc.get("id", f"call_{uuid4().hex[:12]}"),
-                                        "wire_id": tc.get("id"),
-                                        "name": tc.get("function", {}).get("name", ""),
-                                        "parts": [],
-                                        "thought_signature": None,
-                                    }
+                                idx = _resolve_tool_call_index(tc, tools_acc)
+                                function = tc.get("function", {}) or {}
+                                for tool_event in tools_acc.append_or_start(
+                                    idx,
+                                    tool_call_id=tc.get("id"),
+                                    tool_name=function.get("name", ""),
+                                    fragment=function.get("arguments", ""),
+                                ):
                                     emitted_stream_event = True
-                                    yield ToolUseStartEvent(
-                                        tool_use_id=pending_calls[idx]["id"],
-                                        tool_name=pending_calls[idx]["name"],
-                                    )
-                                else:
-                                    # The public id is frozen once the
-                                    # ToolUseStartEvent is emitted — keep a
-                                    # late-arriving provider id only for index
-                                    # matching so Start/Delta/End always agree
-                                    # on tool_use_id.
-                                    if tc.get("id"):
-                                        pending_calls[idx]["wire_id"] = tc["id"]
-                                    fname = tc.get("function", {}).get("name", "")
-                                    if fname:
-                                        pending_calls[idx]["name"] = fname
+                                    yield tool_event
 
                                 # Gemini thought_signature (OpenAI compat format):
                                 # tool_calls[].extra_content.google.thought_signature
@@ -1175,30 +1159,13 @@ class OpenAIProvider:
                                     .get("thought_signature")
                                 )
                                 if isinstance(sig, str) and sig:
-                                    pending_calls[idx]["thought_signature"] = sig
+                                    tools_acc.set_metadata(idx, "thought_signature", sig)
 
-                                fragment = tc.get("function", {}).get("arguments", "")
-                                if fragment:
-                                    pending_calls[idx]["parts"].append(fragment)
-                                    emitted_stream_event = True
-                                    yield ToolUseDeltaEvent(
-                                        tool_use_id=pending_calls[idx]["id"],
-                                        json_fragment=fragment,
-                                    )
-
-                    # Emit ToolUseEnd for each completed call
-                    for call in pending_calls.values():
-                        full_json = "".join(call["parts"])
-                        try:
-                            args = json.loads(full_json) if full_json else {}
-                        except json.JSONDecodeError:
-                            args = {"_raw": full_json}
+                    # Chat Completions has no per-call stop event: close every
+                    # assembled call once the stream ends.
+                    for tool_event in tools_acc.finish_all():
                         emitted_stream_event = True
-                        yield ToolUseEndEvent(
-                            tool_use_id=call["id"],
-                            tool_name=call["name"],
-                            arguments=args,
-                        )
+                        yield tool_event
 
                     # Last-resort MiniMax compatibility: some OpenRouter
                     # upstreams leak native MiniMax XML tool calls as text
@@ -1207,7 +1174,7 @@ class OpenAIProvider:
                     # no structured calls arrived, tools were offered, and the
                     # parsed tool name is explicitly allowed by this turn.
                     if (
-                        not pending_calls
+                        not tools_acc.has_calls
                         and tools
                         and assistant_text_parts
                         and self._provider_kind in _TEXT_TOOL_SYNTHESIS_PROVIDER_KINDS
@@ -1232,14 +1199,12 @@ class OpenAIProvider:
 
                     # Gemini thought_signature: extract from the first tool call
                     # that carries one (Gemini attaches it to the first FC only).
-                    gemini_thought_sig: str | None = None
-                    for _call in pending_calls.values():
-                        sig = _call.get("thought_signature")
-                        if isinstance(sig, str) and sig:
-                            gemini_thought_sig = sig
-                            break
                     # Fallback: when Gemini streams the signature on a non-FC
                     # text delta (no tool_call carries it), use the streamed one.
+                    gemini_thought_sig = cast(
+                        "str | None",
+                        tools_acc.first_metadata("thought_signature"),
+                    )
                     if gemini_thought_sig is None:
                         gemini_thought_sig = streamed_thought_signature
 
@@ -1373,8 +1338,7 @@ class OpenAIProvider:
         stop_reason = "stop"
         assistant_text_parts: list[str] = []
         reasoning = ReasoningAccumulator()
-        emitted_structured_tool = False
-        non_stream_thought_sig: str | None = None
+        tools_acc = ToolStreamAccumulator()
 
         for choice in data.get("choices", []):
             if choice.get("finish_reason"):
@@ -1403,32 +1367,25 @@ class OpenAIProvider:
             for tc in message.get("tool_calls") or []:
                 function = tc.get("function") or {}
                 tool_use_id = tc.get("id") or f"call_{uuid4().hex[:12]}"
-                tool_name = function.get("name") or ""
-                arguments_text = function.get("arguments") or ""
-                emitted_structured_tool = True
-                yield ToolUseStartEvent(tool_use_id=tool_use_id, tool_name=tool_name)
-                if arguments_text:
-                    yield ToolUseDeltaEvent(
-                        tool_use_id=tool_use_id,
-                        json_fragment=arguments_text,
-                    )
-                try:
-                    arguments = json.loads(arguments_text) if arguments_text else {}
-                except json.JSONDecodeError:
-                    arguments = {"_raw": arguments_text}
-                yield ToolUseEndEvent(
+                call_key = tools_acc.next_int_key()
+                for tool_event in tools_acc.start(
+                    call_key,
                     tool_use_id=tool_use_id,
-                    tool_name=tool_name,
-                    arguments=arguments,
-                )
-                # Collect Gemini thought_signature from first FC that has one.
-                if non_stream_thought_sig is None:
-                    sig = (tc.get("extra_content") or {}).get("google", {}).get("thought_signature")
-                    if isinstance(sig, str) and sig:
-                        non_stream_thought_sig = sig
+                    tool_name=function.get("name") or "",
+                ):
+                    yield tool_event
+                arguments_text = function.get("arguments") or ""
+                if arguments_text:
+                    for tool_event in tools_acc.append(call_key, arguments_text):
+                        yield tool_event
+                sig = (tc.get("extra_content") or {}).get("google", {}).get("thought_signature")
+                if isinstance(sig, str) and sig:
+                    tools_acc.set_metadata(call_key, "thought_signature", sig)
+                for tool_event in tools_acc.finish(call_key):
+                    yield tool_event
 
         if (
-            not emitted_structured_tool
+            not tools_acc.has_calls
             and tools
             and assistant_text_parts
             and self._provider_kind in _TEXT_TOOL_SYNTHESIS_PROVIDER_KINDS
@@ -1449,7 +1406,10 @@ class OpenAIProvider:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             reasoning_content=reasoning_text or None,
-            thinking_signature=non_stream_thought_sig,
+            thinking_signature=cast(
+                "str | None",
+                tools_acc.first_metadata("thought_signature"),
+            ),
             reasoning_tokens=reasoning_tokens,
             cached_tokens=cached_tokens,
             cache_write_tokens=cache_write_tokens,
