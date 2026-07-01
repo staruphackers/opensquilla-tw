@@ -185,3 +185,19 @@ def test_upsert_router_no_warning_for_matching_tiers() -> None:
     cfg = GatewayConfig()
     res = upsert_router(cfg, mode="recommended")
     assert res.warnings == []
+
+
+def test_upsert_router_redacts_secret_like_tier_fields() -> None:
+    # Tiers are untyped dicts: a hand-written api_key must not be echoed
+    # back through the router-configure RPC response.
+    cfg = GatewayConfig()
+    res = upsert_router(
+        cfg,
+        mode="recommended",
+        tiers={"c2": {"provider": "openrouter", "model": "z-ai/glm-5.1", "api_key": "sk-leak"}},
+    )
+    echoed = res.public_payload["tiers"]["c2"]
+    assert echoed["api_key"] == "***"
+    assert echoed["model"] == "z-ai/glm-5.1"
+    # The stored config keeps the real value; only the echo is redacted.
+    assert res.config.squilla_router.tiers["c2"]["api_key"] == "sk-leak"

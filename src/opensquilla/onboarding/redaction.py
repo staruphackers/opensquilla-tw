@@ -19,6 +19,30 @@ def redact_provider_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+_TIER_SECRET_FIELDS = frozenset({"api_key", "token", "secret"})
+
+
+def redact_router_tiers_payload(tiers: dict[str, Any]) -> dict[str, Any]:
+    """Redact secret-like fields hand-written into router tier dicts.
+
+    Tiers are untyped dicts and carry no secrets by design (credentials live
+    in ``[llm_profiles.<id>]``), but nothing stops an operator from pasting
+    an ``api_key`` into one — the router-configure RPC response must not
+    echo it back. (Adversarial-review finding salvaged from PR #406.)
+    """
+    out: dict[str, Any] = {}
+    for tier_name, tier in tiers.items():
+        if not isinstance(tier, dict):
+            out[tier_name] = tier
+            continue
+        redacted = dict(tier)
+        for key in _TIER_SECRET_FIELDS:
+            if key in redacted and redacted[key]:
+                redacted[key] = REDACTED_PLACEHOLDER
+        out[tier_name] = redacted
+    return out
+
+
 def redact_search_payload(payload: dict[str, Any]) -> dict[str, Any]:
     out = dict(payload)
     if out.get("api_key"):

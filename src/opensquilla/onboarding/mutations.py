@@ -29,6 +29,7 @@ from opensquilla.onboarding.redaction import (
     redact_image_generation_payload,
     redact_memory_embedding_payload,
     redact_provider_payload,
+    redact_router_tiers_payload,
     redact_search_payload,
 )
 from opensquilla.onboarding.search_specs import get_search_provider_setup_spec
@@ -410,7 +411,7 @@ def upsert_router(
     new_cfg.squilla_router = SquillaRouterConfig(**router_payload)
     _sync_llm_model_to_router_default(new_cfg)
     public_payload["default_tier"] = new_cfg.squilla_router.default_tier
-    public_payload["tiers"] = new_cfg.squilla_router.tiers
+    public_payload["tiers"] = redact_router_tiers_payload(new_cfg.squilla_router.tiers)
     return MutationResult(
         config=new_cfg,
         changed=True,
