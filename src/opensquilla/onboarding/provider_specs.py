@@ -228,7 +228,9 @@ def _to_setup_spec(spec: ProviderSpec) -> ProviderSetupSpec:
         router_supported=spec.provider_id in ROUTER_TIER_PROFILE_IDS,
         deployment=_deployment_for(spec),
         blocking=True,
-        can_probe=False,
+        # Runtime-supported providers can be probed live (one-token chat via
+        # onboarding.provider.probe) before the config is saved.
+        can_probe=runtime_supported,
         readme_scenarios=("first-run setup", "quick terminal install"),
         what_you_need=_what_you_need(spec),
         default_direct_model=_default_direct_model(spec.provider_id),

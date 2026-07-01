@@ -348,6 +348,7 @@ def build_provider(
     api_key: str = "",
     base_url: str = "",
     org_id: str = "",
+    proxy: str = "",
 ) -> LLMProvider:
     """Convenience factory: build a single provider directly."""
     return _build_provider(
@@ -357,5 +358,6 @@ def build_provider(
             api_key=api_key,
             base_url=base_url,
             org_id=org_id,
+            proxy=proxy,
         )
     )

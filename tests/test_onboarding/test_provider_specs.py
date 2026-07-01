@@ -177,6 +177,8 @@ def test_provider_payload_exposes_readiness_metadata_for_every_provider():
     for row in payload:
         assert row["blocking"] is True
         assert row["deployment"] in {"cloud", "local", "custom", "oauth"}
-        assert row["canProbe"] is False
+        # Catalog rows are runtime-supported by construction, so every
+        # one is live-probeable via onboarding.provider.probe.
+        assert row["canProbe"] is True
         assert row["readmeScenarios"]
         assert row["whatYouNeed"]
