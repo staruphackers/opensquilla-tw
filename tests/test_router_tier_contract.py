@@ -229,3 +229,31 @@ def test_upsert_router_redacts_camel_and_kebab_tier_secrets() -> None:
     assert echoed["clientSecret"] == "***"
     assert echoed["model"] == "z-ai/glm-5.1"
     assert echoed["provider"] == "openrouter"
+
+
+def test_upsert_router_redacts_acronym_style_tier_secrets() -> None:
+    # Acronym runs have no lowercase->uppercase boundary (APIKey, APIKEY):
+    # the acronym rule and the separator-free fallback must still match.
+    cfg = GatewayConfig()
+    res = upsert_router(
+        cfg,
+        mode="recommended",
+        tiers={
+            "c2": {
+                "provider": "openrouter",
+                "model": "z-ai/glm-5.1",
+                "APIKey": "sk-acronym",
+                "APIKEY": "sk-caps",
+                "API_KEY": "sk-shout",
+                "AccessTOKEN": "tok-caps",
+                # Ordinary words must NOT be redacted by the fallback.
+                "monkey": "keep-me",
+            }
+        },
+    )
+    echoed = res.public_payload["tiers"]["c2"]
+    assert echoed["APIKey"] == "***"
+    assert echoed["APIKEY"] == "***"
+    assert echoed["API_KEY"] == "***"
+    assert echoed["AccessTOKEN"] == "***"
+    assert echoed["monkey"] == "keep-me"

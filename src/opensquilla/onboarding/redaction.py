@@ -22,19 +22,32 @@ def redact_provider_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 _TIER_SECRET_EXACT_KEYS = frozenset({"api_key", "token", "secret", "password", "authorization"})
 _TIER_SECRET_SUFFIXES = ("_key", "_token", "_secret", "_password")
-_CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])([A-Z])")
+# Separator-free fallback for acronym runs no boundary rule can split
+# (APIKEY). Deliberately excludes the bare "key" suffix so ordinary words
+# (monkey) are not redacted.
+_TIER_SECRET_SQUASHED_SUFFIXES = ("apikey", "token", "secret", "password", "authorization")
+# apiKey -> api_Key
+_CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+# APIKey -> API_Key
+_ACRONYM_BOUNDARY_RE = re.compile(r"(?<=[A-Z])(?=[A-Z][a-z])")
 
 
 def _is_secret_like_tier_key(key: str) -> bool:
-    """Match secret-shaped keys in any spelling (api_key, apiKey, api-key).
+    """Match secret-shaped keys in any spelling (api_key, apiKey, APIKey, APIKEY).
 
     Tier dicts are untyped RPC payloads, so only the three known display
-    aliases get canonicalized to snake_case on write — an ``apiKey`` passes
-    through verbatim. Normalize case boundaries before matching so the
+    aliases get canonicalized to snake_case on write — any other spelling
+    passes through verbatim. Normalize camel/acronym case boundaries and
+    separators before matching, with a separator-free fallback, so the
     redaction cannot be dodged by spelling.
     """
-    normalized = _CAMEL_BOUNDARY_RE.sub(r"_\1", str(key)).replace("-", "_").lower()
-    return normalized in _TIER_SECRET_EXACT_KEYS or normalized.endswith(_TIER_SECRET_SUFFIXES)
+    with_boundaries = _ACRONYM_BOUNDARY_RE.sub("_", str(key))
+    with_boundaries = _CAMEL_BOUNDARY_RE.sub("_", with_boundaries)
+    normalized = with_boundaries.replace("-", "_").lower()
+    if normalized in _TIER_SECRET_EXACT_KEYS or normalized.endswith(_TIER_SECRET_SUFFIXES):
+        return True
+    squashed = normalized.replace("_", "")
+    return squashed.endswith(_TIER_SECRET_SQUASHED_SUFFIXES)
 
 
 def redact_router_tiers_payload(tiers: dict[str, Any]) -> dict[str, Any]:
