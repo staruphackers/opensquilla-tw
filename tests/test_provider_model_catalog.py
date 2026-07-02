@@ -161,8 +161,7 @@ async def test_fetch_openrouter_adds_app_attribution_headers() -> None:
     assert captured["headers"] == {
         "Authorization": "Bearer test-key",
         "HTTP-Referer": "https://opensquilla.ai",
-        "X-OpenRouter-Title": "OpenSquilla",
-        "X-OpenRouter-Categories": "cli-agent,personal-agent",
+        "X-Title": "OpenSquilla",
     }
     model = catalog.get("openai/gpt-4o")
     assert model is not None
