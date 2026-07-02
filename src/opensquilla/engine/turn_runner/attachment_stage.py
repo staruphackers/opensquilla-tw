@@ -28,6 +28,7 @@ future ``ErrorEvent`` early-yield branch.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
@@ -55,6 +56,7 @@ class AttachmentMessageBuilderPort(Protocol):
         message: str,
         attachments: list[dict],
         *,
+        workspace_dir: str | Path | None = None,
         session_id: str | None = None,
     ) -> list[Any] | None: ...
 
@@ -72,6 +74,7 @@ class AttachmentStageInput:
 
     effective_runtime_message: str
     attachments: list[dict] | None
+    workspace_dir: str | Path | None = None
     session_id: str | None = None
 
 @dataclass(frozen=True)
@@ -123,6 +126,7 @@ class AttachmentStage:
         extra_messages = self._builder.build(
             inp.effective_runtime_message,
             inp.attachments or [],
+            workspace_dir=inp.workspace_dir,
             session_id=inp.session_id,
         )
         turn_input = (

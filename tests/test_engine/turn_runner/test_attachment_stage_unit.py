@@ -9,6 +9,7 @@ exception-propagation contract without the runtime wrapper.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -17,6 +18,7 @@ from opensquilla.engine.turn_runner.attachment_stage import (
     AttachmentStage,
     AttachmentStageInput,
 )
+from opensquilla.engine.turn_runner.harness import _TurnRunnerAttachmentMessageBuilderAdapter
 from opensquilla.engine.turn_runner.outcome import StageOutcome
 
 
@@ -31,10 +33,16 @@ class _RecordingBuilder:
         message: str,
         attachments: list[dict],
         *,
+        workspace_dir: str | Path | None = None,
         session_id: str | None = None,
     ) -> list[Any] | None:
         self.calls.append(
-            {"message": message, "attachments": attachments, "session_id": session_id}
+            {
+                "message": message,
+                "attachments": attachments,
+                "workspace_dir": workspace_dir,
+                "session_id": session_id,
+            }
         )
         if self.raises is not None:
             raise self.raises("recording builder boom")
@@ -72,7 +80,14 @@ async def test_no_attachments_returns_runtime_message_as_turn_input(
     assert outcome.output is not None
     assert outcome.output.extra_messages is None
     assert outcome.output.turn_input == "hello"
-    assert builder.calls == [{"message": "hello", "attachments": [], "session_id": None}]
+    assert builder.calls == [
+        {
+            "message": "hello",
+            "attachments": [],
+            "workspace_dir": None,
+            "session_id": None,
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -87,6 +102,8 @@ async def test_builder_returns_messages_clears_turn_input() -> None:
     inp = AttachmentStageInput(
         effective_runtime_message="what is this?",
         attachments=[{"type": "image/png", "data": "AA=="}],
+        workspace_dir="/workspace/main",
+        session_id="session-a",
     )
 
     outcome = await stage.run(inp)
@@ -97,7 +114,8 @@ async def test_builder_returns_messages_clears_turn_input() -> None:
         {
             "message": "what is this?",
             "attachments": [{"type": "image/png", "data": "AA=="}],
-            "session_id": None,
+            "workspace_dir": "/workspace/main",
+            "session_id": "session-a",
         }
     ]
 
@@ -167,3 +185,55 @@ async def test_builder_called_exactly_once_per_run() -> None:
     )
     await stage.run(inp)
     assert len(builder.calls) == 1
+
+
+def test_attachment_builder_adapter_prefers_resolved_workspace(tmp_path: Path) -> None:
+    """Per-agent workspace resolution must beat the runner config fallback."""
+
+    calls: list[dict[str, Any]] = []
+
+    class _Runner:
+        _config = type("_Config", (), {"workspace_dir": str(tmp_path / "config")})()
+
+        def _attachment_media_root(self) -> Path:
+            return tmp_path / "media"
+
+        def _build_attachment_messages(
+            self,
+            message: str,
+            attachments: list[dict],
+            *,
+            media_root: Path | None = None,
+            workspace_dir: str | Path | None = None,
+            session_id: str | None = None,
+        ) -> None:
+            calls.append(
+                {
+                    "message": message,
+                    "attachments": attachments,
+                    "media_root": media_root,
+                    "workspace_dir": workspace_dir,
+                    "session_id": session_id,
+                }
+            )
+            return None
+
+    adapter = _TurnRunnerAttachmentMessageBuilderAdapter(_Runner())  # type: ignore[arg-type]
+    agent_workspace = tmp_path / "agent"
+
+    adapter.build(
+        "hello",
+        [{"type": "text/plain", "data": "aGk="}],
+        workspace_dir=agent_workspace,
+        session_id="session-a",
+    )
+
+    assert calls == [
+        {
+            "message": "hello",
+            "attachments": [{"type": "text/plain", "data": "aGk="}],
+            "media_root": tmp_path / "media",
+            "workspace_dir": agent_workspace,
+            "session_id": "session-a",
+        }
+    ]
