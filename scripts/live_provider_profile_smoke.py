@@ -413,7 +413,7 @@ async def smoke_provider(
         model=model,
         base_url=base_url,
         env_key=env_key,
-        key_present=True,
+        key_present=bool(api_key),
         direct_status=direct_status,
         stream_status=stream_status,
         response_model=response_model,
