@@ -74,6 +74,7 @@ GROUP_SPECS: dict[str, dict[str, str]] = {
         "model": "z-ai/glm-5.2",
         "server_tool_profile": "openrouter_fusion",
     },
+    "B9": {"kind": "single", "model": "anthropic/claude-fable-5"},
     "G1": {"kind": "profile", "profile": "g1_code"},
     "G2": {"kind": "profile", "profile": "g2_general"},
     "G3": {"kind": "profile", "profile": "g3_standard"},
@@ -137,6 +138,7 @@ GENERATION_THINKING_MODEL_MAX = "model_max"
 DEFAULT_GENERATION_THINKING = GENERATION_THINKING_MODEL_MAX
 DEFAULT_GENERATION_THINKING_FALLBACK = "xhigh"
 DEFAULT_MODEL_MAX_GENERATION_THINKING: dict[str, str] = {
+    "anthropic/claude-fable-5": "max",
     "anthropic/claude-opus-4.8": "max",
     "deepseek/deepseek-v4-pro": "xhigh",
     "google/gemini-3.1-pro-preview": "high",
