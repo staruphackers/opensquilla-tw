@@ -227,6 +227,10 @@ def test_stream_maps_responses_events(tmp_path: Path, monkeypatch) -> None:
     assert payload["instructions"] == "be brief"
     assert payload["store"] is False and payload["stream"] is True
     assert payload["include"] == ["reasoning.encrypted_content"]
+    # Protocol fact (verified live): the ChatGPT codex backend rejects
+    # max_output_tokens with HTTP 400 "Unsupported parameter" — it must
+    # never be sent; subscription turns carry no client-set output cap.
+    assert "max_output_tokens" not in payload
     (tool,) = payload["tools"]
     assert tool["type"] == "function" and tool["name"] == "search"
     assert "function" not in tool  # flat Responses shape, not chat-completions nesting

@@ -171,6 +171,17 @@ class OpenAICodexProvider:
             "stream": True,
             "include": ["reasoning.encrypted_content"],
         }
+        # The ChatGPT codex backend rejects max_output_tokens outright
+        # ("Unsupported parameter", verified live 2026-07-02), matching
+        # codex-rs which never sends it — subscription turns have no
+        # client-set output cap. Surface the dropped budget for operators
+        # instead of silently ignoring it.
+        if cfg.max_tokens > 0:
+            log.debug(
+                "openai_codex.max_tokens_unsupported",
+                requested_max_tokens=cfg.max_tokens,
+                model=self._model,
+            )
         if tools:
             payload["tools"] = [_codex_tool(tool) for tool in tools]
         if cfg.thinking:
