@@ -6570,11 +6570,13 @@ class TurnRunner:
                 )
                 result = None
                 if isinstance(sha_ref, str) and sha_ref and media_root is not None:
+                    raw_size = att.get("size")
+                    size = raw_size if isinstance(raw_size, int) else -1
                     ref = make_attachment_ref(
                         sha256=sha_ref,
                         name=label,
                         mime=media_type,
-                        size=att.get("size") if isinstance(att.get("size"), int) else -1,
+                        size=size,
                         session_id=session_id,
                         source="transcript",
                     )
