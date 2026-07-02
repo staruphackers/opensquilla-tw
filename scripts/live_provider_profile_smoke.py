@@ -47,6 +47,7 @@ _MODEL_ENV = {
     "bailian_coding": "BAILIAN_CODING_MODEL",
     "moonshot": "MOONSHOT_MODEL",
     "zhipu": "ZAI_MODEL",
+    "qianfan": "QIANFAN_MODEL",
     "minimax": "MINIMAX_MODEL",
     "minimax_openai": "MINIMAX_MODEL",
     "minimax_cn": "MINIMAX_CN_MODEL",
@@ -63,6 +64,7 @@ _BASE_ENV = {
     "bailian_coding": "BAILIAN_CODING_BASE_URL",
     "moonshot": "MOONSHOT_BASE_URL",
     "zhipu": "ZAI_BASE_URL",
+    "qianfan": "QIANFAN_BASE_URL",
     "minimax": "MINIMAX_BASE_URL",
     "minimax_openai": "MINIMAX_OPENAI_BASE_URL",
     "minimax_cn": "MINIMAX_CN_BASE_URL",
@@ -79,6 +81,7 @@ _DEFAULT_MODELS = {
     "bailian_coding": "kimi-k2.5",
     "moonshot": "kimi-k2.6",
     "zhipu": "glm-4.5",
+    "qianfan": "ernie-4.0-turbo-8k",
     "minimax": "MiniMax-M2.7",
     "minimax_openai": "MiniMax-M2.7",
     "minimax_cn": "MiniMax-M2.7",
@@ -319,8 +322,13 @@ async def smoke_provider(
     model = (
         model_override
         or os.environ.get(_MODEL_ENV.get(provider, ""), "").strip()
-        or _DEFAULT_MODELS[provider]
+        or _DEFAULT_MODELS.get(provider, "")
     )
+    if not model:
+        raise SystemExit(
+            f"no model configured for provider {provider!r}: pass --model or set "
+            f"{_MODEL_ENV.get(provider) or 'a model env override'}"
+        )
     base_url = (
         base_url_override
         or os.environ.get(_BASE_ENV.get(provider, ""), "").strip()
