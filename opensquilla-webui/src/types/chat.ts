@@ -237,6 +237,9 @@ export interface ChatEnsembleMetaModel {
   input: number
   output: number
   costUsd: number
+  // Live per-member lifecycle during streaming: 'running' while the proposer is
+  // still generating, 'done' once it finishes. Absent for settled/history rows.
+  status?: 'running' | 'done'
 }
 
 export interface ChatEnsembleMeta {
@@ -273,6 +276,9 @@ export interface ChatMessage {
   provenanceSourceTool?: string
   interrupted?: boolean
   routerSettled?: boolean
+  // Live-accumulated ensemble members for the in-flight router strip, grown by
+  // `session.event.ensemble_progress` deltas before the final `done` arrives.
+  ensemble?: ChatEnsembleMeta
   messageId?: string
   usage?: ChatUsagePayload
   turn_usage?: ChatUsagePayload

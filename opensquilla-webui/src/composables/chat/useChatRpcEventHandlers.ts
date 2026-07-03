@@ -9,6 +9,7 @@ import type {
 import type {
   ArtifactPayload,
   CompactionPayload,
+  EnsembleProgressPayload,
   RouterDecisionPayload,
   SessionEventPayload,
   TextDeltaPayload,
@@ -88,6 +89,7 @@ export interface UseChatRpcEventHandlersOptions {
   sessionRunStatus: (source: ChatRunStatusSource | null | undefined) => ChatRunStatus
   applySessionRunState: (source: ChatRunStatusSource | null | undefined) => void
   queueRouterDecision: (payload: RouterDecisionPayload) => void
+  appendEnsembleProgress: (payload: EnsembleProgressPayload) => void
   flushPendingRouterDecision: () => void
   clearPendingRouterDecision: () => void
   handleRouterControlReplay: () => void
@@ -511,6 +513,12 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
     options.queueRouterDecision(payload)
   }
 
+  function handleRpcEnsembleProgress(payload: EnsembleProgressPayload) {
+    if (isStaleEpoch(payload)) return
+    if (!acceptStreamSeq(payload)) return
+    options.appendEnsembleProgress(payload)
+  }
+
   function handleRpcRouterControlReplay(payload: SessionEventPayload) {
     if (isStaleEpoch(payload)) return
     if (aborted.value) return
@@ -691,6 +699,7 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
     onTaskGroupDone: handleRpcTaskGroupDone,
     onTaskGroupFailed: handleRpcTaskGroupFailed,
     onRouterDecision: handleRpcRouterDecision,
+    onEnsembleProgress: handleRpcEnsembleProgress,
     onRouterControlReplay: handleRpcRouterControlReplay,
     onAny: handleRpcAny,
     onConnectionState: handleRpcConnectionState,

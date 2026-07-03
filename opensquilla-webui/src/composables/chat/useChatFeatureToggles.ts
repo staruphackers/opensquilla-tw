@@ -1,4 +1,6 @@
 import { computed, ref } from 'vue'
+import i18n from '@/i18n'
+import { useToasts } from '@/composables/useToasts'
 import type { ChatRouterTierConfig } from '@/types/chat'
 import type { ModelRoutingMode } from '@/types/modelRouting'
 import { normalizeModelRoutingMode } from '@/types/modelRouting'
@@ -48,6 +50,7 @@ const ROUTER_FX_PREF_KEY = 'opensquilla.routerFx'
 const ROUTER_SHAPE_KEY = 'opensquilla.router.shape'
 
 export function useChatFeatureToggles(options: UseChatFeatureTogglesOptions) {
+  const { pushToast } = useToasts()
   const routerEnabled = ref(false)
   const routerVisualEffectsEnabled = ref(true)
   const routerVisualMode = ref(DEFAULT_ROUTER_VISUAL_MODE)
@@ -235,6 +238,7 @@ export function useChatFeatureToggles(options: UseChatFeatureTogglesOptions) {
       routerEnabled.value = previousRouter
       llmEnsembleEnabled.value = previousEnsemble
       console.warn('Failed to update model routing:', err instanceof Error ? err.message : String(err))
+      pushToast(i18n.global.t('chat.modelRouting.updateFailed'), { tone: 'danger' })
     } finally {
       modelRoutingSettingsBusy.value = false
       routerSettingsBusy.value = false

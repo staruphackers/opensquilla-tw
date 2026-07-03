@@ -234,6 +234,26 @@ class RouterDecisionEvent:
 
 
 @dataclass
+class EnsembleProgressEvent:
+    """One LLM-ensemble member started or finished mid-turn. Emitted from the
+    ensemble provider and forwarded so the frontend can reveal ensemble members
+    incrementally ahead of the terminal DoneEvent breakdown."""
+
+    kind: Literal["ensemble_progress"] = field(default="ensemble_progress", init=False)
+    event_type: str = "proposer_start"
+    proposer_index: int = -1
+    proposer_label: str = ""
+    proposer_model: str = ""
+    proposer_provider: str = ""
+    sample_index: int = 0
+    elapsed_ms: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+    error: str = ""
+
+
+@dataclass
 class MetaPreflightEvent:
     """Emitted before a MetaSkill run begins when the plan declares a
     ``request_template``. This is a non-blocking preview of the interpreted
@@ -364,6 +384,7 @@ AgentEvent = (
     | CompactionEvent
     | WarningEvent
     | RouterDecisionEvent
+    | EnsembleProgressEvent
     | MetaPreflightEvent
     | MetaRunAnnouncedEvent
     | MetaStepStateEvent

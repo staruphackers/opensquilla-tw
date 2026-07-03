@@ -789,6 +789,7 @@ const {
   pendingDecision,
   handleRouterControlReplay,
   queueRouterDecision,
+  appendEnsembleProgress,
   flushPendingRouterDecision,
   clearPendingRouterDecision,
 } = chatRouterDecisionRuntime
@@ -1007,6 +1008,7 @@ const chatRenderedMessages = useChatRenderedMessages({
   routerVisualEffectsEnabled,
   routerVisualMode,
   modelRoutingMode,
+  isStreaming,
   renderMarkdown,
   stripGeneratedArtifactMarkers,
   stripTimePrefix,
@@ -1014,48 +1016,23 @@ const chatRenderedMessages = useChatRenderedMessages({
 })
 const { renderedMessages, routerDecisionCells } = chatRenderedMessages
 
-/**
- * While the live work-card is visible, pending LLM ensemble routing is no
- * longer the primary status. The work-card represents the execution phase, so
- * any unfinished ensemble routing panel would read as stale/parallel progress.
- */
-const suppressLivePendingEnsembleRouterFx = computed(() =>
-  isStreaming.value &&
-  streamBubble.value &&
-  answerRevealOpen.value &&
-  modelRoutingMode.value === 'llm_ensemble',
-)
+// The live ensemble strip owns the synthesizing narrative — it reveals members
+// as they run and settles in place — so the work-card runs its normal execution
+// phase alongside it. The two are independent progress surfaces on purpose: the
+// strip answers "which models are synthesizing", the work-card "what step now".
+const liveWorkCardPhaseLabel = streamPhaseLabel
+const liveWorkCardStepLabel = streamStepLabel
 
-const liveEnsembleRouterPhaseActive = computed(() =>
-  suppressLivePendingEnsembleRouterFx.value &&
-  !pendingDecision.value &&
-  !streamHasVisibleOutput.value,
-)
-
-const liveWorkCardPhaseLabel = computed(() =>
-  liveEnsembleRouterPhaseActive.value
-    ? t('chat.routerFx.ensembleSelecting')
-    : streamPhaseLabel.value,
-)
-
-const liveWorkCardStepLabel = computed(() =>
-  liveEnsembleRouterPhaseActive.value
-    ? t('chat.routerFx.ensembleMode')
-    : streamStepLabel.value,
-)
-
-function shouldRenderRouterStrip(message: ChatRenderedMessage): boolean {
-  return !(
-    suppressLivePendingEnsembleRouterFx.value &&
-    message.routerPanel === 'llm-ensemble' &&
-    message.routerSettled !== true
-  )
+function shouldRenderRouterStrip(_message: ChatRenderedMessage): boolean {
+  // Always surface the router strip — the live ensemble strip is the primary
+  // surface for the synthesizing process and no longer defers to the work-card.
+  return true
 }
 
 /**
- * Pre-reveal AI model router phase. It covers the short window before the live
- * work-card is revealed; after reveal, the work-card is the only live progress
- * panel for LLM ensemble turns.
+ * Pre-decision router-strip placeholder. It holds the strip's slot for the short
+ * window before the first router_decision / ensemble_progress lands, so the live
+ * ensemble strip appears from the very start of the turn rather than popping in.
  */
 const routerStripReserve = computed<ChatRenderedMessage | null>(() => {
   if (!isStreaming.value || !routerEnabled.value || !routerVisualEffectsEnabled.value) return null
@@ -1066,7 +1043,6 @@ const routerStripReserve = computed<ChatRenderedMessage | null>(() => {
     if (msg.displayRole === 'user') break
   }
   if (modelRoutingMode.value === 'llm_ensemble') {
-    if (suppressLivePendingEnsembleRouterFx.value) return null
     return {
       id: 'router-strip-reserve',
       role: 'router',
@@ -1340,6 +1316,7 @@ const rpcEventHandlers = useChatRpcEventHandlers({
   sessionRunStatus,
   applySessionRunState,
   queueRouterDecision,
+  appendEnsembleProgress,
   flushPendingRouterDecision,
   clearPendingRouterDecision,
   handleRouterControlReplay,

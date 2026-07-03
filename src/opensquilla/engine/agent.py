@@ -81,6 +81,9 @@ from opensquilla.provider import (
 )
 from opensquilla.provider.failures import ProviderFailureKind, classify_provider_error
 from opensquilla.provider.types import ContentBlockImage
+from opensquilla.provider.types import (
+    EnsembleProgressEvent as ProviderEnsembleProgressEvent,
+)
 from opensquilla.result_budget import (
     ToolResultBudgetClass,
     compact_tool_result_content,
@@ -121,6 +124,7 @@ from .types import (
     CompactionEvent,
     CompactionOutcome,
     DoneEvent,
+    EnsembleProgressEvent,
     ErrorEvent,
     RunHeartbeatEvent,
     StateChangeEvent,
@@ -2695,6 +2699,20 @@ class Agent:
                                 yield RunHeartbeatEvent(
                                     phase=raw_ev.phase,
                                     message=raw_ev.message,
+                                )
+                            elif isinstance(raw_ev, ProviderEnsembleProgressEvent):
+                                yield EnsembleProgressEvent(
+                                    event_type=raw_ev.event_type,
+                                    proposer_index=raw_ev.proposer_index,
+                                    proposer_label=raw_ev.proposer_label,
+                                    proposer_model=raw_ev.proposer_model,
+                                    proposer_provider=raw_ev.proposer_provider,
+                                    sample_index=raw_ev.sample_index,
+                                    elapsed_ms=raw_ev.elapsed_ms,
+                                    input_tokens=raw_ev.input_tokens,
+                                    output_tokens=raw_ev.output_tokens,
+                                    cost_usd=raw_ev.cost_usd,
+                                    error=raw_ev.error,
                                 )
                     except _IterationStreamTimeoutError:
                         if artifact_delivery_final_response_pending:

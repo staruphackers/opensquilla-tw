@@ -50,6 +50,7 @@ from opensquilla.channels.types import IncomingMessage, OutgoingMessage
 from opensquilla.engine.start_turn import start_turn_via_runtime
 from opensquilla.engine.types import (
     ArtifactEvent,
+    EnsembleProgressEvent,
     ErrorEvent,
     RouterDecisionEvent,
     RunHeartbeatEvent,
@@ -1693,6 +1694,22 @@ def _router_decision_payload(event: RouterDecisionEvent) -> dict[str, Any]:
     }
 
 
+def _ensemble_progress_payload(event: EnsembleProgressEvent) -> dict[str, Any]:
+    return {
+        "event_type": event.event_type,
+        "proposer_index": event.proposer_index,
+        "proposer_label": event.proposer_label,
+        "proposer_model": event.proposer_model,
+        "proposer_provider": event.proposer_provider,
+        "sample_index": event.sample_index,
+        "elapsed_ms": event.elapsed_ms,
+        "input_tokens": event.input_tokens,
+        "output_tokens": event.output_tokens,
+        "cost_usd": event.cost_usd,
+        "error": event.error,
+    }
+
+
 def _tool_use_start_payload(event: ToolUseStartEvent) -> dict[str, Any]:
     return {
         "tool_use_id": event.tool_use_id,
@@ -2283,6 +2300,13 @@ async def _run_turn_batch_path(
                         "session.event.router_decision",
                         _router_decision_payload(event),
                     )
+            elif isinstance(event, EnsembleProgressEvent):
+                if event_bridge is not None:
+                    await event_bridge.emit(
+                        session_key,
+                        "session.event.ensemble_progress",
+                        _ensemble_progress_payload(event),
+                    )
             elif isinstance(event, ToolUseStartEvent):
                 if event_bridge is not None:
                     await event_bridge.emit(
@@ -2449,6 +2473,13 @@ async def _run_turn_streaming_path(
                         session_key,
                         "session.event.router_decision",
                         _router_decision_payload(event),
+                    )
+            elif isinstance(event, EnsembleProgressEvent):
+                if event_bridge is not None:
+                    await event_bridge.emit(
+                        session_key,
+                        "session.event.ensemble_progress",
+                        _ensemble_progress_payload(event),
                     )
             elif isinstance(event, ToolUseStartEvent):
                 if event_bridge is not None:
