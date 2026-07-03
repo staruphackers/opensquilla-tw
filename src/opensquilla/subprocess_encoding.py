@@ -9,9 +9,9 @@ collapsed into U+FFFD replacement characters -- the "乱码" reported in issue #
 
 This module centralises two fixes:
 
-* :func:`decode_subprocess_output` -- decode captured bytes by trying strict
-  UTF-8 first (which wins whenever the child already emitted UTF-8) and falling
-  back to the Windows system code page when the bytes are not valid UTF-8.
+* :func:`decode_subprocess_output` -- decode captured bytes, keeping clean UTF-8
+  as-is but otherwise scoring a UTF-8 reading against the Windows system code
+  page and choosing whichever looks less like a misread.
 * :func:`apply_utf8_child_env` -- force Python child processes to emit UTF-8 on
   Windows so the strict UTF-8 path is taken in the first place.
 
@@ -92,18 +92,20 @@ def decode_subprocess_output(
     Without a fallback encoding (POSIX, or the fallback explicitly disabled) this
     is exactly the historical behaviour: UTF-8 with replacement.
 
-    With a fallback encoding (Windows) fully valid UTF-8 is returned as-is -- so
+    With a fallback encoding (Windows) UTF-8 that decodes cleanly *and*
+    plausibly (no replacement or C1-control characters) is returned as-is -- so
     anything the child emitted cleanly as UTF-8 is preserved (the common case
     once ``PYTHONUTF8`` forces child stdio to UTF-8).  Otherwise the bytes are
-    truncated and/or legacy code page: decode with *both* UTF-8 and the system
-    code page -- each dropping an incomplete trailing sequence -- and keep the
-    reading that looks less like a misread (fewest replacement + C1-control
-    characters).
+    truncated, legacy code page, or valid-but-implausible UTF-8: decode with
+    *both* UTF-8 and the system code page -- each dropping an incomplete trailing
+    sequence -- and keep the reading that looks less like a misread (fewest
+    replacement + C1-control characters).
 
-    This scoring handles the two opposite failure modes at a truncation boundary
-    (issue #336): real code-page output whose body happens to parse as UTF-8 is
-    kept as code page (its low trail bytes make the UTF-8 reading accrue
-    replacement or C1 characters), while genuinely-UTF-8 output merely cut
+    This scoring handles the failure modes around the truncation boundary
+    (issue #336): real code-page output whose bytes parse as UTF-8 is kept as
+    code page (its low trail bytes make the UTF-8 reading accrue replacement or
+    C1 characters -- even when the buffer is *fully* valid UTF-8, e.g. GBK
+    ``0xC2 0x80`` = 聙 vs UTF-8 U+0080), while genuinely-UTF-8 output merely cut
     mid-character stays UTF-8 (a tie resolves to UTF-8).  It cannot disambiguate
     byte sequences that are individually valid *and printable* in both encodings
     -- rare in real multi-character output -- which resolve to UTF-8.
@@ -113,10 +115,16 @@ def decode_subprocess_output(
     if not fallback_encoding:
         return raw.decode("utf-8", errors="replace")
     try:
-        return raw.decode("utf-8")
+        utf8_strict = raw.decode("utf-8")
     except UnicodeDecodeError:
-        pass
-    utf8_text = _decode_dropping_incomplete_tail(raw, "utf-8")
+        utf8_strict = None
+    # Cleanly *and* plausibly valid UTF-8 is unambiguous; a valid-but-implausible
+    # decode (C1 controls) may be misread code-page bytes and must still be scored.
+    if utf8_strict is not None and _misread_score(utf8_strict) == 0:
+        return utf8_strict
+    utf8_text = (
+        utf8_strict if utf8_strict is not None else _decode_dropping_incomplete_tail(raw, "utf-8")
+    )
     try:
         codepage_text = _decode_dropping_incomplete_tail(raw, fallback_encoding)
     except LookupError:

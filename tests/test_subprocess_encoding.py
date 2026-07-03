@@ -110,6 +110,14 @@ class TestDecodeSubprocessOutput:
         raw = (_HELLO * 50).encode("utf-8")[:-1]
         assert decode_subprocess_output(raw, fallback_encoding="gbk") == (_HELLO * 50)[:-1]
 
+    def test_complete_gbk_valid_as_utf8_still_prefers_codepage(self) -> None:
+        # 聙聛 in GBK is 0xC2 0x80 0xC2 0x81 -- a *complete*, fully valid UTF-8
+        # string (U+0080 U+0081).  The clean-UTF-8 fast path must not short-circuit
+        # past scoring and hand back the C1-control mojibake.
+        raw = "聙聛".encode("gbk")
+        assert raw == b"\xc2\x80\xc2\x81"
+        assert decode_subprocess_output(raw, fallback_encoding="gbk") == "聙聛"
+
     def test_realistic_output_survives_truncation_both_encodings(self) -> None:
         # Real mixed CJK+ASCII output, in either encoding, truncated by up to a
         # full multibyte char, must decode cleanly and keep the right prefix.
