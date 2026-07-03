@@ -25,6 +25,7 @@ interface ProviderPanelContract {
   runtimeProviders: ProviderOption[]
   routerSupportTone: string
   routerSupportText: string
+  canConfigureRouter: boolean
   providerNeeds: string[]
   providerCoreFields: FieldSpec[]
   providerAdvancedFields: FieldSpec[]
@@ -76,7 +77,7 @@ function onProviderSelect(event: Event) {
       <div class="control-row__control control-row__control--stack">
         <strong class="control-pill" :class="panel.routerSupportTone">{{ panel.routerSupportText }}</strong>
         <button
-          v-if="panel.routerSupportTone === 'is-ready'"
+          v-if="panel.canConfigureRouter"
           type="button"
           class="setup-inline-link"
           @click="emit('goToSection', 'router')"

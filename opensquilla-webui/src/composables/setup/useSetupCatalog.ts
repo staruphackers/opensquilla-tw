@@ -321,6 +321,19 @@ const routerSupportTone = computed(() => {
   return providerSpec.value.routerSupported === true ? 'is-ready' : 'is-direct'
 })
 
+// The "Configure the router →" affordance must only appear when jumping to the
+// Router section shows a consistent, ready view. routerSupportTone tracks the
+// *selected* provider (so the pill updates live as you browse providers), but the
+// Router panel reflects the *saved* config — so gating the link on the tone alone
+// could land on the previously-saved provider's tiers or the "provider first"
+// empty state. Require a router-capable provider to actually be saved AND the
+// selection to be clean, so selected == saved and the Router view is not stale.
+const canConfigureRouter = computed(() =>
+  hasSavedProvider.value
+  && !providerForm.isDirty.value
+  && routerSupportTone.value === 'is-ready',
+)
+
 const providerNeeds = computed(() => {
   if (!providerSpec.value) return [t('setup.provider.chooseToSeeFields')]
   return providerSpec.value.whatYouNeed || []
@@ -430,6 +443,7 @@ const providerPanel = providerForm.createPanel({
   runtimeProviders,
   routerSupportTone,
   routerSupportText,
+  canConfigureRouter,
   providerNeeds,
   providerCoreFields,
   providerAdvancedFields,
