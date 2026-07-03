@@ -75,6 +75,7 @@ def _launch_script(
     elif profile:
         if not is_valid_profile_name(profile):
             raise AutostartError(f"Invalid OpenSquilla profile name: {profile}")
+        lines.append(r"Remove-Item Env:\OPENSQUILLA_STATE_DIR -ErrorAction SilentlyContinue")
         lines.append(f"$env:OPENSQUILLA_HOME = {_powershell_literal(str(home.parent))}")
         lines.append(f"$env:OPENSQUILLA_PROFILE = {_powershell_literal(profile)}")
         args = ["--profile", profile, *args]

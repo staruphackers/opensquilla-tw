@@ -39,6 +39,18 @@ def test_launch_script_for_profile_sets_profile_env(tmp_path: Path) -> None:
     assert "'--profile' 'coder' 'gateway' 'start'" in script
 
 
+def test_launch_script_for_profile_masks_inherited_state_dir(tmp_path: Path) -> None:
+    home = tmp_path / "profiles" / "coder"
+    script = _launch_script(opensquilla="C:/Tools/opensquilla.exe", profile="coder", home=home)
+
+    clear_state_dir = r"Remove-Item Env:\OPENSQUILLA_STATE_DIR -ErrorAction SilentlyContinue"
+    set_home = "$env:OPENSQUILLA_HOME"
+    set_profile = "$env:OPENSQUILLA_PROFILE"
+
+    assert clear_state_dir in script
+    assert script.index(clear_state_dir) < script.index(set_home) < script.index(set_profile)
+
+
 def test_launch_script_without_profile_uses_legacy_gateway_start(tmp_path: Path) -> None:
     script = _launch_script(opensquilla="C:/Tools/opensquilla.exe", profile=None, home=tmp_path)
 
