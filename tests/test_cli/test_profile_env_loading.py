@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -117,3 +119,58 @@ def test_cli_profile_env_wins_over_legacy_home_for_same_key(
     assert result.exit_code == 0, result.output
     assert os.environ["PROFILE_SHARED_MARK"] == "coder"
     assert default_opensquilla_home() == profiles_root / "coder"
+
+
+def test_cli_profile_env_wins_on_cold_start_import(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    legacy_home = tmp_path / ".opensquilla"
+    legacy_home.mkdir()
+    (legacy_home / ".env").write_text("PROFILE_SHARED_MARK=legacy\n", encoding="utf-8")
+    profiles_root = tmp_path / "profiles"
+    _write_profile(profiles_root, "coder", ["PROFILE_SHARED_MARK=coder"])
+
+    env = os.environ.copy()
+    env.update({"HOME": str(tmp_path), "OPENSQUILLA_HOME": str(profiles_root)})
+    env.pop("OPENSQUILLA_PROFILE", None)
+    env.pop("OPENSQUILLA_STATE_DIR", None)
+    env.pop("PROFILE_SHARED_MARK", None)
+    pythonpath = [
+        str(repo_root / "src"),
+        str(repo_root),
+        env.get("PYTHONPATH", ""),
+    ]
+    env["PYTHONPATH"] = os.pathsep.join(path for path in pythonpath if path)
+
+    script = """
+import os
+import sys
+from typer.testing import CliRunner
+
+sys.argv = ["opensquilla", "--profile", "coder", "providers", "list", "--json"]
+from opensquilla.cli.main import app
+
+cold_start_mark = os.environ.get("PROFILE_SHARED_MARK", "")
+if cold_start_mark != "coder":
+    print(cold_start_mark)
+    raise SystemExit(2)
+
+result = CliRunner().invoke(app, ["--profile", "coder", "providers", "list", "--json"])
+if result.exit_code != 0:
+    print(result.output)
+    raise SystemExit(result.exit_code)
+
+print(os.environ.get("PROFILE_SHARED_MARK", ""))
+raise SystemExit(0 if os.environ.get("PROFILE_SHARED_MARK") == "coder" else 2)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=cwd,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
