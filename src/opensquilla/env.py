@@ -80,8 +80,11 @@ def _is_test_env_enabled() -> bool:
     return "PYTEST_CURRENT_TEST" in os.environ
 
 
-def load_env(cwd: str | Path | None = None) -> int:
+def load_env(cwd: str | Path | None = None, home: str | Path | None = None) -> int:
     """Load .env files into os.environ with precedence rules.
+
+    ``home`` can be provided after the CLI has resolved an explicit profile, so
+    profile-specific ``.env`` files are considered without changing cwd.
 
     Returns the number of new variables injected.
     """
@@ -93,8 +96,9 @@ def load_env(cwd: str | Path | None = None) -> int:
     for name in local_names:
         candidates.append(work_dir / name)
 
-    # 2. ~/.opensquilla/.env (global)
-    candidates.append(default_opensquilla_home() / ".env")
+    # 2. OpenSquilla home .env (legacy home or explicit profile home)
+    opensquilla_home = Path(home) if home is not None else default_opensquilla_home()
+    candidates.append(opensquilla_home / ".env")
 
     # Merge: first file wins per key, but os.environ always wins
     merged: dict[str, str] = {}
