@@ -91,3 +91,29 @@ def test_env_load_uses_provided_home(monkeypatch, tmp_path: Path) -> None:
 
     assert load_env(home=home) >= 1
     assert os.environ["CUSTOM_MARK"] == "ok"
+
+
+def test_cli_profile_env_wins_over_legacy_home_for_same_key(
+    monkeypatch, tmp_path: Path
+) -> None:
+    profiles_root = tmp_path / "profiles"
+    legacy_home = tmp_path / ".opensquilla"
+    legacy_home.mkdir()
+    (legacy_home / ".env").write_text("PROFILE_SHARED_MARK=legacy\n", encoding="utf-8")
+    _write_profile(profiles_root, "coder", ["PROFILE_SHARED_MARK=coder"])
+
+    for key in (
+        "OPENSQUILLA_HOME",
+        "OPENSQUILLA_PROFILE",
+        "OPENSQUILLA_STATE_DIR",
+        "PROFILE_SHARED_MARK",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("OPENSQUILLA_HOME", str(profiles_root))
+
+    result = runner.invoke(app, ["--profile", "coder", "providers", "list", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert os.environ["PROFILE_SHARED_MARK"] == "coder"
+    assert default_opensquilla_home() == profiles_root / "coder"
