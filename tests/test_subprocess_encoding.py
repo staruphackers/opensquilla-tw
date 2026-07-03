@@ -96,6 +96,32 @@ class TestDecodeSubprocessOutput:
         raw = _HELLO.encode("gbk")
         assert decode_subprocess_output(raw, fallback_encoding="gbk") == _HELLO
 
+    def test_truncated_gbk_with_utf8_lookalike_body_prefers_codepage(self) -> None:
+        # 聙 is 0xC2 0x80 in GBK, which is *also* a valid UTF-8 sequence (U+0080).
+        # With a truncated trailing lead byte a lenient UTF-8 decode would emit the
+        # U+0080 control char and mojibake the real GBK text; scoring by
+        # replacement count must keep the code-page reading instead.
+        raw = b"\xc2\x80\xe4"  # 聙 + an incomplete trailing multibyte lead
+        assert decode_subprocess_output(raw, fallback_encoding="gbk") == "聙"
+
+    def test_truncated_utf8_beats_codepage_on_score(self) -> None:
+        # The mirror case: genuinely UTF-8 output cut mid-character must not be
+        # dragged into the code page even though the fallback is configured.
+        raw = (_HELLO * 50).encode("utf-8")[:-1]
+        assert decode_subprocess_output(raw, fallback_encoding="gbk") == (_HELLO * 50)[:-1]
+
+    def test_realistic_output_survives_truncation_both_encodings(self) -> None:
+        # Real mixed CJK+ASCII output, in either encoding, truncated by up to a
+        # full multibyte char, must decode cleanly and keep the right prefix.
+        text = "你好，OpenSquilla 支持中文输出！日志：正常运行 abc123。"
+        for encoding in ("utf-8", "gbk"):
+            body = (text * 5).encode(encoding)
+            for cut in range(5):
+                raw = body[: len(body) - cut]
+                got = decode_subprocess_output(raw, fallback_encoding="gbk")
+                assert "�" not in got, (encoding, cut)
+                assert got.startswith("你好，OpenSquilla"), (encoding, cut)
+
 
 class TestApplyUtf8ChildEnv:
     def test_sets_vars_on_windows(self, monkeypatch: pytest.MonkeyPatch) -> None:

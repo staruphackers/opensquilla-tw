@@ -53,6 +53,35 @@ def _windows_system_encoding() -> str | None:
 _DEFAULT_FALLBACK_ENCODING = _windows_system_encoding()
 
 
+# The C1 control block (U+0080..U+009F) is essentially never present in real
+# program output; it only appears when legacy code-page bytes are misread as
+# UTF-8, so its presence is a strong "this is not really UTF-8" signal.
+_C1_CONTROL_STRIP = {codepoint: None for codepoint in range(0x80, 0xA0)}
+
+
+def _decode_dropping_incomplete_tail(raw: bytes, encoding: str) -> str:
+    """Decode *raw* in *encoding*, replacing bad bytes but dropping a partial tail.
+
+    An ``errors="replace"`` incremental decoder fed with ``final=False`` emits a
+    replacement character for genuinely invalid bytes, but merely *buffers* an
+    incomplete multibyte sequence at the very end -- which is then discarded.  So
+    a byte-cap or mid-stream truncation loses only the fraction of one cut
+    character instead of producing a stray replacement char.
+    """
+    return codecs.getincrementaldecoder(encoding)("replace").decode(raw, final=False)
+
+
+def _misread_score(text: str) -> int:
+    """How much a decoded string looks like a *misread*; lower is better.
+
+    Counts replacement characters (invalid bytes for the assumed encoding) plus
+    C1 control codes (a fingerprint of code-page bytes forced through UTF-8).
+    """
+    replacements = text.count("�")
+    c1_controls = len(text) - len(text.translate(_C1_CONTROL_STRIP))
+    return replacements + c1_controls
+
+
 def decode_subprocess_output(
     raw: bytes | None,
     *,
@@ -63,29 +92,38 @@ def decode_subprocess_output(
     Without a fallback encoding (POSIX, or the fallback explicitly disabled) this
     is exactly the historical behaviour: UTF-8 with replacement.
 
-    With a fallback encoding (Windows) strict UTF-8 is attempted first -- so
-    anything the child emitted as UTF-8 is preserved -- and only genuinely
-    non-UTF-8 bytes fall through to the legacy code page (e.g. ``cp936``).
+    With a fallback encoding (Windows) fully valid UTF-8 is returned as-is -- so
+    anything the child emitted cleanly as UTF-8 is preserved (the common case
+    once ``PYTHONUTF8`` forces child stdio to UTF-8).  Otherwise the bytes are
+    truncated and/or legacy code page: decode with *both* UTF-8 and the system
+    code page -- each dropping an incomplete trailing sequence -- and keep the
+    reading that looks less like a misread (fewest replacement + C1-control
+    characters).
 
-    Both attempts use an *incremental* decoder fed with ``final=False`` so that
-    an incomplete multibyte sequence at the very end of the buffer -- which
-    happens whenever output is truncated at a byte cap or read mid-stream -- is
-    buffered and dropped rather than turned into replacement characters.  Without
-    this, a single cut trailing byte would make a strict decode fail and collapse
-    the *entire* buffer to garbled replacement text (issue #336).
+    This scoring handles the two opposite failure modes at a truncation boundary
+    (issue #336): real code-page output whose body happens to parse as UTF-8 is
+    kept as code page (its low trail bytes make the UTF-8 reading accrue
+    replacement or C1 characters), while genuinely-UTF-8 output merely cut
+    mid-character stays UTF-8 (a tie resolves to UTF-8).  It cannot disambiguate
+    byte sequences that are individually valid *and printable* in both encodings
+    -- rare in real multi-character output -- which resolve to UTF-8.
     """
     if not raw:
         return ""
     if not fallback_encoding:
         return raw.decode("utf-8", errors="replace")
     try:
-        return codecs.getincrementaldecoder("utf-8")("strict").decode(raw, final=False)
+        return raw.decode("utf-8")
     except UnicodeDecodeError:
         pass
+    utf8_text = _decode_dropping_incomplete_tail(raw, "utf-8")
     try:
-        return codecs.getincrementaldecoder(fallback_encoding)("replace").decode(raw, final=False)
+        codepage_text = _decode_dropping_incomplete_tail(raw, fallback_encoding)
     except LookupError:
         return raw.decode("utf-8", errors="replace")
+    if _misread_score(codepage_text) < _misread_score(utf8_text):
+        return codepage_text
+    return utf8_text
 
 
 def apply_utf8_child_env(env: dict[str, str]) -> dict[str, str]:
