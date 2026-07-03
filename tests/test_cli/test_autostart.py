@@ -81,6 +81,19 @@ def test_registration_script_uses_encoded_inner_launch_command(tmp_path: Path) -
     assert "--profile" in inner
 
 
+def test_registration_script_uses_valid_limited_runlevel(tmp_path: Path) -> None:
+    script = _registration_script(
+        powershell="C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
+        opensquilla="C:/Program Files/OpenSquilla/opensquilla.exe",
+        profile=None,
+        home=tmp_path,
+        task_name="OpenSquilla",
+    )
+
+    assert "-RunLevel Limited" in script
+    assert "LeastPrivilege" not in script
+
+
 def test_register_logon_task_windows_dispatches_encoded_registration(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
