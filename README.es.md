@@ -539,7 +539,7 @@ Gracias a todas las personas que contribuyen a OpenSquilla.
 
 <p align="center">
   <a href="https://github.com/opensquilla/opensquilla/graphs/contributors">
-    <img src="https://contrib.rocks/image?repo=opensquilla/opensquilla&max=100&columns=12" alt="OpenSquilla contributors" />
+    <img src="https://contrib.rocks/image?repo=opensquilla/opensquilla&max=100&columns=10" alt="OpenSquilla contributors" />
   </a>
 </p>
 
