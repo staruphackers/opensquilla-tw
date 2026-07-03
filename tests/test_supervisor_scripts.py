@@ -31,3 +31,10 @@ def test_task_scheduler_registration_uses_encoded_command() -> None:
     assert "-EncodedCommand" in text
     assert "ConvertTo-PowerShellSingleQuotedLiteral" in text
     assert "ConvertTo-XmlEscapedText" in text
+
+
+def test_supervisor_profile_name_match_is_case_sensitive() -> None:
+    lib = (SUPERVISOR / "lib.ps1").read_text(encoding="utf-8")
+
+    assert "-cmatch $Script:PROFILE_NAME_PATTERN" in lib
+    assert "-match $Script:PROFILE_NAME_PATTERN" not in lib

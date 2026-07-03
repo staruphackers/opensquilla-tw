@@ -50,7 +50,7 @@ function Get-ProfilesRoot {
 
 function Test-ProfileName {
     param([Parameter(Mandatory)] [string] $Name)
-    return [bool]($Name -match $Script:PROFILE_NAME_PATTERN)
+    return [bool]($Name -cmatch $Script:PROFILE_NAME_PATTERN)
 }
 
 function Get-OpensquillaRoot {
