@@ -71,6 +71,31 @@ class TestDecodeSubprocessOutput:
         assert whole == _HELLO
         assert per_chunk != _HELLO  # the old per-chunk approach was lossy
 
+    def test_truncated_gbk_tail_does_not_garble_whole_buffer(self) -> None:
+        # Byte-cap truncation cuts the last GBK character in half.  A single cut
+        # trailing byte must not collapse the whole buffer to replacement chars.
+        body = (_HELLO * 500).encode("gbk")
+        truncated = body[:-1]
+        result = decode_subprocess_output(truncated, fallback_encoding="gbk")
+        assert result.startswith(_HELLO * 10)
+        assert "�" not in result  # only the dropped tail is lost, nothing garbled
+        assert result == (_HELLO * 500)[:-1]
+
+    def test_truncated_utf8_tail_drops_cleanly(self) -> None:
+        # UTF-8 output truncated mid-character (e.g. PYTHONUTF8 child hitting the
+        # byte cap) keeps the valid prefix and drops the incomplete tail.
+        body = (_HELLO * 500).encode("utf-8")
+        truncated = body[:-1]
+        result = decode_subprocess_output(truncated, fallback_encoding="gbk")
+        assert result == (_HELLO * 500)[:-1]
+        assert "�" not in result
+
+    def test_utf8_with_invalid_middle_byte_uses_fallback(self) -> None:
+        # A genuinely non-UTF-8 byte in the middle (not just a truncated tail)
+        # routes to the legacy code page rather than being treated as UTF-8.
+        raw = _HELLO.encode("gbk")
+        assert decode_subprocess_output(raw, fallback_encoding="gbk") == _HELLO
+
 
 class TestApplyUtf8ChildEnv:
     def test_sets_vars_on_windows(self, monkeypatch: pytest.MonkeyPatch) -> None:

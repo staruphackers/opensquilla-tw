@@ -21,6 +21,7 @@ UTF-8 with replacement and no environment variables are injected.
 
 from __future__ import annotations
 
+import codecs
 import locale
 import os
 
@@ -60,23 +61,30 @@ def decode_subprocess_output(
     """Decode subprocess output bytes to text.
 
     Without a fallback encoding (POSIX, or the fallback explicitly disabled) this
-    is exactly the historical behaviour: UTF-8 with replacement.  With a fallback
-    encoding (Windows) strict UTF-8 is attempted first -- so anything the child
-    emitted as UTF-8 is preserved -- and the legacy code page (e.g. ``cp936``) is
-    used only when the bytes are not valid UTF-8, with a final UTF-8-replace
-    safety net for undecodable or truncated tails.
+    is exactly the historical behaviour: UTF-8 with replacement.
+
+    With a fallback encoding (Windows) strict UTF-8 is attempted first -- so
+    anything the child emitted as UTF-8 is preserved -- and only genuinely
+    non-UTF-8 bytes fall through to the legacy code page (e.g. ``cp936``).
+
+    Both attempts use an *incremental* decoder fed with ``final=False`` so that
+    an incomplete multibyte sequence at the very end of the buffer -- which
+    happens whenever output is truncated at a byte cap or read mid-stream -- is
+    buffered and dropped rather than turned into replacement characters.  Without
+    this, a single cut trailing byte would make a strict decode fail and collapse
+    the *entire* buffer to garbled replacement text (issue #336).
     """
     if not raw:
         return ""
     if not fallback_encoding:
         return raw.decode("utf-8", errors="replace")
     try:
-        return raw.decode("utf-8")
+        return codecs.getincrementaldecoder("utf-8")("strict").decode(raw, final=False)
     except UnicodeDecodeError:
         pass
     try:
-        return raw.decode(fallback_encoding)
-    except (UnicodeDecodeError, LookupError):
+        return codecs.getincrementaldecoder(fallback_encoding)("replace").decode(raw, final=False)
+    except LookupError:
         return raw.decode("utf-8", errors="replace")
 
 
