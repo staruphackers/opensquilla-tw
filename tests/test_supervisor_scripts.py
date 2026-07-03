@@ -82,3 +82,13 @@ def test_supervisor_skip_running_checks_gateway_state_not_exit_code() -> None:
     assert "ConvertFrom-Json -ErrorAction SilentlyContinue" in start_all
     assert "[string]$parsed.state -eq 'running'" in start_all
     assert "if ($status.ExitCode -eq 0)" not in start_all
+
+
+def test_supervisor_ports_are_persisted_per_profile() -> None:
+    lib = (SUPERVISOR / "lib.ps1").read_text(encoding="utf-8")
+
+    assert "$Script:PORT_FILE_NAME = 'supervisor-port.txt'" in lib
+    assert "Get-ProfilePortFile" in lib
+    assert "Get-UsedProfilePorts" in lib
+    assert "Set-Content -LiteralPath $portFile" in lib
+    assert "$BasePort + $index" not in lib

@@ -19,6 +19,7 @@ $Script:DEFAULT_BASE_PORT = 18791
 $Script:TASK_NAME = 'OpenSquillaProfileSupervisor'
 $Script:DISPLAY_NAME = 'OpenSquilla Multi-Profile Gateway Supervisor'
 $Script:PROFILE_NAME_PATTERN = '^[a-z0-9][a-z0-9_-]{0,63}$'
+$Script:PORT_FILE_NAME = 'supervisor-port.txt'
 
 function Get-DefaultProfilesRoot {
     $userProfile = [Environment]::GetFolderPath('UserProfile')
@@ -128,14 +129,63 @@ function Get-ProfilePort {
         [Parameter(Mandatory)] [string] $ProfilesRoot
     )
 
-    $index = 0
-    foreach ($sibling in (Get-ProfileEntries -ProfilesRoot $ProfilesRoot)) {
-        if ($sibling.Name -eq $Name) {
-            return [int]($BasePort + $index)
-        }
-        $index += 1
+    if (-not (Test-ProfileName -Name $Name)) {
+        throw "Invalid OpenSquilla profile name: $Name"
     }
-    return [int]$BasePort
+
+    $profilePath = Join-Path $ProfilesRoot $Name
+    if (-not (Test-Path -LiteralPath $profilePath -PathType Container)) {
+        throw "Profile does not exist: $profilePath"
+    }
+
+    $portFile = Get-ProfilePortFile -ProfilePath $profilePath
+    $existing = Read-ProfilePortFile -PortFile $portFile
+    if ($null -ne $existing) {
+        return [int]$existing
+    }
+
+    $used = Get-UsedProfilePorts -ProfilesRoot $ProfilesRoot
+    $candidate = [int]$BasePort
+    while ($used.ContainsKey($candidate)) {
+        $candidate += 1
+    }
+
+    Set-Content -LiteralPath $portFile -Value ([string]$candidate) -Encoding ASCII
+    return [int]$candidate
+}
+
+function Get-ProfilePortFile {
+    param([Parameter(Mandatory)] [string] $ProfilePath)
+    return (Join-Path $ProfilePath $Script:PORT_FILE_NAME)
+}
+
+function Read-ProfilePortFile {
+    param([Parameter(Mandatory)] [string] $PortFile)
+
+    if (-not (Test-Path -LiteralPath $PortFile -PathType Leaf)) {
+        return $null
+    }
+
+    $raw = (Get-Content -LiteralPath $PortFile -Raw -ErrorAction Stop).Trim()
+    $port = 0
+    if ([int]::TryParse($raw, [ref]$port) -and $port -gt 0 -and $port -lt 65536) {
+        return [int]$port
+    }
+    return $null
+}
+
+function Get-UsedProfilePorts {
+    param([Parameter(Mandatory)] [string] $ProfilesRoot)
+
+    $used = @{}
+    foreach ($entry in (Get-ProfileEntries -ProfilesRoot $ProfilesRoot)) {
+        $portFile = Get-ProfilePortFile -ProfilePath $entry.Path
+        $port = Read-ProfilePortFile -PortFile $portFile
+        if ($null -ne $port) {
+            $used[[int]$port] = $true
+        }
+    }
+    return $used
 }
 
 function Write-Status {
