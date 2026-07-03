@@ -329,18 +329,22 @@ def test_desktop_update_actions_are_guarded_against_reentry() -> None:
         "// Lets the gateway-served Control UI",
     )
 
-    assert "if (updateDownloadInProgress || updateApplying || desktopUpdateStatus === 'downloaded')" in download_update
-    assert download_update.index("updateDownloadInProgress || updateApplying") < download_update.index(
-        "const mockVersion = mockUpdateVersion()"
+    reentry_guard = (
+        "if (updateDownloadInProgress || updateApplying || "
+        "desktopUpdateStatus === 'downloaded')"
+    )
+    assert reentry_guard in download_update
+    assert download_update.index("updateDownloadInProgress || updateApplying") < (
+        download_update.index("const mockVersion = mockUpdateVersion()")
     )
     assert "if (updateDownloadInProgress || updateApplying) return" in check_update
     assert "if (!mockDownloadedUpdate && !downloadedUpdateVersion) return" in apply_update
     assert apply_update.index("if (updateApplying) return") < apply_update.index(
         "if (!mockDownloadedUpdate && !downloadedUpdateVersion) return"
     )
-    assert apply_update.index("if (!mockDownloadedUpdate && !downloadedUpdateVersion) return") < apply_update.index(
-        "if (mockDownloadedUpdate)"
-    )
+    assert apply_update.index(
+        "if (!mockDownloadedUpdate && !downloadedUpdateVersion) return"
+    ) < apply_update.index("if (mockDownloadedUpdate)")
 
 
 def test_desktop_mock_update_dialog_auto_responder_is_mock_only() -> None:
@@ -356,7 +360,10 @@ def test_desktop_mock_update_dialog_auto_responder_is_mock_only() -> None:
         "function showUpdateError",
     )
 
-    assert "const MOCK_UPDATE_DIALOG_RESPONSES_ENV = 'OPENSQUILLA_DESKTOP_MOCK_UPDATE_DIALOG_RESPONSES'" in main_ts
+    assert (
+        "const MOCK_UPDATE_DIALOG_RESPONSES_ENV = "
+        "'OPENSQUILLA_DESKTOP_MOCK_UPDATE_DIALOG_RESPONSES'"
+    ) in main_ts
     assert "if (mockUpdateVersion() === null) return null" in responder
     assert "process.env[MOCK_UPDATE_DIALOG_RESPONSES_ENV]" in responder
     assert "Number.isInteger(response)" in responder
@@ -480,7 +487,9 @@ def test_apply_downloaded_update_timeout_restores_retry_state_before_returning()
     )
     assert "restoreDownloadedUpdateRetryState(pendingVersion)" in timeout_branch
     assert "return" in timeout_branch
-    assert timeout_branch.index("return") < apply_update.index("autoUpdater.quitAndInstall(false, true)")
+    assert timeout_branch.index("return") < apply_update.index(
+        "autoUpdater.quitAndInstall(false, true)"
+    )
 
 
 def test_apply_downloaded_update_handoff_error_restores_retry_state() -> None:
@@ -514,14 +523,42 @@ def test_desktop_persists_network_observability_privacy_setting() -> None:
     main_ts = _read("desktop/electron/src/main.ts")
     types_ts = _read("opensquilla-webui/src/platform/types.ts")
     vite_env = _read("opensquilla-webui/src/vite-env.d.ts")
-    connection = _section(main_ts, "interface DesktopConnection", "interface OnboardingPayload")
-    onboarding_payload = _section(main_ts, "interface OnboardingPayload", "interface DesktopSettingsPayload")
-    settings_payload = _section(main_ts, "interface DesktopSettingsPayload", "interface DesktopSettingsSnapshot")
+    connection = _section(
+        main_ts,
+        "interface DesktopConnection",
+        "interface OnboardingPayload",
+    )
+    onboarding_payload = _section(
+        main_ts,
+        "interface OnboardingPayload",
+        "interface DesktopSettingsPayload",
+    )
+    settings_payload = _section(
+        main_ts,
+        "interface DesktopSettingsPayload",
+        "interface DesktopSettingsSnapshot",
+    )
     snapshot = _section(main_ts, "interface DesktopSettingsSnapshot", "interface RuntimeLaunch")
-    save = _section(main_ts, "async function saveDesktopCredential", "async function writeDesktopConfig")
-    config_writer = _section(main_ts, "async function writeDesktopConfig", "function settingsSnapshot")
-    web_settings = _section(types_ts, "export interface DesktopSettings", "export interface ProviderOption")
-    web_payload = _section(types_ts, "export interface DesktopSettingsPayload", "export interface PlatformCapabilities")
+    save = _section(
+        main_ts,
+        "async function saveDesktopCredential",
+        "async function writeDesktopConfig",
+    )
+    config_writer = _section(
+        main_ts,
+        "async function writeDesktopConfig",
+        "function settingsSnapshot",
+    )
+    web_settings = _section(
+        types_ts,
+        "export interface DesktopSettings",
+        "export interface ProviderOption",
+    )
+    web_payload = _section(
+        types_ts,
+        "export interface DesktopSettingsPayload",
+        "export interface PlatformCapabilities",
+    )
     desktop_api = _section(vite_env, "interface OpenSquillaDesktopApi", "interface Window")
 
     assert "disableNetworkObservability: boolean" in connection
@@ -542,21 +579,29 @@ def test_desktop_persists_network_observability_privacy_setting() -> None:
     assert "disableNetworkObservability," in save
     assert "'[privacy]'" in config_writer
     assert (
-        "`disable_network_observability = ${credential.disableNetworkObservability ? 'true' : 'false'}`"
+        "`disable_network_observability = "
+        "${credential.disableNetworkObservability ? 'true' : 'false'}`"
         in config_writer
     )
 
 
-def test_desktop_credential_save_preserves_existing_config_privacy_when_payload_omits_setting() -> None:
+def test_desktop_credential_save_preserves_config_privacy_without_payload_setting() -> None:
     main_ts = _read("desktop/electron/src/main.ts")
-    save = _section(main_ts, "async function saveDesktopCredential", "async function writeDesktopConfig")
+    save = _section(
+        main_ts,
+        "async function saveDesktopCredential",
+        "async function writeDesktopConfig",
+    )
     read_config = _section(
         main_ts,
         "function readDesktopConfigNetworkObservabilitySetting",
         "function desktopConfigNetworkObservabilityDisabled",
     )
 
-    assert "const configDisableNetworkObservability = readDesktopConfigNetworkObservabilitySetting()" in save
+    assert (
+        "const configDisableNetworkObservability = "
+        "readDesktopConfigNetworkObservabilitySetting()"
+    ) in save
     assert (
         ": configDisableNetworkObservability ?? existing?.disableNetworkObservability ?? false"
         in save
@@ -609,7 +654,8 @@ def test_desktop_network_observability_disable_gates_native_update_and_gateway_e
     assert "desktopPersistedNetworkObservabilityDisabled()" in main_ts
     assert "desktopConfigNetworkObservabilityDisabled()" in main_ts
     assert (
-        "return desktopPersistedNetworkObservabilityDisabled() || desktopConfigNetworkObservabilityDisabled()"
+        "return desktopPersistedNetworkObservabilityDisabled() || "
+        "desktopConfigNetworkObservabilityDisabled()"
         in network_gate
     )
     assert "OPENSQUILLA_PRIVACY_DISABLE_NETWORK_OBSERVABILITY" in main_ts
