@@ -6,6 +6,7 @@ import tomllib
 from pathlib import Path
 
 CURRENT_VERSION = "0.5.0rc1"
+CURRENT_DESKTOP_VERSION = "0.5.0-rc1"
 CURRENT_TAG = f"v{CURRENT_VERSION}"
 HISTORICAL_PREVIEW_VERSION = "0.2.0rc1"
 HISTORICAL_PREVIEW_TAG = f"v{HISTORICAL_PREVIEW_VERSION}"
@@ -28,9 +29,14 @@ def test_lockfile_version_matches_current_release() -> None:
 
 def test_desktop_electron_release_config_matches_current_release() -> None:
     package = json.loads(Path("desktop/electron/package.json").read_text(encoding="utf-8"))
+    lock = json.loads(Path("desktop/electron/package-lock.json").read_text(encoding="utf-8"))
     build = package["build"]
 
-    assert package["version"] == CURRENT_VERSION
+    assert package["version"] == CURRENT_DESKTOP_VERSION
+    assert lock["version"] == CURRENT_DESKTOP_VERSION
+    assert lock["packages"][""]["version"] == CURRENT_DESKTOP_VERSION
+    assert re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?", package["version"])
+    assert not re.search(r"(?<=\d)(?:a|b|rc)\d+$", package["version"])
     assert package["repository"] == {
         "type": "git",
         "url": "https://github.com/opensquilla/opensquilla.git",
@@ -51,8 +57,9 @@ def test_release_workflow_builds_desktop_installers() -> None:
     assert "build-desktop-windows:" in workflow
     assert "npx electron-builder --mac --publish never" in workflow
     assert "npx electron-builder --win --publish never" in workflow
-    assert "OpenSquilla-{version}-mac-arm64.dmg" in workflow
-    assert "OpenSquilla-{version}-win-x64.exe" in workflow
+    assert "desktop_asset_version" in workflow
+    assert "OpenSquilla-{desktop_version}-mac-arm64.dmg" in workflow
+    assert "OpenSquilla-{desktop_version}-win-x64.exe" in workflow
     assert "latest-mac.yml" in workflow
     assert "latest.yml" in workflow
     assert "NOTES_FILE=\"docs/releases/${TAG#v}.md\"" in workflow
@@ -257,8 +264,8 @@ def test_releases_md_exists_and_references_current_and_preview_tags() -> None:
     assert (
         HISTORICAL_PREVIEW_TAG in text
     ), f"RELEASES.md must retain the historical tag '{HISTORICAL_PREVIEW_TAG}'"
-    assert f"OpenSquilla-{CURRENT_VERSION}-mac-arm64.dmg" in text
-    assert f"OpenSquilla-{CURRENT_VERSION}-win-x64.exe" in text
+    assert f"OpenSquilla-{CURRENT_DESKTOP_VERSION}-mac-arm64.dmg" in text
+    assert f"OpenSquilla-{CURRENT_DESKTOP_VERSION}-win-x64.exe" in text
     assert "do not publish Windows portable zips" in text
     assert "legacy Windows portable downloads" in text
 
@@ -276,8 +283,8 @@ def test_changelog_has_current_release_section_and_unreleased() -> None:
 def test_readme_release_install_uses_latest_assets_and_pinned_alternative() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
 
-    assert f"OpenSquilla-{CURRENT_VERSION}-mac-arm64.dmg" in readme
-    assert f"OpenSquilla-{CURRENT_VERSION}-win-x64.exe" in readme
+    assert f"OpenSquilla-{CURRENT_DESKTOP_VERSION}-mac-arm64.dmg" in readme
+    assert f"OpenSquilla-{CURRENT_DESKTOP_VERSION}-win-x64.exe" in readme
     assert "Simplified release assets" in readme
     assert "desktop installers and the Python wheel only" in readme
     assert "releases/latest/download/OpenSquilla-windows-x64-portable.zip" not in readme
@@ -350,9 +357,9 @@ def test_current_release_notes_prioritize_model_ensemble_and_sandbox() -> None:
     notes = Path(f"docs/releases/{CURRENT_VERSION}.md").read_text(encoding="utf-8")
 
     assert "## Downloads" in notes
-    assert f"OpenSquilla-{CURRENT_VERSION}-mac-arm64.dmg" in notes
-    assert f"OpenSquilla-{CURRENT_VERSION}-mac-arm64.zip" in notes
-    assert f"OpenSquilla-{CURRENT_VERSION}-win-x64.exe" in notes
+    assert f"OpenSquilla-{CURRENT_DESKTOP_VERSION}-mac-arm64.dmg" in notes
+    assert f"OpenSquilla-{CURRENT_DESKTOP_VERSION}-mac-arm64.zip" in notes
+    assert f"OpenSquilla-{CURRENT_DESKTOP_VERSION}-win-x64.exe" in notes
     assert f"opensquilla-{CURRENT_VERSION}-py3-none-any.whl" in notes
     assert notes.index("### Model Ensemble") < notes.index(
         "### Managed execution and sandbox alignment"

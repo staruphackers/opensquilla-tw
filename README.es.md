@@ -28,6 +28,12 @@
 
 ---
 
+## Novedades
+
+- 📢 **2026-07-03** — Nuestro informe técnico **[Agentic Routing: The Harness-Native Data Flywheel](docs/releases/agentic_routing_v0.pdf)** (versión preliminar) ya está disponible, publicado junto con OpenSquilla **0.5.0 Preview 1**. Detalla cómo el enrutador nativo del harness convierte el tráfico cotidiano de los agentes en un volante de datos que se mejora a sí mismo.
+
+---
+
 ## Resumen
 
 OpenSquilla es un agente de IA con microkernel y eficiente en el uso de tokens. Un enrutador de modelos local envía cada turno al modelo más económico que pueda resolverlo, mientras que la memoria persistente, un sandbox por capas, la búsqueda web integrada y los embeddings en el propio dispositivo completan un único bucle de turnos compartido.
@@ -48,7 +54,7 @@ Los instaladores de escritorio y la instalación rápida desde terminal te ofrec
 
 Los comandos de instalación de versiones usan los recursos de release publicados en GitHub. Las instalaciones del wheel de Python usan nombres de archivo de wheel con versión, porque los instaladores validan la versión incrustada en el nombre del archivo del wheel.
 
-Para el uso de escritorio de 0.5.0 Preview 1, opta por los instaladores de escritorio empaquetados de la Release de GitHub: `OpenSquilla-0.5.0rc1-mac-arm64.dmg` en macOS y `OpenSquilla-0.5.0rc1-win-x64.exe` en Windows.
+Para el uso de escritorio de 0.5.0 Preview 1, opta por los instaladores de escritorio empaquetados de la Release de GitHub: `OpenSquilla-0.5.0-rc1-mac-arm64.dmg` en macOS y `OpenSquilla-0.5.0-rc1-win-x64.exe` en Windows.
 
 | Ruta | Público | Cuándo usarla |
 | --- | --- | --- |
@@ -81,8 +87,8 @@ Enlaces de instalación: [Git](https://git-scm.com/downloads) ·
 
 Los instaladores de escritorio de 0.5.0 Preview 1 empaquetan la consola de control de Vue y el runtime del gateway en una carcasa de Electron.
 
-- macOS Apple Silicon: <https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc1/OpenSquilla-0.5.0rc1-mac-arm64.dmg>
-- Windows x64: <https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc1/OpenSquilla-0.5.0rc1-win-x64.exe>
+- macOS Apple Silicon: <https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc1/OpenSquilla-0.5.0-rc1-mac-arm64.dmg>
+- Windows x64: <https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc1/OpenSquilla-0.5.0-rc1-win-x64.exe>
 
 Cierra cualquier aplicación de escritorio de OpenSquilla en ejecución antes de actualizar. Se reutilizan el `~/.opensquilla/config.toml` y los datos de sesión existentes.
 

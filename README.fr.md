@@ -28,6 +28,12 @@
 
 ---
 
+## Actualités
+
+- 📢 **2026-07-03** — Notre rapport technique **[Agentic Routing: The Harness-Native Data Flywheel](docs/releases/agentic_routing_v0.pdf)** (préversion) est disponible, publié en même temps qu'OpenSquilla **0.5.0 Preview 1**. Il détaille comment le routeur natif du harness transforme le trafic quotidien des agents en un volant d'inertie de données qui s'améliore de lui-même.
+
+---
+
 ## Présentation
 
 OpenSquilla est un Agent IA à micro-noyau, économe en Token. Un routeur de modèles
@@ -67,8 +73,8 @@ wheel versionnés, car les installateurs valident la version intégrée au nom d
 fichier du wheel.
 
 Pour un usage bureau en 0.5.0 Preview 1, préférez les installateurs de bureau empaquetés issus de la
-Release GitHub : `OpenSquilla-0.5.0rc1-mac-arm64.dmg` sous macOS et
-`OpenSquilla-0.5.0rc1-win-x64.exe` sous Windows.
+Release GitHub : `OpenSquilla-0.5.0-rc1-mac-arm64.dmg` sous macOS et
+`OpenSquilla-0.5.0-rc1-win-x64.exe` sous Windows.
 
 | Voie | Public | Quand l'utiliser |
 | --- | --- | --- |
@@ -118,8 +124,8 @@ Liens d'installation : [Git](https://git-scm.com/downloads) ·
 Les installateurs de bureau 0.5.0 Preview 1 empaquettent la console de contrôle Vue et
 l'environnement d'exécution de la passerelle dans une enveloppe Electron.
 
-- macOS Apple Silicon : <https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc1/OpenSquilla-0.5.0rc1-mac-arm64.dmg>
-- Windows x64 : <https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc1/OpenSquilla-0.5.0rc1-win-x64.exe>
+- macOS Apple Silicon : <https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc1/OpenSquilla-0.5.0-rc1-mac-arm64.dmg>
+- Windows x64 : <https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc1/OpenSquilla-0.5.0-rc1-win-x64.exe>
 
 Quittez toute application de bureau OpenSquilla en cours d'exécution avant la mise à
 niveau. Les fichiers `~/.opensquilla/config.toml` et les données de session existants

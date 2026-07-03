@@ -28,6 +28,12 @@
 
 ---
 
+## 最新动态
+
+- 📢 **2026-07-03** —— 我们的技术报告 **[Agentic Routing: The Harness-Native Data Flywheel](docs/releases/agentic_routing_v0.pdf)**（预览版）已发布，随 OpenSquilla **0.5.0 Preview 1** 一同放出。报告详细介绍了 harness 原生路由如何把日常 Agent 流量转化为自我改进的数据飞轮。
+
+---
+
 ## 概览
 
 OpenSquilla 是一个高效利用 Token 的微内核 AI Agent。本地模型路由会把每一轮都发给能处理它的最便宜模型；持久记忆、分层沙箱、内置网络搜索和设备端嵌入共同构成了这个
@@ -54,7 +60,7 @@ OpenSquilla 可运行于 Windows、macOS 和 Linux。请选择与你的使用场
 文件名，因为安装器会校验嵌入在 wheel 文件名中的版本号。
 
 对于 0.5.0 Preview 1 的桌面使用，建议从 GitHub Release 下载打包桌面安装包:macOS 上为
-`OpenSquilla-0.5.0rc1-mac-arm64.dmg`，Windows 上为 `OpenSquilla-0.5.0rc1-win-x64.exe`。
+`OpenSquilla-0.5.0-rc1-mac-arm64.dmg`，Windows 上为 `OpenSquilla-0.5.0-rc1-win-x64.exe`。
 
 | 安装方式 | 适合人群 | 何时使用 |
 | --- | --- | --- |
@@ -94,8 +100,8 @@ PowerShell 安装器会通过 `winget` 自动装好它；而**终端快速安装
 
 0.5.0 Preview 1 桌面安装包将 Vue 控制台和网关运行时打包在一个 Electron 外壳中。
 
-- macOS Apple Silicon:<https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc1/OpenSquilla-0.5.0rc1-mac-arm64.dmg>
-- Windows x64:<https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc1/OpenSquilla-0.5.0rc1-win-x64.exe>
+- macOS Apple Silicon:<https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc1/OpenSquilla-0.5.0-rc1-mac-arm64.dmg>
+- Windows x64:<https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc1/OpenSquilla-0.5.0-rc1-win-x64.exe>
 
 升级前请退出任何正在运行的 OpenSquilla 桌面应用。已有的
 `~/.opensquilla/config.toml` 和会话数据会被复用。
