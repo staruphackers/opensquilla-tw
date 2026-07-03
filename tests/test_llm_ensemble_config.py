@@ -7,11 +7,13 @@ from opensquilla.provider.ensemble import build_ensemble_provider_from_config
 from opensquilla.provider.selector import ProviderConfig
 
 
-def test_llm_ensemble_defaults_to_enabled() -> None:
+def test_llm_ensemble_defaults_to_disabled() -> None:
+    # Off by default so a fresh install lands on the single-model AI router;
+    # ensemble is opt-in via the composer's routing control.
     cfg = GatewayConfig()
 
     ensemble = cfg.llm_ensemble
-    assert ensemble.enabled is True
+    assert ensemble.enabled is False
     assert ensemble.mode == "b5_fusion"
     assert ensemble.proposer_tools is False
     assert ensemble.min_successful_proposers == 1

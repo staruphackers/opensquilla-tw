@@ -73,6 +73,7 @@ function makeHarness(activeStreamTaskId = '') {
     sessionRunStatus: () => ({ status: 'idle', label: 'Idle', task: null }),
     applySessionRunState: vi.fn(),
     queueRouterDecision: vi.fn(),
+    appendEnsembleProgress: vi.fn(),
     flushPendingRouterDecision: vi.fn(),
     clearPendingRouterDecision: vi.fn(),
     handleRouterControlReplay: vi.fn(),

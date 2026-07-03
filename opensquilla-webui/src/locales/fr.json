@@ -1581,7 +1581,8 @@
       "ensembleFallbackReason": "fallback · {reason}",
       "ensembleRouterPoolHidden": "pool du routeur masqué",
       "ensembleTokens": "{count} tok",
-      "ensembleUsed": "utilisé"
+      "ensembleUsed": "utilisé",
+      "ensembleDetailUnavailable": "{count} candidats · détail indisponible"
     },
     "sources": "Sources",
     "activitySteps": "Activité · {count} étape | Activité · {count} étapes",
@@ -1663,7 +1664,8 @@
       "runModeTrustedDesc": "Utilise le bac à sable par défaut ; les actions explicites sur l'hôte peuvent s'exécuter sur l'hôte si la politique l'autorise.",
       "runModeFull": "Accès hôte complet",
       "runModeFullDesc": "Exécute sans isolation sandbox.",
-      "runModeFullUnavailable": "L'accès hôte complet nécessite une session owner."
+      "runModeFullUnavailable": "L'accès hôte complet nécessite une session owner.",
+      "badgeNew": "NEW"
     },
     "pending": {
       "label": "En attente {count}/{max}",
@@ -1758,6 +1760,21 @@
       "preparingOutput": "Préparation de la sortie",
       "stillWaiting": "Toujours en attente du modèle",
       "stillWorking": "Toujours en cours — dernier signal il y a {seconds} s"
+    },
+    "msgMeta": {
+      "ensembleModels": "Ensemble · {count} modèles",
+      "tokens": "jetons",
+      "cache": "cache",
+      "think": "raisonnement",
+      "ensemble": "ensemble",
+      "cost": "coût",
+      "saved": "économie",
+      "fallback": "repli",
+      "fallbackUsed": "utilisé",
+      "ensembleModelsAria": "Modèles de l'ensemble"
+    },
+    "modelRouting": {
+      "updateFailed": "Impossible de changer le routage des modèles — rétabli. Vérifiez la connexion à la passerelle et réessayez."
     }
   },
   "shared": {

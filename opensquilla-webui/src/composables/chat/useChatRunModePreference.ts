@@ -58,7 +58,11 @@ function preferredRunMode(
 }
 
 export function useChatRunModePreference(options: UseChatRunModePreferenceOptions) {
-  const runMode = ref<SandboxRunMode>('trusted')
+  // Default to full host access. For the local owner the backend policy already
+  // reports 'full'; this seeds it before the policy loads (no trusted flicker).
+  // Remote non-owners still get 'trusted' from their policy, and the backend
+  // coerces disallowed modes, so this does not weaken the sandbox boundary.
+  const runMode = ref<SandboxRunMode>('full')
   const runModeUserSelected = ref(false)
 
   const currentRunModePolicy = computed(() => {
@@ -68,7 +72,9 @@ export function useChatRunModePreference(options: UseChatRunModePreferenceOption
 
   const runModePolicyDefault = computed<SandboxRunMode>(() => {
     const raw = currentRunModePolicy.value?.defaultRunMode
-    return isSandboxRunMode(raw) ? raw : 'trusted'
+    // Fall back to 'full' only when the policy omits a default; the backend
+    // always supplies 'trusted' for non-owner principals, so they are unaffected.
+    return isSandboxRunMode(raw) ? raw : 'full'
   })
 
   const allowedRunModes = computed<SandboxRunMode[]>(() => {

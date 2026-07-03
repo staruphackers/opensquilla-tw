@@ -21,13 +21,14 @@ from opensquilla.provider import (
 )
 from opensquilla.provider.ensemble import EnsembleMemberConfig, EnsembleProvider
 from opensquilla.provider.selector import ProviderConfig
-from opensquilla.provider.types import StreamEvent
+from opensquilla.provider.types import EnsembleProgressEvent, StreamEvent
 
 
 @dataclass
 class _FakePlan:
     events: list[StreamEvent]
     delay: float = 0.0
+    gate: asyncio.Event | None = None
 
 
 @dataclass
@@ -73,6 +74,8 @@ class _FakeProvider:
         plan = self._registry.plans[self._cfg.model]
         if plan.delay > 0:
             await asyncio.sleep(plan.delay)
+        if plan.gate is not None:
+            await plan.gate.wait()
         for event in plan.events:
             yield event
 
@@ -427,6 +430,110 @@ async def test_openrouter_members_get_member_specific_reasoning_capabilities(
     assert aggregator_cfg.thinking_level == "high"
     assert aggregator_cfg.model_capabilities.supports_reasoning is True
     assert aggregator_cfg.model_capabilities.reasoning_format == "openrouter"
+
+
+@pytest.mark.asyncio
+async def test_ensemble_emits_proposer_progress_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = _FakeRegistry(
+        {
+            "p1": _FakePlan(
+                [TextDeltaEvent(text="d1"), DoneEvent(input_tokens=1, output_tokens=2, model="p1")]
+            ),
+            "p2": _FakePlan(
+                [TextDeltaEvent(text="d2"), DoneEvent(input_tokens=3, output_tokens=4, model="p2")]
+            ),
+            "agg": _FakePlan(
+                [TextDeltaEvent(text="f"), DoneEvent(input_tokens=5, output_tokens=6, model="agg")]
+            ),
+        }
+    )
+    monkeypatch.setattr("opensquilla.provider.ensemble._build_provider", registry.provider_for)
+    provider = EnsembleProvider(
+        profile_name="default",
+        proposers=[_member("p1"), _member("p2")],
+        aggregator=_member("agg"),
+        proposer_timeout_seconds=1,
+        aggregator_timeout_seconds=1,
+        shuffle_candidates=False,
+    )
+
+    events = await _collect(provider)
+    progress = [event for event in events if isinstance(event, EnsembleProgressEvent)]
+
+    # Each proposer announces a start and a finish so the UI can reveal it live.
+    starts = {p.proposer_model for p in progress if p.event_type == "proposer_start"}
+    finishes = {p.proposer_model for p in progress if p.event_type == "proposer_finish"}
+    assert starts == {"p1", "p2"}
+    assert finishes == {"p1", "p2"}
+
+    # The finish delta carries the proposer's usage/cost so the UI can render
+    # per-member tokens live (not just at the terminal breakdown).
+    p1_finish = next(
+        p
+        for p in progress
+        if p.event_type == "proposer_finish" and p.proposer_model == "p1"
+    )
+    assert p1_finish.input_tokens == 1
+    assert p1_finish.output_tokens == 2
+
+    # Progress is delivered before the terminal DoneEvent that carries the breakdown.
+    last_progress = max(i for i, e in enumerate(events) if isinstance(e, EnsembleProgressEvent))
+    done_index = max(i for i, e in enumerate(events) if isinstance(e, DoneEvent))
+    assert last_progress < done_index
+
+
+@pytest.mark.asyncio
+async def test_ensemble_streams_proposer_progress_live_not_buffered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # p2 blocks until `gate` is set. The consumer sets the gate only AFTER it has
+    # received p1's proposer_finish from the LIVE stream. If progress were buffered
+    # until gather() completed, p1's finish would never surface (p2 stays blocked,
+    # gather never returns) → deadlock. Live streaming completes within the timeout.
+    gate = asyncio.Event()
+    registry = _FakeRegistry(
+        {
+            "p1": _FakePlan([DoneEvent(input_tokens=1, output_tokens=1, model="p1")]),
+            "p2": _FakePlan([DoneEvent(input_tokens=1, output_tokens=1, model="p2")], gate=gate),
+            "agg": _FakePlan(
+                [TextDeltaEvent(text="f"), DoneEvent(input_tokens=1, output_tokens=1, model="agg")]
+            ),
+        }
+    )
+    monkeypatch.setattr("opensquilla.provider.ensemble._build_provider", registry.provider_for)
+    provider = EnsembleProvider(
+        profile_name="default",
+        proposers=[_member("p1"), _member("p2")],
+        aggregator=_member("agg"),
+        proposer_timeout_seconds=2,
+        aggregator_timeout_seconds=2,
+        shuffle_candidates=False,
+    )
+
+    async def consume() -> list[StreamEvent]:
+        collected: list[StreamEvent] = []
+        async for event in provider.chat(
+            [Message(role="user", content="q")],
+            config=ChatConfig(max_tokens=8, thinking=False),
+        ):
+            collected.append(event)
+            if (
+                isinstance(event, EnsembleProgressEvent)
+                and event.event_type == "proposer_finish"
+                and event.proposer_model == "p1"
+            ):
+                gate.set()  # reachable only if p1's finish streamed live
+        return collected
+
+    events = await asyncio.wait_for(consume(), timeout=3.0)
+    finishes = {
+        e.proposer_model
+        for e in events
+        if isinstance(e, EnsembleProgressEvent) and e.event_type == "proposer_finish"
+    }
+    assert finishes == {"p1", "p2"}
 
 
 def test_runtime_wrap_is_after_selector_resolution() -> None:

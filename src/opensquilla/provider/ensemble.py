@@ -7,7 +7,7 @@ import contextlib
 import os
 import random
 import time
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
@@ -18,6 +18,7 @@ from .selector import ModelSelector, ProviderConfig, SelectorConfig
 from .types import (
     ChatConfig,
     DoneEvent,
+    EnsembleProgressEvent,
     ErrorEvent,
     Message,
     ModelCapabilities,
@@ -429,16 +430,30 @@ class EnsembleProvider:
             phase="ensemble_proposers",
             message=f"Running {len(self.proposers)} proposer model(s)",
         )
-        proposer_task = asyncio.create_task(
-            self._run_proposers(messages, tools=tools, config=config)
-        )
-        try:
-            while not proposer_task.done():
-                done, _ = await asyncio.wait(
-                    {proposer_task},
-                    timeout=_ensemble_heartbeat_interval(),
+        # Run proposers concurrently; stream their lifecycle deltas LIVE (so the
+        # UI reveals each member the moment it starts/finishes) while still emitting
+        # a keep-alive heartbeat during the wait, so a slow proposer batch never
+        # looks stalled. Drain a progress queue: a real delta -> yield immediately,
+        # a heartbeat-interval gap -> yield a keep-alive, the sentinel -> done.
+        progress_queue: asyncio.Queue[EnsembleProgressEvent | None] = asyncio.Queue()
+
+        async def _drain_proposers() -> list[_CandidateResult]:
+            try:
+                return await self._run_proposers(
+                    messages, tools=tools, config=config, progress=progress_queue.put_nowait
                 )
-                if not done:
+            finally:
+                progress_queue.put_nowait(None)  # sentinel: proposers finished
+
+        proposer_task = asyncio.create_task(_drain_proposers())
+        try:
+            while True:
+                try:
+                    progress_event = await asyncio.wait_for(
+                        progress_queue.get(),
+                        timeout=_ensemble_heartbeat_interval(),
+                    )
+                except TimeoutError:
                     yield ProviderHeartbeatEvent(
                         phase="ensemble_proposers_wait",
                         message=(
@@ -446,6 +461,10 @@ class EnsembleProvider:
                             f"{len(self.proposers)} proposer model(s)"
                         ),
                     )
+                    continue
+                if progress_event is None:
+                    break
+                yield progress_event
             candidates = await proposer_task
         finally:
             if not proposer_task.done():
@@ -506,6 +525,7 @@ class EnsembleProvider:
         *,
         tools: list[ToolDefinition] | None,
         config: ChatConfig | None,
+        progress: Callable[[EnsembleProgressEvent], None] | None = None,
     ) -> list[_CandidateResult]:
         tasks: list[asyncio.Task[_CandidateResult]] = []
         index = 0
@@ -521,6 +541,7 @@ class EnsembleProvider:
                             messages=messages,
                             tools=tools if self.proposer_tools else None,
                             config=config,
+                            progress=progress,
                         )
                     )
                 )
@@ -538,6 +559,7 @@ class EnsembleProvider:
         messages: list[Message],
         tools: list[ToolDefinition] | None,
         config: ChatConfig | None,
+        progress: Callable[[EnsembleProgressEvent], None] | None = None,
     ) -> _CandidateResult:
         cfg = member.provider_config
         started = time.monotonic()
@@ -548,6 +570,17 @@ class EnsembleProvider:
             provider=cfg.provider,
             model=cfg.model,
         )
+        if progress is not None:
+            progress(
+                EnsembleProgressEvent(
+                    event_type="proposer_start",
+                    proposer_index=index,
+                    proposer_label=result.label,
+                    proposer_model=result.model,
+                    proposer_provider=result.provider,
+                    sample_index=sample_index,
+                )
+            )
         try:
             return await asyncio.wait_for(
                 self._collect_candidate_inner(
@@ -572,6 +605,22 @@ class EnsembleProvider:
             result.error_code = type(exc).__name__
         finally:
             result.elapsed_ms = int((time.monotonic() - started) * 1000)
+            if progress is not None:
+                progress(
+                    EnsembleProgressEvent(
+                        event_type="proposer_finish",
+                        proposer_index=index,
+                        proposer_label=result.label,
+                        proposer_model=result.model,
+                        proposer_provider=result.provider,
+                        sample_index=sample_index,
+                        elapsed_ms=result.elapsed_ms,
+                        input_tokens=result.input_tokens,
+                        output_tokens=result.output_tokens,
+                        cost_usd=result.billed_cost,
+                        error=result.error,
+                    )
+                )
         return result
 
     async def _collect_candidate_inner(

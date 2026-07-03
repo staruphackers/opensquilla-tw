@@ -104,7 +104,10 @@ describe('useChatRenderedMessages router visual mode', () => {
     expect(cells[winnerIdx].tiers).toContain('balanced')
   })
 
-  it('uses the ensemble strip instead of normal router cells while LLM ensemble mode is active', () => {
+  it('keeps a restored single-model turn as the grid while ensemble mode is on', () => {
+    // A restored history (squilla_router) turn must render as the normal candidate
+    // grid even while the global LLM-ensemble toggle happens to be on — the active
+    // mode only tags the live turn, never restored history.
     const withMessages = useChatRenderedMessages({
       messages: ref<ChatMessage[]>([
         { role: 'user', text: 'hard question', ts: 0 },
@@ -113,6 +116,7 @@ describe('useChatRenderedMessages router visual mode', () => {
           text: '',
           ts: 1,
           provenanceKind: 'router_decision',
+          restoredFromHistory: true,
           routerDecision: {
             tier: 'balanced',
             model: 'anthropic/claude-sonnet-4.6',
@@ -138,8 +142,147 @@ describe('useChatRenderedMessages router visual mode', () => {
     })
 
     const strip = withMessages.renderedMessages.value.find(message => message.isRouterStrip)
+    expect(strip?.routerPanel).toBe('real-candidates')
+    expect((strip?.gridCells || []).length).toBeGreaterThan(1)
+  })
+
+  it('shows the ensemble strip for the live turn while ensemble mode is on', () => {
+    // Live (non-history) squilla_router decision + active ensemble mode → the
+    // ensemble panel immediately, not the tier grid.
+    const withMessages = useChatRenderedMessages({
+      messages: ref<ChatMessage[]>([
+        { role: 'user', text: 'hard question', ts: 0 },
+        {
+          role: 'router',
+          text: '',
+          ts: 1,
+          provenanceKind: 'router_decision',
+          routerDecision: {
+            tier: 'balanced',
+            model: 'anthropic/claude-sonnet-4.6',
+            source: 'squilla_router',
+          },
+        },
+      ]),
+      sessionKey: ref('router-ensemble-live-test'),
+      routerSlots: ref(['fast', 'balanced', 'strong']),
+      routerModels: ref({}),
+      routerTierConfigs: ref({
+        fast: { model: 'openai/gpt-5.4-mini', supportsImage: false, imageOnly: false },
+        balanced: { model: 'anthropic/claude-sonnet-4.6', supportsImage: false, imageOnly: false },
+        strong: { model: 'openai/gpt-5.5', supportsImage: false, imageOnly: false },
+      }),
+      routerVisualEffectsEnabled: ref(true),
+      routerVisualMode: ref('real_candidates'),
+      renderMarkdown: text => text,
+      stripGeneratedArtifactMarkers: text => text,
+      stripTimePrefix: text => text,
+      isSubagentCompletionMessage: () => false,
+      modelRoutingMode: ref('llm_ensemble'),
+    })
+
+    const strip = withMessages.renderedMessages.value.find(message => message.isRouterStrip)
     expect(strip?.routerPanel).toBe('llm-ensemble')
     expect(strip?.gridCells || []).toHaveLength(0)
+  })
+
+  it('renders the ensemble strip when the decision source is ensemble (per-message)', () => {
+    const withMessages = useChatRenderedMessages({
+      messages: ref<ChatMessage[]>([
+        { role: 'user', text: 'hard question', ts: 0 },
+        {
+          role: 'router',
+          text: '',
+          ts: 1,
+          provenanceKind: 'router_decision',
+          routerDecision: {
+            tier: 'balanced',
+            model: 'anthropic/claude-sonnet-4.6',
+            source: 'llm_ensemble',
+          },
+        },
+      ]),
+      sessionKey: ref('router-ensemble-source-test'),
+      routerSlots: ref(['fast', 'balanced', 'strong']),
+      routerModels: ref({}),
+      routerTierConfigs: ref({
+        fast: { model: 'openai/gpt-5.4-mini', supportsImage: false, imageOnly: false },
+        balanced: { model: 'anthropic/claude-sonnet-4.6', supportsImage: false, imageOnly: false },
+        strong: { model: 'openai/gpt-5.5', supportsImage: false, imageOnly: false },
+      }),
+      routerVisualEffectsEnabled: ref(true),
+      routerVisualMode: ref('real_candidates'),
+      renderMarkdown: text => text,
+      stripGeneratedArtifactMarkers: text => text,
+      stripTimePrefix: text => text,
+      isSubagentCompletionMessage: () => false,
+      modelRoutingMode: ref('off'),
+    })
+
+    const strip = withMessages.renderedMessages.value.find(message => message.isRouterStrip)
+    expect(strip?.routerPanel).toBe('llm-ensemble')
+    expect(strip?.gridCells || []).toHaveLength(0)
+  })
+
+  it('keeps the live ensemble strip while its own turn is still streaming', () => {
+    // A tool-using ensemble turn emits its breakdown mid-turn; the strip (and any
+    // open trace inspector) must survive until the whole turn settles.
+    const api = useChatRenderedMessages({
+      messages: ref<ChatMessage[]>([
+        { role: 'user', text: 'hello', ts: 0 },
+        {
+          role: 'router',
+          text: '',
+          ts: 1,
+          provenanceKind: 'router_decision',
+          routerDecision: {
+            tier: 'balanced',
+            model: 'anthropic/claude-sonnet-4.6',
+            source: 'llm_ensemble',
+          },
+        },
+        {
+          role: 'assistant',
+          text: 'Working on it…',
+          ts: 2,
+          messageId: 'assistant-ensemble-live',
+          usage: {
+            model: 'z-ai/glm-5.2',
+            model_usage_breakdown: [
+              { role: 'anchor', provider: 'openrouter', model: 'qwen/qwen3.7-plus' },
+              { role: 'critic', provider: 'openrouter', model: 'z-ai/glm-5.2' },
+            ],
+            ensemble_trace: {
+              profile: 'default',
+              mode: 'router_dynamic',
+              llm_request_count: 2,
+              total_candidates: 3,
+              fallback_used: false,
+            },
+          },
+        },
+      ]),
+      sessionKey: ref('router-ensemble-live-stream-test'),
+      routerSlots: ref(['fast', 'balanced', 'strong']),
+      routerModels: ref({}),
+      routerTierConfigs: ref({
+        fast: { model: 'openai/gpt-5.4-mini', supportsImage: false, imageOnly: false },
+        balanced: { model: 'anthropic/claude-sonnet-4.6', supportsImage: false, imageOnly: false },
+        strong: { model: 'openai/gpt-5.5', supportsImage: false, imageOnly: false },
+      }),
+      routerVisualEffectsEnabled: ref(true),
+      routerVisualMode: ref('real_candidates'),
+      renderMarkdown: text => text,
+      stripGeneratedArtifactMarkers: text => text,
+      stripTimePrefix: text => text,
+      isSubagentCompletionMessage: () => false,
+      modelRoutingMode: ref('llm_ensemble'),
+      isStreaming: ref(true),
+    })
+
+    const strip = api.renderedMessages.value.find(message => message.isRouterStrip)
+    expect(strip).toBeTruthy()
+    expect(strip?.routerPanel).toBe('llm-ensemble')
   })
 
   it('removes the pending ensemble strip once the assistant answer carries the completed trace', () => {

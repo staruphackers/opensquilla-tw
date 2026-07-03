@@ -64,6 +64,7 @@ export interface UseChatRenderedMessagesOptions {
   routerVisualEffectsEnabled: Ref<boolean>
   routerVisualMode: Ref<RouterVisualMode>
   modelRoutingMode?: Ref<ModelRoutingMode>
+  isStreaming?: Ref<boolean>
   renderMarkdown: (text: string) => string
   stripGeneratedArtifactMarkers: (text: string) => string
   stripTimePrefix: (text: string) => string
@@ -168,6 +169,16 @@ export function useChatRenderedMessages(options: UseChatRenderedMessagesOptions)
     let turnIdx = 0
     let turnRequestKind: ChatRouterRequestKind = 'text'
 
+    // Index of the last user turn — anything after it belongs to the in-flight
+    // turn, whose live ensemble strip must survive its own mid-turn done event.
+    let lastUserIdx = -1
+    for (let k = options.messages.value.length - 1; k >= 0; k--) {
+      if (options.messages.value[k].role === 'user') {
+        lastUserIdx = k
+        break
+      }
+    }
+
     for (let i = 0; i < options.messages.value.length; i++) {
       const msg = options.messages.value[i]
       const day = dayKey(msg.ts)
@@ -193,7 +204,12 @@ export function useChatRenderedMessages(options: UseChatRenderedMessagesOptions)
 
       const usageEnsemble = ensembleMetaFromMessage(msg)
       if (usageEnsemble) {
-        if (turnRouterIdx >= 0) {
+        // A tool-using ensemble turn emits its breakdown MID-turn (the ensemble
+        // is the first LLM call). Keep the live strip + its open trace inspector
+        // until the whole turn settles; only then hand off to the bubble popover.
+        // Older/settled turns splice on every recompute exactly as before.
+        const inLiveTurn = options.isStreaming?.value === true && i > lastUserIdx
+        if (turnRouterIdx >= 0 && !inLiveTurn) {
           result.splice(turnRouterIdx, 1)
           turnRouterIdx = -1
         }
@@ -275,8 +291,8 @@ export function useChatRenderedMessages(options: UseChatRenderedMessagesOptions)
     requestKind: ChatRouterRequestKind = 'text',
   ): ChatRenderedMessage | null {
     if (!options.routerVisualEffectsEnabled.value) return null
-    if (isEnsembleRouterDecision(decision)) {
-      return renderedEnsembleRouterStrip(msg, undefined, turnIdx, index, messageId)
+    if (isEnsembleRouterDecision(decision, msg.restoredFromHistory === true) || msg.ensemble) {
+      return renderedEnsembleRouterStrip(msg, msg.ensemble, turnIdx, index, messageId)
     }
     const cells = routerDecisionCellsForRequest(decision, requestKind)
     if (cells.length <= 1) return null
@@ -323,11 +339,13 @@ export function useChatRenderedMessages(options: UseChatRenderedMessagesOptions)
       showHeader: false,
       sourceIndex: index,
       isRouterStrip: true,
-      routerState: ensemble ? 'settled' : 'pending',
+      routerState: msg.routerSettled === true ? 'settled' : 'pending',
       routerSource: 'llm_ensemble',
       routerObserve: false,
       routerStatic: msg.restoredFromHistory === true,
-      routerSettled: Boolean(ensemble) || msg.routerSettled === true,
+      // Live strips stay unsettled (animating) while members stream in; a member
+      // list alone no longer forces 'settled'. History strips are frozen instead.
+      routerSettled: msg.routerSettled === true || msg.restoredFromHistory === true,
       routerPanel: 'llm-ensemble',
       routerMode: 'llm_ensemble',
       ensemble,
@@ -402,10 +420,17 @@ export function useChatRenderedMessages(options: UseChatRenderedMessagesOptions)
     return usage ? ensembleMeta(usage) : undefined
   }
 
-  function isEnsembleRouterDecision(decision: NormalizedRouterDecision): boolean {
+  function isEnsembleRouterDecision(
+    decision: NormalizedRouterDecision,
+    restoredFromHistory: boolean,
+  ): boolean {
     const source = String(decision.source || decision.routing_source || '').toLowerCase()
     if (source.includes('ensemble')) return true
-    return options.modelRoutingMode?.value === 'llm_ensemble'
+    // The active mode is authoritative for the LIVE turn — ensemble mode shows
+    // the ensemble panel immediately instead of the tier grid, even before the
+    // first ensemble_progress lands. It is NEVER applied to restored history, so
+    // a past single-model turn is not re-tagged while the toggle happens to be on.
+    return !restoredFromHistory && options.modelRoutingMode?.value === 'llm_ensemble'
   }
 
   function normalizeEnsembleUsageRows(value: unknown): ChatEnsembleUsageRow[] {

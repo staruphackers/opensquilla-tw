@@ -1581,7 +1581,8 @@
       "ensembleFallbackReason": "fallback · {reason}",
       "ensembleRouterPoolHidden": "pool del router oculto",
       "ensembleTokens": "{count} tok",
-      "ensembleUsed": "usado"
+      "ensembleUsed": "usado",
+      "ensembleDetailUnavailable": "{count} candidatos · detalle no disponible"
     },
     "sources": "Fuentes",
     "activitySteps": "Actividad · {count} paso | Actividad · {count} pasos",
@@ -1663,7 +1664,8 @@
       "runModeTrustedDesc": "Usa la sandbox por defecto; las acciones explícitas sobre el host pueden ejecutarse en el host si la política lo permite.",
       "runModeFull": "Acceso completo al host",
       "runModeFullDesc": "Ejecuta sin aislamiento de sandbox.",
-      "runModeFullUnavailable": "El acceso completo al host requiere una sesión owner."
+      "runModeFullUnavailable": "El acceso completo al host requiere una sesión owner.",
+      "badgeNew": "NEW"
     },
     "pending": {
       "label": "Pendientes {count}/{max}",
@@ -1758,6 +1760,21 @@
       "preparingOutput": "Preparando la salida",
       "stillWaiting": "Aún esperando al modelo",
       "stillWorking": "Aún trabajando — última señal hace {seconds} s"
+    },
+    "msgMeta": {
+      "ensembleModels": "Conjunto · {count} modelos",
+      "tokens": "tokens",
+      "cache": "caché",
+      "think": "razonamiento",
+      "ensemble": "conjunto",
+      "cost": "coste",
+      "saved": "ahorro",
+      "fallback": "reserva",
+      "fallbackUsed": "usado",
+      "ensembleModelsAria": "Modelos del conjunto"
+    },
+    "modelRouting": {
+      "updateFailed": "No se pudo cambiar el enrutamiento de modelos — revertido. Comprueba la conexión con la pasarela e inténtalo de nuevo."
     }
   },
   "shared": {

@@ -89,7 +89,7 @@
           <div v-if="message.meta" class="msg-ai-meta">
             <span v-if="message.meta.model" class="msg-meta__model">{{ message.meta.modelShort }}</span>
             <span v-if="message.meta.costUsd" class="msg-meta__cost">${{ message.meta.costUsd.toFixed(6).replace(/\.?0+$/, '') }}</span>
-            <span v-if="message.meta.ensemble" class="msg-meta__ensemble">Ensemble · {{ message.meta.ensemble.modelCount }} models</span>
+            <span v-if="message.meta.ensemble" class="msg-meta__ensemble">{{ t('chat.msgMeta.ensembleModels', { count: message.meta.ensemble.modelCount }) }}</span>
             <span v-if="message.meta.hasSaved" class="savings-indicator">{{ message.meta.savedLabel }}</span>
             <span
               v-if="hasMetaDetails"
@@ -119,36 +119,36 @@
                 :aria-label="t('chat.usageDetails')"
               >
                 <div v-if="message.meta.hasTokens" class="msg-meta-popover__row">
-                  <span class="msg-meta-popover__label">tokens</span>
+                  <span class="msg-meta-popover__label">{{ t('chat.msgMeta.tokens') }}</span>
                   <span class="msg-meta-popover__value">&#8593;{{ fmtTok(message.meta.input) }} &#8595;{{ fmtTok(message.meta.output) }}</span>
                 </div>
                 <div v-if="message.meta.cachedTokens" class="msg-meta-popover__row">
-                  <span class="msg-meta-popover__label">cache</span>
+                  <span class="msg-meta-popover__label">{{ t('chat.msgMeta.cache') }}</span>
                   <span class="msg-meta-popover__value">{{ fmtTok(message.meta.cachedTokens) }}</span>
                 </div>
                 <div v-if="message.meta.reasoningTokens" class="msg-meta-popover__row">
-                  <span class="msg-meta-popover__label">think</span>
+                  <span class="msg-meta-popover__label">{{ t('chat.msgMeta.think') }}</span>
                   <span class="msg-meta-popover__value">{{ fmtTok(message.meta.reasoningTokens) }}</span>
                 </div>
                 <template v-if="message.meta.ensemble">
                   <div class="msg-meta-popover__divider"></div>
                   <div class="msg-meta-popover__row">
-                    <span class="msg-meta-popover__label">ensemble</span>
+                    <span class="msg-meta-popover__label">{{ t('chat.msgMeta.ensemble') }}</span>
                     <span class="msg-meta-popover__value">{{ ensembleSummary }}</span>
                   </div>
                   <div class="msg-meta-popover__row">
-                    <span class="msg-meta-popover__label">cost</span>
+                    <span class="msg-meta-popover__label">{{ t('chat.msgMeta.cost') }}</span>
                     <span class="msg-meta-popover__value">{{ fmtUsd(message.meta.ensemble.costUsd || message.meta.costUsd) }}</span>
                   </div>
                   <div class="msg-meta-popover__row">
-                    <span class="msg-meta-popover__label">saved</span>
+                    <span class="msg-meta-popover__label">{{ t('chat.msgMeta.saved') }}</span>
                     <span class="msg-meta-popover__value">{{ ensembleSavedText }}</span>
                   </div>
                   <div v-if="message.meta.ensemble.fallbackUsed" class="msg-meta-popover__row">
-                    <span class="msg-meta-popover__label">fallback</span>
-                    <span class="msg-meta-popover__value">used</span>
+                    <span class="msg-meta-popover__label">{{ t('chat.msgMeta.fallback') }}</span>
+                    <span class="msg-meta-popover__value">{{ t('chat.msgMeta.fallbackUsed') }}</span>
                   </div>
-                  <div class="msg-meta-popover__models" aria-label="Ensemble models">
+                  <div class="msg-meta-popover__models" :aria-label="t('chat.msgMeta.ensembleModelsAria')">
                     <div
                       v-for="member in message.meta.ensemble.models"
                       :key="`${member.role}:${member.provider}:${member.model}`"

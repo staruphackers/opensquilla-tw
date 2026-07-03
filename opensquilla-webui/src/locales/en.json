@@ -1581,7 +1581,8 @@
       "ensembleFallbackReason": "fallback · {reason}",
       "ensembleRouterPoolHidden": "router pool hidden",
       "ensembleTokens": "{count} tok",
-      "ensembleUsed": "used"
+      "ensembleUsed": "used",
+      "ensembleDetailUnavailable": "{count} candidates · detail unavailable"
     },
     "sources": "Sources",
     "activitySteps": "Activity · {count} step | Activity · {count} steps",
@@ -1663,7 +1664,8 @@
       "runModeTrustedDesc": "Use the sandbox by default; explicit host-affecting actions can run on the host when policy allows.",
       "runModeFull": "Full Host Access",
       "runModeFullDesc": "Run without sandbox isolation.",
-      "runModeFullUnavailable": "Full Host Access requires an owner session."
+      "runModeFullUnavailable": "Full Host Access requires an owner session.",
+      "badgeNew": "NEW"
     },
     "pending": {
       "label": "Pending {count}/{max}",
@@ -1758,6 +1760,21 @@
       "preparingOutput": "Preparing output",
       "stillWaiting": "Still waiting for model",
       "stillWorking": "Still working — last signal {seconds}s ago"
+    },
+    "msgMeta": {
+      "ensembleModels": "Ensemble · {count} models",
+      "tokens": "tokens",
+      "cache": "cache",
+      "think": "think",
+      "ensemble": "ensemble",
+      "cost": "cost",
+      "saved": "saved",
+      "fallback": "fallback",
+      "fallbackUsed": "used",
+      "ensembleModelsAria": "Ensemble models"
+    },
+    "modelRouting": {
+      "updateFailed": "Couldn't switch model routing — reverted. Check the gateway connection and try again."
     }
   },
   "shared": {

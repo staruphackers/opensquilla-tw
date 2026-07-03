@@ -1581,7 +1581,8 @@
       "ensembleFallbackReason": "fallback · {reason}",
       "ensembleRouterPoolHidden": "router pool 非表示",
       "ensembleTokens": "{count} tok",
-      "ensembleUsed": "使用済み"
+      "ensembleUsed": "使用済み",
+      "ensembleDetailUnavailable": "{count} 個の候補 · 詳細は利用できません"
     },
     "sources": "ソース",
     "activitySteps": "アクティビティ · {count} ステップ | アクティビティ · {count} ステップ",
@@ -1663,7 +1664,8 @@
       "runModeTrustedDesc": "既定ではサンドボックスを使い、明示的にホストへ影響する操作はポリシーが許可した場合にホストで実行できます。",
       "runModeFull": "完全なホストアクセス",
       "runModeFullDesc": "サンドボックス分離なしで実行します。",
-      "runModeFullUnavailable": "完全なホストアクセスには owner セッションが必要です。"
+      "runModeFullUnavailable": "完全なホストアクセスには owner セッションが必要です。",
+      "badgeNew": "NEW"
     },
     "pending": {
       "label": "保留中 {count}/{max}",
@@ -1758,6 +1760,21 @@
       "preparingOutput": "出力を準備中",
       "stillWaiting": "まだモデルを待機中",
       "stillWorking": "まだ処理中 — 最後の信号は {seconds} 秒前"
+    },
+    "msgMeta": {
+      "ensembleModels": "アンサンブル · {count} モデル",
+      "tokens": "トークン",
+      "cache": "キャッシュ",
+      "think": "推論",
+      "ensemble": "アンサンブル",
+      "cost": "コスト",
+      "saved": "節約",
+      "fallback": "フォールバック",
+      "fallbackUsed": "使用",
+      "ensembleModelsAria": "アンサンブルモデル"
+    },
+    "modelRouting": {
+      "updateFailed": "モデルルーティングを切り替えられませんでした。元に戻しました。ゲートウェイ接続を確認して再試行してください。"
     }
   },
   "shared": {

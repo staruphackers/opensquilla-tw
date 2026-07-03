@@ -1,7 +1,6 @@
 <template>
   <div
     class="router-fx"
-    :data-state="message.routerState"
     :data-source="message.routerSource"
     :data-observe="message.routerObserve ? 'true' : undefined"
     :data-static="message.routerStatic ? 'true' : undefined"
@@ -40,10 +39,26 @@
             v-for="model in ensembleModels"
             :key="`${model.role}:${model.provider}:${model.model}`"
             class="router-fx-inspector__row"
+            :class="{ 'router-fx-inspector__row--running': model.status === 'running' }"
+            :data-status="model.status || undefined"
           >
             <span class="router-fx-inspector__role">{{ model.role }}</span>
             <span class="router-fx-inspector__model" :title="model.model">{{ model.modelShort }}</span>
-            <span class="router-fx-inspector__usage">{{ ensembleModelUsage(model) }}</span>
+            <span class="router-fx-inspector__usage">
+              <span
+                v-if="model.status === 'running'"
+                class="router-fx-inspector__spin"
+                aria-hidden="true"
+              ></span>
+              <template v-else>{{ ensembleModelUsage(model) }}</template>
+            </span>
+          </div>
+          <div
+            v-if="!hasEnsembleModels"
+            class="router-fx-inspector__row router-fx-inspector__row--empty"
+            data-testid="router-ensemble-detail-unavailable"
+          >
+            <span class="router-fx-inspector__empty">{{ t('chat.routerFx.ensembleDetailUnavailable', { count: candidateCount }) }}</span>
           </div>
         </div>
         <div class="router-fx-inspector__foot">
@@ -94,8 +109,19 @@ const ensemble = computed(() => props.message.ensemble)
 const ensembleModels = computed(() => ensemble.value?.models || [])
 const isEnsemblePanel = computed(() => props.message.routerPanel === 'llm-ensemble')
 const hasEnsembleModels = computed(() => ensembleModels.value.length > 0)
-const hasInspector = computed(() => hasEnsembleModels.value)
-const isEnsembleDone = computed(() => Boolean(ensemble.value) && props.message.routerSettled === true)
+// Openable once we know *how many* candidates ran, even before per-member rows
+// arrive — a completed ensemble that only reported a count still lets the user
+// open the trace (which then shows a graceful "detail unavailable" row).
+const hasInspector = computed(() => hasEnsembleModels.value || (ensemble.value?.modelCount || 0) > 0)
+// Synthesizing is "done" once the turn settles OR every revealed member has
+// finished. The latter freezes the strip (green dot, no scan) while the
+// aggregator/tools keep running below, instead of animating for the whole turn.
+const allMembersDone = computed(() =>
+  hasEnsembleModels.value && ensembleModels.value.every(member => member.status === 'done'),
+)
+const isEnsembleDone = computed(
+  () => allMembersDone.value || (Boolean(ensemble.value) && props.message.routerSettled === true),
+)
 const isLegacyGrid = computed(() => props.message.routerPanel === 'legacy-grid')
 const gridColumnCount = computed(() => isLegacyGrid.value ? 5 : Math.min(4, Math.max(2, gridCells.value.length)))
 const mobileGridColumnCount = computed(() => isLegacyGrid.value ? 3 : (gridCells.value.length > 2 ? 2 : Math.max(1, gridCells.value.length)))
@@ -113,10 +139,9 @@ const ensembleStatusLabel = computed(() => {
   if (isEnsembleDone.value) return t('chat.routerFx.ensembleDone', { count: candidateCount.value })
   return t('chat.routerFx.ensembleRunning', { count: candidateCount.value })
 })
-const ensembleMetaLabel = computed(() => {
-  if (!hasEnsembleModels.value) return t('chat.routerFx.ensembleMode')
-  return hasInspector.value ? t('chat.routerFx.ensembleViewTrace') : t('chat.routerFx.ensembleMode')
-})
+const ensembleMetaLabel = computed(() =>
+  hasInspector.value ? t('chat.routerFx.ensembleViewTrace') : t('chat.routerFx.ensembleMode'),
+)
 const ensembleButtonLabel = computed(() => {
   return hasInspector.value
     ? t('chat.routerFx.ensembleToggleTrace')
@@ -414,6 +439,36 @@ function ensembleModelUsage(model: ChatEnsembleMetaModel): string {
   white-space: nowrap;
 }
 
+.router-fx-inspector__row--empty {
+  grid-template-columns: 1fr;
+  justify-items: start;
+}
+
+.router-fx-inspector__empty {
+  color: var(--router-muted);
+  text-transform: none;
+}
+
+.router-fx-inspector__row--running .router-fx-inspector__model {
+  color: var(--router-accent);
+}
+
+.router-fx-inspector__spin {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border: 1.4px solid color-mix(in srgb, var(--router-accent) 32%, transparent);
+  border-top-color: var(--router-accent);
+  border-radius: 50%;
+  animation: router-fx-inspector-spin 0.8s linear infinite;
+}
+
+@keyframes router-fx-inspector-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .router-fx-inspector__foot {
   margin-top: 8px;
 }
@@ -646,7 +701,8 @@ function ensembleModelUsage(model: ChatEnsembleMetaModel): string {
   .router-fx-cell .nm-base,
   .router-fx-cell .nm-win,
   .router-fx-ensemble__dot,
-  .router-fx-ensemble__scan {
+  .router-fx-ensemble__scan,
+  .router-fx-inspector__spin {
     animation: none !important;
     transition: none !important;
   }

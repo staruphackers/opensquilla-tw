@@ -1581,7 +1581,8 @@
       "ensembleFallbackReason": "Fallback · {reason}",
       "ensembleRouterPoolHidden": "Router-Pool ausgeblendet",
       "ensembleTokens": "{count} tok",
-      "ensembleUsed": "verwendet"
+      "ensembleUsed": "verwendet",
+      "ensembleDetailUnavailable": "{count} Kandidaten · Details nicht verfügbar"
     },
     "sources": "Quellen",
     "activitySteps": "Aktivität · {count} Schritt | Aktivität · {count} Schritte",
@@ -1663,7 +1664,8 @@
       "runModeTrustedDesc": "Nutzt standardmäßig die Sandbox; eindeutige Host-Aktionen können nach Richtlinie auf dem Host laufen.",
       "runModeFull": "Voller Hostzugriff",
       "runModeFullDesc": "Ohne Sandbox-Isolierung ausführen.",
-      "runModeFullUnavailable": "Voller Hostzugriff erfordert eine owner-Sitzung."
+      "runModeFullUnavailable": "Voller Hostzugriff erfordert eine owner-Sitzung.",
+      "badgeNew": "NEW"
     },
     "pending": {
       "label": "Ausstehend {count}/{max}",
@@ -1758,6 +1760,21 @@
       "preparingOutput": "Ausgabe wird vorbereitet",
       "stillWaiting": "Warte weiterhin auf Modell",
       "stillWorking": "Noch in Arbeit — letztes Signal vor {seconds} s"
+    },
+    "msgMeta": {
+      "ensembleModels": "Ensemble · {count} Modelle",
+      "tokens": "Tokens",
+      "cache": "Cache",
+      "think": "Denken",
+      "ensemble": "Ensemble",
+      "cost": "Kosten",
+      "saved": "gespart",
+      "fallback": "Fallback",
+      "fallbackUsed": "genutzt",
+      "ensembleModelsAria": "Ensemble-Modelle"
+    },
+    "modelRouting": {
+      "updateFailed": "Modell-Routing konnte nicht umgeschaltet werden – zurückgesetzt. Prüfen Sie die Gateway-Verbindung und versuchen Sie es erneut."
     }
   },
   "shared": {
