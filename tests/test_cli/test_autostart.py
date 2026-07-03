@@ -21,6 +21,10 @@ def _decode_powershell(encoded: str) -> str:
     return base64.b64decode(encoded.encode("ascii")).decode("utf-16-le")
 
 
+def _extract_encoded_after(script: str, marker: str) -> str:
+    return script.split(marker, 1)[1].split("'", 1)[0]
+
+
 def test_task_name_for_profile() -> None:
     assert task_name_for_profile(None) == "OpenSquilla"
     assert task_name_for_profile("coder") == "OpenSquilla_coder"
@@ -110,6 +114,35 @@ def test_register_logon_task_windows_dispatches_encoded_registration(
     outer = _decode_powershell(cmd[5])
     assert "Register-ScheduledTask" in outer
     assert "OpenSquilla_coder" in outer
+
+
+def test_register_logon_task_state_dir_reaches_nested_launch_payload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "state-home"
+    home.mkdir(parents=True)
+    monkeypatch.setattr("opensquilla.cli.autostart.platform.system", lambda: "Windows")
+
+    def fake_which(name: str) -> str | None:
+        if name == "opensquilla":
+            return "C:/Tools/opensquilla.exe"
+        if name in {"powershell.exe", "powershell"}:
+            return "C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+        return None
+
+    monkeypatch.setattr("opensquilla.cli.autostart.shutil.which", fake_which)
+    with mock.patch("opensquilla.cli.autostart.subprocess.run") as run_mock:
+        run_mock.return_value = mock.Mock(returncode=0, stdout="", stderr="")
+        result = register_logon_task(profile=None, home=home, state_dir=home)
+
+    assert result.profile is None
+    cmd = run_mock.call_args.args[0]
+    outer = _decode_powershell(cmd[5])
+    inner_encoded = _extract_encoded_after(outer, "-EncodedCommand ")
+    inner = _decode_powershell(inner_encoded)
+    assert "OPENSQUILLA_STATE_DIR" in inner
+    assert str(home) in inner
+    assert "--profile" not in inner
 
 
 def test_register_logon_task_rejects_unsupported_platform(

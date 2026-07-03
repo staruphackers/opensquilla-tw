@@ -92,6 +92,28 @@ def test_init_autostart_state_dir_override_is_registered(
     )
 
 
+def test_init_autostart_state_dir_wins_over_profile_env(
+    monkeypatch, tmp_path: Path
+) -> None:
+    state_home = tmp_path / "state-home"
+    monkeypatch.setenv("OPENSQUILLA_STATE_DIR", str(state_home))
+    monkeypatch.setenv("OPENSQUILLA_HOME", str(tmp_path / "profiles"))
+    monkeypatch.setenv("OPENSQUILLA_PROFILE", "coder")
+    _patch_init_answers(monkeypatch)
+
+    with mock.patch("opensquilla.cli.init_cmd.autostart") as autostart_mock:
+        autostart_mock.register_logon_task.return_value.summary.return_value = (
+            "Windows autostart registered for default home"
+        )
+        run_init(autostart_register=True)
+
+    autostart_mock.register_logon_task.assert_called_once_with(
+        profile=None,
+        home=state_home,
+        state_dir=state_home,
+    )
+
+
 def test_init_autostart_errors_are_non_fatal(monkeypatch, tmp_path: Path) -> None:
     from opensquilla.cli import autostart
 
