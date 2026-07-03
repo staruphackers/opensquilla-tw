@@ -175,8 +175,10 @@ function Invoke-Opensquilla {
 
     $previousHome = $env:OPENSQUILLA_HOME
     $previousProfile = $env:OPENSQUILLA_PROFILE
+    $previousStateDir = $env:OPENSQUILLA_STATE_DIR
     $env:OPENSQUILLA_HOME = $profileRoot
     $env:OPENSQUILLA_PROFILE = $profileLeaf
+    Remove-Item Env:\OPENSQUILLA_STATE_DIR -ErrorAction SilentlyContinue
 
     try {
         $cmd = Get-OpensquillaCommand -Repo $Repo
@@ -216,6 +218,11 @@ function Invoke-Opensquilla {
             Remove-Item Env:\OPENSQUILLA_PROFILE -ErrorAction SilentlyContinue
         } else {
             $env:OPENSQUILLA_PROFILE = $previousProfile
+        }
+        if ($null -eq $previousStateDir) {
+            Remove-Item Env:\OPENSQUILLA_STATE_DIR -ErrorAction SilentlyContinue
+        } else {
+            $env:OPENSQUILLA_STATE_DIR = $previousStateDir
         }
     }
 }

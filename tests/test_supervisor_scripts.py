@@ -53,3 +53,24 @@ def test_supervisor_explicit_repo_takes_precedence_over_installed_binary() -> No
     assert auto_detect in lib
     assert lib.index(repo_branch) < lib.index(explicit_error) < lib.index(installed_lookup)
     assert lib.index(installed_lookup) < lib.index(auto_detect)
+
+
+def test_supervisor_profile_invocation_masks_inherited_state_dir() -> None:
+    lib = (SUPERVISOR / "lib.ps1").read_text(encoding="utf-8")
+
+    save_state_dir = "$previousStateDir = $env:OPENSQUILLA_STATE_DIR"
+    clear_state_dir = r"Remove-Item Env:\OPENSQUILLA_STATE_DIR -ErrorAction SilentlyContinue"
+    restore_state_dir = "$env:OPENSQUILLA_STATE_DIR = $previousStateDir"
+    set_profile = "$env:OPENSQUILLA_PROFILE = $profileLeaf"
+    resolve_command = "$cmd = Get-OpensquillaCommand -Repo $Repo"
+
+    assert save_state_dir in lib
+    assert clear_state_dir in lib
+    assert restore_state_dir in lib
+    assert (
+        lib.index(save_state_dir)
+        < lib.index(set_profile)
+        < lib.index(clear_state_dir)
+        < lib.index(resolve_command)
+    )
+    assert lib.index(resolve_command) < lib.index(restore_state_dir)
