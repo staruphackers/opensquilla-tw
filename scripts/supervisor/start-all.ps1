@@ -43,7 +43,11 @@ foreach ($entry in $entries) {
         if ($SkipRunning) {
             $statusArgs = @('--profile', $entry.Name, 'gateway', 'status', '--listen', $BindHost, '--port', [string]$port, '--json')
             $status = Invoke-Opensquilla -Repo $Repo -Profile $entry.Path -Arguments $statusArgs -CaptureOutput
-            if ($status.ExitCode -eq 0) {
+            $parsed = $null
+            if ($status.Output) {
+                $parsed = $status.Output | ConvertFrom-Json -ErrorAction SilentlyContinue
+            }
+            if ($parsed -and [string]$parsed.state -eq 'running') {
                 Write-Status ("[{0}] already running on port {1}; skipped" -f $entry.Name, $port) -Level ok
                 $skipped += 1
                 continue

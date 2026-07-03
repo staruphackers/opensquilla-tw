@@ -74,3 +74,11 @@ def test_supervisor_profile_invocation_masks_inherited_state_dir() -> None:
         < lib.index(resolve_command)
     )
     assert lib.index(resolve_command) < lib.index(restore_state_dir)
+
+
+def test_supervisor_skip_running_checks_gateway_state_not_exit_code() -> None:
+    start_all = (SUPERVISOR / "start-all.ps1").read_text(encoding="utf-8")
+
+    assert "ConvertFrom-Json -ErrorAction SilentlyContinue" in start_all
+    assert "[string]$parsed.state -eq 'running'" in start_all
+    assert "if ($status.ExitCode -eq 0)" not in start_all
