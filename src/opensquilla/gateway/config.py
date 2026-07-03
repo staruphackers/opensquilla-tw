@@ -319,7 +319,9 @@ class LlmEnsembleConfig(BaseSettings):
         extra="ignore",
     )
 
-    enabled: bool = True
+    # Off by default so a fresh install lands on the single-model AI router
+    # (squilla_router). Ensemble is opt-in via the composer's routing control.
+    enabled: bool = False
     mode: Literal["b5_fusion"] = "b5_fusion"
     proposer_tools: bool = False
     min_successful_proposers: int = Field(default=1, ge=1)

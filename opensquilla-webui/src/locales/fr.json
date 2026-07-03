@@ -1664,7 +1664,8 @@
       "runModeTrustedDesc": "Utilise le bac à sable par défaut ; les actions explicites sur l'hôte peuvent s'exécuter sur l'hôte si la politique l'autorise.",
       "runModeFull": "Accès hôte complet",
       "runModeFullDesc": "Exécute sans isolation sandbox.",
-      "runModeFullUnavailable": "L'accès hôte complet nécessite une session owner."
+      "runModeFullUnavailable": "L'accès hôte complet nécessite une session owner.",
+      "badgeNew": "NEW"
     },
     "pending": {
       "label": "En attente {count}/{max}",

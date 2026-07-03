@@ -1664,7 +1664,8 @@
       "runModeTrustedDesc": "Nutzt standardmäßig die Sandbox; eindeutige Host-Aktionen können nach Richtlinie auf dem Host laufen.",
       "runModeFull": "Voller Hostzugriff",
       "runModeFullDesc": "Ohne Sandbox-Isolierung ausführen.",
-      "runModeFullUnavailable": "Voller Hostzugriff erfordert eine owner-Sitzung."
+      "runModeFullUnavailable": "Voller Hostzugriff erfordert eine owner-Sitzung.",
+      "badgeNew": "NEW"
     },
     "pending": {
       "label": "Ausstehend {count}/{max}",

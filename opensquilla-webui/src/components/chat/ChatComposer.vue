@@ -81,6 +81,11 @@
                 @click="toggleModelRouting"
               >
                 <Icon name="router" :size="17" />
+                <span
+                  v-if="showRouterNewBadge"
+                  class="chat-model-routing-btn__new"
+                  aria-hidden="true"
+                >{{ t('chat.composer.badgeNew') }}</span>
               </button>
               <ChatComposerModelRouting
                 v-if="modelRoutingOpen"
@@ -235,6 +240,22 @@ const textareaEl = ref<HTMLTextAreaElement | null>(null)
 const fileInputEl = ref<HTMLInputElement | null>(null)
 const settingsOpen = ref(false)
 const modelRoutingOpen = ref(false)
+
+// "NEW" badge on the routing control — the single-model AI router is now the
+// default, so flag it until the user first opens the control, then never again.
+const ROUTER_NEW_BADGE_KEY = 'opensquilla.composer.routerNewBadgeSeen'
+const routerNewBadgeSeen = ref(false)
+try {
+  routerNewBadgeSeen.value = localStorage.getItem(ROUTER_NEW_BADGE_KEY) === '1'
+} catch { /* localStorage unavailable */ }
+const showRouterNewBadge = computed(() => !routerNewBadgeSeen.value)
+function dismissRouterNewBadge() {
+  if (routerNewBadgeSeen.value) return
+  routerNewBadgeSeen.value = true
+  try {
+    localStorage.setItem(ROUTER_NEW_BADGE_KEY, '1')
+  } catch { /* localStorage unavailable */ }
+}
 const runModeOpen = ref(false)
 const settingsAnchorEl = ref<HTMLElement | null>(null)
 const modelRoutingAnchorEl = ref<HTMLElement | null>(null)
@@ -284,6 +305,7 @@ function toggleSettings() {
 function toggleModelRouting() {
   modelRoutingOpen.value = !modelRoutingOpen.value
   if (modelRoutingOpen.value) {
+    dismissRouterNewBadge()
     settingsOpen.value = false
     runModeOpen.value = false
   }
@@ -614,6 +636,22 @@ defineExpose<ChatComposerExpose>({
   border-color: transparent;
   background: transparent;
   color: var(--text-muted);
+}
+
+.chat-model-routing-btn__new {
+  position: absolute;
+  top: -3px;
+  right: -5px;
+  padding: 1px 4px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--bg-surface);
+  font-size: 8px;
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  pointer-events: none;
 }
 
 .chat-model-routing-btn.btn--ghost:not(:disabled):hover {

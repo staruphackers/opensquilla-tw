@@ -1664,7 +1664,8 @@
       "runModeTrustedDesc": "默认使用沙箱；明确需要主机的操作会在策略允许时自动放行。",
       "runModeFull": "完全主机访问",
       "runModeFullDesc": "不使用沙箱隔离运行。",
-      "runModeFullUnavailable": "完全主机访问需要 owner 会话。"
+      "runModeFullUnavailable": "完全主机访问需要 owner 会话。",
+      "badgeNew": "新"
     },
     "pending": {
       "label": "待发送 {count}/{max}",

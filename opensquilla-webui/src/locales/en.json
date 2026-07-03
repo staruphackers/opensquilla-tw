@@ -1664,7 +1664,8 @@
       "runModeTrustedDesc": "Use the sandbox by default; explicit host-affecting actions can run on the host when policy allows.",
       "runModeFull": "Full Host Access",
       "runModeFullDesc": "Run without sandbox isolation.",
-      "runModeFullUnavailable": "Full Host Access requires an owner session."
+      "runModeFullUnavailable": "Full Host Access requires an owner session.",
+      "badgeNew": "NEW"
     },
     "pending": {
       "label": "Pending {count}/{max}",
