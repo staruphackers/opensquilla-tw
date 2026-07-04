@@ -85,7 +85,9 @@ async def _run_git(*args: str, cwd: str | None = None) -> str:
         cwd=cwd,
     )
     stdout, _ = await proc.communicate()
-    output = stdout.decode("utf-8", errors="replace")
+    from opensquilla.subprocess_encoding import decode_subprocess_output
+
+    output = decode_subprocess_output(stdout)
     if proc.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed (exit {proc.returncode}):\n{output}")
     return output

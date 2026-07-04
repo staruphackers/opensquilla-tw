@@ -55,3 +55,58 @@ async def test_git_status_run_mode_full_uses_host_subprocess(
             },
         }
     ]
+
+
+class _GbkProcess:
+    """Emits GBK/CP936-encoded Chinese bytes (e.g. a filename in git status)."""
+
+    returncode = 0
+
+    async def communicate(self) -> tuple[bytes, None]:
+        # "新建文件" (new file) encoded in GBK — invalid UTF-8, so a naive
+        # utf-8/replace decode would mangle it into replacement characters.
+        return " M ".encode("ascii") + "新建文件.txt\n".encode("gbk"), None
+
+
+@pytest.mark.asyncio
+async def test_git_host_output_decodes_via_centralized_decoder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The git host fallback must route bytes through the centralized subprocess
+    # decoder (not a raw utf-8/replace decode that garbles CJK filenames on
+    # Windows, #336 residue). Verify the wiring by spying on the decoder.
+    reset_runtime()
+    raw = " M ".encode("ascii") + "新建文件.txt\n".encode("gbk")
+    seen: list[bytes] = []
+
+    def fake_decode(data: bytes | None, **kwargs: Any) -> str:
+        seen.append(bytes(data or b""))
+        return "新建文件.txt (decoded)"
+
+    monkeypatch.setattr(
+        "opensquilla.subprocess_encoding.decode_subprocess_output", fake_decode
+    )
+
+    async def fake_create_subprocess_exec(*args: str, **kwargs: Any) -> _GbkProcess:
+        return _GbkProcess()
+
+    monkeypatch.setattr(git.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    token = current_tool_context.set(
+        ToolContext(
+            is_owner=True,
+            workspace_dir=str(tmp_path),
+            run_mode="full",
+            session_key="agent:main:test",
+        )
+    )
+    try:
+        result = await git.git_status()
+    finally:
+        current_tool_context.reset(token)
+        reset_runtime()
+
+    # Git output flowed through the centralized decoder (not a raw .decode()).
+    assert seen == [raw]
+    assert result == "新建文件.txt (decoded)"
+

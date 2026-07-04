@@ -69,7 +69,14 @@ def test_desktop_activation_retry_and_second_instance_share_resume_helper() -> N
 
     assert "if (process.platform !== 'darwin') app.quit()" in main_ts
     assert "app.on('activate', () => {\n  void openOrResumeDesktopApp()" in main_ts
-    assert "app.on('second-instance', () => {\n    void openOrResumeDesktopApp()" in main_ts
+    # second-instance resumes the app via the shared helper (a diagnostic log
+    # line precedes the resume call — see the #446 relaunch-retry contract).
+    second_instance = _section(
+        main_ts,
+        "app.on('second-instance', () => {",
+        "void app.whenReady().then",
+    )
+    assert "void openOrResumeDesktopApp()" in second_instance
     assert "void app.whenReady().then" in main_ts
     assert "void openOrResumeDesktopApp()" in _section(
         main_ts,
@@ -892,3 +899,41 @@ def test_desktop_cleanup_does_not_claim_os_app_uninstall() -> None:
     assert "remove OpenSquilla through your OS" in en_runtime["uninstallDone"]
     assert "清理桌面本地数据" in zh_runtime["uninstallLabel"]
     assert "已卸载" not in zh_runtime["uninstallDone"]
+
+
+def test_desktop_second_launch_retries_lock_and_logs_instead_of_silent_quit() -> None:
+    # Issue #446: a relaunch right after closing must not silently no-op. The
+    # single-instance lock is retried for a bounded window, and both success and
+    # failure are recorded to a main-process launch log.
+    main_ts = _read("desktop/electron/src/main.ts")
+
+    assert "function acquireSingleInstanceLockWithRetry(): boolean" in main_ts
+    assert "function desktopLog(" in main_ts
+    assert "desktop.log" in main_ts
+    # Bounded retry, not a single attempt.
+    retry = _section(
+        main_ts,
+        "function acquireSingleInstanceLockWithRetry(): boolean",
+        "desktopLog('launch',",
+    )
+    assert "Date.now() + 5_000" in retry
+    assert "app.requestSingleInstanceLock()" in retry
+    # On give-up: explicit dialog + quit, not a bare silent app.quit().
+    giveup = _section(main_ts, "if (!gotSingleInstanceLock) {", "app.on('second-instance'")
+    assert "launch_aborted_lock_held" in giveup
+    assert "showErrorBox" in giveup
+
+
+def test_desktop_windows_quit_drains_gateway_before_exit() -> None:
+    # Issue: the daily Windows close path must give the gateway its graceful
+    # drain (like the update/uninstall paths), not a bare TerminateProcess.
+    main_ts = _read("desktop/electron/src/main.ts")
+
+    before_quit = _section(main_ts, "app.on('before-quit'", "function shutdownFromSignal")
+    assert "process.platform === 'win32'" in before_quit
+    assert "event.preventDefault()" in before_quit
+    assert "requestGatewayShutdown(" in before_quit
+    assert "waitForGatewayProcessExit(child)" in before_quit
+    assert "app.exit(0)" in before_quit
+    # The drain runs once, then the re-issued quit falls through.
+    assert "windowsQuitDrainDone" in before_quit

@@ -212,6 +212,21 @@ def test_default_ci_blocks_pull_requests_and_main_pushes() -> None:
     assert "workflow_changed" not in text
 
 
+def test_ci_verifies_committed_frontend_dist_is_fresh() -> None:
+    # The gateway serves the COMMITTED dist, not source, so CI must fail when a
+    # Web UI source change lands without a rebuilt+committed bundle. An
+    # exists-only check would let a stale bundle ship (#413 residue), so the step
+    # must diff the freshly-built dist against the committed one.
+    ci_path = WORKFLOW_DIR / "ci.yml"
+    if not ci_path.exists():
+        return
+    text = ci_path.read_text(encoding="utf-8")
+
+    assert "Verify committed dist is fresh" in text
+    assert "git diff --quiet -- src/opensquilla/gateway/static/dist" in text
+    assert "committed Web UI dist is stale" in text
+
+
 def test_pr_target_validator_allows_main_pull_requests(tmp_path: Path) -> None:
     result = _validate_pr_target(
         tmp_path,
