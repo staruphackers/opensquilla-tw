@@ -255,6 +255,7 @@ METHOD_SCOPES: dict[str, str] = {
     # The probe persists nothing but carries candidate credentials.
     "onboarding.provider.probe": ADMIN_SCOPE,
     "onboarding.router.configure": ADMIN_SCOPE,
+    "onboarding.ensemble.configure": ADMIN_SCOPE,
     "onboarding.memory_embedding.configure": ADMIN_SCOPE,
     "onboarding.search.configure": ADMIN_SCOPE,
     "onboarding.imageGeneration.configure": ADMIN_SCOPE,
