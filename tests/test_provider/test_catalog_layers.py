@@ -247,11 +247,12 @@ def test_packaged_corrections_file_parses_with_expected_tables() -> None:
         .read_text(encoding="utf-8")
     )
     payload = tomllib.loads(text)
-    # Window/pricing corrections (static tables) + the transcribed
+    # Window/pricing corrections (retired static tables) + the transcribed
     # capability ladder (see the "capability ladder migration" section).
     assert set(payload) == {
         "moonshot",
         "anthropic",
+        "openrouter",
         "dashscope",
         "volcengine",
         "byteplus",
@@ -272,6 +273,12 @@ def test_packaged_corrections_file_parses_with_expected_tables() -> None:
         "claude-opus-4-6",
         "claude-sonnet-4-6",
         "claude-haiku-4-5-20251001",
+    }
+    assert set(payload["openrouter"]) == {
+        "anthropic/claude-opus-4.8",
+        "anthropic/claude-sonnet-4.6",
+        "x-ai/grok-4.3",
+        "stepfun/step-3.5-flash",
     }
     # Every packaged row survives normalization — no unknown field names,
     # no mistyped values (a dropped field would silently weaken a layer).
@@ -315,38 +322,49 @@ def test_ladder_glob_rows_keep_specific_before_general_file_order() -> None:
 
 
 def test_moonshot_v1_windows_resolve_from_packaged_corrections() -> None:
-    # moonshot-v1-* is absent from the snapshot's moonshot table, so before
-    # these rows resolve_entry fell to the synthesized floor (32k/8k) while
-    # only the legacy paths knew the real windows via _STATIC_FALLBACK. The
-    # corrections layer now carries the same values as data.
+    # moonshot-v1-* is absent from the snapshot's moonshot table, so without
+    # these rows resolve_entry would fall to the synthesized floor (32k/8k).
+    # The corrections rows are the canonical source of these windows (the
+    # in-repo static fallback table they were copied from has been retired);
+    # the literals below pin the retired table's exact values.
     catalog = ModelCatalog()
-    for model in ("moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"):
-        static_max_output, static_context = model_catalog_module._STATIC_FALLBACK[model]
+    expected_windows = {
+        "moonshot-v1-8k": (8_192, 8_192),
+        "moonshot-v1-32k": (32_768, 32_768),
+        "moonshot-v1-128k": (131_072, 131_072),
+    }
+    for model, (max_output, context_window) in expected_windows.items():
         entry = catalog.resolve_entry(model, provider="moonshot")
         assert entry.source == "corrections", model
-        assert entry.context_window == static_context, model
-        assert entry.max_output_tokens == static_max_output, model
-    # Copied EXACTLY from the static table (which stays untouched for the
-    # legacy paths): the 8k SKU is 8192/8192, not the synthesized 32k/8k.
+        assert entry.context_window == context_window, model
+        assert entry.max_output_tokens == max_output, model
+    # The 8k SKU is 8192/8192, not the synthesized 32k/8k.
     eight_k = catalog.resolve_entry("moonshot-v1-8k", provider="moonshot")
     assert (eight_k.max_output_tokens, eight_k.context_window) == (8_192, 8_192)
 
 
-def test_anthropic_known_models_priced_via_packaged_corrections() -> None:
-    from opensquilla.provider.anthropic import _KNOWN_MODELS
-
+def test_anthropic_listing_models_priced_via_packaged_corrections() -> None:
+    # The corrections rows are the canonical metadata for the SKUs the
+    # Anthropic adapter lists (the adapter's _KNOWN_MODELS table has been
+    # retired; list_models resolves these rows through the shared catalog).
+    # Literals pin the retired table's values, with per-1k costs converted
+    # to the canonical per-Mtok unit (x1000).
+    listing_rows = (
+        ("claude-opus-4-6", "Claude Opus 4.6", 200_000, 32_000, 15.0, 75.0),
+        ("claude-sonnet-4-6", "Claude Sonnet 4.6", 200_000, 16_000, 3.0, 15.0),
+        ("claude-haiku-4-5-20251001", "Claude Haiku 4.5", 200_000, 8_192, 0.25, 1.25),
+    )
     catalog = ModelCatalog()
-    assert _KNOWN_MODELS  # the corrections rows mirror this table
-    for row in _KNOWN_MODELS:
-        entry = catalog.resolve_entry(row["model_id"], provider="anthropic")
-        assert entry.source == "corrections", row["model_id"]
-        # Windows copied from the same rows; corrections beat the snapshot.
-        assert entry.context_window == row["context_window"], row["model_id"]
-        assert entry.max_output_tokens == row["max_output_tokens"], row["model_id"]
-        # Per-1k costs converted to the canonical per-Mtok unit (x1000).
-        assert entry.input_cost_per_mtok == pytest.approx(row["input_cost_per_1k"] * 1000.0)
-        assert entry.output_cost_per_mtok == pytest.approx(row["output_cost_per_1k"] * 1000.0)
-        # _KNOWN_MODELS carries no cache pricing — those stay unknown.
+    for model_id, display_name, context_window, max_output, in_mtok, out_mtok in listing_rows:
+        entry = catalog.resolve_entry(model_id, provider="anthropic")
+        assert entry.source == "corrections", model_id
+        assert entry.display_name == display_name, model_id
+        # Windows come from the same rows; corrections beat the snapshot.
+        assert entry.context_window == context_window, model_id
+        assert entry.max_output_tokens == max_output, model_id
+        assert entry.input_cost_per_mtok == pytest.approx(in_mtok)
+        assert entry.output_cost_per_mtok == pytest.approx(out_mtok)
+        # The retired table carried no cache pricing — those stay unknown.
         assert entry.cache_read_cost_per_mtok is None
         assert entry.cache_write_cost_per_mtok is None
 

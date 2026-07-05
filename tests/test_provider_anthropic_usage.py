@@ -17,6 +17,7 @@ from opensquilla.provider.types import (
     DoneEvent,
     ErrorEvent,
     Message,
+    ModelInfo,
 )
 
 
@@ -436,3 +437,42 @@ def test_anthropic_http_error_with_non_utf8_body_yields_error_event(monkeypatch)
     assert isinstance(error, ErrorEvent)
     assert error.code == "429"
     assert error.message.startswith("HTTP 429:")
+
+
+def test_list_models_rows_match_retired_known_models_table() -> None:
+    # list_models now builds its rows from the shared catalog's corrections
+    # data instead of the retired _KNOWN_MODELS adapter table. These literals
+    # are the exact rows that table produced (per-1k costs on the wire).
+    expected = [
+        ModelInfo(
+            provider="anthropic",
+            model_id="claude-opus-4-6",
+            display_name="Claude Opus 4.6",
+            context_window=200000,
+            max_output_tokens=32000,
+            input_cost_per_1k=0.015,
+            output_cost_per_1k=0.075,
+        ),
+        ModelInfo(
+            provider="anthropic",
+            model_id="claude-sonnet-4-6",
+            display_name="Claude Sonnet 4.6",
+            context_window=200000,
+            max_output_tokens=16000,
+            input_cost_per_1k=0.003,
+            output_cost_per_1k=0.015,
+        ),
+        ModelInfo(
+            provider="anthropic",
+            model_id="claude-haiku-4-5-20251001",
+            display_name="Claude Haiku 4.5",
+            context_window=200000,
+            max_output_tokens=8192,
+            input_cost_per_1k=0.00025,
+            output_cost_per_1k=0.00125,
+        ),
+    ]
+
+    rows = asyncio.run(AnthropicProvider(api_key="test").list_models())
+
+    assert rows == expected

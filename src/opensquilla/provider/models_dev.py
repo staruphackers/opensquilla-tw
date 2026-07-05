@@ -4,8 +4,9 @@ The snapshot (``models_dev_snapshot.json``, refreshed via
 ``scripts/refresh_models_dev_snapshot.py``) is the offline source of real
 per-``(provider, model)`` context/output limits and capability booleans. It
 sits between the live provider catalog (authoritative when reachable) and
-the hand-maintained conservative ``_STATIC_FALLBACK`` (emergency floor), so
-direct-provider deployments stop running on guessed limits.
+the hand-maintained conservative budget rows packaged in
+``catalog_overrides.toml`` (emergency floor), so direct-provider deployments
+stop running on guessed limits.
 """
 
 from __future__ import annotations
