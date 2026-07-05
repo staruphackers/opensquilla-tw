@@ -664,7 +664,7 @@
     },
     "empty": {
       "title": "No sessions yet.",
-      "body": "Start your first task above — sessions appear here as agents pick up work."
+      "body": "Sessions appear here as agents pick up work."
     },
     "noMatches": {
       "title": "No matches",

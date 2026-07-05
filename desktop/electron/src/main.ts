@@ -20,6 +20,7 @@ interface GatewayState {
 
 type SecretEncryption = 'safeStorage' | 'plain'
 type RouterMode = 'recommended' | 'openrouter-mix' | 'disabled'
+type ModelRoutingMode = 'squilla_router' | 'direct' | 'llm_ensemble'
 type TextRouterTier = 'c0' | 'c1' | 'c2' | 'c3'
 
 interface ProviderCatalogEntry {
@@ -58,6 +59,7 @@ interface DesktopConnection {
   baseUrl: string
   apiKeyEnv: string
   encryptedApiKey?: string
+  modelRoutingMode: ModelRoutingMode
   routerMode: RouterMode
   routerDefaultTier: TextRouterTier
   routerTiers: Record<string, RouterTier>
@@ -75,6 +77,7 @@ interface OnboardingPayload {
   model?: unknown
   baseUrl?: unknown
   apiKey?: unknown
+  modelRoutingMode?: unknown
   routerMode?: unknown
   routerDefaultTier?: unknown
   routerTiers?: unknown
@@ -90,6 +93,7 @@ interface DesktopSettingsSnapshot {
   model: string
   baseUrl: string
   apiKeyConfigured: boolean
+  modelRoutingMode: ModelRoutingMode
   routerMode: RouterMode
   routerDefaultTier: TextRouterTier
   routerTiers: Record<string, RouterTier>
@@ -566,6 +570,37 @@ function normalizeRouterMode(raw: unknown, provider: string): RouterMode {
   return 'disabled'
 }
 
+function modelRoutingModeAllowed(mode: ModelRoutingMode, provider: string): boolean {
+  if (mode === 'direct') return true
+  if (mode === 'llm_ensemble') return provider === 'openrouter'
+  return ROUTER_PROFILE_IDS.has(provider)
+}
+
+function modelRoutingModeForRouterMode(routerMode: RouterMode, provider: string): ModelRoutingMode {
+  if (routerMode === 'disabled') return 'direct'
+  if (routerMode === 'openrouter-mix' && provider === 'openrouter') return 'llm_ensemble'
+  return modelRoutingModeAllowed('squilla_router', provider) ? 'squilla_router' : 'direct'
+}
+
+function normalizeModelRoutingMode(raw: unknown, provider: string, fallbackRouterMode?: RouterMode): ModelRoutingMode {
+  const value = String(raw || '').trim().toLowerCase()
+  const requested = ['squilla_router', 'direct', 'llm_ensemble'].includes(value)
+    ? value as ModelRoutingMode
+    : fallbackRouterMode
+      ? modelRoutingModeForRouterMode(fallbackRouterMode, provider)
+      : modelRoutingModeAllowed('squilla_router', provider)
+        ? 'squilla_router'
+        : 'direct'
+  if (modelRoutingModeAllowed(requested, provider)) return requested
+  return modelRoutingModeAllowed('squilla_router', provider) ? 'squilla_router' : 'direct'
+}
+
+function routerModeForModelRoutingMode(mode: ModelRoutingMode, provider: string): RouterMode {
+  if (mode === 'direct') return 'disabled'
+  if (mode === 'llm_ensemble' && provider === 'openrouter') return 'recommended'
+  return normalizeRouterMode('recommended', provider)
+}
+
 function defaultRouterTiers(provider: string, mode: RouterMode): Record<string, RouterTier> {
   if (mode === 'disabled') return {}
   if (mode === 'openrouter-mix') return cloneRouterTiers(ROUTER_PROFILES.openrouter)
@@ -658,6 +693,22 @@ function routerConfigTomlLines(credential: DesktopConnection): string[] {
     `default_tier = ${tomlString(credential.routerDefaultTier)}`,
     ...(credential.routerMode === 'recommended' ? [`tier_profile = ${tomlString(credential.provider)}`] : []),
     ...tierLines,
+  ]
+}
+
+function ensembleConfigTomlLines(credential: DesktopConnection): string[] {
+  if (credential.modelRoutingMode !== 'llm_ensemble') {
+    return [
+      '',
+      '[llm_ensemble]',
+      'enabled = false',
+    ]
+  }
+  return [
+    '',
+    '[llm_ensemble]',
+    'enabled = true',
+    'selection_mode = "static_openrouter_b5"',
   ]
 }
 
@@ -759,7 +810,9 @@ function isConnectionReady(record: DesktopConnection): boolean {
 function normalizeDesktopCredential(parsed: Partial<DesktopConnection>): DesktopConnection {
   const provider = normalizeProvider(parsed.provider)
   const defaults = providerDefaults(provider)
-  const routerMode = normalizeRouterMode(parsed.routerMode, provider)
+  const legacyRouterMode = normalizeRouterMode(parsed.routerMode, provider)
+  const modelRoutingMode = normalizeModelRoutingMode(parsed.modelRoutingMode, provider, legacyRouterMode)
+  const routerMode = routerModeForModelRoutingMode(modelRoutingMode, provider)
   const routerDefaultTier = normalizeTextTier(parsed.routerDefaultTier)
   const defaultTiers = defaultRouterTiers(provider, routerMode)
   const routerTiers = normalizeRouterTiers(parsed.routerTiers, defaultTiers)
@@ -772,6 +825,7 @@ function normalizeDesktopCredential(parsed: Partial<DesktopConnection>): Desktop
     baseUrl: parsed.baseUrl || defaults.baseUrl,
     apiKeyEnv: parsed.apiKeyEnv || defaults.apiKeyEnv,
     encryptedApiKey: parsed.encryptedApiKey || '',
+    modelRoutingMode,
     routerMode,
     routerDefaultTier,
     routerTiers,
@@ -798,7 +852,16 @@ async function saveDesktopCredential(payload: OnboardingPayload): Promise<Deskto
   const existing = await loadDesktopCredential()
   const provider = normalizeProvider(payload.provider ?? existing?.provider)
   const defaults = providerDefaults(provider)
-  const routerMode = normalizeRouterMode(payload.routerMode ?? existing?.routerMode, provider)
+  const legacyRouterMode = normalizeRouterMode(payload.routerMode ?? existing?.routerMode, provider)
+  const hasModelRoutingMode = Object.prototype.hasOwnProperty.call(payload, 'modelRoutingMode')
+  const hasRouterMode = Object.prototype.hasOwnProperty.call(payload, 'routerMode')
+  const rawModelRoutingMode = hasModelRoutingMode
+    ? payload.modelRoutingMode
+    : hasRouterMode
+      ? undefined
+      : existing?.modelRoutingMode
+  const modelRoutingMode = normalizeModelRoutingMode(rawModelRoutingMode, provider, legacyRouterMode)
+  const routerMode = routerModeForModelRoutingMode(modelRoutingMode, provider)
   const routerDefaultTier = normalizeTextTier(payload.routerDefaultTier ?? existing?.routerDefaultTier)
   const defaultTiers = defaultRouterTiers(provider, routerMode)
   const existingTiers = existing && existing.provider === provider && existing.routerMode === routerMode
@@ -830,6 +893,7 @@ async function saveDesktopCredential(payload: OnboardingPayload): Promise<Deskto
     : configDisableNetworkObservability ?? existing?.disableNetworkObservability ?? false
 
   if (defaults.requiresApiKey && !encryptedApiKey) throw new Error('API key is required.')
+  if (modelRoutingMode === 'llm_ensemble' && provider !== 'openrouter') throw new Error('LLM Ensemble requires OpenRouter in desktop onboarding.')
   if (!routerModel && routerMode !== 'disabled') throw new Error('Router tiers require a default model.')
   if (!model) throw new Error('Model is required.')
   if (searchDefaults.requiresApiKey && !encryptedSearchApiKey) {
@@ -843,6 +907,7 @@ async function saveDesktopCredential(payload: OnboardingPayload): Promise<Deskto
     baseUrl,
     apiKeyEnv: defaults.apiKeyEnv,
     encryptedApiKey,
+    modelRoutingMode,
     routerMode,
     routerDefaultTier,
     routerTiers,
@@ -881,6 +946,7 @@ async function writeDesktopConfig(credential: DesktopConnection): Promise<void> 
     `base_url = ${tomlString(credential.baseUrl)}`,
     '',
     ...routerConfigTomlLines(credential),
+    ...ensembleConfigTomlLines(credential),
     ...privacyConfigTomlLines(credential),
     '',
     '[control_ui]',
@@ -894,7 +960,9 @@ async function writeDesktopConfig(credential: DesktopConnection): Promise<void> 
 function settingsSnapshot(connection: DesktopConnection | null): DesktopSettingsSnapshot {
   const provider = normalizeProvider(connection?.provider)
   const defaults = providerDefaults(provider)
-  const routerMode = normalizeRouterMode(connection?.routerMode, provider)
+  const legacyRouterMode = normalizeRouterMode(connection?.routerMode, provider)
+  const modelRoutingMode = normalizeModelRoutingMode(connection?.modelRoutingMode, provider, legacyRouterMode)
+  const routerMode = routerModeForModelRoutingMode(modelRoutingMode, provider)
   const routerDefaultTier = normalizeTextTier(connection?.routerDefaultTier)
   const routerTiers = normalizeRouterTiers(connection?.routerTiers, defaultRouterTiers(provider, routerMode))
   const searchProvider = normalizeSearchProvider(connection?.searchProvider)
@@ -904,6 +972,7 @@ function settingsSnapshot(connection: DesktopConnection | null): DesktopSettings
     model: connection?.model || routerDefaultModel(routerTiers, routerDefaultTier) || defaults.model,
     baseUrl: connection?.baseUrl || defaults.baseUrl,
     apiKeyConfigured: Boolean(connection?.encryptedApiKey),
+    modelRoutingMode,
     routerMode,
     routerDefaultTier,
     routerTiers,
@@ -1021,13 +1090,109 @@ async function openArtifactWithDefaultApp(payload: ArtifactOpenRequest): Promise
   }
 }
 
-// --- Desktop native-shell i18n (English + Simplified Chinese, v1) ---
+// --- Desktop native-shell i18n ---
 // The embedded Web UI carries its own vue-i18n layer; this small catalog covers
 // the main-process surfaces that live OUTSIDE the BrowserWindow (app-authored
 // menu group labels and the onboarding window title), keyed off the OS locale.
 // Role-based menu items (Cut/Copy/Paste/…) are localized by Electron itself.
 type DesktopLocale = 'en' | 'zh-Hans' | 'ja' | 'fr' | 'de' | 'es'
+const DESKTOP_LOCALES: DesktopLocale[] = ['en', 'zh-Hans', 'ja', 'fr', 'de', 'es']
+const DESKTOP_LOCALE_LABELS: Record<DesktopLocale, string> = {
+  en: 'English',
+  'zh-Hans': '简体中文',
+  ja: '日本語',
+  fr: 'Français',
+  de: 'Deutsch',
+  es: 'Español',
+}
 let desktopLocale: DesktopLocale = 'en'
+
+const PROVIDER_NOTE_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
+  en: {
+    openrouter: 'Best default for mixed model routing.',
+    openai: 'OpenAI-only tier profile.',
+    openai_responses: 'OpenAI Responses-API shape (chat + responses).',
+    anthropic: 'Direct Claude access without SquillaRouter tiers.',
+    dashscope: 'Qwen tier profile for Mainland-friendly access.',
+    deepseek: 'DeepSeek-only fast and pro routing.',
+    gemini: 'Gemini OpenAI-compatible tier profile.',
+    moonshot: 'Kimi text and image-capable routes.',
+    ollama: 'Local direct model path.',
+    qianfan: 'Direct provider model id required.',
+    volcengine: 'Doubao tier profile.',
+    zhipu: 'GLM tier profile.',
+  },
+  'zh-Hans': {
+    openrouter: '适合混合模型路由的初始默认选项。',
+    openai: '仅使用 OpenAI 的层级配置。',
+    openai_responses: 'OpenAI Responses API 格式（chat + responses）。',
+    anthropic: '直接访问 Claude，不使用 SquillaRouter 层级。',
+    dashscope: '面向大陆访问的 Qwen 层级配置。',
+    deepseek: '仅使用 DeepSeek 的 fast/pro 路由。',
+    gemini: 'Gemini 的 OpenAI 兼容层级配置。',
+    moonshot: 'Kimi 文本和图像能力路由。',
+    ollama: '本地直连模型路径。',
+    qianfan: '需要填写直连 provider 模型 ID。',
+    volcengine: '豆包层级配置。',
+    zhipu: 'GLM 层级配置。',
+  },
+  ja: {
+    openrouter: '混合モデルルーティングに適した初期デフォルトです。',
+    openai: 'OpenAI のみを使うティアプロファイルです。',
+    openai_responses: 'OpenAI Responses API 形式（chat + responses）です。',
+    anthropic: 'SquillaRouter ティアを使わず Claude に直接アクセスします。',
+    dashscope: '中国本土から使いやすい Qwen ティアプロファイルです。',
+    deepseek: 'DeepSeek の fast/pro のみでルーティングします。',
+    gemini: 'Gemini の OpenAI 互換ティアプロファイルです。',
+    moonshot: 'Kimi のテキストと画像対応ルートです。',
+    ollama: 'ローカル直接モデルのパスです。',
+    qianfan: '直接 provider のモデル ID が必要です。',
+    volcengine: 'Doubao ティアプロファイルです。',
+    zhipu: 'GLM ティアプロファイルです。',
+  },
+  fr: {
+    openrouter: 'Bon choix initial par défaut pour le routage de modèles mixtes.',
+    openai: 'Profil de niveaux limité à OpenAI.',
+    openai_responses: 'Format OpenAI Responses API (chat + responses).',
+    anthropic: 'Accès direct à Claude sans niveaux SquillaRouter.',
+    dashscope: 'Profil de niveaux Qwen adapté à un accès depuis la Chine continentale.',
+    deepseek: 'Routage fast/pro limité à DeepSeek.',
+    gemini: 'Profil de niveaux Gemini compatible OpenAI.',
+    moonshot: 'Routes Kimi pour le texte et les capacités image.',
+    ollama: 'Chemin de modèle direct local.',
+    qianfan: 'ID de modèle provider direct requis.',
+    volcengine: 'Profil de niveaux Doubao.',
+    zhipu: 'Profil de niveaux GLM.',
+  },
+  de: {
+    openrouter: 'Gute anfängliche Voreinstellung für gemischtes Modellrouting.',
+    openai: 'Nur-OpenAI-Stufenprofil.',
+    openai_responses: 'OpenAI Responses-API-Format (chat + responses).',
+    anthropic: 'Direkter Claude-Zugriff ohne SquillaRouter-Stufen.',
+    dashscope: 'Qwen-Stufenprofil für gut erreichbaren Zugriff vom chinesischen Festland.',
+    deepseek: 'Nur DeepSeek fast/pro Routing.',
+    gemini: 'OpenAI-kompatibles Gemini-Stufenprofil.',
+    moonshot: 'Kimi-Routen für Text- und Bildfähigkeiten.',
+    ollama: 'Lokaler direkter Modellpfad.',
+    qianfan: 'Direkte provider-Modell-ID erforderlich.',
+    volcengine: 'Doubao-Stufenprofil.',
+    zhipu: 'GLM-Stufenprofil.',
+  },
+  es: {
+    openrouter: 'Buena opción inicial para el enrutamiento mixto de modelos.',
+    openai: 'Perfil de niveles solo con OpenAI.',
+    openai_responses: 'Formato OpenAI Responses API (chat + responses).',
+    anthropic: 'Acceso directo a Claude sin niveles SquillaRouter.',
+    dashscope: 'Perfil de niveles Qwen para acceso cómodo desde China continental.',
+    deepseek: 'Enrutamiento fast/pro solo con DeepSeek.',
+    gemini: 'Perfil de niveles Gemini compatible con OpenAI.',
+    moonshot: 'Rutas Kimi para texto y capacidades de imagen.',
+    ollama: 'Ruta de modelo directo local.',
+    qianfan: 'Se requiere el ID del modelo provider directo.',
+    volcengine: 'Perfil de niveles Doubao.',
+    zhipu: 'Perfil de niveles GLM.',
+  },
+}
 
 function resolveDesktopLocale(): DesktopLocale {
   const preferred = typeof app.getPreferredSystemLanguages === 'function'
@@ -1075,16 +1240,18 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'onboarding.rail.title': 'Desktop setup',
     'onboarding.rail.subtitle': 'Configure the local runtime in the same order as the guided CLI.',
     'onboarding.rail.foot': 'OpenSquilla keeps this profile local to this device.',
+    'onboarding.language.label': 'Language',
     'onboarding.aria.setupSteps': 'Setup steps',
     'onboarding.aria.setupDepth': 'Setup depth',
-    'onboarding.aria.routerMode': 'Router mode',
+    'onboarding.aria.modelRoutingMode': 'Routing mode',
     'onboarding.aria.searchProvider': 'Search provider',
+    'onboarding.aria.language': 'Onboarding language',
     'onboarding.nav.mode.title': 'Mode',
     'onboarding.nav.mode.sub': 'Setup depth',
     'onboarding.nav.provider.title': 'Provider',
     'onboarding.nav.provider.sub': 'Model access',
-    'onboarding.nav.router.title': 'Smart Router',
-    'onboarding.nav.router.sub': 'Routing mode',
+    'onboarding.nav.routing.title': 'Routing',
+    'onboarding.nav.routing.sub': 'Mode',
     'onboarding.nav.tiers.title': 'Tiers',
     'onboarding.nav.tiers.sub': 'Default models',
     'onboarding.nav.search.title': 'Search',
@@ -1095,24 +1262,25 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'onboarding.step1.simpleTitle': 'Simple setup',
     'onboarding.step1.simpleDesc': 'Pick one provider, add its key, choose search, and start OpenSquilla with defaults.',
     'onboarding.step1.advancedTitle': 'Advanced setup',
-    'onboarding.step1.advancedDesc': 'Review Smart Router mode, tier defaults, and direct model details before startup.',
+    'onboarding.step1.advancedDesc': 'Review tier defaults and direct model details before startup.',
     'onboarding.step1.note': 'You can change provider, router, and search settings later from the desktop Settings page.',
     'onboarding.step1.quit': 'Quit',
     'onboarding.step1.continue': 'Continue',
     'onboarding.step2.badge': 'Required',
     'onboarding.step2.heading': 'Connect a provider',
-    'onboarding.step2.subtitle': 'This is the account the local runtime uses for model calls. OpenRouter is the default; more providers stay tucked away until you need them.',
+    'onboarding.step2.subtitle': 'Choose the provider account the local runtime uses for model calls. OpenRouter starts selected, but any supported provider can be used.',
     'onboarding.step2.apiKey': 'API key',
     'onboarding.step2.endpointSummary': 'Endpoint and direct model',
     'onboarding.step2.baseUrl': 'Base URL',
     'onboarding.step2.directModel': 'Direct model',
     'onboarding.step2.back': 'Back',
     'onboarding.step2.next': 'Next',
-    'onboarding.step3.badge': 'Routing',
-    'onboarding.step3.heading': 'Select Smart Router mode',
-    'onboarding.step3.subtitle': 'Choose whether OpenSquilla should route work across tier defaults or call one model directly.',
+    'onboarding.step3.badge': 'Advanced',
+    'onboarding.step3.heading': 'Choose routing mode',
+    'onboarding.step3.subtitle': 'Decide whether OpenSquilla should use Smart Router tiers, call one fixed model, or use the OpenRouter ensemble.',
     'onboarding.step3.back': 'Back',
     'onboarding.step3.next': 'Next',
+    'onboarding.step3.directModel': 'Direct model',
     'onboarding.step4.badge': 'Models',
     'onboarding.step4.heading': 'Review tier models',
     'onboarding.step4.subtitle': 'Pick the default text tier and keep the CLI defaults, or customize the model ids before startup.',
@@ -1125,8 +1293,6 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'onboarding.step5.searchHintDefault': 'DuckDuckGo is enough to start.',
     'onboarding.step5.back': 'Back',
     'onboarding.step5.finish': 'Start OpenSquilla',
-    'onboarding.more.show': 'More providers',
-    'onboarding.more.hide': 'Hide providers',
   },
   'zh-Hans': {
     'menu.edit': '编辑',
@@ -1158,16 +1324,18 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'onboarding.rail.title': '桌面设置',
     'onboarding.rail.subtitle': '按照引导式 CLI 的相同顺序配置本地运行时。',
     'onboarding.rail.foot': 'OpenSquilla 将此配置保留在本设备本地。',
+    'onboarding.language.label': '语言',
     'onboarding.aria.setupSteps': '设置步骤',
     'onboarding.aria.setupDepth': '设置深度',
-    'onboarding.aria.routerMode': '路由模式',
+    'onboarding.aria.modelRoutingMode': '路由模式',
     'onboarding.aria.searchProvider': '搜索提供商',
+    'onboarding.aria.language': 'onboarding 语言',
     'onboarding.nav.mode.title': '模式',
     'onboarding.nav.mode.sub': '设置深度',
     'onboarding.nav.provider.title': '提供商',
     'onboarding.nav.provider.sub': '模型访问',
-    'onboarding.nav.router.title': 'Smart Router',
-    'onboarding.nav.router.sub': '路由模式',
+    'onboarding.nav.routing.title': '路由',
+    'onboarding.nav.routing.sub': '模式',
     'onboarding.nav.tiers.title': '层级',
     'onboarding.nav.tiers.sub': '默认模型',
     'onboarding.nav.search.title': '搜索',
@@ -1178,24 +1346,25 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'onboarding.step1.simpleTitle': '简单设置',
     'onboarding.step1.simpleDesc': '选择一个提供商，添加其密钥，选择搜索，然后使用默认设置启动 OpenSquilla。',
     'onboarding.step1.advancedTitle': '高级设置',
-    'onboarding.step1.advancedDesc': '在启动前查看 Smart Router 模式、层级默认值和直连模型详情。',
+    'onboarding.step1.advancedDesc': '在启动前查看层级默认值和直连模型详情。',
     'onboarding.step1.note': '稍后可在桌面设置页面更改提供商、路由器和搜索设置。',
     'onboarding.step1.quit': '退出',
     'onboarding.step1.continue': '继续',
     'onboarding.step2.badge': '必填',
     'onboarding.step2.heading': '连接提供商',
-    'onboarding.step2.subtitle': '这是本地运行时用于模型调用的账户。默认使用 OpenRouter；其他提供商会收起，需要时再展开。',
+    'onboarding.step2.subtitle': '选择本地运行时用于模型调用的提供商账户。OpenRouter 只是初始默认选项，可改用任何支持的提供商。',
     'onboarding.step2.apiKey': 'API 密钥',
     'onboarding.step2.endpointSummary': '端点和直连模型',
     'onboarding.step2.baseUrl': 'Base URL',
     'onboarding.step2.directModel': '直连模型',
     'onboarding.step2.back': '返回',
     'onboarding.step2.next': '下一步',
-    'onboarding.step3.badge': '路由',
-    'onboarding.step3.heading': '选择 Smart Router 模式',
-    'onboarding.step3.subtitle': '选择 OpenSquilla 是按层级默认值分配工作，还是直接调用单个模型。',
+    'onboarding.step3.badge': '高级',
+    'onboarding.step3.heading': '选择路由模式',
+    'onboarding.step3.subtitle': '选择 OpenSquilla 使用 Smart Router 层级、直连一个固定模型，还是使用 OpenRouter Ensemble。',
     'onboarding.step3.back': '返回',
     'onboarding.step3.next': '下一步',
+    'onboarding.step3.directModel': '直连模型',
     'onboarding.step4.badge': '模型',
     'onboarding.step4.heading': '候选模型池',
     'onboarding.step4.subtitle': '选择默认文本层级并保留 CLI 默认值，或在启动前自定义模型 id。',
@@ -1208,8 +1377,6 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'onboarding.step5.searchHintDefault': 'DuckDuckGo 足以开始使用。',
     'onboarding.step5.back': '返回',
     'onboarding.step5.finish': '启动 OpenSquilla',
-    'onboarding.more.show': '更多提供商',
-    'onboarding.more.hide': '收起提供商',
   },
   ja: {
     'menu.edit': '編集',
@@ -1239,16 +1406,15 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'onboarding.rail.title': 'デスクトップ設定',
     'onboarding.rail.subtitle': 'ガイド付き CLI と同じ順序でローカルランタイムを設定します。',
     'onboarding.rail.foot': 'OpenSquilla はこのプロファイルをこのデバイス内に保持します。',
+    'onboarding.language.label': '言語',
     'onboarding.aria.setupSteps': 'セットアップ手順',
     'onboarding.aria.setupDepth': 'セットアップの詳細度',
-    'onboarding.aria.routerMode': 'ルーターモード',
     'onboarding.aria.searchProvider': '検索プロバイダー',
+    'onboarding.aria.language': 'オンボーディングの言語',
     'onboarding.nav.mode.title': 'モード',
     'onboarding.nav.mode.sub': 'セットアップの詳細度',
     'onboarding.nav.provider.title': 'プロバイダー',
     'onboarding.nav.provider.sub': 'モデルアクセス',
-    'onboarding.nav.router.title': 'Smart Router',
-    'onboarding.nav.router.sub': 'ルーティングモード',
     'onboarding.nav.tiers.title': 'ティア',
     'onboarding.nav.tiers.sub': 'デフォルトモデル',
     'onboarding.nav.search.title': '検索',
@@ -1259,24 +1425,19 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'onboarding.step1.simpleTitle': 'シンプルセットアップ',
     'onboarding.step1.simpleDesc': 'プロバイダーを 1 つ選び、キーを追加して検索を選択し、デフォルト設定で OpenSquilla を起動します。',
     'onboarding.step1.advancedTitle': '詳細セットアップ',
-    'onboarding.step1.advancedDesc': '起動前に Smart Router モード、ティアのデフォルト、直接モデルの詳細を確認します。',
+    'onboarding.step1.advancedDesc': '起動前にティアのデフォルトと直接モデルの詳細を確認します。',
     'onboarding.step1.note': 'プロバイダー、ルーター、検索の設定は後でデスクトップの設定ページから変更できます。',
     'onboarding.step1.quit': '終了',
     'onboarding.step1.continue': '続行',
     'onboarding.step2.badge': '必須',
     'onboarding.step2.heading': 'プロバイダーを接続',
-    'onboarding.step2.subtitle': 'これはローカルランタイムがモデル呼び出しに使用するアカウントです。OpenRouter がデフォルトで、その他のプロバイダーは必要になるまで隠れています。',
+    'onboarding.step2.subtitle': 'ローカルランタイムがモデル呼び出しに使用するプロバイダーアカウントを選択します。OpenRouter は初期選択であり、対応する任意のプロバイダーに変更できます。',
     'onboarding.step2.apiKey': 'API キー',
     'onboarding.step2.endpointSummary': 'エンドポイントと直接モデル',
     'onboarding.step2.baseUrl': 'Base URL',
     'onboarding.step2.directModel': '直接モデル',
     'onboarding.step2.back': '戻る',
     'onboarding.step2.next': '次へ',
-    'onboarding.step3.badge': 'ルーティング',
-    'onboarding.step3.heading': 'Smart Router モードを選択',
-    'onboarding.step3.subtitle': 'OpenSquilla がティアのデフォルトで作業を振り分けるか、1 つのモデルを直接呼び出すかを選択します。',
-    'onboarding.step3.back': '戻る',
-    'onboarding.step3.next': '次へ',
     'onboarding.step4.badge': 'モデル',
     'onboarding.step4.heading': 'ティアのモデルを確認',
     'onboarding.step4.subtitle': 'デフォルトのテキストティアを選んで CLI のデフォルトを維持するか、起動前にモデル id をカスタマイズします。',
@@ -1289,8 +1450,6 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'onboarding.step5.searchHintDefault': 'DuckDuckGo で始めるには十分です。',
     'onboarding.step5.back': '戻る',
     'onboarding.step5.finish': 'OpenSquilla を起動',
-    'onboarding.more.show': 'その他のプロバイダー',
-    'onboarding.more.hide': 'プロバイダーを隠す',
   },
   fr: {
     'menu.edit': 'Édition',
@@ -1320,16 +1479,15 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'onboarding.rail.title': 'Configuration du bureau',
     'onboarding.rail.subtitle': 'Configurez le runtime local dans le même ordre que la CLI guidée.',
     'onboarding.rail.foot': 'OpenSquilla conserve ce profil en local sur cet appareil.',
+    'onboarding.language.label': 'Langue',
     'onboarding.aria.setupSteps': 'Étapes de configuration',
     'onboarding.aria.setupDepth': 'Niveau de configuration',
-    'onboarding.aria.routerMode': 'Mode du routeur',
     'onboarding.aria.searchProvider': 'Fournisseur de recherche',
+    'onboarding.aria.language': 'Langue de l’onboarding',
     'onboarding.nav.mode.title': 'Mode',
     'onboarding.nav.mode.sub': 'Niveau de configuration',
     'onboarding.nav.provider.title': 'Fournisseur',
     'onboarding.nav.provider.sub': 'Accès aux modèles',
-    'onboarding.nav.router.title': 'Smart Router',
-    'onboarding.nav.router.sub': 'Mode de routage',
     'onboarding.nav.tiers.title': 'Niveaux',
     'onboarding.nav.tiers.sub': 'Modèles par défaut',
     'onboarding.nav.search.title': 'Recherche',
@@ -1340,24 +1498,19 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'onboarding.step1.simpleTitle': 'Configuration simple',
     'onboarding.step1.simpleDesc': 'Choisissez un fournisseur, ajoutez sa clé, sélectionnez la recherche et démarrez OpenSquilla avec les valeurs par défaut.',
     'onboarding.step1.advancedTitle': 'Configuration avancée',
-    'onboarding.step1.advancedDesc': 'Examinez le mode Smart Router, les niveaux par défaut et les détails du modèle direct avant le démarrage.',
+    'onboarding.step1.advancedDesc': 'Examinez les niveaux par défaut et les détails du modèle direct avant le démarrage.',
     'onboarding.step1.note': 'Vous pourrez modifier les paramètres de fournisseur, de routeur et de recherche plus tard depuis la page Paramètres du bureau.',
     'onboarding.step1.quit': 'Quitter',
     'onboarding.step1.continue': 'Continuer',
     'onboarding.step2.badge': 'Requis',
     'onboarding.step2.heading': 'Connecter un fournisseur',
-    'onboarding.step2.subtitle': 'C\'est le compte utilisé par le runtime local pour les appels de modèle. OpenRouter est le choix par défaut ; les autres fournisseurs restent masqués jusqu\'à ce que vous en ayez besoin.',
+    'onboarding.step2.subtitle': 'Choisissez le compte fournisseur utilisé par le runtime local pour les appels de modèle. OpenRouter est sélectionné au départ, mais tout fournisseur pris en charge peut être utilisé.',
     'onboarding.step2.apiKey': 'Clé API',
     'onboarding.step2.endpointSummary': 'Point de terminaison et modèle direct',
     'onboarding.step2.baseUrl': 'Base URL',
     'onboarding.step2.directModel': 'Modèle direct',
     'onboarding.step2.back': 'Retour',
     'onboarding.step2.next': 'Suivant',
-    'onboarding.step3.badge': 'Routage',
-    'onboarding.step3.heading': 'Choisir le mode Smart Router',
-    'onboarding.step3.subtitle': 'Choisissez si OpenSquilla doit répartir le travail entre les niveaux par défaut ou appeler un seul modèle directement.',
-    'onboarding.step3.back': 'Retour',
-    'onboarding.step3.next': 'Suivant',
     'onboarding.step4.badge': 'Modèles',
     'onboarding.step4.heading': 'Examiner les modèles par niveau',
     'onboarding.step4.subtitle': 'Choisissez le niveau de texte par défaut et conservez les valeurs par défaut de la CLI, ou personnalisez les id de modèle avant le démarrage.',
@@ -1370,8 +1523,6 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'onboarding.step5.searchHintDefault': 'DuckDuckGo suffit pour démarrer.',
     'onboarding.step5.back': 'Retour',
     'onboarding.step5.finish': 'Démarrer OpenSquilla',
-    'onboarding.more.show': 'Plus de fournisseurs',
-    'onboarding.more.hide': 'Masquer les fournisseurs',
   },
   de: {
     'menu.edit': 'Bearbeiten',
@@ -1401,16 +1552,15 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'onboarding.rail.title': 'Desktop-Einrichtung',
     'onboarding.rail.subtitle': 'Richten Sie die lokale Laufzeitumgebung in derselben Reihenfolge wie die geführte CLI ein.',
     'onboarding.rail.foot': 'OpenSquilla behält dieses Profil lokal auf diesem Gerät.',
+    'onboarding.language.label': 'Sprache',
     'onboarding.aria.setupSteps': 'Einrichtungsschritte',
     'onboarding.aria.setupDepth': 'Einrichtungstiefe',
-    'onboarding.aria.routerMode': 'Router-Modus',
     'onboarding.aria.searchProvider': 'Suchanbieter',
+    'onboarding.aria.language': 'Onboarding-Sprache',
     'onboarding.nav.mode.title': 'Modus',
     'onboarding.nav.mode.sub': 'Einrichtungstiefe',
     'onboarding.nav.provider.title': 'Anbieter',
     'onboarding.nav.provider.sub': 'Modellzugriff',
-    'onboarding.nav.router.title': 'Smart Router',
-    'onboarding.nav.router.sub': 'Routing-Modus',
     'onboarding.nav.tiers.title': 'Stufen',
     'onboarding.nav.tiers.sub': 'Standardmodelle',
     'onboarding.nav.search.title': 'Suche',
@@ -1421,24 +1571,19 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'onboarding.step1.simpleTitle': 'Einfache Einrichtung',
     'onboarding.step1.simpleDesc': 'Wählen Sie einen Anbieter, fügen Sie seinen Schlüssel hinzu, wählen Sie die Suche und starten Sie OpenSquilla mit den Standardwerten.',
     'onboarding.step1.advancedTitle': 'Erweiterte Einrichtung',
-    'onboarding.step1.advancedDesc': 'Prüfen Sie vor dem Start den Smart-Router-Modus, die Stufenstandards und die Details des direkten Modells.',
+    'onboarding.step1.advancedDesc': 'Prüfen Sie vor dem Start die Stufenstandards und die Details des direkten Modells.',
     'onboarding.step1.note': 'Sie können Anbieter-, Router- und Sucheinstellungen später auf der Desktop-Seite Einstellungen ändern.',
     'onboarding.step1.quit': 'Beenden',
     'onboarding.step1.continue': 'Weiter',
     'onboarding.step2.badge': 'Erforderlich',
     'onboarding.step2.heading': 'Anbieter verbinden',
-    'onboarding.step2.subtitle': 'Dies ist das Konto, das die lokale Laufzeitumgebung für Modellaufrufe verwendet. OpenRouter ist die Standardeinstellung; weitere Anbieter bleiben ausgeblendet, bis Sie sie benötigen.',
+    'onboarding.step2.subtitle': 'Wählen Sie das Anbieterkonto, das die lokale Laufzeitumgebung für Modellaufrufe verwendet. OpenRouter ist anfangs ausgewählt, aber jeder unterstützte Anbieter kann verwendet werden.',
     'onboarding.step2.apiKey': 'API-Schlüssel',
     'onboarding.step2.endpointSummary': 'Endpunkt und direktes Modell',
     'onboarding.step2.baseUrl': 'Base URL',
     'onboarding.step2.directModel': 'Direktes Modell',
     'onboarding.step2.back': 'Zurück',
     'onboarding.step2.next': 'Weiter',
-    'onboarding.step3.badge': 'Routing',
-    'onboarding.step3.heading': 'Smart-Router-Modus auswählen',
-    'onboarding.step3.subtitle': 'Wählen Sie, ob OpenSquilla die Arbeit über die Stufenstandards verteilen oder ein einzelnes Modell direkt aufrufen soll.',
-    'onboarding.step3.back': 'Zurück',
-    'onboarding.step3.next': 'Weiter',
     'onboarding.step4.badge': 'Modelle',
     'onboarding.step4.heading': 'Stufenmodelle prüfen',
     'onboarding.step4.subtitle': 'Wählen Sie die Standard-Textstufe und behalten Sie die CLI-Standards bei, oder passen Sie die Modell-ids vor dem Start an.',
@@ -1451,8 +1596,6 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'onboarding.step5.searchHintDefault': 'DuckDuckGo reicht für den Start.',
     'onboarding.step5.back': 'Zurück',
     'onboarding.step5.finish': 'OpenSquilla starten',
-    'onboarding.more.show': 'Weitere Anbieter',
-    'onboarding.more.hide': 'Anbieter ausblenden',
   },
   es: {
     'menu.edit': 'Edición',
@@ -1482,16 +1625,15 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'onboarding.rail.title': 'Configuración de escritorio',
     'onboarding.rail.subtitle': 'Configura el runtime local en el mismo orden que la CLI guiada.',
     'onboarding.rail.foot': 'OpenSquilla mantiene este perfil local en este dispositivo.',
+    'onboarding.language.label': 'Idioma',
     'onboarding.aria.setupSteps': 'Pasos de configuración',
     'onboarding.aria.setupDepth': 'Nivel de configuración',
-    'onboarding.aria.routerMode': 'Modo del enrutador',
     'onboarding.aria.searchProvider': 'Proveedor de búsqueda',
+    'onboarding.aria.language': 'Idioma de onboarding',
     'onboarding.nav.mode.title': 'Modo',
     'onboarding.nav.mode.sub': 'Nivel de configuración',
     'onboarding.nav.provider.title': 'Proveedor',
     'onboarding.nav.provider.sub': 'Acceso a modelos',
-    'onboarding.nav.router.title': 'Smart Router',
-    'onboarding.nav.router.sub': 'Modo de enrutamiento',
     'onboarding.nav.tiers.title': 'Niveles',
     'onboarding.nav.tiers.sub': 'Modelos predeterminados',
     'onboarding.nav.search.title': 'Búsqueda',
@@ -1502,24 +1644,19 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'onboarding.step1.simpleTitle': 'Configuración simple',
     'onboarding.step1.simpleDesc': 'Elige un proveedor, añade su clave, selecciona la búsqueda e inicia OpenSquilla con los valores predeterminados.',
     'onboarding.step1.advancedTitle': 'Configuración avanzada',
-    'onboarding.step1.advancedDesc': 'Revisa el modo Smart Router, los valores predeterminados de niveles y los detalles del modelo directo antes del inicio.',
+    'onboarding.step1.advancedDesc': 'Revisa los valores predeterminados de niveles y los detalles del modelo directo antes del inicio.',
     'onboarding.step1.note': 'Puedes cambiar los ajustes de proveedor, enrutador y búsqueda más tarde desde la página Ajustes del escritorio.',
     'onboarding.step1.quit': 'Salir',
     'onboarding.step1.continue': 'Continuar',
     'onboarding.step2.badge': 'Obligatorio',
     'onboarding.step2.heading': 'Conectar un proveedor',
-    'onboarding.step2.subtitle': 'Esta es la cuenta que usa el runtime local para las llamadas a modelos. OpenRouter es el predeterminado; los demás proveedores permanecen ocultos hasta que los necesites.',
+    'onboarding.step2.subtitle': 'Elige la cuenta de proveedor que usa el runtime local para las llamadas a modelos. OpenRouter empieza seleccionado, pero puedes usar cualquier proveedor compatible.',
     'onboarding.step2.apiKey': 'Clave API',
     'onboarding.step2.endpointSummary': 'Endpoint y modelo directo',
     'onboarding.step2.baseUrl': 'Base URL',
     'onboarding.step2.directModel': 'Modelo directo',
     'onboarding.step2.back': 'Atrás',
     'onboarding.step2.next': 'Siguiente',
-    'onboarding.step3.badge': 'Enrutamiento',
-    'onboarding.step3.heading': 'Selecciona el modo Smart Router',
-    'onboarding.step3.subtitle': 'Elige si OpenSquilla debe distribuir el trabajo entre los valores predeterminados de niveles o llamar a un solo modelo directamente.',
-    'onboarding.step3.back': 'Atrás',
-    'onboarding.step3.next': 'Siguiente',
     'onboarding.step4.badge': 'Modelos',
     'onboarding.step4.heading': 'Revisa los modelos por nivel',
     'onboarding.step4.subtitle': 'Elige el nivel de texto predeterminado y mantén los valores predeterminados de la CLI, o personaliza los id de modelo antes del inicio.',
@@ -1532,8 +1669,6 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'onboarding.step5.searchHintDefault': 'DuckDuckGo es suficiente para empezar.',
     'onboarding.step5.back': 'Atrás',
     'onboarding.step5.finish': 'Iniciar OpenSquilla',
-    'onboarding.more.show': 'Más proveedores',
-    'onboarding.more.hide': 'Ocultar proveedores',
   },
 }
 
@@ -1545,18 +1680,15 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
 const ONBOARDING_SCRIPT_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
   en: {
     tierDefaultsAvailable: 'Tier defaults available.',
-    modeOpenrouterMix: 'OpenRouter model mix',
-    modeDirect: 'Direct model',
-    modeDefaultTier: 'Default tier routing',
-    providerHint: '{label} stores the key as {env}. {note}',
-    noApiKey: 'no API key',
-    autoBodyOpenrouter: 'Use the default OpenRouter tier settings.',
-    autoBody: 'Route simple, normal, and hard work through the {label} tier profile.',
-    autoTitle: 'Automatic tier routing',
-    fixedTitle: 'Use one fixed model',
-    fixedBody: 'Skip Smart Router and send every request to the direct model.',
-    routerHintDisabled: 'Requests will use the direct model field from the provider step.',
-    routerHintActive: '{mode} is active. The next step shows the exact c0-c3 and image model ids before saving.',
+    modeSmartRouterTitle: 'Smart Router',
+    modeSmartRouterDesc: 'Use the existing layered Squilla Router defaults for this provider.',
+    modeDirectTitle: 'Direct single model',
+    modeDirectDesc: 'Send every request to one provider model without tier routing or ensemble.',
+    modeEnsembleTitle: 'Ensemble',
+    modeEnsembleDesc: 'Use the OpenRouter static B5 ensemble and skip the tier table.',
+    modeSmartRouterUnavailable: 'This provider does not have desktop tier defaults yet.',
+    modeEnsembleUnavailable: 'Ensemble setup currently requires OpenRouter.',
+    directModelPrompt: 'Requests will use this model directly.',
     directModelLabel: 'Direct model',
     noModel: 'No model',
     directModelNote: 'Smart Router is off. Every request uses this model directly.',
@@ -1570,26 +1702,22 @@ const ONBOARDING_SCRIPT_MESSAGES: Record<DesktopLocale, Record<string, string>> 
     searchHintDefault: 'DuckDuckGo is enough to start.',
     apiKeyRequired: '{label} API key is required.',
     directModelRequiredDisabled: 'Direct model is required when Smart Router is disabled.',
+    directModelRequiredDirect: 'Direct model is required for Direct single model mode.',
     defaultTierRequiresModel: 'Default router tier requires a model.',
     searchApiKeyRequired: '{label} search API key is required.',
-    moreProviders: 'More providers',
-    hideProviders: 'Hide providers',
     stepLabel: 'Step {n}',
   },
   'zh-Hans': {
     tierDefaultsAvailable: '提供层级默认值。',
-    modeOpenrouterMix: 'OpenRouter 模型混合',
-    modeDirect: '直连模型',
-    modeDefaultTier: '默认层级路由',
-    providerHint: '{label} 将密钥存储为 {env}。{note}',
-    noApiKey: '无 API 密钥',
-    autoBodyOpenrouter: '使用默认的 OpenRouter 层级设置。',
-    autoBody: '通过 {label} 层级配置路由简单、普通和困难的工作。',
-    autoTitle: '自动层级路由',
-    fixedTitle: '使用一个固定模型',
-    fixedBody: '跳过 Smart Router，将每个请求都发送到直连模型。',
-    routerHintDisabled: '请求将使用提供商步骤中的直连模型字段。',
-    routerHintActive: '{mode} 已启用。下一步将在保存前显示确切的 c0-c3 和图像模型 id。',
+    modeSmartRouterTitle: 'Smart Router',
+    modeSmartRouterDesc: '使用此提供商现有的 Squilla Router 层级默认值。',
+    modeDirectTitle: '直连单模型',
+    modeDirectDesc: '每个请求都发送到一个固定模型，不使用层级路由或 Ensemble。',
+    modeEnsembleTitle: 'Ensemble',
+    modeEnsembleDesc: '使用 OpenRouter static B5 Ensemble，并跳过层级表。',
+    modeSmartRouterUnavailable: '此提供商尚无桌面层级默认值。',
+    modeEnsembleUnavailable: '当前 onboarding 中 Ensemble 需要 OpenRouter。',
+    directModelPrompt: '请求会直接使用此模型。',
     directModelLabel: '直连模型',
     noModel: '无模型',
     directModelNote: 'Smart Router 已关闭。每个请求都直接使用此模型。',
@@ -1603,26 +1731,13 @@ const ONBOARDING_SCRIPT_MESSAGES: Record<DesktopLocale, Record<string, string>> 
     searchHintDefault: 'DuckDuckGo 足以开始使用。',
     apiKeyRequired: '需要 {label} API 密钥。',
     directModelRequiredDisabled: '禁用 Smart Router 时需要直连模型。',
+    directModelRequiredDirect: '直连单模型模式需要直连模型。',
     defaultTierRequiresModel: '默认路由层级需要一个模型。',
     searchApiKeyRequired: '需要 {label} 搜索 API 密钥。',
-    moreProviders: '更多提供商',
-    hideProviders: '收起提供商',
     stepLabel: '步骤 {n}',
   },
   ja: {
     tierDefaultsAvailable: 'ティアのデフォルトを利用できます。',
-    modeOpenrouterMix: 'OpenRouter モデルミックス',
-    modeDirect: '直接モデル',
-    modeDefaultTier: 'デフォルトティアルーティング',
-    providerHint: '{label} はキーを {env} として保存します。{note}',
-    noApiKey: 'API キーなし',
-    autoBodyOpenrouter: 'デフォルトの OpenRouter ティア設定を使用します。',
-    autoBody: '簡単・通常・難しい作業を {label} のティアプロファイル経由で振り分けます。',
-    autoTitle: '自動ティアルーティング',
-    fixedTitle: '固定モデルを 1 つ使用',
-    fixedBody: 'Smart Router をスキップし、すべてのリクエストを直接モデルに送信します。',
-    routerHintDisabled: 'リクエストはプロバイダー手順の直接モデルフィールドを使用します。',
-    routerHintActive: '{mode} が有効です。次の手順では保存前に正確な c0-c3 と画像モデルの id を表示します。',
     directModelLabel: '直接モデル',
     noModel: 'モデルなし',
     directModelNote: 'Smart Router はオフです。すべてのリクエストでこのモデルを直接使用します。',
@@ -1638,24 +1753,10 @@ const ONBOARDING_SCRIPT_MESSAGES: Record<DesktopLocale, Record<string, string>> 
     directModelRequiredDisabled: 'Smart Router を無効にする場合は直接モデルが必要です。',
     defaultTierRequiresModel: 'デフォルトのルーターティアにはモデルが必要です。',
     searchApiKeyRequired: '{label} の検索 API キーが必要です。',
-    moreProviders: 'その他のプロバイダー',
-    hideProviders: 'プロバイダーを隠す',
     stepLabel: 'ステップ {n}',
   },
   fr: {
     tierDefaultsAvailable: 'Valeurs de niveau par défaut disponibles.',
-    modeOpenrouterMix: 'Mélange de modèles OpenRouter',
-    modeDirect: 'Modèle direct',
-    modeDefaultTier: 'Routage par niveau par défaut',
-    providerHint: '{label} enregistre la clé sous {env}. {note}',
-    noApiKey: 'aucune clé API',
-    autoBodyOpenrouter: 'Utiliser les réglages de niveau OpenRouter par défaut.',
-    autoBody: 'Acheminer le travail simple, normal et difficile via le profil de niveaux {label}.',
-    autoTitle: 'Routage automatique par niveau',
-    fixedTitle: 'Utiliser un seul modèle fixe',
-    fixedBody: 'Ignorer Smart Router et envoyer chaque requête au modèle direct.',
-    routerHintDisabled: 'Les requêtes utiliseront le champ de modèle direct de l\'étape fournisseur.',
-    routerHintActive: '{mode} est actif. L\'étape suivante affiche les id exacts c0-c3 et du modèle d\'image avant l\'enregistrement.',
     directModelLabel: 'Modèle direct',
     noModel: 'Aucun modèle',
     directModelNote: 'Smart Router est désactivé. Chaque requête utilise directement ce modèle.',
@@ -1671,24 +1772,10 @@ const ONBOARDING_SCRIPT_MESSAGES: Record<DesktopLocale, Record<string, string>> 
     directModelRequiredDisabled: 'Un modèle direct est requis lorsque Smart Router est désactivé.',
     defaultTierRequiresModel: 'Le niveau de routeur par défaut nécessite un modèle.',
     searchApiKeyRequired: 'La clé API de recherche {label} est requise.',
-    moreProviders: 'Plus de fournisseurs',
-    hideProviders: 'Masquer les fournisseurs',
     stepLabel: 'Étape {n}',
   },
   de: {
     tierDefaultsAvailable: 'Stufenstandards verfügbar.',
-    modeOpenrouterMix: 'OpenRouter-Modellmix',
-    modeDirect: 'Direktes Modell',
-    modeDefaultTier: 'Standard-Stufenrouting',
-    providerHint: '{label} speichert den Schlüssel als {env}. {note}',
-    noApiKey: 'kein API-Schlüssel',
-    autoBodyOpenrouter: 'Die Standard-OpenRouter-Stufeneinstellungen verwenden.',
-    autoBody: 'Einfache, normale und schwierige Arbeit über das {label}-Stufenprofil leiten.',
-    autoTitle: 'Automatisches Stufenrouting',
-    fixedTitle: 'Ein festes Modell verwenden',
-    fixedBody: 'Smart Router überspringen und jede Anfrage an das direkte Modell senden.',
-    routerHintDisabled: 'Anfragen verwenden das Feld für das direkte Modell aus dem Anbieterschritt.',
-    routerHintActive: '{mode} ist aktiv. Der nächste Schritt zeigt vor dem Speichern die genauen c0-c3- und Bildmodell-ids.',
     directModelLabel: 'Direktes Modell',
     noModel: 'Kein Modell',
     directModelNote: 'Smart Router ist aus. Jede Anfrage verwendet dieses Modell direkt.',
@@ -1704,24 +1791,10 @@ const ONBOARDING_SCRIPT_MESSAGES: Record<DesktopLocale, Record<string, string>> 
     directModelRequiredDisabled: 'Ein direktes Modell ist erforderlich, wenn Smart Router deaktiviert ist.',
     defaultTierRequiresModel: 'Die Standard-Routerstufe erfordert ein Modell.',
     searchApiKeyRequired: 'Der Such-API-Schlüssel für {label} ist erforderlich.',
-    moreProviders: 'Weitere Anbieter',
-    hideProviders: 'Anbieter ausblenden',
     stepLabel: 'Schritt {n}',
   },
   es: {
     tierDefaultsAvailable: 'Valores de nivel predeterminados disponibles.',
-    modeOpenrouterMix: 'Mezcla de modelos OpenRouter',
-    modeDirect: 'Modelo directo',
-    modeDefaultTier: 'Enrutamiento por nivel predeterminado',
-    providerHint: '{label} guarda la clave como {env}. {note}',
-    noApiKey: 'sin clave API',
-    autoBodyOpenrouter: 'Usar los ajustes de nivel de OpenRouter predeterminados.',
-    autoBody: 'Enrutar el trabajo simple, normal y difícil a través del perfil de niveles {label}.',
-    autoTitle: 'Enrutamiento automático por nivel',
-    fixedTitle: 'Usar un solo modelo fijo',
-    fixedBody: 'Omitir Smart Router y enviar cada solicitud al modelo directo.',
-    routerHintDisabled: 'Las solicitudes usarán el campo de modelo directo del paso del proveedor.',
-    routerHintActive: '{mode} está activo. El siguiente paso muestra los id exactos c0-c3 y del modelo de imagen antes de guardar.',
     directModelLabel: 'Modelo directo',
     noModel: 'Sin modelo',
     directModelNote: 'Smart Router está desactivado. Cada solicitud usa este modelo directamente.',
@@ -1737,14 +1810,8 @@ const ONBOARDING_SCRIPT_MESSAGES: Record<DesktopLocale, Record<string, string>> 
     directModelRequiredDisabled: 'Se requiere un modelo directo cuando Smart Router está desactivado.',
     defaultTierRequiresModel: 'El nivel de enrutador predeterminado requiere un modelo.',
     searchApiKeyRequired: 'Se requiere la clave API de búsqueda de {label}.',
-    moreProviders: 'Más proveedores',
-    hideProviders: 'Ocultar proveedores',
     stepLabel: 'Paso {n}',
   },
-}
-
-function onboardingMessages(locale: DesktopLocale): Record<string, string> {
-  return { ...ONBOARDING_SCRIPT_MESSAGES.en, ...ONBOARDING_SCRIPT_MESSAGES[locale] }
 }
 
 function desktopT(key: string): string {
@@ -1866,6 +1933,12 @@ function escapeHtmlServer(value: string): string {
 // Localized server-rendered onboarding string, HTML-escaped for safe insertion.
 function ot(key: string): string {
   return escapeHtmlServer(desktopT(key))
+}
+
+function localeOptionsHtml(): string {
+  return DESKTOP_LOCALES.map((locale) => (
+    `<option value="${escapeHtmlServer(locale)}"${locale === desktopLocale ? ' selected' : ''}>${escapeHtmlServer(DESKTOP_LOCALE_LABELS[locale])}</option>`
+  )).join('')
 }
 
 function onboardingHtml(): string {
@@ -1995,6 +2068,24 @@ function onboardingHtml(): string {
       font-weight: 600;
       line-height: 1.4;
     }
+    .rail-bottom {
+      display: grid;
+      gap: 14px;
+    }
+    .language-picker {
+      display: grid;
+      gap: 7px;
+      color: #565c54;
+      font-size: 11px;
+      font-weight: 700;
+    }
+    .language-picker select {
+      min-height: 34px;
+      border-radius: 8px;
+      font-size: 12px;
+      font-weight: 650;
+      padding: 0 10px;
+    }
     .deck {
       position: relative;
       min-width: 0;
@@ -2091,14 +2182,23 @@ function onboardingHtml(): string {
       overflow-y: auto;
       padding-right: 2px;
     }
-    .setup-card[data-screen="0"] .card-body,
-    .setup-card[data-screen="1"] .card-body {
+    .setup-card[data-screen="0"] .card-body {
       overflow: visible;
     }
     .provider-grid {
       display: grid;
       gap: 10px;
       grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .provider-picker {
+      min-height: 0;
+      max-height: min(310px, 42vh);
+      overflow-x: hidden;
+      overflow-y: auto;
+      padding-right: 3px;
+    }
+    .provider-picker .provider-grid {
+      padding-bottom: 2px;
     }
     .provider-grid.single-provider {
       grid-template-columns: 1fr;
@@ -2191,123 +2291,10 @@ function onboardingHtml(): string {
       padding: 3px 6px;
       text-transform: uppercase;
     }
-    .provider-more {
-      position: relative;
-      display: grid;
-      gap: 8px;
-    }
-    .provider-more-toggle {
-      width: 100%;
-      min-height: 38px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      border: 1px solid rgba(32,35,31,0.1);
-      border-radius: 8px;
-      background: rgba(255,255,255,0.48);
-      color: #5f665e;
-      font-size: 12px;
-      font-weight: 700;
-      padding: 0 12px;
-      text-align: left;
-    }
-    .provider-more-toggle:hover {
-      border-color: rgba(242,106,27,0.24);
-      color: var(--ink);
-    }
-    .provider-more-list {
-      position: absolute;
-      z-index: 5;
-      top: 43px;
-      left: 0;
-      right: 0;
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 7px;
-      border: 1px solid rgba(32,35,31,0.12);
-      border-radius: 8px;
-      background: rgba(255,254,249,0.98);
-      box-shadow: 0 18px 42px rgba(35, 32, 26, 0.16);
-      padding: 8px;
-    }
-    .provider-row {
-      appearance: none;
-      min-height: 42px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
-      border: 1px solid rgba(32,35,31,0.1);
-      border-radius: 8px;
-      background: rgba(255,255,255,0.52);
-      color: var(--ink);
-      padding: 0 11px;
-      text-align: left;
-    }
-    .provider-row strong {
-      min-width: 0;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      font-size: 12px;
-      font-weight: 650;
-    }
-    .provider-row small {
-      flex: none;
-      color: var(--dim);
-      font-size: 10px;
-      font-weight: 700;
-      text-transform: uppercase;
-    }
-    .provider-row.active {
-      border-color: var(--accent);
-      background: #fffaf4;
-      color: var(--accent-dark);
-    }
     .choice-row, .tier-defaults {
       display: grid;
       gap: 10px;
       grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-    .router-choice {
-      display: grid;
-      gap: 12px;
-    }
-    .router-primary {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 12px;
-    }
-    .router-primary .choice {
-      min-height: 112px;
-      padding: 16px;
-    }
-    .router-primary .choice strong {
-      font-size: 16px;
-    }
-    .router-subchoice {
-      display: grid;
-      gap: 8px;
-      border: 1px solid rgba(32,35,31,0.1);
-      border-radius: 8px;
-      background: rgba(255,255,255,0.46);
-      padding: 12px;
-    }
-    .router-subchoice > span {
-      color: var(--dim);
-      font-size: 11px;
-      font-weight: 750;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-    }
-    .router-subgrid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 8px;
-    }
-    .router-subgrid .choice {
-      min-height: 72px;
-      padding: 12px;
     }
     .tier-defaults {
       grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -2346,19 +2333,84 @@ function onboardingHtml(): string {
       border-color: var(--accent);
       box-shadow: 0 0 0 3px rgba(242, 106, 27, 0.12);
     }
-    details {
-      border: 1px solid #e2e0da;
-      border-radius: 8px;
-      background: rgba(255,255,255,0.46);
-      padding: 11px 13px;
+	    details {
+	      border: 1px solid #e2e0da;
+	      border-radius: 8px;
+	      background: rgba(255,255,255,0.46);
+	      padding: 11px 13px;
     }
     summary {
       color: #656b64;
       cursor: pointer;
       font-size: 12px;
-      font-weight: 600;
-    }
-    .field-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
+	      font-weight: 600;
+	    }
+	    .endpoint-panel {
+	      border: 1px solid #e2e0da;
+	      border-radius: 8px;
+	      background: rgba(255,255,255,0.46);
+	      overflow: hidden;
+	      transition: border-color 180ms ease, background 180ms ease, box-shadow 180ms ease;
+	    }
+	    .endpoint-panel.open {
+	      border-color: rgba(242,106,27,0.22);
+	      background: rgba(255,255,255,0.68);
+	      box-shadow: 0 10px 24px rgba(44,38,28,0.05);
+	    }
+	    .endpoint-summary {
+	      appearance: none;
+	      width: 100%;
+	      min-height: 42px;
+	      display: flex;
+	      align-items: center;
+	      gap: 9px;
+	      border: 0;
+	      background: transparent;
+	      color: #656b64;
+	      cursor: pointer;
+	      font: inherit;
+	      font-size: 12px;
+	      font-weight: 650;
+	      padding: 0 13px;
+	      text-align: left;
+	    }
+	    .endpoint-summary::before {
+	      content: "";
+	      width: 7px;
+	      height: 7px;
+	      border-right: 2px solid #747a73;
+	      border-bottom: 2px solid #747a73;
+	      transform: rotate(-45deg);
+	      transition: transform 180ms ease, border-color 180ms ease;
+	    }
+	    .endpoint-panel.open .endpoint-summary::before {
+	      border-color: var(--accent-dark);
+	      transform: rotate(45deg);
+	    }
+	    .endpoint-summary:focus-visible {
+	      outline: none;
+	      box-shadow: inset 0 0 0 3px rgba(242, 106, 27, 0.12);
+	    }
+	    .endpoint-content {
+	      display: grid;
+	      grid-template-rows: 0fr;
+	      opacity: 0;
+	      transform: translateY(-4px);
+	      transition: grid-template-rows 220ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity 160ms ease, transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+	    }
+	    .endpoint-panel.open .endpoint-content {
+	      grid-template-rows: 1fr;
+	      opacity: 1;
+	      transform: translateY(0);
+	    }
+	    .endpoint-content-clip {
+	      min-height: 0;
+	      overflow: hidden;
+	    }
+	    .endpoint-fields {
+	      padding: 2px 13px 13px;
+	    }
+	    .field-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 12px; }
     .tier-list { display: grid; gap: 8px; }
     .tier-item {
       display: grid;
@@ -2460,170 +2512,195 @@ function onboardingHtml(): string {
   <main>
     <aside class="rail">
       <section>
-        <h1>${ot('onboarding.rail.title')}</h1>
-        <p>${ot('onboarding.rail.subtitle')}</p>
+        <h1 data-i18n="onboarding.rail.title">${ot('onboarding.rail.title')}</h1>
+        <p data-i18n="onboarding.rail.subtitle">${ot('onboarding.rail.subtitle')}</p>
       </section>
-      <nav class="progress" aria-label="${ot('onboarding.aria.setupSteps')}">
+      <nav class="progress" aria-label="${ot('onboarding.aria.setupSteps')}" data-i18n-aria="onboarding.aria.setupSteps">
         <button class="step active" type="button" data-step-label="0">
           <span class="step-index">1</span>
-          <span><strong>${ot('onboarding.nav.mode.title')}</strong><span>${ot('onboarding.nav.mode.sub')}</span></span>
+          <span><strong data-i18n="onboarding.nav.mode.title">${ot('onboarding.nav.mode.title')}</strong><span data-i18n="onboarding.nav.mode.sub">${ot('onboarding.nav.mode.sub')}</span></span>
         </button>
         <button class="step" type="button" data-step-label="1">
           <span class="step-index">2</span>
-          <span><strong>${ot('onboarding.nav.provider.title')}</strong><span>${ot('onboarding.nav.provider.sub')}</span></span>
+          <span><strong data-i18n="onboarding.nav.provider.title">${ot('onboarding.nav.provider.title')}</strong><span data-i18n="onboarding.nav.provider.sub">${ot('onboarding.nav.provider.sub')}</span></span>
         </button>
         <button class="step" type="button" data-step-label="2" data-advanced-step>
           <span class="step-index">3</span>
-          <span><strong>${ot('onboarding.nav.router.title')}</strong><span>${ot('onboarding.nav.router.sub')}</span></span>
+          <span><strong data-i18n="onboarding.nav.routing.title">${ot('onboarding.nav.routing.title')}</strong><span data-i18n="onboarding.nav.routing.sub">${ot('onboarding.nav.routing.sub')}</span></span>
         </button>
         <button class="step" type="button" data-step-label="3" data-advanced-step>
           <span class="step-index">4</span>
-          <span><strong>${ot('onboarding.nav.tiers.title')}</strong><span>${ot('onboarding.nav.tiers.sub')}</span></span>
+          <span><strong data-i18n="onboarding.nav.tiers.title">${ot('onboarding.nav.tiers.title')}</strong><span data-i18n="onboarding.nav.tiers.sub">${ot('onboarding.nav.tiers.sub')}</span></span>
         </button>
         <button class="step" type="button" data-step-label="4">
-          <span class="step-index">5</span>
-          <span><strong>${ot('onboarding.nav.search.title')}</strong><span>${ot('onboarding.nav.search.sub')}</span></span>
+          <span class="step-index">4</span>
+          <span><strong data-i18n="onboarding.nav.search.title">${ot('onboarding.nav.search.title')}</strong><span data-i18n="onboarding.nav.search.sub">${ot('onboarding.nav.search.sub')}</span></span>
         </button>
       </nav>
-      <div class="rail-foot">${ot('onboarding.rail.foot')}</div>
+      <div class="rail-bottom">
+        <label class="language-picker" for="onboardingLocale">
+          <span data-i18n="onboarding.language.label">${ot('onboarding.language.label')}</span>
+          <select id="onboardingLocale" aria-label="${ot('onboarding.aria.language')}" data-i18n-aria="onboarding.aria.language">
+            ${localeOptionsHtml()}
+          </select>
+        </label>
+        <div class="rail-foot" data-i18n="onboarding.rail.foot">${ot('onboarding.rail.foot')}</div>
+      </div>
     </aside>
     <form id="setup-form" class="deck">
       <section class="setup-card active" data-screen="0">
         <header class="card-head">
           <div>
             <p class="eyebrow">Step 01</p>
-            <h2>${ot('onboarding.step1.heading')}</h2>
-            <p>${ot('onboarding.step1.subtitle')}</p>
+            <h2 data-i18n="onboarding.step1.heading">${ot('onboarding.step1.heading')}</h2>
+            <p data-i18n="onboarding.step1.subtitle">${ot('onboarding.step1.subtitle')}</p>
           </div>
-          <span class="card-badge">${ot('onboarding.step1.badge')}</span>
+          <span class="card-badge" data-i18n="onboarding.step1.badge">${ot('onboarding.step1.badge')}</span>
         </header>
         <div class="card-body">
-          <div class="setup-mode-grid" role="radiogroup" aria-label="${ot('onboarding.aria.setupDepth')}">
+          <div class="setup-mode-grid" role="radiogroup" aria-label="${ot('onboarding.aria.setupDepth')}" data-i18n-aria="onboarding.aria.setupDepth">
             <button class="choice active" type="button" data-setup-mode="simple">
-              <strong>${ot('onboarding.step1.simpleTitle')}</strong>
-              <small>${ot('onboarding.step1.simpleDesc')}</small>
+              <strong data-i18n="onboarding.step1.simpleTitle">${ot('onboarding.step1.simpleTitle')}</strong>
+              <small data-i18n="onboarding.step1.simpleDesc">${ot('onboarding.step1.simpleDesc')}</small>
             </button>
             <button class="choice" type="button" data-setup-mode="advanced">
-              <strong>${ot('onboarding.step1.advancedTitle')}</strong>
-              <small>${ot('onboarding.step1.advancedDesc')}</small>
+              <strong data-i18n="onboarding.step1.advancedTitle">${ot('onboarding.step1.advancedTitle')}</strong>
+              <small data-i18n="onboarding.step1.advancedDesc">${ot('onboarding.step1.advancedDesc')}</small>
             </button>
           </div>
           <input id="setupMode" type="hidden" value="simple" />
-          <div class="note">${ot('onboarding.step1.note')}</div>
+          <div class="note" data-i18n="onboarding.step1.note">${ot('onboarding.step1.note')}</div>
         </div>
         <footer class="actions">
-          <button class="secondary" type="button" id="cancel">${ot('onboarding.step1.quit')}</button>
-          <button class="primary next-button" type="button">${ot('onboarding.step1.continue')}</button>
+          <button class="secondary" type="button" id="cancel" data-i18n="onboarding.step1.quit">${ot('onboarding.step1.quit')}</button>
+          <button class="primary next-button" type="button" data-i18n="onboarding.step1.continue">${ot('onboarding.step1.continue')}</button>
         </footer>
       </section>
       <section class="setup-card" data-screen="1">
         <header class="card-head">
           <div>
             <p class="eyebrow">Step 02</p>
-            <h2>${ot('onboarding.step2.heading')}</h2>
-            <p>${ot('onboarding.step2.subtitle')}</p>
+            <h2 data-i18n="onboarding.step2.heading">${ot('onboarding.step2.heading')}</h2>
+            <p data-i18n="onboarding.step2.subtitle">${ot('onboarding.step2.subtitle')}</p>
           </div>
-          <span class="card-badge">${ot('onboarding.step2.badge')}</span>
+          <span class="card-badge" data-i18n="onboarding.step2.badge">${ot('onboarding.step2.badge')}</span>
         </header>
         <div class="card-body">
         <div class="provider-picker">
           <div class="provider-grid" id="providerGrid"></div>
-          <div class="provider-more">
-            <button class="provider-more-toggle" type="button" id="providerMoreToggle">
-              <span>${ot('onboarding.more.show')}</span><span id="providerMoreCount"></span>
-            </button>
-            <div class="provider-more-list" id="providerMoreList" hidden></div>
-          </div>
         </div>
         <input id="provider" type="hidden" value="openrouter" />
+        <input id="routerMode" type="hidden" value="recommended" />
         <label>
-          ${ot('onboarding.step2.apiKey')}
+          <span data-i18n="onboarding.step2.apiKey">${ot('onboarding.step2.apiKey')}</span>
           <input id="apiKey" name="apiKey" type="password" autocomplete="off" placeholder="sk-..." />
         </label>
-        <details>
-          <summary>${ot('onboarding.step2.endpointSummary')}</summary>
-          <div class="field-pair">
-          <label>
-            ${ot('onboarding.step2.baseUrl')}
-            <input id="baseUrl" name="baseUrl" autocomplete="off" />
-          </label>
-          <label>
-            ${ot('onboarding.step2.directModel')}
-            <input id="model" name="model" autocomplete="off" />
-          </label>
+        <div class="endpoint-panel" id="endpointPanel">
+          <button class="endpoint-summary" id="endpointToggle" type="button" aria-expanded="false" aria-controls="endpointContent">
+            <span data-i18n="onboarding.step2.endpointSummary">${ot('onboarding.step2.endpointSummary')}</span>
+          </button>
+          <div class="endpoint-content" id="endpointContent" aria-hidden="true">
+            <div class="endpoint-content-clip">
+              <div class="field-pair endpoint-fields">
+                <label>
+                  <span data-i18n="onboarding.step2.baseUrl">${ot('onboarding.step2.baseUrl')}</span>
+                  <input id="baseUrl" name="baseUrl" autocomplete="off" />
+                </label>
+                <label>
+                  <span data-i18n="onboarding.step2.directModel">${ot('onboarding.step2.directModel')}</span>
+                  <input id="model" name="model" autocomplete="off" />
+                </label>
+              </div>
+            </div>
           </div>
-        </details>
+        </div>
         <div class="note" id="providerHint"></div>
         </div>
         <footer class="actions">
-          <button class="secondary back-button" type="button">${ot('onboarding.step2.back')}</button>
-          <button class="primary next-button" type="button">${ot('onboarding.step2.next')}</button>
+          <button class="secondary back-button" type="button" data-i18n="onboarding.step2.back">${ot('onboarding.step2.back')}</button>
+          <button class="primary next-button" type="button" data-i18n="onboarding.step2.next">${ot('onboarding.step2.next')}</button>
         </footer>
       </section>
       <section class="setup-card" data-screen="2">
         <header class="card-head">
           <div>
             <p class="eyebrow">Step 03</p>
-            <h2>${ot('onboarding.step3.heading')}</h2>
-            <p>${ot('onboarding.step3.subtitle')}</p>
+            <h2 data-i18n="onboarding.step3.heading">${ot('onboarding.step3.heading')}</h2>
+            <p data-i18n="onboarding.step3.subtitle">${ot('onboarding.step3.subtitle')}</p>
           </div>
-          <span class="card-badge">${ot('onboarding.step3.badge')}</span>
+          <span class="card-badge" data-i18n="onboarding.step3.badge">${ot('onboarding.step3.badge')}</span>
         </header>
         <div class="card-body">
-          <div class="choice-row" id="routerModeGrid" role="radiogroup" aria-label="${ot('onboarding.aria.routerMode')}"></div>
-          <input id="routerMode" type="hidden" value="recommended" />
-          <div class="note" id="routerModeHint"></div>
+          <div class="choice-row" id="modelRoutingModeGrid" role="radiogroup" aria-label="${ot('onboarding.aria.modelRoutingMode')}" data-i18n-aria="onboarding.aria.modelRoutingMode"></div>
+          <input id="modelRoutingMode" type="hidden" value="squilla_router" />
+          <div id="directModelPanel" hidden>
+            <label>
+              <span data-i18n="onboarding.step3.directModel">${ot('onboarding.step3.directModel')}</span>
+              <input id="directModelRoute" autocomplete="off" />
+            </label>
+            <div class="note" id="directModelHint"></div>
+          </div>
         </div>
         <footer class="actions">
-          <button class="secondary back-button" type="button">${ot('onboarding.step3.back')}</button>
-          <button class="primary next-button" type="button">${ot('onboarding.step3.next')}</button>
+          <button class="secondary back-button" type="button" data-i18n="onboarding.step3.back">${ot('onboarding.step3.back')}</button>
+          <button class="primary next-button" type="button" data-i18n="onboarding.step3.next">${ot('onboarding.step3.next')}</button>
         </footer>
       </section>
       <section class="setup-card" data-screen="3">
         <header class="card-head">
           <div>
-            <p class="eyebrow">Step 04</p>
-            <h2>${ot('onboarding.step4.heading')}</h2>
-            <p>${ot('onboarding.step4.subtitle')}</p>
+            <p class="eyebrow">Step 03</p>
+            <h2 data-i18n="onboarding.step4.heading">${ot('onboarding.step4.heading')}</h2>
+            <p data-i18n="onboarding.step4.subtitle">${ot('onboarding.step4.subtitle')}</p>
           </div>
-          <span class="card-badge">${ot('onboarding.step4.badge')}</span>
+          <span class="card-badge" data-i18n="onboarding.step4.badge">${ot('onboarding.step4.badge')}</span>
         </header>
         <div class="card-body">
           <div id="tierBody"></div>
         </div>
         <footer class="actions">
-          <button class="secondary back-button" type="button">${ot('onboarding.step4.back')}</button>
-          <button class="primary next-button" type="button">${ot('onboarding.step4.next')}</button>
+          <button class="secondary back-button" type="button" data-i18n="onboarding.step4.back">${ot('onboarding.step4.back')}</button>
+          <button class="primary next-button" type="button" data-i18n="onboarding.step4.next">${ot('onboarding.step4.next')}</button>
         </footer>
       </section>
       <section class="setup-card" data-screen="4">
         <header class="card-head">
           <div>
-            <p class="eyebrow">Step 05</p>
-            <h2>${ot('onboarding.step5.heading')}</h2>
-            <p>${ot('onboarding.step5.subtitle')}</p>
+            <p class="eyebrow">Step 04</p>
+            <h2 data-i18n="onboarding.step5.heading">${ot('onboarding.step5.heading')}</h2>
+            <p data-i18n="onboarding.step5.subtitle">${ot('onboarding.step5.subtitle')}</p>
           </div>
-          <span class="card-badge">${ot('onboarding.step5.badge')}</span>
+          <span class="card-badge" data-i18n="onboarding.step5.badge">${ot('onboarding.step5.badge')}</span>
         </header>
         <div class="card-body">
-        <div class="choice-row" id="searchProviderGrid" role="radiogroup" aria-label="${ot('onboarding.aria.searchProvider')}"></div>
+        <div class="choice-row" id="searchProviderGrid" role="radiogroup" aria-label="${ot('onboarding.aria.searchProvider')}" data-i18n-aria="onboarding.aria.searchProvider"></div>
         <input id="searchProvider" type="hidden" value="duckduckgo" />
         <label id="searchKeyLabel" hidden>
-          ${ot('onboarding.step5.searchKey')}
+          <span data-i18n="onboarding.step5.searchKey">${ot('onboarding.step5.searchKey')}</span>
           <input id="searchApiKey" name="searchApiKey" type="password" autocomplete="off" placeholder="SEARCH_API_KEY" />
         </label>
-        <div class="note" id="searchHint">${ot('onboarding.step5.searchHintDefault')}</div>
+        <div class="note" id="searchHint" data-i18n="onboarding.step5.searchHintDefault">${ot('onboarding.step5.searchHintDefault')}</div>
         </div>
         <footer class="actions">
-          <button class="secondary back-button" type="button">${ot('onboarding.step5.back')}</button>
-          <button class="primary" type="button" id="finish">${ot('onboarding.step5.finish')}</button>
+          <button class="secondary back-button" type="button" data-i18n="onboarding.step5.back">${ot('onboarding.step5.back')}</button>
+          <button class="primary" type="button" id="finish" data-i18n="onboarding.step5.finish">${ot('onboarding.step5.finish')}</button>
         </footer>
       </section>
       <div class="error" id="error"></div>
     </form>
   </main>
   <script>
-    const t = ${JSON.stringify(onboardingMessages(desktopLocale))};
+    const desktopMessages = ${JSON.stringify(DESKTOP_MESSAGES)};
+    const onboardingMessageCatalog = ${JSON.stringify(ONBOARDING_SCRIPT_MESSAGES)};
+    const providerNoteCatalog = ${JSON.stringify(PROVIDER_NOTE_MESSAGES)};
+    let activeLocale = ${JSON.stringify(desktopLocale)};
+    let t = messagesFor(activeLocale);
+    function messagesFor(locale) {
+      return Object.assign({}, onboardingMessageCatalog.en, onboardingMessageCatalog[locale] || {});
+    }
+    function desktopMessage(locale, key) {
+      return (desktopMessages[locale] && desktopMessages[locale][key]) || desktopMessages.en[key] || key;
+    }
     function fmt(key, vars) {
       let out = t[key] != null ? String(t[key]) : key;
       if (vars) for (const name of Object.keys(vars)) out = out.split('{' + name + '}').join(String(vars[name]));
@@ -2633,127 +2710,135 @@ function onboardingHtml(): string {
     const searchProviders = ${JSON.stringify(SEARCH_PROVIDER_CATALOG)};
     const routerProfiles = ${JSON.stringify(ROUTER_PROFILES)};
     const textTiers = ${JSON.stringify(TEXT_ROUTER_TIERS)};
-    const featuredProviderIds = ['openrouter'];
     let step = 0;
-    let showMoreProviders = false;
     let routerTiers = clone(routerProfiles.openrouter);
     const setupMode = document.getElementById('setupMode');
     const provider = document.getElementById('provider');
     const baseUrl = document.getElementById('baseUrl');
     const model = document.getElementById('model');
     const providerHint = document.getElementById('providerHint');
+    const modelRoutingMode = document.getElementById('modelRoutingMode');
+    const modelRoutingModeGrid = document.getElementById('modelRoutingModeGrid');
+    const directModelPanel = document.getElementById('directModelPanel');
+    const directModelRoute = document.getElementById('directModelRoute');
+    const directModelHint = document.getElementById('directModelHint');
     const routerMode = document.getElementById('routerMode');
-    const routerModeHint = document.getElementById('routerModeHint');
-    const routerModeGrid = document.getElementById('routerModeGrid');
     const tierBody = document.getElementById('tierBody');
     const searchHint = document.getElementById('searchHint');
     const errorBox = document.getElementById('error');
     const finish = document.getElementById('finish');
     const searchProvider = document.getElementById('searchProvider');
-    const searchProviderGrid = document.getElementById('searchProviderGrid');
-    const searchKeyLabel = document.getElementById('searchKeyLabel');
+	    const searchProviderGrid = document.getElementById('searchProviderGrid');
+	    const searchKeyLabel = document.getElementById('searchKeyLabel');
+	    const onboardingLocale = document.getElementById('onboardingLocale');
+	    const endpointPanel = document.getElementById('endpointPanel');
+	    const endpointToggle = document.getElementById('endpointToggle');
+	    const endpointContent = document.getElementById('endpointContent');
     function clone(value) {
       return JSON.parse(JSON.stringify(value || {}));
     }
     function currentProvider() {
       return providers.find((item) => item.id === provider.value) || providers[0];
     }
-    function defaultModeFor(selected) {
-      return selected.routerSupported ? 'recommended' : 'disabled';
+    function providerNote(item) {
+      return (providerNoteCatalog[activeLocale] && providerNoteCatalog[activeLocale][item.id])
+        || (providerNoteCatalog.en && providerNoteCatalog.en[item.id])
+        || item.note
+        || '';
     }
-    function profileKeyForMode() {
-      if (routerMode.value === 'openrouter-mix') return 'openrouter';
-      return provider.value;
+    function modelRoutingCapabilities(selected) {
+      return {
+        squilla_router: Boolean(selected.routerSupported),
+        direct: true,
+        llm_ensemble: selected.id === 'openrouter',
+      };
     }
-    function modeLabel(mode) {
-      if (mode === 'openrouter-mix') return t.modeOpenrouterMix;
-      if (mode === 'disabled') return t.modeDirect;
-      return t.modeDefaultTier;
+    function defaultModelRoutingModeFor(selected) {
+      return selected.routerSupported ? 'squilla_router' : 'direct';
     }
-    function syncProviderDefaults(resetRouter) {
-      const selected = currentProvider();
-      baseUrl.value = selected.baseUrl || baseUrl.value;
-      model.value = selected.model || model.value;
-      providerHint.textContent = fmt('providerHint', { label: selected.label, env: selected.apiKeyEnv || t.noApiKey, note: selected.note });
-      if (resetRouter) {
-        routerMode.value = defaultModeFor(selected);
-        routerTiers = clone(routerProfiles[profileKeyForMode()]);
-      }
-      renderRouterModes();
-      renderTiers();
+    function syncRouterModeFromModelRouting() {
+      routerMode.value = modelRoutingMode.value === 'direct' ? 'disabled' : 'recommended';
     }
+	    function profileKeyForMode() {
+	      if (modelRoutingMode.value === 'llm_ensemble') return 'openrouter';
+	      return provider.value;
+	    }
+	    function setEndpointPanelOpen(open) {
+	      endpointPanel.classList.toggle('open', open);
+	      endpointToggle.setAttribute('aria-expanded', String(open));
+	      endpointContent.setAttribute('aria-hidden', String(!open));
+	    }
+	    function syncProviderDefaults(resetRouter) {
+	      const selected = currentProvider();
+	      if (resetRouter) {
+	        baseUrl.value = selected.baseUrl || '';
+	        model.value = selected.model || '';
+	      } else {
+	        if (!baseUrl.value && selected.baseUrl) baseUrl.value = selected.baseUrl;
+	        if (!model.value && selected.model) model.value = selected.model;
+	      }
+	      providerHint.textContent = providerNote(selected);
+	      if (resetRouter) {
+	        modelRoutingMode.value = defaultModelRoutingModeFor(selected);
+	        syncRouterModeFromModelRouting();
+	        routerTiers = clone(routerProfiles[profileKeyForMode()]);
+	        setEndpointPanelOpen(routerMode.value === 'disabled' && !model.value.trim());
+	      }
+	      renderModelRoutingModeGrid();
+	      renderTiers();
+	    }
     function renderProviderGrid() {
       const grid = document.getElementById('providerGrid');
-      const moreList = document.getElementById('providerMoreList');
-      const moreToggle = document.getElementById('providerMoreToggle');
-      const moreCount = document.getElementById('providerMoreCount');
-      const featured = providers.filter((item) => featuredProviderIds.includes(item.id));
-      const more = providers.filter((item) => !featuredProviderIds.includes(item.id));
-      grid.classList.toggle('single-provider', featured.length === 1);
-      grid.innerHTML = featured.map((item) => (
-        '<button class="provider' + (item.id === provider.value ? ' active' : '') + '" type="button" data-provider="' + item.id + '">' +
-        '<span class="provider-tag">provider</span><strong>' + item.label + '</strong><small>' + (item.routerSupported ? t.tierDefaultsAvailable : item.note) + '</small></button>'
+      grid.classList.toggle('single-provider', providers.length === 1);
+      grid.innerHTML = providers.map((item) => (
+        '<button class="provider' + (item.id === provider.value ? ' active' : '') + '" type="button" data-provider="' + escapeAttr(item.id) + '">' +
+        '<span class="provider-tag">' + escapeHtml(t.providerField) + '</span><strong>' + escapeHtml(item.label) + '</strong><small>' + escapeHtml(item.routerSupported ? t.tierDefaultsAvailable : providerNote(item)) + '</small></button>'
       )).join('');
-      moreToggle.querySelector('span:first-child').textContent = showMoreProviders ? t.hideProviders : t.moreProviders;
-      moreCount.textContent = String(more.length);
-      moreList.hidden = !showMoreProviders;
-      moreList.innerHTML = more.map((item) => (
-        '<button class="provider-row' + (item.id === provider.value ? ' active' : '') + '" type="button" data-provider="' + item.id + '">' +
-        '<strong>' + item.label + '</strong><small>provider</small></button>'
-      )).join('');
+      function selectProvider(nextProvider) {
+	        provider.value = nextProvider || 'openrouter';
+	        errorBox.textContent = '';
+	        syncProviderDefaults(true);
+	        renderProviderGrid();
+	        render();
+	      }
       const bindProviderButton = (button) => {
-        button.addEventListener('click', () => {
-          provider.value = button.dataset.provider || 'openrouter';
-          if (!featuredProviderIds.includes(provider.value)) showMoreProviders = true;
-          renderProviderGrid();
-          syncProviderDefaults(true);
-        });
+        button.addEventListener('click', () => selectProvider(button.dataset.provider || 'openrouter'));
       };
       grid.querySelectorAll('.provider').forEach(bindProviderButton);
-      moreList.querySelectorAll('.provider-row').forEach(bindProviderButton);
-      moreToggle.onclick = () => {
-        showMoreProviders = !showMoreProviders;
-        renderProviderGrid();
-      };
     }
-    function renderRouterModes() {
+    function renderModelRoutingModeGrid() {
       const selected = currentProvider();
-      if ((routerMode.value === 'recommended' && !selected.routerSupported) || routerMode.value === 'openrouter-mix') {
-        routerMode.value = defaultModeFor(selected);
+      const capabilities = modelRoutingCapabilities(selected);
+      if (!capabilities[modelRoutingMode.value]) {
+        modelRoutingMode.value = defaultModelRoutingModeFor(selected);
       }
-      const autoActive = routerMode.value !== 'disabled';
-      const autoDisabled = !selected.routerSupported;
-      const autoBody = selected.id === 'openrouter'
-        ? t.autoBodyOpenrouter
-        : fmt('autoBody', { label: selected.label });
-      routerModeGrid.className = 'router-choice';
-      routerModeGrid.innerHTML =
-        '<div class="router-primary">' +
-        '<button class="choice' + (autoActive ? ' active' : '') + '" type="button" data-router-primary="auto"' + (autoDisabled ? ' disabled' : '') + '>' +
-        '<strong>' + escapeHtml(t.autoTitle) + '</strong><small>' + escapeHtml(autoBody) + '</small></button>' +
-        '<button class="choice' + (routerMode.value === 'disabled' ? ' active' : '') + '" type="button" data-router-primary="disabled">' +
-        '<strong>' + escapeHtml(t.fixedTitle) + '</strong><small>' + escapeHtml(t.fixedBody) + '</small></button>' +
-        '</div>';
-      routerModeGrid.querySelectorAll('[data-router-primary]').forEach((button) => {
+      syncRouterModeFromModelRouting();
+      const modes = [
+        { id: 'squilla_router', title: t.modeSmartRouterTitle, desc: t.modeSmartRouterDesc, disabledReason: t.modeSmartRouterUnavailable },
+        { id: 'direct', title: t.modeDirectTitle, desc: t.modeDirectDesc, disabledReason: '' },
+        { id: 'llm_ensemble', title: t.modeEnsembleTitle, desc: t.modeEnsembleDesc, disabledReason: t.modeEnsembleUnavailable },
+      ];
+      modelRoutingModeGrid.innerHTML = modes.map((mode) => {
+        const enabled = Boolean(capabilities[mode.id]);
+        const active = mode.id === modelRoutingMode.value;
+        const desc = enabled ? mode.desc : mode.disabledReason;
+        return '<button class="choice' + (active ? ' active' : '') + '" type="button" data-model-routing-mode="' + escapeAttr(mode.id) + '"' + (enabled ? '' : ' disabled') + '>' +
+          '<strong>' + escapeHtml(mode.title) + '</strong><small>' + escapeHtml(desc) + '</small></button>';
+      }).join('');
+      modelRoutingModeGrid.querySelectorAll('[data-model-routing-mode]').forEach((button) => {
         button.addEventListener('click', () => {
-          routerMode.value = button.dataset.routerPrimary === 'disabled' ? 'disabled' : defaultModeFor(selected);
-          routerTiers = clone(routerProfiles[profileKeyForMode()]);
-          renderRouterModes();
-          renderTiers();
+          if (button.disabled) return;
+          modelRoutingMode.value = button.dataset.modelRoutingMode || 'squilla_router';
+          syncRouterModeFromModelRouting();
+          if (modelRoutingMode.value === 'direct') setEndpointPanelOpen(true);
+          errorBox.textContent = '';
+          renderModelRoutingModeGrid();
+          render();
         });
       });
-      routerModeGrid.querySelectorAll('.choice').forEach((button) => {
-        if (!button.dataset.routerMode) return;
-        button.addEventListener('click', () => {
-          routerMode.value = button.dataset.routerMode || 'recommended';
-          routerTiers = clone(routerProfiles[profileKeyForMode()]);
-          renderRouterModes();
-          renderTiers();
-        });
-      });
-      routerModeHint.textContent = routerMode.value === 'disabled'
-        ? t.routerHintDisabled
-        : fmt('routerHintActive', { mode: modeLabel(routerMode.value) });
+      directModelPanel.hidden = modelRoutingMode.value !== 'direct';
+      directModelRoute.value = model.value;
+      directModelHint.textContent = t.directModelPrompt;
     }
     function renderTiers() {
       if (routerMode.value === 'disabled') {
@@ -2808,6 +2893,23 @@ function onboardingHtml(): string {
     function escapeAttr(value) {
       return escapeHtml(value);
     }
+    function applyLocale(nextLocale) {
+      const locale = desktopMessages[nextLocale] ? nextLocale : 'en';
+      activeLocale = locale;
+      t = messagesFor(locale);
+      document.documentElement.lang = locale;
+      document.title = desktopMessage(locale, 'onboarding.title');
+      document.querySelectorAll('[data-i18n]').forEach((element) => {
+        element.textContent = desktopMessage(locale, element.dataset.i18n);
+      });
+      document.querySelectorAll('[data-i18n-aria]').forEach((element) => {
+        element.setAttribute('aria-label', desktopMessage(locale, element.dataset.i18nAria));
+      });
+      renderProviderGrid();
+      renderSearchProviderGrid();
+      syncProviderDefaults(false);
+      render();
+    }
     function shortModel(value) {
       const text = String(value || '');
       const parts = text.split('/');
@@ -2840,7 +2942,9 @@ function onboardingHtml(): string {
       return setupMode.value === 'simple';
     }
     function routeSteps() {
-      return isSimpleSetup() ? [0, 1, 4] : [0, 1, 2, 3, 4];
+      if (isSimpleSetup()) return [0, 1, 4];
+      if (modelRoutingMode.value === 'squilla_router') return [0, 1, 2, 3, 4];
+      return [0, 1, 2, 4];
     }
     function routePosition(targetStep) {
       return routeSteps().indexOf(targetStep);
@@ -2872,14 +2976,15 @@ function onboardingHtml(): string {
       document.querySelectorAll('[data-advanced-step]').forEach((item) => {
         item.classList.toggle('simple-hidden', isSimpleSetup());
       });
-      document.querySelectorAll('.step').forEach((item) => {
-        const labelStep = Number(item.dataset.stepLabel || 0);
-        const itemRouteIndex = route.indexOf(labelStep);
-        const index = item.querySelector('.step-index');
-        if (index && itemRouteIndex >= 0) index.textContent = String(itemRouteIndex + 1);
-        item.classList.toggle('active', labelStep === step);
-        item.classList.toggle('done', itemRouteIndex >= 0 && itemRouteIndex < currentRouteIndex);
-      });
+	      document.querySelectorAll('.step').forEach((item) => {
+	        const labelStep = Number(item.dataset.stepLabel || 0);
+	        const itemRouteIndex = route.indexOf(labelStep);
+	        const index = item.querySelector('.step-index');
+	        item.hidden = itemRouteIndex < 0;
+	        if (index && itemRouteIndex >= 0) index.textContent = String(itemRouteIndex + 1);
+	        item.classList.toggle('active', labelStep === step);
+	        item.classList.toggle('done', itemRouteIndex >= 0 && itemRouteIndex < currentRouteIndex);
+	      });
       document.querySelectorAll('.setup-card').forEach((screen) => {
         const screenStep = Number(screen.dataset.screen || 0);
         const screenRouteIndex = route.indexOf(screenStep);
@@ -2891,7 +2996,7 @@ function onboardingHtml(): string {
       if (step === 1) {
         syncProviderDefaults(false);
       }
-      if (step === 2) renderRouterModes();
+      renderModelRoutingModeGrid();
       if (step === 3) renderTiers();
       syncSearchProviderControls();
     }
@@ -2920,12 +3025,22 @@ function onboardingHtml(): string {
         render();
       });
     });
-    function validateStep() {
+	    onboardingLocale.addEventListener('change', () => {
+	      errorBox.textContent = '';
+	      applyLocale(onboardingLocale.value);
+	    });
+	    endpointToggle.addEventListener('click', () => {
+	      setEndpointPanelOpen(!endpointPanel.classList.contains('open'));
+	    });
+	    directModelRoute.addEventListener('input', () => {
+	      model.value = directModelRoute.value;
+	    });
+	    function validateStep() {
       const selected = currentProvider();
       const selectedSearch = currentSearchProvider();
       if (step === 1 && selected.requiresApiKey && !document.getElementById('apiKey').value.trim()) return fmt('apiKeyRequired', { label: selected.label });
-      if (step === 3 && routerMode.value === 'disabled' && !model.value.trim()) return t.directModelRequiredDisabled;
-      if (step === 3 && routerMode.value !== 'disabled') {
+      if (step === 2 && modelRoutingMode.value === 'direct' && !model.value.trim()) return t.directModelRequiredDirect;
+      if (step === 3 && modelRoutingMode.value === 'squilla_router') {
         const defaultTier = document.getElementById('routerDefaultTier')?.value || 'c1';
         if (!routerTiers[defaultTier] || !routerTiers[defaultTier].model) return t.defaultTierRequiresModel;
       }
@@ -2965,6 +3080,7 @@ function onboardingHtml(): string {
           apiKey: document.getElementById('apiKey').value,
           baseUrl: baseUrl.value,
           model: model.value,
+          modelRoutingMode: modelRoutingMode.value,
           routerMode: routerMode.value,
           routerDefaultTier: document.getElementById('routerDefaultTier')?.value || 'c1',
           routerTiers,
@@ -3385,7 +3501,7 @@ async function startGateway(): Promise<GatewayState> {
 }
 
 async function loadControlUi(window: BrowserWindow, gatewayUrl: string): Promise<void> {
-  const url = `${gatewayUrl}/control/`
+  const url = `${gatewayUrl}/control/chat`
   let lastError: Error | null = null
   for (let attempt = 1; attempt <= 10; attempt += 1) {
     try {
@@ -4417,6 +4533,7 @@ ipcMain.handle('desktop:onboarding:defaults', () => ({
   providers: PROVIDER_CATALOG,
   searchProviders: SEARCH_PROVIDER_CATALOG,
   router: {
+    modelRoutingModes: ['squilla_router', 'direct', 'llm_ensemble'],
     modes: ['recommended', 'openrouter-mix', 'disabled'],
     defaultTier: 'c1',
     textTiers: TEXT_ROUTER_TIERS,
