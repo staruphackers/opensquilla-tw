@@ -130,6 +130,50 @@ describe('useSetupEnsembleForm — partial payload building', () => {
     })
   })
 
+  it('switches OpenRouter fixed ensemble into custom dynamic candidates using the legacy template', () => {
+    const f = useSetupEnsembleForm()
+    f.initFromConfig({
+      enabled: true,
+      selection_mode: 'static_openrouter_b5',
+      model_options: [...LEGACY_OPENROUTER_MODEL_OPTIONS],
+    })
+
+    f.setOpenRouterCustomEnsemble(true)
+
+    expect(f.selectionMode.value).toBe('router_dynamic')
+    expect(f.modelOptions.value).toEqual([])
+    expect(f.candidates.value).toEqual(
+      LEGACY_OPENROUTER_MODEL_OPTIONS.map(model => ({
+        provider: 'openrouter',
+        model,
+        source: 'custom',
+        enabled: true,
+      })),
+    )
+    expect(f.payload()).toEqual({
+      selectionMode: 'router_dynamic',
+      modelOptions: [],
+      candidates: LEGACY_OPENROUTER_MODEL_OPTIONS.map(model => ({
+        provider: 'openrouter',
+        model,
+        source: 'custom',
+        enabled: true,
+      })),
+    })
+  })
+
+  it('turns OpenRouter customization back off without leaking seeded candidates into a pristine static save', () => {
+    const f = useSetupEnsembleForm()
+    f.initFromConfig({ enabled: true, selection_mode: 'static_openrouter_b5' })
+
+    f.setOpenRouterCustomEnsemble(true)
+    f.setOpenRouterCustomEnsemble(false)
+
+    expect(f.selectionMode.value).toBe('static_openrouter_b5')
+    expect(f.isDirty.value).toBe(false)
+    expect(f.payload()).toEqual({})
+  })
+
   it('sends allFailedPolicy alone when only it changed', () => {
     const f = useSetupEnsembleForm()
     f.initFromConfig(SAVED)
@@ -152,7 +196,7 @@ describe('useSetupEnsembleForm — model option edits', () => {
 
   it('removes exactly the named option', () => {
     const f = useSetupEnsembleForm()
-    f.initFromConfig({ model_options: ['a/one', 'b/two'] })
+    f.initFromConfig({ selection_mode: 'router_dynamic', model_options: ['a/one', 'b/two'] })
 
     f.removeModelOption('a/one')
     expect(f.modelOptions.value).toEqual(['b/two'])
@@ -239,18 +283,32 @@ describe('useSetupEnsembleForm — panel contract', () => {
     const f = useSetupEnsembleForm()
     f.initFromConfig({ selection_mode: 'static_openrouter_b5' })
 
-    const profile = makePanel(f, 'openrouter').value.fixedOpenRouterProfile
+    const panel = makePanel(f, 'openrouter').value
+    const profile = panel.fixedOpenRouterProfile
 
     expect(profile?.proposers.map(candidate => candidate.model)).toEqual([...OPENROUTER_FIXED_ENSEMBLE_PROPOSERS])
     expect(profile?.aggregator.model).toBe(OPENROUTER_FIXED_ENSEMBLE_AGGREGATOR)
-    expect(makePanel(f, 'openrouter').value.showCandidateEditor).toBe(false)
+    expect(panel.showCandidateEditor).toBe(false)
+    expect(panel.showOpenRouterFixedSwitch).toBe(true)
+    expect(panel.openRouterCustomEnsemble).toBe(false)
   })
 
-  it('surfaces the OpenRouter credential hint only for static selection on a non-openrouter provider', () => {
+  it('uses the custom candidate panel for non-OpenRouter providers even if static mode is stored', () => {
     const f = useSetupEnsembleForm()
     f.initFromConfig({ selection_mode: 'static_openrouter_b5' })
 
-    expect(makePanel(f, 'deepseek').value.showOpenrouterHint).toBe(true)
+    const panel = makePanel(f, 'deepseek').value
+
+    expect(panel.fixedOpenRouterProfile).toBeNull()
+    expect(panel.showCandidateEditor).toBe(true)
+    expect(panel.showOpenRouterFixedSwitch).toBe(false)
+  })
+
+  it('does not surface OpenRouter fixed hints outside the OpenRouter provider path', () => {
+    const f = useSetupEnsembleForm()
+    f.initFromConfig({ selection_mode: 'static_openrouter_b5' })
+
+    expect(makePanel(f, 'deepseek').value.showOpenrouterHint).toBe(false)
     expect(makePanel(f, 'openrouter').value.showOpenrouterHint).toBe(false)
     expect(makePanel(f, 'OpenRouter').value.showOpenrouterHint).toBe(false)
 

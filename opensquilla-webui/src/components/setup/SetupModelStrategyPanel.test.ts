@@ -61,6 +61,8 @@ function panel(overrides: Record<string, unknown> = {}) {
       allFailedPolicy: 'fallback_single',
       showModelOptions: true,
       showCandidateEditor: true,
+      showOpenRouterFixedSwitch: false,
+      openRouterCustomEnsemble: false,
       showOpenrouterHint: false,
       advancedOpen: false,
       statusText: 'Ensemble is on.',
@@ -333,6 +335,7 @@ describe('SetupModelStrategyPanel', () => {
   })
 
   it('shows the fixed OpenRouter ensemble profile without the custom candidate editor', async () => {
+    const onUpdateOpenrouterCustomEnsemble = vi.fn()
     const { app, el } = await mountPanel({
       activeStrategy: 'ensemble',
       cards: [
@@ -353,16 +356,71 @@ describe('SetupModelStrategyPanel', () => {
           aggregator: { key: 'openrouter-fixed:openrouter:z-ai/glm-5.2:aggregator', provider: 'openrouter', model: 'z-ai/glm-5.2', source: 'openrouter_fixed', enabled: true },
         },
         showCandidateEditor: false,
+        showOpenRouterFixedSwitch: true,
+        openRouterCustomEnsemble: false,
       },
-    })
+    }, { onUpdateOpenrouterCustomEnsemble })
 
     expect(el.textContent).toContain('OpenRouter fixed ensemble')
+    expect(el.textContent).toContain('Customize ensemble')
     expect(el.textContent).toContain('deepseek/deepseek-v4-pro')
     expect(el.textContent).toContain('moonshotai/kimi-k2.7-code')
     expect(el.textContent).toContain('qwen/qwen3.7-max')
     expect(el.textContent).toContain('Aggregator')
+    const customize = el.querySelector<HTMLInputElement>('input[name="setup_model_strategy_openrouter_custom"]')
+    expect(customize?.checked).toBe(false)
+    customize!.checked = true
+    customize!.dispatchEvent(new Event('change', { bubbles: true }))
+    await nextTick()
+    expect(onUpdateOpenrouterCustomEnsemble).toHaveBeenCalledWith(true)
     expect(el.querySelector('input[name="setup_model_strategy_add_candidate_provider"]')).toBeNull()
     expect(el.querySelector('[data-testid="setup-model-strategy-reset-candidates"]')).toBeNull()
+
+    app.unmount()
+  })
+
+  it('shows custom candidates rather than the fixed OpenRouter block for non-OpenRouter providers', async () => {
+    const { app, el } = await mountPanel({
+      providerLabel: 'DeepSeek',
+      activeStrategy: 'ensemble',
+      cards: [
+        { id: 'router', enabled: false, titleKey: 'setup.modelStrategy.cards.router.title', descKey: 'setup.modelStrategy.cards.router.desc' },
+        { id: 'ensemble', enabled: true, titleKey: 'setup.modelStrategy.cards.ensemble.title', descKey: 'setup.modelStrategy.cards.ensemble.desc' },
+        { id: 'single', enabled: false, titleKey: 'setup.modelStrategy.cards.single.title', descKey: 'setup.modelStrategy.cards.single.desc' },
+      ],
+      router: {
+        ...panel().router,
+        routerDefaultTier: 'c1',
+        textTiers: ['c1'],
+        tierRows: [
+          { name: 'c1', provider: 'deepseek', model: 'deepseek-v4-pro', thinkingLevel: 'high', supportsImage: false },
+        ],
+      },
+      ensemble: {
+        enabled: true,
+        selectionMode: 'static_openrouter_b5',
+        fixedOpenRouterProfile: null,
+        tierCandidates: [
+          {
+            key: 'tier:deepseek:deepseek-v4-pro',
+            provider: 'deepseek',
+            model: 'deepseek-v4-pro',
+            source: 'tier',
+            enabled: true,
+            credential: { provider: 'deepseek', available: true, source: 'explicit', envKey: 'DEEPSEEK_API_KEY' },
+          },
+        ],
+        customCandidates: [],
+        showCandidateEditor: true,
+        showOpenRouterFixedSwitch: false,
+      },
+    })
+
+    expect(el.textContent).not.toContain('OpenRouter fixed ensemble')
+    expect(el.textContent).not.toContain('Customize ensemble')
+    expect(el.textContent).toContain('Candidate models')
+    expect(el.textContent).toContain('DeepSeek · deepseek-v4-pro')
+    expect(el.querySelector('input[name="setup_model_strategy_add_candidate_provider"]')).toBeTruthy()
 
     app.unmount()
   })

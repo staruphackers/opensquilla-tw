@@ -313,6 +313,8 @@
       "customCandidatesLabel": "プロバイダー横断のカスタム候補",
       "openrouterFixedTitle": "OpenRouter 固定集約",
       "openrouterFixedDesc": "Chat Model が OpenRouter を使う場合、集約ルーティングは 4 つの提案モデルと 1 つの集約モデルを使います。",
+      "customizeOpenRouterLabel": "集約をカスタマイズ",
+      "customizeOpenRouterDesc": "旧 OpenRouter 候補テンプレートを使い、ルーター基準の集約ルーティングに切り替えます。",
       "openrouterFixedProposer": "提案モデル",
       "openrouterFixedAggregator": "集約モデル",
       "credentialReady": "接続済み",

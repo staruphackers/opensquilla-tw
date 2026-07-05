@@ -204,14 +204,21 @@ export function useChatRenderedMessages(options: UseChatRenderedMessagesOptions)
 
       const usageEnsemble = ensembleMetaFromMessage(msg)
       if (usageEnsemble) {
-        // A tool-using ensemble turn emits its breakdown MID-turn (the ensemble
-        // is the first LLM call). Keep the live strip + its open trace inspector
-        // until the whole turn settles; only then hand off to the bubble popover.
-        // Older/settled turns splice on every recompute exactly as before.
         const inLiveTurn = options.isStreaming?.value === true && i > lastUserIdx
-        if (turnRouterIdx >= 0 && !inLiveTurn) {
-          result.splice(turnRouterIdx, 1)
-          turnRouterIdx = -1
+        const stripItem = renderedEnsembleRouterStrip(
+          {
+            ...msg,
+            routerSettled: msg.routerSettled === true || !inLiveTurn,
+          },
+          usageEnsemble,
+          turnIdx,
+          i,
+          `${msg.messageId || i}-ensemble-router`,
+        )
+        if (stripItem) {
+          turnRouterIdx = upsertRouterStrip(result, stripItem, turnRouterIdx, {
+            settleReplacement: false,
+          })
         }
         prevRole = ''
       } else {
@@ -774,9 +781,10 @@ function upsertRouterStrip(
   result: ChatRenderedMessage[],
   stripItem: ChatRenderedMessage,
   previousIndex: number,
+  options: { settleReplacement?: boolean } = {},
 ): number {
   if (previousIndex >= 0) {
-    stripItem.routerSettled = true
+    if (options.settleReplacement !== false) stripItem.routerSettled = true
     result[previousIndex] = stripItem
     return previousIndex
   }

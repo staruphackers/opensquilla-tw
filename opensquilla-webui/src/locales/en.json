@@ -313,6 +313,8 @@
       "customCandidatesLabel": "Custom cross-provider candidates",
       "openrouterFixedTitle": "OpenRouter fixed ensemble",
       "openrouterFixedDesc": "When Chat Model uses OpenRouter, ensemble routing uses four proposer models and one aggregator.",
+      "customizeOpenRouterLabel": "Customize ensemble",
+      "customizeOpenRouterDesc": "Switch to router-based ensemble routing with the legacy OpenRouter candidate template.",
       "openrouterFixedProposer": "Proposer model",
       "openrouterFixedAggregator": "Aggregator",
       "credentialReady": "Connected",

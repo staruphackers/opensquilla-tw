@@ -283,9 +283,14 @@ describe('useChatRenderedMessages router visual mode', () => {
     const strip = api.renderedMessages.value.find(message => message.isRouterStrip)
     expect(strip).toBeTruthy()
     expect(strip?.routerPanel).toBe('llm-ensemble')
+    expect(strip?.ensemble?.modelCount).toBe(2)
+    expect(strip?.ensemble?.models.map(model => model.modelShort)).toEqual([
+      'qwen3.7-plus',
+      'glm-5.2',
+    ])
   })
 
-  it('removes the pending ensemble strip once the assistant answer carries the completed trace', () => {
+  it('keeps the ensemble strip as a settled trace panel once the assistant answer completes', () => {
     const api = useChatRenderedMessages({
       messages: ref<ChatMessage[]>([
         { role: 'user', text: 'hello', ts: 0 },
@@ -341,9 +346,18 @@ describe('useChatRenderedMessages router visual mode', () => {
     const rendered = api.renderedMessages.value
     const assistantIndex = rendered.findIndex(message => message.displayRole === 'assistant')
     const stripIndex = rendered.findIndex(message => message.isRouterStrip)
+    const strip = rendered[stripIndex]
 
     expect(assistantIndex).toBeGreaterThan(-1)
-    expect(stripIndex).toBe(-1)
+    expect(stripIndex).toBeGreaterThan(-1)
+    expect(stripIndex).toBeLessThan(assistantIndex)
+    expect(strip?.routerPanel).toBe('llm-ensemble')
+    expect(strip?.routerSettled).toBe(true)
+    expect(strip?.ensemble?.modelCount).toBe(2)
+    expect(strip?.ensemble?.models.map(model => model.modelShort)).toEqual([
+      'qwen3.7-plus',
+      'glm-5.2',
+    ])
     expect(rendered[assistantIndex]?.meta?.ensemble?.modelCount).toBe(2)
   })
 })
@@ -465,7 +479,7 @@ describe('useChatRenderedMessages clarify history recovery', () => {
 })
 
 describe('useChatRenderedMessages ensemble metadata', () => {
-  it('keeps completed ensemble trace on the assistant meta without rendering a router strip', () => {
+  it('reconstructs a settled ensemble strip from completed assistant usage', () => {
     const api = renderedMessagesFor([
       {
         role: 'user',
@@ -496,7 +510,10 @@ describe('useChatRenderedMessages ensemble metadata', () => {
     const strip = api.renderedMessages.value.find(message => message.isRouterStrip)
     const assistant = api.renderedMessages.value.find(message => message.displayRole === 'assistant')
 
-    expect(strip).toBeUndefined()
+    expect(strip).toBeTruthy()
+    expect(strip?.routerPanel).toBe('llm-ensemble')
+    expect(strip?.routerSettled).toBe(true)
+    expect(strip?.ensemble?.modelCount).toBe(3)
     expect(assistant?.meta?.ensemble?.modelCount).toBe(3)
     expect(assistant?.meta?.ensemble?.models.map(model => model.modelShort)).toEqual([
       'qwen3.7-plus',

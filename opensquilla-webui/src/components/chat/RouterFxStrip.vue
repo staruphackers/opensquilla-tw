@@ -109,10 +109,12 @@ const ensemble = computed(() => props.message.ensemble)
 const ensembleModels = computed(() => ensemble.value?.models || [])
 const isEnsemblePanel = computed(() => props.message.routerPanel === 'llm-ensemble')
 const hasEnsembleModels = computed(() => ensembleModels.value.length > 0)
-// Openable once we know *how many* candidates ran, even before per-member rows
-// arrive — a completed ensemble that only reported a count still lets the user
-// open the trace (which then shows a graceful "detail unavailable" row).
-const hasInspector = computed(() => hasEnsembleModels.value || (ensemble.value?.modelCount || 0) > 0)
+// Ensemble strips are trace surfaces, not only animations: keep them openable
+// even while candidate details are still unknown so the empty/pending state is
+// visible instead of looking broken.
+const hasInspector = computed(() =>
+  isEnsemblePanel.value || hasEnsembleModels.value || (ensemble.value?.modelCount || 0) > 0,
+)
 // Synthesizing is "done" once the turn settles OR every revealed member has
 // finished. The latter freezes the strip (green dot, no scan) while the
 // aggregator/tools keep running below, instead of animating for the whole turn.

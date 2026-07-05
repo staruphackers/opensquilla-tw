@@ -297,6 +297,7 @@ async function loadData() {
     behaviorForm.initFromConfig(config.value)
     routerForm.initFromConfig(config.value.squilla_router || {}, currentRouterProfile.value?.tiers || {}, currentProvider.value)
     ensembleForm.initFromConfig(config.value.llm_ensemble || {})
+    reconcileEnsembleProviderCompatibility()
     capabilitiesForm.initSearchFromConfig(config.value, searchProviders.value)
     capabilitiesForm.initMemoryFromConfig(config.value)
     capabilitiesForm.initImageFromConfig(config.value, status.value, imageProviders.value)
@@ -543,6 +544,13 @@ const privacyPanel = computed(() => ({
 }))
 
 const isOpenrouterProvider = computed(() => currentProvider.value.toLowerCase() === 'openrouter')
+function reconcileEnsembleProviderCompatibility() {
+  const provider = currentProvider.value.toLowerCase()
+  if (provider && provider !== 'openrouter' && ensembleForm.selectionMode.value === 'static_openrouter_b5') {
+    ensembleForm.setSelectionMode('router_dynamic')
+  }
+}
+
 // openrouter-mix is only valid for the openrouter provider. When the selection
 // moves off openrouter while a stored mix mode is loaded, coerce the mode back
 // to recommended so the save payload stays valid for the new provider. watch
@@ -551,6 +559,7 @@ watch(isOpenrouterProvider, (isOpenrouter) => {
   if (!isOpenrouter && routerForm.mode.value === 'openrouter-mix') {
     routerForm.setRouterMode('recommended')
   }
+  reconcileEnsembleProviderCompatibility()
 })
 const routerPanel = routerForm.createPanel({
   routerSummary,
@@ -1073,6 +1082,10 @@ function removeEnsembleCandidate(candidate: EnsembleCandidateView) {
 
 function resetEnsembleCandidates() {
   ensembleForm.resetModelOptions()
+}
+
+function setOpenRouterCustomEnsemble(value: boolean) {
+  ensembleForm.setOpenRouterCustomEnsemble(value)
 }
 
 function setEnsembleMinSuccessful(value: number) {
@@ -1598,6 +1611,7 @@ async function copyConfigPath() {
     addEnsembleCandidate,
     removeEnsembleCandidate,
     resetEnsembleCandidates,
+    setOpenRouterCustomEnsemble,
     setEnsembleMinSuccessful,
     setEnsembleAllFailedPolicy,
     selectChannelType,

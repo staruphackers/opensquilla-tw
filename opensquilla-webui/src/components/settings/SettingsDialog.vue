@@ -192,6 +192,7 @@
               @add-ensemble-candidate="addEnsembleCandidate"
               @remove-ensemble-candidate="removeEnsembleCandidate"
               @reset-ensemble-candidates="resetEnsembleCandidates"
+              @update-openrouter-custom-ensemble="setOpenRouterCustomEnsemble"
               @update-ensemble-min-successful="setEnsembleMinSuccessful"
               @update-ensemble-all-failed-policy="setEnsembleAllFailedPolicy"
               @go-to-section="selectSection"
@@ -327,6 +328,7 @@ const {
   addEnsembleCandidate,
   removeEnsembleCandidate,
   resetEnsembleCandidates,
+  setOpenRouterCustomEnsemble,
   setEnsembleMinSuccessful,
   setEnsembleAllFailedPolicy,
   applyProviderPreset,
