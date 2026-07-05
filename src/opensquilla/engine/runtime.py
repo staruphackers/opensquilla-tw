@@ -1238,11 +1238,27 @@ class _SelectorFallbackProvider:
             if savings_key in metadata:
                 metadata[savings_key] = 0.0
 
+    def _note_fallback_hop(self) -> None:
+        """Count each selector fallback actually taken this turn.
+
+        Read at turn finalize by the router decision record
+        (engine/steps/router_decision_record.py) so persisted rows report
+        how many hops away from the routed model the executed one is.
+        """
+        metadata = self._turn_metadata
+        if metadata is None:
+            return
+        try:
+            metadata["router_fallback_hops"] = int(metadata.get("router_fallback_hops") or 0) + 1
+        except Exception:  # noqa: BLE001 — telemetry only
+            pass
+
     def fallback_after_invalid_response(self, reason: str) -> bool:
         try:
             self._provider = self._selector.next_fallback_after_failure(RuntimeError(reason))
         except Exception:
             return False
+        self._note_fallback_hop()
         self._realign_routed_model_after_fallback()
         return True
 
@@ -1285,6 +1301,7 @@ class _SelectorFallbackProvider:
                         yield buffered_event
                     yield event
                     return
+                self._note_fallback_hop()
                 self._realign_routed_model_after_fallback()
                 async for fallback_event in self._provider.chat(
                     messages,
@@ -4959,6 +4976,24 @@ class TurnRunner:
         """
 
         try:
+            # Flush the staged router decision record (V017 router_decisions)
+            # with executed facts: executed_kind/ensemble_profile/fallback_hops
+            # are only knowable now that the provider ran. Best-effort — the
+            # hook never raises and no-ops when nothing was staged.
+            if turn_obj is not None:
+                from opensquilla.engine.steps.router_decision_record import (
+                    flush_router_decision,
+                )
+
+                flush_router_decision(
+                    turn_obj.metadata,
+                    ensemble_trace=(
+                        getattr(done_event, "ensemble_trace", None)
+                        if done_event is not None
+                        else None
+                    ),
+                )
+
             tool_names = [getattr(td, "name", "") for td in tool_defs]
             prompt_hash, system_prompt_hash, tool_list_hash = compute_hashes(
                 message, final_prompt, [n for n in tool_names if n]
@@ -5125,6 +5160,11 @@ class TurnRunner:
                 session_intent=session_intent,
                 intent_summary=build_intent_summary(message),
                 trace_id=trace_id or turn_id,
+                decision_id=(
+                    turn_obj.metadata.get("router_decision_id")
+                    if turn_obj is not None
+                    else None
+                ),
                 tool_profile=prompt_report.tool_profile if prompt_report else None,
                 prompt_hash=prompt_hash,
                 system_prompt_hash=system_prompt_hash,
