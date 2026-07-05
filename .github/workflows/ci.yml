@@ -106,13 +106,26 @@ jobs:
         working-directory: opensquilla-webui
         run: npm run build
 
-      - name: Verify dist exists
+      - name: Verify committed dist is fresh
         run: |
           if [ ! -f "src/opensquilla/gateway/static/dist/index.html" ]; then
             echo "ERROR: Frontend dist not found"
             exit 1
           fi
-          echo "Frontend dist verified"
+          # The build above regenerates src/opensquilla/gateway/static/dist. If
+          # the committed dist differs from a fresh build, a Web UI source change
+          # was made without rebuilding + committing the bundle it ships (the
+          # gateway serves the committed dist, not source). Fail so a stale
+          # bundle can never ship (e.g. an approval-button removal that only
+          # lands in source — the #413 residue).
+          if ! git diff --quiet -- src/opensquilla/gateway/static/dist; then
+            echo "ERROR: committed Web UI dist is stale — rebuild and commit it:"
+            echo "  cd opensquilla-webui && npm ci && npm run build"
+            echo "Changed dist files:"
+            git --no-pager diff --stat -- src/opensquilla/gateway/static/dist
+            exit 1
+          fi
+          echo "Frontend dist verified fresh"
 
   tui-check:
     name: OpenTUI package tests
