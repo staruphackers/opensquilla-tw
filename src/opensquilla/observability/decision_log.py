@@ -24,7 +24,7 @@ from typing import Literal
 from opensquilla.bootstrap_types import BootstrapFileReport
 from opensquilla.paths import default_opensquilla_home
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 _INTENT_SUMMARY_MAX_CHARS = 500
 _EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 _URL_RE = re.compile(r"https?://[^\s<>'\"]+", re.IGNORECASE)
@@ -130,6 +130,9 @@ class DecisionEntry:
     session_intent: str | None = None
     intent_summary: str | None = None
     trace_id: str | None = None
+    # Join key into the persisted V017 router_decisions table (uuid4 hex,
+    # stamped by engine/steps/router_decision_record.py). Additive-only.
+    decision_id: str | None = None
     tool_profile: str | None = None
     system_chars: int = 0
     tool_count: int = 0

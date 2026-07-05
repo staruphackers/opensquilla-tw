@@ -537,6 +537,7 @@ class ServiceContainer:
     flush_service: Any = None  # SessionFlushService | None (gated by OPENSQUILLA_SESSION_FLUSH)
     memory_repair_service: Any = None
     meta_run_writer: Any = None
+    router_decision_writer: Any = None
     task_runtime: Any = None
     heartbeat_loop: Any = None
     heartbeat_watcher: Any = None
@@ -624,6 +625,22 @@ class ServiceContainer:
         if self.meta_run_writer is not None:
             try:
                 self.meta_run_writer.close()
+            except Exception:
+                pass
+        if self.router_decision_writer is not None:
+            # Unregister the process-wide hook before closing so a torn-down
+            # container cannot leave the router step handing records to a
+            # closed connection (same pattern as set_shared_catalog below).
+            try:
+                from opensquilla.engine.steps.router_decision_record import (
+                    set_decision_writer,
+                )
+
+                set_decision_writer(None)
+            except Exception:
+                pass
+            try:
+                self.router_decision_writer.close()
             except Exception:
                 pass
         try:
@@ -2251,6 +2268,57 @@ async def build_services(
         log.warning("build_services.meta_run_writer_failed", error=str(e))
         meta_run_writer = None
 
+    # ── Router decision records (V017 router_decisions) ─────────────
+    # Same yoyo-only-table pattern as meta_run_writer: the writer exists only
+    # when the session DB is real (not :memory:); with no writer registered
+    # the router step's stage/flush hooks are no-ops. Boot also rehydrates
+    # the in-process sticky/anti-downgrade history from the last <=5 records
+    # per recently-active session so it survives a gateway restart.
+    router_decision_writer = None
+    try:
+        router_cfg_for_decisions = getattr(config, "squilla_router", None)
+        if getattr(router_cfg_for_decisions, "enabled", False):
+            decisions_storage = get_session_storage(session_manager)
+            decisions_db_path = (
+                getattr(decisions_storage, "_db_path", None)
+                if decisions_storage is not None
+                else None
+            )
+            if decisions_db_path and decisions_db_path != ":memory:":
+                from opensquilla.engine.steps.router_decision_record import (
+                    rehydrate_history_from_writer,
+                    set_decision_writer,
+                )
+                from opensquilla.persistence.router_decision_writer import (
+                    open_router_decision_writer,
+                )
+
+                router_decision_writer = open_router_decision_writer(
+                    decisions_db_path,
+                    retention_days=int(
+                        getattr(router_cfg_for_decisions, "decision_retention_days", 30)
+                        or 30
+                    ),
+                )
+                set_decision_writer(router_decision_writer)
+                rehydrated = rehydrate_history_from_writer(router_decision_writer)
+                if rehydrated:
+                    log.info(
+                        "build_services.router_history_rehydrated",
+                        sessions=rehydrated,
+                    )
+    except Exception as e:  # noqa: BLE001 - decision records must not block boot.
+        log.warning("build_services.router_decision_writer_failed", error=str(e))
+        try:
+            from opensquilla.engine.steps.router_decision_record import set_decision_writer
+
+            set_decision_writer(None)
+            if router_decision_writer is not None:
+                router_decision_writer.close()
+        except Exception:
+            pass
+        router_decision_writer = None
+
     svc = ServiceContainer(
         config=config,
         provider_selector=provider_selector,
@@ -2270,6 +2338,7 @@ async def build_services(
         flush_service=flush_service,
         memory_repair_service=memory_repair_service,
         meta_run_writer=meta_run_writer,
+        router_decision_writer=router_decision_writer,
         deferred_warmups=deferred_warmups,
     )
     # Attach deferred callback ref so start_gateway_server can wire TurnRunner

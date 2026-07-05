@@ -24,6 +24,7 @@ from opensquilla.engine.routing import (
     provider_mismatch,
 )
 from opensquilla.engine.routing.policy_data import DEFAULT_CONTEXT_WINDOW_TOKENS
+from opensquilla.engine.steps.router_decision_record import stage_router_decision
 from opensquilla.provider.context_capabilities import provider_state_continuity_diagnostic
 from opensquilla.router_control import RouterControlHoldStore
 from opensquilla.router_runtime_diagnostics import router_runtime_operator_message
@@ -122,6 +123,29 @@ class RoutingHistoryStore:
 
 
 _history_store = RoutingHistoryStore()
+
+
+def seed_routing_history(entries_by_session: dict[str, list[dict]]) -> int:
+    """Seed the in-process history store from persisted decision records.
+
+    Boot-time rehydration hook (see engine/steps/router_decision_record.py):
+    sessions that already accumulated live in-process history are never
+    clobbered. Returns the number of sessions seeded.
+    """
+    seeded = 0
+    for session_key, entries in entries_by_session.items():
+        if not session_key or not entries:
+            continue
+        if _history_store.get(session_key):
+            continue
+        _history_store.set(
+            session_key,
+            [dict(entry) for entry in entries][-_MAX_ROUTING_HISTORY:],
+        )
+        seeded += 1
+    return seeded
+
+
 _DEFER_ROUTING_HISTORY_KEY = "_defer_squilla_router_history"
 _PENDING_ROUTING_HISTORY_ENTRY_KEY = "_pending_squilla_router_history_entry"
 _PENDING_ROUTING_HISTORY_SESSION_KEY = "_pending_squilla_router_history_session"
@@ -604,6 +628,7 @@ async def apply_squilla_router(ctx: TurnContext) -> TurnContext:
         ctx.metadata["route_max_history_turns"] = history_turns
         ctx.metadata.update(_compute_savings(decision.model, tiers))
         _record_thinking_metadata(ctx, router_cfg, image_tiers[tier_name])
+        stage_router_decision(ctx, decision=decision)
         log.debug("squilla_router.image_routed", tier=decision.tier, model=decision.model)
         return ctx
 
@@ -642,6 +667,7 @@ async def apply_squilla_router(ctx: TurnContext) -> TurnContext:
             ctx.metadata.update(_compute_savings(decision.model, tiers))
             _flag_tier_provider_mismatch(ctx, tiers, decision.tier, routing_applied=True)
             _record_thinking_metadata(ctx, router_cfg, tiers[decision.tier])
+            stage_router_decision(ctx, decision=decision)
             log.debug(
                 "squilla_router.router_control_hold_applied",
                 tier=decision.tier,
@@ -854,6 +880,7 @@ async def apply_squilla_router(ctx: TurnContext) -> TurnContext:
     # "model strongly chose this class" and "post-processing forced it"
     # is visible in the log without re-running the router.
     routing_extra = ctx.metadata.get("routing_extra") or {}
+    stage_router_decision(ctx, decision=decision, routing_extra=routing_extra)
     log.debug(
         "squilla_router.routed",
         tier=decision.tier,

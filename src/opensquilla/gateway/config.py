@@ -797,6 +797,11 @@ class SquillaRouterConfig(BaseSettings):
     complaint_upgrade_steps: int = 1
     complaint_upgrade_max_chars: int = 160
     require_router_runtime: bool = True
+    # Days router decision records (V017 router_decisions) are retained in
+    # the session DB before the writer's write-time opportunistic pruning
+    # deletes them. Additive key: the class-level extra="ignore" keeps old
+    # builds rollback-tolerant when this key is present in config files.
+    decision_retention_days: int = Field(default=30, ge=1)
     estimated_output_savings_pct: float = 0.03
     upgrade_to_c3_compaction_enabled: bool = True
     vision_history_lookback_turns: int = Field(default=8, ge=0)
