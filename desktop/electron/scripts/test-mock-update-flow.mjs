@@ -75,8 +75,8 @@ try {
   const page = await app.firstWindow({ timeout: 60_000 })
   await page.waitForLoadState('domcontentloaded', { timeout: 60_000 }).catch(() => {})
   await waitFor(
-    async () => page.url().includes('/control/'),
-    'Control UI to load',
+    async () => page.url().includes('/control/chat'),
+    'Control UI to load on Chat',
     60_000,
   )
 

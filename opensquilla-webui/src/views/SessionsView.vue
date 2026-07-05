@@ -27,7 +27,7 @@
     />
 
     <section class="hub-list">
-      <div class="hub-list__head">
+      <div v-if="allSessions.length > 0" class="hub-list__head">
         <div class="hub-filters control-segmented" role="group" :aria-label="t('sessions.filter.ariaLabel')">
           <button
             v-for="chip in FILTER_CHIPS"
@@ -439,6 +439,10 @@ onUnmounted(teardownLive)
   display: flex;
   flex-direction: column;
   gap: var(--sp-3);
+}
+
+.hub-state {
+  min-height: 40vh;
 }
 
 .hub-list__head {

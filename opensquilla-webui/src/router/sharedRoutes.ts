@@ -1,4 +1,5 @@
 import type { RouteRecordRaw } from 'vue-router'
+import { detectPlatformId } from '@/platform/capabilities'
 import { readLastRoute } from './lastRoute'
 
 const OverviewView = () => import('@/views/OverviewView.vue')
@@ -12,17 +13,22 @@ const SessionsView = () => import('@/views/SessionsView.vue')
 const UsageView = () => import('@/views/UsageView.vue')
 const SkillsView = () => import('@/views/SkillsView.vue')
 
+export function defaultRootRedirect(): string {
+  if (detectPlatformId() === 'desktop') return '/chat'
+  const saved = readLastRoute()
+  if (saved) return saved
+  const isMobile = window.matchMedia('(max-width: 768px)').matches
+  return isMobile ? '/chat' : '/sessions'
+}
+
 export const sharedRoutes: RouteRecordRaw[] = [
   {
     path: '/',
     redirect: () => {
-      // Reopen the last-viewed view if one is saved (and still valid). This
-      // only fires when landing on the root, so an explicit deep link to a
-      // specific view is never overridden. Falls back to the platform default.
-      const saved = readLastRoute()
-      if (saved) return saved
-      const isMobile = window.matchMedia('(max-width: 768px)').matches
-      return isMobile ? '/chat' : '/sessions'
+      // Desktop app cold starts should feel like opening an assistant: land on
+      // Chat, not the session ledger. Browser builds still restore the last
+      // stable view when available, with the existing responsive fallback.
+      return defaultRootRedirect()
     },
   },
   { path: '/chat',      name: 'chat',      component: ChatView,      meta: { title: 'Chat', group: 'Work', icon: 'chat', nav: 'primary', navOrder: 10, platforms: ['web', 'desktop'] } },

@@ -82,16 +82,13 @@ const isIdle = computed(() => props.approvalsCount === 0 && activeCount.value ==
 <style scoped>
 .hub-attention-clear {
   align-items: center;
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
   color: var(--text-muted);
   display: flex;
   flex-wrap: wrap;
   font-size: var(--fs-sm);
   gap: var(--sp-2);
   margin: 0;
-  padding: var(--sp-3) var(--sp-4);
+  padding: var(--sp-1);
 }
 
 .hub-attention-clear__mark {
