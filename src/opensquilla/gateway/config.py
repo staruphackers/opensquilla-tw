@@ -784,6 +784,19 @@ class SquillaRouterConfig(BaseSettings):
     # key. Off: such tiers run on the active provider (with a logged
     # mismatch warning), preserving the historical behavior.
     cross_provider_tiers: bool = False
+    # What routing does when it lands on a tier naming a provider other than
+    # llm.provider while cross_provider_tiers is off. "route" preserves the
+    # historical, documented-intentional behavior: flag the mismatch loudly
+    # (warning log + router_tier_provider_mismatch metadata) but still run
+    # the tier's model id on the active provider's credentials. "veto"
+    # rebinds the turn to the nearest tier that executes on the active
+    # provider (or the default tier), recording the veto in the routing
+    # trail; without a usable rebind target it falls back to route-and-flag.
+    # Downgrade note: additive key. This section is extra="ignore", so an
+    # rc1 loader reading a config that carries this key simply drops it and
+    # falls back to the historical route-and-flag behavior — persisting it
+    # never bricks a downgraded gateway.
+    tier_provider_mismatch: Literal["route", "veto"] = "route"
     tiers: dict = Field(default_factory=_default_tiers)
     default_tier: str = DEFAULT_TEXT_TIER
     confidence_threshold: float = 0.5
@@ -797,6 +810,11 @@ class SquillaRouterConfig(BaseSettings):
     complaint_upgrade_steps: int = 1
     complaint_upgrade_max_chars: int = 160
     require_router_runtime: bool = True
+    # Days router decision records (V017 router_decisions) are retained in
+    # the session DB before the writer's write-time opportunistic pruning
+    # deletes them. Additive key: the class-level extra="ignore" keeps old
+    # builds rollback-tolerant when this key is present in config files.
+    decision_retention_days: int = Field(default=30, ge=1)
     estimated_output_savings_pct: float = 0.03
     upgrade_to_c3_compaction_enabled: bool = True
     vision_history_lookback_turns: int = Field(default=8, ge=0)

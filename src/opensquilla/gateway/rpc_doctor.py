@@ -25,6 +25,7 @@ from opensquilla.health.evaluator import (
     evaluate_router,
     evaluate_sandbox,
     evaluate_search,
+    evaluate_squilla_router_runtime,
 )
 from opensquilla.health.model import FixStep, HealthFinding, HealthSeverity, build_report
 from opensquilla.health.recovery_commands import command_with_config as _command_with_config
@@ -43,6 +44,7 @@ _COLLECTION_INSPECT_COMMANDS = {
     "channels": "opensquilla channels status --json",
     "sandbox": "opensquilla sandbox status --json",
     "router": "opensquilla diagnostics status",
+    "squilla_router": "opensquilla diagnostics status",
     "memory_embedding": "opensquilla memory status --deep --json",
     "search": "opensquilla search status --json",
     "image_generation": "opensquilla onboard status --json",
@@ -262,6 +264,18 @@ def _router_payload(ctx: RpcContext, *, deep: bool = False) -> dict[str, Any]:
         error = str(exc)
         runtime_error_kind = classify_router_runtime_error(exc)
 
+    active_provider = str(getattr(getattr(config, "llm", None), "provider", "") or "")
+    mismatched_tier_providers: dict[str, str] = {}
+    tiers = getattr(router, "tiers", {}) or {}
+    if isinstance(tiers, dict) and active_provider.strip():
+        from opensquilla.router_tiers import TierConfig
+
+        active_l = active_provider.strip().lower()
+        for tier_name, tier_value in tiers.items():
+            tier = TierConfig.from_value(tier_value)
+            if tier.provider and tier.provider.lower() != active_l:
+                mismatched_tier_providers[str(tier_name)] = tier.provider
+
     return {
         "enabled": bool(getattr(router, "enabled", False)),
         "rolloutPhase": getattr(router, "rollout_phase", None),
@@ -272,7 +286,37 @@ def _router_payload(ctx: RpcContext, *, deep: bool = False) -> dict[str, Any]:
         "requireRouterRuntime": bool(getattr(router, "require_router_runtime", False)),
         "runtimeErrorKind": runtime_error_kind,
         "error": error,
+        "activeProvider": active_provider,
+        "crossProviderTiers": bool(getattr(router, "cross_provider_tiers", False)),
+        "tierProviderMismatch": str(
+            getattr(router, "tier_provider_mismatch", "route") or "route"
+        ),
+        "mismatchedTierProviders": mismatched_tier_providers,
     }
+
+
+def _squilla_router_runtime_payload(ctx: RpcContext) -> dict[str, Any]:
+    """Live router runtime load outcome from the turn loop's strategy cache.
+
+    Complements ``_router_payload`` (config/asset re-validation) with what is
+    actually serving turns. This collector only reads: the strategy cache is
+    populated by the gateway's boot-time background preload, the first routed
+    turn, or the router surface's deep validation (which runs just before
+    this collector). Until one of those lands the payload reports
+    ``initialized=False`` and the evaluator stays silent.
+    """
+    config = getattr(ctx, "config", None)
+    router = getattr(config, "squilla_router", None) if config is not None else None
+    payload: dict[str, Any] = {
+        "enabled": bool(getattr(router, "enabled", False)),
+        "requireRouterRuntime": bool(getattr(router, "require_router_runtime", False)),
+    }
+    if not payload["enabled"]:
+        return payload
+    from opensquilla.engine.steps.squilla_router import router_runtime_status
+
+    payload.update(router_runtime_status())
+    return payload
 
 
 def _llm_ensemble_payload(ctx: RpcContext) -> dict[str, Any]:
@@ -385,6 +429,11 @@ async def _handle_doctor_status(params: dict | None, ctx: RpcContext) -> dict[st
         ("channels", lambda: _handle_channels_status({}, ctx), evaluate_channels),
         ("sandbox", lambda: _sandbox_payload(ctx), evaluate_sandbox),
         ("router", lambda: _router_payload(ctx, deep=deep), evaluate_router),
+        (
+            "squilla_router",
+            lambda: _squilla_router_runtime_payload(ctx),
+            evaluate_squilla_router_runtime,
+        ),
         (
             "memory_embedding",
             lambda: _memory_embedding_payload(ctx),
