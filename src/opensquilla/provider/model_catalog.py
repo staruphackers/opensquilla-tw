@@ -37,11 +37,11 @@ MaxTokensSource = Literal["override", "catalog", "default"]
 ContextWindowSource = Literal["catalog", "default"]
 
 # Local runtimes (Ollama, …) have unqualified model ids that miss the catalog
-# and the static table, so the 200k cloud default would make the turn budget
-# over-estimate and skip trimming while the runtime silently truncates. Report
-# the runtime's own default window so budgeting matches what it actually allows.
-# Membership lives in registry.py (LOCAL_RUNTIME_PROVIDERS) next to its
-# keyless sibling set so the two cannot drift apart unnoticed.
+# and the packaged corrections, so the 200k cloud default would make the turn
+# budget over-estimate and skip trimming while the runtime silently truncates.
+# Report the runtime's own default window so budgeting matches what it
+# actually allows. Membership lives in registry.py (LOCAL_RUNTIME_PROVIDERS)
+# next to its keyless sibling set so the two cannot drift apart unnoticed.
 _LOCAL_CONTEXT_WINDOW = _OLLAMA_DEFAULT_NUM_CTX
 
 # One-release migration gate (recorded decision OQ#5). get_capabilities has
@@ -54,60 +54,6 @@ _LOCAL_CONTEXT_WINDOW = _OLLAMA_DEFAULT_NUM_CTX
 # catalog stops the engine stripping images for vision-capable models, and
 # supports_tools starts gating tool wiring per model instead of always-on.
 CATALOG_CAPABILITIES_FOR_ANTHROPIC_OLLAMA = False
-
-# Static fallback for squilla-router tier models + default model.
-# Used when the OpenRouter API is unreachable at boot.
-# Format: model_id → (max_output_tokens, context_window)
-#
-# Keys are provider-agnostic basenames (no "vendor/" prefix); a model that
-# was previously listed under both spellings is merged to ONE conservative
-# (per-dimension min) tuple. Conservative because over-estimating the
-# context window causes silent server-side truncation, while
-# under-estimating only triggers compaction earlier. Lookups normalize the
-# requested id via ``_static_fallback_entry`` so either spelling resolves
-# to the same entry. When offline, the live catalog still overrides this.
-_STATIC_FALLBACK: dict[str, tuple[int, int]] = {
-    "claude-opus-4.8": (128_000, 1_000_000),
-    "claude-sonnet-4.6": (128_000, 1_000_000),
-    "gemini-3.5-flash": (65_536, 1_048_576),
-    "gpt-5.4-nano": (128_000, 400_000),
-    "gpt-5.4-mini": (128_000, 400_000),
-    "gpt-5.5": (128_000, 1_000_000),
-    "qwen3-coder-plus": (65_536, 1_000_000),
-    "grok-4.3": (DEFAULT_MAX_TOKENS, 1_000_000),
-    "glm-4.5-air": (98_304, 131_072),
-    "glm-4.6": (131_072, 202_752),
-    "glm-4.7-flashx": (128_000, 200_000),
-    "glm-5": (80_000, 80_000),
-    "glm-5.1": (128_000, 200_000),
-    "glm-5.2": (262_144, 1_048_576),
-    "minimax-m2.5": (65_536, 196_608),
-    "minimax-m2.7": (8192, 196_608),
-    "step-3.5-flash": (16_384, 256_000),
-    "deepseek-v4-flash": (16_384, 1_048_576),
-    "deepseek-v4-pro": (16_384, 1_048_576),
-    "deepseek-v3.2": (16_384, 163_840),
-    "moonshot-v1-8k": (8192, 8192),
-    "moonshot-v1-32k": (32_768, 32_768),
-    "moonshot-v1-128k": (131_072, 131_072),
-    "kimi-k2.5": (32_768, 262_144),
-    "kimi-k2.6": (32_768, 262_144),
-}
-
-
-def _static_fallback_entry(model_id: str) -> tuple[int, int] | None:
-    """Return the static ``(max_output, context_window)`` for a model.
-
-    Tries the id verbatim, then the basename after the final ``/`` so the
-    same physical model resolves identically whether referenced as a bare
-    id (``glm-5``) or a provider-qualified id (``z-ai/glm-5``).
-    """
-    entry = _STATIC_FALLBACK.get(model_id)
-    if entry is not None:
-        return entry
-    if "/" in model_id:
-        return _STATIC_FALLBACK.get(model_id.rsplit("/", 1)[-1])
-    return None
 
 
 def _price_per_1k(value: object) -> float:
@@ -129,8 +75,11 @@ def _price_per_1k(value: object) -> float:
 # GENUINELY KNOWS for a model; merging is per field, so a lower layer fills
 # only fields every higher layer left unset (see catalog_types.py for the
 # per-type "unset" sentinels). get_capabilities resolves through this chain
-# (host-trust branches excepted); the legacy resolve_max_tokens /
-# resolve_context_window paths are intentionally NOT routed through it yet.
+# (host-trust branches excepted). The legacy resolve_max_tokens /
+# resolve_context_window paths keep their own chain order (live > snapshot >
+# corrections budgets > defaults); they consult the corrections data only in
+# the slot the retired static fallback table occupied, via
+# ``_corrections_budget_fallback``.
 # ---------------------------------------------------------------------------
 
 # Synthesized floor applied after all layers: conservative budgets for
@@ -192,6 +141,54 @@ def _corrections_tables() -> dict[str, dict[str, dict[str, Any]]]:
         log.warning("model_catalog.corrections_unavailable")
         return {}
     return _normalize_corrections(payload)
+
+
+def _corrections_budget_fallback(model_id: str) -> tuple[int, int] | None:
+    """Conservative ``(max_output_tokens, context_window)`` from corrections.
+
+    Fills exactly the resolution slot the retired static fallback table
+    occupied in the legacy ``resolve_max_tokens`` / ``resolve_context_window``
+    chains: consulted only after the live catalog and the models.dev snapshot
+    both miss. Like that table, the lookup is provider-agnostic and keyed by
+    basename — the requested id and every exact (non-glob) corrections row
+    key are normalized to the basename after the final ``/``, so a model
+    resolves identically whether referenced bare (``moonshot-v1-8k``) or
+    provider-qualified (``moonshot/moonshot-v1-8k``), and regardless of which
+    provider table carries the row. Glob rows belong to the capability
+    ladder and are never consulted for budgets.
+
+    When several rows share a basename, the per-dimension minimum wins —
+    over-estimating a context window causes silent server-side truncation,
+    while under-estimating only triggers compaction earlier. A dimension no
+    row knows is returned as 0 (callers treat 0 as unknown).
+    """
+    basename = (model_id or "").strip().lower().rsplit("/", 1)[-1]
+    if not basename:
+        return None
+    max_outputs: list[int] = []
+    windows: list[int] = []
+    matched = False
+    for table in _corrections_tables().values():
+        for key, entry in table.items():
+            if any(marker in key for marker in "*?["):
+                continue
+            if key.rsplit("/", 1)[-1] != basename:
+                continue
+            max_output = int(entry.get("max_output_tokens") or 0)
+            window = int(entry.get("context_window") or 0)
+            if max_output <= 0 and window <= 0:
+                continue
+            matched = True
+            if max_output > 0:
+                max_outputs.append(max_output)
+            if window > 0:
+                windows.append(window)
+    if not matched:
+        return None
+    return (
+        min(max_outputs) if max_outputs else 0,
+        min(windows) if windows else 0,
+    )
 
 
 def _live_layer_fields(info: ModelInfo | None) -> dict[str, Any]:
@@ -322,8 +319,9 @@ class ModelCatalog:
     Priority chain for max_tokens:
       1. User config override (>0)
       2. API-fetched catalog value
-      3. Static fallback table
-      4. DEFAULT_MAX_TOKENS (16384)
+      3. models.dev snapshot value
+      4. Packaged corrections budgets (catalog_overrides.toml)
+      5. DEFAULT_MAX_TOKENS (16384)
       → then clamp to min(value, context_window)
     """
 
@@ -508,10 +506,12 @@ class ModelCatalog:
            reasoning off) with ``source="synthesized"``.
 
         ``source`` names the highest-authority layer that contributed at
-        least one field. ``get_capabilities`` now resolves through this
-        chain (its host-trust branches excepted); the legacy
-        ``resolve_max_tokens`` / ``resolve_context_window`` paths do not
-        route through it yet.
+        least one field. ``get_capabilities`` resolves through this chain
+        (its host-trust branches excepted). The legacy ``resolve_max_tokens``
+        / ``resolve_context_window`` paths keep their own chain order and
+        consult the corrections data only at the slot the retired static
+        fallback table occupied (below the snapshot), via
+        ``_corrections_budget_fallback``.
         """
         provider_id = (provider or "").strip().lower()
         model_id = (model or "").strip()
@@ -538,7 +538,7 @@ class ModelCatalog:
     def resolve_max_tokens(
         self, model_id: str, user_override: int = 0, provider: str = ""
     ) -> int:
-        """Resolve max_tokens: user > catalog > static fallback > default, then clamp."""
+        """Resolve max_tokens: user > catalog > corrections budgets > default, then clamp."""
         return self.resolve_max_tokens_with_source(model_id, user_override, provider)[0]
 
     def resolve_max_tokens_with_source(
@@ -548,7 +548,7 @@ class ModelCatalog:
 
         ``override`` = the caller-supplied ``user_override`` (an explicit
         config value); ``catalog`` = live provider catalog, models.dev
-        snapshot, or the packaged static fallback table; ``default`` =
+        snapshot, or the packaged corrections budget rows; ``default`` =
         :data:`DEFAULT_MAX_TOKENS`. :meth:`resolve_max_tokens` delegates
         here (single implementation), so value and attribution can never
         drift apart. The clamp below may lower the number without changing
@@ -570,8 +570,8 @@ class ModelCatalog:
         elif snapshot_limits is not None and snapshot_limits[0] > 0:
             effective = snapshot_limits[0]
             source = "catalog"
-        elif (static := _static_fallback_entry(model_id)) is not None:
-            effective = static[0]
+        elif (budgets := _corrections_budget_fallback(model_id)) is not None and budgets[0] > 0:
+            effective = budgets[0]
             source = "catalog"
         else:
             effective = DEFAULT_MAX_TOKENS
@@ -593,7 +593,7 @@ class ModelCatalog:
         return effective, source
 
     def resolve_context_window(self, model_id: str, provider: str = "") -> int:
-        """Resolve context window: catalog > models.dev > static fallback > local/default."""
+        """Resolve context window: catalog > models.dev > corrections budgets > local/default."""
         return self.resolve_context_window_with_source(model_id, provider)[0]
 
     def resolve_context_window_with_source(
@@ -602,7 +602,7 @@ class ModelCatalog:
         """Resolve the context window and name the layer that decided it.
 
         ``catalog`` = live provider catalog, models.dev snapshot, or the
-        packaged static fallback table; ``default`` = the local-runtime or
+        packaged corrections budget rows; ``default`` = the local-runtime or
         cloud default window. :meth:`resolve_context_window` delegates here
         (single implementation), so value and attribution can never drift
         apart.
@@ -613,9 +613,9 @@ class ModelCatalog:
         snapshot_limits = _models_dev_limits(provider, model_id)
         if snapshot_limits is not None and snapshot_limits[1] > 0:
             return snapshot_limits[1], "catalog"
-        static = _static_fallback_entry(model_id)
-        if static is not None:
-            return static[1], "catalog"
+        budgets = _corrections_budget_fallback(model_id)
+        if budgets is not None and budgets[1] > 0:
+            return budgets[1], "catalog"
         if provider and provider.strip().lower() in LOCAL_RUNTIME_PROVIDERS:
             return _LOCAL_CONTEXT_WINDOW, "default"
         return DEFAULT_CONTEXT_WINDOW, "default"
@@ -626,9 +626,9 @@ class ModelCatalog:
 #
 # The gateway boots ONE catalog and warms it (fetch_openrouter); every other
 # resolution site should consult that same instance instead of constructing
-# cold copies that only ever see snapshot/static data. Callers that run
+# cold copies that only ever see snapshot/corrections data. Callers that run
 # without a gateway boot (standalone CLI paths) fall back to a lazily-built
-# cold instance, which preserves today's snapshot/static-only semantics.
+# cold instance, which preserves today's snapshot/corrections-only semantics.
 # ---------------------------------------------------------------------------
 
 _shared_catalog: ModelCatalog | None = None

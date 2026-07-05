@@ -1304,9 +1304,10 @@ _DYNAMIC_SELECTED_PENALTY = {
     "aggregator_strong": 0.12,
 }
 
-# quality/cost_latency are a manually-refreshed static snapshot (same pattern as
-# _STATIC_FALLBACK in model_catalog.py), not live-fetched. Refresh both columns together
-# so they stay apples-to-apples with the formulas below when models are added/renamed.
+# quality/cost_latency are a manually-refreshed static snapshot (same pattern as the
+# packaged budget rows in catalog_overrides.toml), not live-fetched. Refresh both columns
+# together so they stay apples-to-apples with the formulas below when models are
+# added/renamed.
 #
 # quality = Artificial Analysis Intelligence Index / 100, v4.1 methodology, single leaderboard
 #   snapshot fetched 2026-07-03 from https://artificialanalysis.ai/leaderboards/models (reasoning

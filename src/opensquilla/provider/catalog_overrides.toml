@@ -35,12 +35,22 @@
 # Data rows follow — this file started bootstrapped-empty so per-model fixes
 # land here as data instead of as code branches.
 
-# --- window/pricing corrections (sources: in-repo static tables) ---
+# --- window/pricing corrections (canonical budget/pricing rows) ---
 #
-# moonshot-v1-* windows: copied verbatim from _STATIC_FALLBACK in
-# src/opensquilla/provider/model_catalog.py (its tuples are
-# (max_output_tokens, context_window)). The static table itself is untouched;
-# these rows let resolve_entry stop depending on it.
+# These rows were originally copied from two in-repo static tables —
+# _STATIC_FALLBACK in src/opensquilla/provider/model_catalog.py (tuples of
+# (max_output_tokens, context_window)) and _KNOWN_MODELS in
+# src/opensquilla/provider/anthropic.py. Both tables have since been RETIRED
+# and deleted; the rows below are now the canonical source of this data.
+#
+# Besides resolve_entry's provider-scoped corrections layer, the legacy
+# token-budget paths (resolve_max_tokens / resolve_context_window in
+# model_catalog.py) consult exact (non-glob) rows carrying
+# context_window/max_output_tokens PROVIDER-AGNOSTICALLY by basename via
+# _corrections_budget_fallback — the slot the retired static table occupied,
+# below the live catalog and the models.dev snapshot. Keep budget rows
+# conservative: over-estimating a window causes silent server-side
+# truncation; under-estimating only triggers compaction earlier.
 
 [moonshot."moonshot-v1-8k"]
 context_window = 8192
@@ -54,27 +64,54 @@ max_output_tokens = 32768
 context_window = 131072
 max_output_tokens = 131072
 
-# anthropic rows: windows and pricing copied from _KNOWN_MODELS in
-# src/opensquilla/provider/anthropic.py; its per-1k USD costs are converted
-# to per-Mtok (x1000) to match the catalog's canonical unit.
+# anthropic rows: windows, display names, and pricing for the SKUs the
+# Anthropic adapter lists (its list_models resolves these rows through the
+# shared catalog). Per-1k USD costs from the retired adapter table were
+# converted to per-Mtok (x1000) to match the catalog's canonical unit.
 
 [anthropic."claude-opus-4-6"]
+display_name = "Claude Opus 4.6"
 context_window = 200000
 max_output_tokens = 32000
 input_cost_per_mtok = 15.0
 output_cost_per_mtok = 75.0
 
 [anthropic."claude-sonnet-4-6"]
+display_name = "Claude Sonnet 4.6"
 context_window = 200000
 max_output_tokens = 16000
 input_cost_per_mtok = 3.0
 output_cost_per_mtok = 15.0
 
 [anthropic."claude-haiku-4-5-20251001"]
+display_name = "Claude Haiku 4.5"
 context_window = 200000
 max_output_tokens = 8192
 input_cost_per_mtok = 0.25
 output_cost_per_mtok = 1.25
+
+# openrouter rows: token budgets for the squilla-router tier models the
+# models.dev snapshot does not carry (its openrouter table stores them
+# under these same vendor-qualified ids, but no snapshot table knows the
+# bare basenames). Values are the retired static table's conservative
+# tuples; the provider-agnostic basename fallback serves them for bare and
+# qualified spellings alike.
+
+[openrouter."anthropic/claude-opus-4.8"]
+context_window = 1000000
+max_output_tokens = 128000
+
+[openrouter."anthropic/claude-sonnet-4.6"]
+context_window = 1000000
+max_output_tokens = 128000
+
+[openrouter."x-ai/grok-4.3"]
+context_window = 1000000
+max_output_tokens = 16384
+
+[openrouter."stepfun/step-3.5-flash"]
+context_window = 256000
+max_output_tokens = 16384
 
 # --- capability ladder migration (transcribed from get_capabilities) ---
 #
