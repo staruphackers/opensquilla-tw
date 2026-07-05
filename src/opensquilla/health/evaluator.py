@@ -9,8 +9,10 @@ from opensquilla.router_runtime_diagnostics import (
     ROUTER_ASSETS_MISSING,
     ROUTER_NATIVE_DEPENDENCY_MISSING,
     ROUTER_PYTHON_DEPENDENCY_MISSING,
+    ROUTER_RUNTIME_UNAVAILABLE,
     WINDOWS_VC_RUNTIME_MISSING,
     classify_router_runtime_error,
+    router_runtime_hint,
 )
 
 _LEGACY_PROVIDER_REPLACEMENTS = {
@@ -1554,6 +1556,80 @@ def evaluate_llm_ensemble(payload: dict[str, Any]) -> list[HealthFinding]:
                 ),
                 FixStep(label="Restart gateway", command="opensquilla gateway restart"),
             ],
+            restart_required=True,
+        )
+    ]
+
+
+def evaluate_squilla_router_runtime(payload: dict[str, Any]) -> list[HealthFinding]:
+    """Persistent surfacing of the router runtime load outcome.
+
+    Unlike ``evaluate_router`` (which re-validates config and bundle assets),
+    this reads the live strategy singleton from the turn loop: which
+    classifier is actually serving turns right now.
+
+    Finding matrix:
+
+    * runtime loaded → ok ``squilla_router.runtime.ready``.
+    * runtime failed to load and ``require_router_runtime`` is true → warn
+      ``squilla_router.runtime.unavailable`` (readiness degrades). This is
+      how the flag gets teeth without refusing to start: the operator asked
+      for the ML runtime, so its absence must stay loudly visible.
+    * runtime failed to load and the flag is false → the same finding at
+      info severity: the operator explicitly accepted degraded routing, so
+      it stays visible as optional context but does not degrade readiness.
+    * router disabled, or the strategy singleton not yet constructed (the
+      gateway preloads it in a background task at boot) → no findings.
+    """
+    if not bool(payload.get("enabled")):
+        return []
+    if not bool(payload.get("initialized")):
+        return []
+    require_runtime = bool(payload.get("requireRouterRuntime"))
+    strategy = str(payload.get("strategy") or "unavailable")
+    code = str(payload.get("code") or ROUTER_RUNTIME_UNAVAILABLE)
+    evidence = {
+        "requireRouterRuntime": require_runtime,
+        "strategy": strategy,
+        "loaded": bool(payload.get("loaded")),
+        "runtimeErrorKind": None if payload.get("loaded") else code,
+        "error": payload.get("error"),
+    }
+    if bool(payload.get("loaded")):
+        return [
+            HealthFinding(
+                id="squilla_router.runtime.ready",
+                severity="ok",
+                surface="squilla_router",
+                title="Router ML runtime loaded",
+                detail="The local ML router runtime is loaded and classifying turns.",
+                evidence=evidence,
+            )
+        ]
+
+    if strategy == "heuristic":
+        degradation = (
+            "Turns are tiered by the built-in heuristic fallback "
+            '(routing source "heuristic") until the ML runtime loads.'
+        )
+    else:
+        degradation = "Every turn is routed to the default tier until the ML runtime loads."
+    _, _, fix_steps = _router_runtime_missing_guidance(
+        {"error": payload.get("error"), "runtimeErrorKind": code}
+    )
+    severity: HealthSeverity = "warn" if require_runtime else "info"
+    return [
+        HealthFinding(
+            id="squilla_router.runtime.unavailable",
+            severity=severity,
+            surface="squilla_router",
+            title="Router ML runtime is unavailable",
+            detail=(
+                f"The local ML router runtime failed to load ({code}). "
+                f"{degradation} {router_runtime_hint(code)}"
+            ),
+            evidence=evidence,
+            fix_steps=fix_steps,
             restart_required=True,
         )
     ]

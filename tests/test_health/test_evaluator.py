@@ -10,6 +10,7 @@ from opensquilla.health.evaluator import (
     evaluate_router,
     evaluate_sandbox,
     evaluate_search,
+    evaluate_squilla_router_runtime,
 )
 
 
@@ -1080,3 +1081,119 @@ def test_memory_embedding_evaluator_does_not_report_unknown_status_as_ready() ->
         "opensquilla memory status --deep --json",
         "opensquilla gateway restart",
     ]
+
+
+def test_squilla_router_runtime_evaluator_silent_when_router_disabled() -> None:
+    assert (
+        evaluate_squilla_router_runtime(
+            {"enabled": False, "requireRouterRuntime": True}
+        )
+        == []
+    )
+
+
+def test_squilla_router_runtime_evaluator_silent_before_strategy_initializes() -> None:
+    # Transient startup state: the gateway preloads the strategy in a
+    # background boot task, so an uninitialized cache is not a failure.
+    assert (
+        evaluate_squilla_router_runtime(
+            {
+                "enabled": True,
+                "requireRouterRuntime": True,
+                "initialized": False,
+                "loaded": False,
+                "code": None,
+                "strategy": "unavailable",
+                "error": None,
+            }
+        )
+        == []
+    )
+
+
+def test_squilla_router_runtime_evaluator_reports_loaded_runtime_ok() -> None:
+    findings = evaluate_squilla_router_runtime(
+        {
+            "enabled": True,
+            "requireRouterRuntime": True,
+            "initialized": True,
+            "loaded": True,
+            "code": None,
+            "strategy": "v4_phase3",
+            "error": None,
+        }
+    )
+
+    assert findings[0].id == "squilla_router.runtime.ready"
+    assert findings[0].severity == "ok"
+    assert _impact(findings[0]) == "none"
+    assert findings[0].evidence["strategy"] == "v4_phase3"
+
+
+def test_squilla_router_runtime_evaluator_warns_when_required_runtime_failed() -> None:
+    findings = evaluate_squilla_router_runtime(
+        {
+            "enabled": True,
+            "requireRouterRuntime": True,
+            "initialized": True,
+            "loaded": False,
+            "code": "macos_libomp_missing",
+            "strategy": "heuristic",
+            "error": "Library not loaded: @rpath/libomp.dylib",
+        }
+    )
+
+    finding = findings[0]
+    assert finding.id == "squilla_router.runtime.unavailable"
+    assert finding.severity == "warn"
+    assert _impact(finding) == "degrades"
+    assert finding.evidence["runtimeErrorKind"] == "macos_libomp_missing"
+    assert 'routing source "heuristic"' in finding.detail
+    assert "brew install libomp" in finding.detail
+    assert finding.restart_required is True
+    assert [step.command for step in finding.fix_steps] == [
+        "brew install libomp",
+        "opensquilla gateway restart",
+        "opensquilla configure router --router disabled",
+    ]
+
+
+def test_squilla_router_runtime_evaluator_softens_to_info_when_flag_false() -> None:
+    findings = evaluate_squilla_router_runtime(
+        {
+            "enabled": True,
+            "requireRouterRuntime": False,
+            "initialized": True,
+            "loaded": False,
+            "code": "router_python_dependency_missing",
+            "strategy": "heuristic",
+            "error": "No module named 'onnxruntime'",
+        }
+    )
+
+    finding = findings[0]
+    assert finding.id == "squilla_router.runtime.unavailable"
+    # Operator explicitly opted out of requiring the runtime: keep the state
+    # visible, but do not degrade readiness.
+    assert finding.severity == "info"
+    assert _impact(finding) == "optional"
+    assert finding.evidence["runtimeErrorKind"] == "router_python_dependency_missing"
+
+
+def test_squilla_router_runtime_evaluator_describes_default_tier_degradation() -> None:
+    findings = evaluate_squilla_router_runtime(
+        {
+            "enabled": True,
+            "requireRouterRuntime": True,
+            "initialized": True,
+            "loaded": False,
+            "code": "router_runtime_unavailable",
+            "strategy": "unavailable",
+            "error": "synthetic failure",
+        }
+    )
+
+    finding = findings[0]
+    assert finding.severity == "warn"
+    assert "default tier" in finding.detail
+    assert 'routing source "heuristic"' not in finding.detail

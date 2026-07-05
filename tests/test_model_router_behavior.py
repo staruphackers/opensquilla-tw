@@ -1109,7 +1109,7 @@ async def test_repeated_message_across_sessions_is_classified_each_time(
 
 
 @pytest.mark.asyncio
-async def test_required_router_runtime_failure_falls_back_to_default_tier(
+async def test_required_router_runtime_failure_falls_back_to_heuristic_tiering(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import opensquilla.squilla_router.v4_phase3 as v4_phase3
@@ -1120,9 +1120,12 @@ async def test_required_router_runtime_failure_falls_back_to_default_tier(
 
     routed = await apply_squilla_router(ctx)
 
-    assert routed.metadata["routing_source"] == "v4_unavailable"
-    assert routed.metadata["routed_tier"] == "c1"
-    assert routed.metadata["routing_confidence"] == 0.0
+    # Short plain text lands in the heuristic c0 band; the decision is
+    # honestly attributed to the fallback classifier, not the ML runtime.
+    assert routed.metadata["routing_source"] == "heuristic"
+    assert routed.metadata["routed_tier"] == "c0"
+    assert routed.metadata["routing_confidence"] == pytest.approx(0.55)
+    assert routed.metadata["routing_extra"]["heuristic_band"] == "short_plain"
 
 
 @pytest.mark.asyncio
@@ -1169,7 +1172,7 @@ async def test_router_runtime_failure_emits_macos_libomp_guidance(
     ctx.config.squilla_router.require_router_runtime = True
     routed = await apply_squilla_router(ctx)
 
-    assert routed.metadata["routing_source"] == "v4_unavailable"
+    assert routed.metadata["routing_source"] == "heuristic"
     messages = [
         record.getMessage()
         for record in caplog.records
