@@ -313,6 +313,8 @@
       "customCandidatesLabel": "Candidatos personalizados entre proveedores",
       "openrouterFixedTitle": "Conjunto fijo de OpenRouter",
       "openrouterFixedDesc": "Cuando el modelo de chat usa OpenRouter, el enrutamiento agregado usa cuatro modelos proponentes y un agregador.",
+      "customizeOpenRouterLabel": "Personalizar conjunto",
+      "customizeOpenRouterDesc": "Cambiar al enrutamiento de conjunto basado en router con la plantilla antigua de candidatos OpenRouter.",
       "openrouterFixedProposer": "Modelo proponente",
       "openrouterFixedAggregator": "Agregador",
       "credentialReady": "Conectado",

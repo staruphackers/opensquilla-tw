@@ -313,6 +313,8 @@
       "customCandidatesLabel": "Benutzerdefinierte providerübergreifende Kandidaten",
       "openrouterFixedTitle": "Feste OpenRouter-Ensemble-Konfiguration",
       "openrouterFixedDesc": "Wenn das Chat Model OpenRouter nutzt, verwendet Ensemble-Routing vier Vorschlagsmodelle und einen Aggregator.",
+      "customizeOpenRouterLabel": "Ensemble anpassen",
+      "customizeOpenRouterDesc": "Zu routerbasiertem Ensemble-Routing mit der alten OpenRouter-Kandidatenvorlage wechseln.",
       "openrouterFixedProposer": "Vorschlagsmodell",
       "openrouterFixedAggregator": "Aggregator",
       "credentialReady": "Verbunden",

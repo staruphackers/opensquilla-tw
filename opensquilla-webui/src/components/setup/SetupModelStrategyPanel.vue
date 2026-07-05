@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import ControlSwitch from '@/components/ControlSwitch.vue'
 import SetupTierTable from '@/components/setup/SetupTierTable.vue'
 import type { ModelStrategy } from '@/composables/setup/useSetupModelStrategyForm'
 import type { SetupTierRow } from '@/composables/setup/useSetupRouterForm'
@@ -43,6 +44,8 @@ interface EnsemblePanelContract {
   tierCandidates: readonly EnsembleCandidateView[]
   customCandidates: readonly EnsembleCandidateView[]
   fixedOpenRouterProfile: EnsembleFixedOpenRouterProfile | null
+  showOpenRouterFixedSwitch: boolean
+  openRouterCustomEnsemble: boolean
   minSuccessfulProposers: number
   allFailedPolicy: string
   showModelOptions: boolean
@@ -78,6 +81,7 @@ const emit = defineEmits<{
   addEnsembleCandidate: [provider: string, model: string]
   removeEnsembleCandidate: [candidate: EnsembleCandidateView]
   resetEnsembleCandidates: []
+  updateOpenrouterCustomEnsemble: [value: boolean]
   updateEnsembleMinSuccessful: [value: number]
   updateEnsembleAllFailedPolicy: [value: string]
   goToSection: [value: string]
@@ -245,6 +249,21 @@ function credentialLabel(candidate: EnsembleCandidateView): string {
             {{ t('setup.modelStrategy.ensembleDependency', { provider: dependencyProvider, model: dependencyModel }) }}
           </p>
         </div>
+
+        <label v-if="panel.ensemble.showOpenRouterFixedSwitch" class="control-row">
+          <div class="control-row__label-block">
+            <span class="control-row__label">{{ t('setup.modelStrategy.customizeOpenRouterLabel') }}</span>
+            <span class="control-row__desc">{{ t('setup.modelStrategy.customizeOpenRouterDesc') }}</span>
+          </div>
+          <div class="control-row__control">
+            <ControlSwitch
+              :checked="panel.ensemble.openRouterCustomEnsemble"
+              name="setup_model_strategy_openrouter_custom"
+              :aria-label="t('setup.modelStrategy.customizeOpenRouterLabel')"
+              @change="(value) => emit('updateOpenrouterCustomEnsemble', value)"
+            />
+          </div>
+        </label>
 
         <div v-if="panel.ensemble.fixedOpenRouterProfile" class="control-row control-row--stack">
           <div class="control-row__label-block">

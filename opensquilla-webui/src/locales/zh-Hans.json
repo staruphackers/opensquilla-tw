@@ -313,6 +313,8 @@
       "customCandidatesLabel": "自定义跨服务商候选",
       "openrouterFixedTitle": "OpenRouter 固定聚合",
       "openrouterFixedDesc": "当聊天模型使用 OpenRouter 时，聚合路由固定使用四个候选生成模型和一个综合模型。",
+      "customizeOpenRouterLabel": "自定义聚合",
+      "customizeOpenRouterDesc": "切换为基于路由的聚合，并用旧 OpenRouter 候选模板预填。",
       "openrouterFixedProposer": "候选生成模型",
       "openrouterFixedAggregator": "综合模型",
       "credentialReady": "已连接",

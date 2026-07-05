@@ -150,6 +150,15 @@ function legacyDefaultModelOptions(options: readonly string[]): boolean {
   return options.every((option, index) => option === LEGACY_OPENROUTER_MODEL_OPTIONS[index])
 }
 
+function legacyOpenRouterCandidateConfigs(): EnsembleCandidateConfig[] {
+  return LEGACY_OPENROUTER_MODEL_OPTIONS.map(model => ({
+    provider: 'openrouter',
+    model,
+    source: 'custom',
+    enabled: true,
+  }))
+}
+
 function candidateKey(candidate: { provider: string; model: string; source: string }): string {
   return `${candidate.source}:${candidate.provider}:${candidate.model}`
 }
@@ -214,13 +223,16 @@ export function useSetupEnsembleForm() {
   const selectionModeDirty = computed(() => selectionMode.value !== baseline.value.selectionMode)
   const modelOptionsDirty = computed(() => JSON.stringify(modelOptions.value) !== baseline.value.modelOptions)
   const candidatesDirty = computed(() => JSON.stringify(candidates.value) !== baseline.value.candidates)
+  const dynamicCandidateInputsActive = computed(() => selectionMode.value === 'router_dynamic')
+  const effectiveModelOptionsDirty = computed(() => dynamicCandidateInputsActive.value && modelOptionsDirty.value)
+  const effectiveCandidatesDirty = computed(() => dynamicCandidateInputsActive.value && candidatesDirty.value)
   const minSuccessfulDirty = computed(() => minSuccessfulProposers.value !== baseline.value.minSuccessfulProposers)
   const allFailedPolicyDirty = computed(() => allFailedPolicy.value !== baseline.value.allFailedPolicy)
   const isDirty = computed(() => (
     enabledDirty.value
     || selectionModeDirty.value
-    || modelOptionsDirty.value
-    || candidatesDirty.value
+    || effectiveModelOptionsDirty.value
+    || effectiveCandidatesDirty.value
     || minSuccessfulDirty.value
     || allFailedPolicyDirty.value
   ))
@@ -297,6 +309,30 @@ export function useSetupEnsembleForm() {
     candidates.value = []
   }
 
+  function restoreBaselineCandidateInputs() {
+    try {
+      modelOptions.value = JSON.parse(baseline.value.modelOptions) as string[]
+    } catch {
+      modelOptions.value = []
+    }
+    try {
+      candidates.value = JSON.parse(baseline.value.candidates) as EnsembleCandidateConfig[]
+    } catch {
+      candidates.value = []
+    }
+  }
+
+  function setOpenRouterCustomEnsemble(value: boolean) {
+    if (value) {
+      selectionMode.value = 'router_dynamic'
+      modelOptions.value = []
+      candidates.value = legacyOpenRouterCandidateConfigs()
+      return
+    }
+    selectionMode.value = 'static_openrouter_b5'
+    restoreBaselineCandidateInputs()
+  }
+
   function setMinSuccessfulProposers(value: number) {
     minSuccessfulProposers.value = normalizeMinSuccessful(value)
   }
@@ -311,8 +347,8 @@ export function useSetupEnsembleForm() {
     const params: Record<string, unknown> = {}
     if (enabledDirty.value) params.enabled = enabled.value
     if (selectionModeDirty.value) params.selectionMode = selectionMode.value
-    if (modelOptionsDirty.value) params.modelOptions = [...modelOptions.value]
-    if (candidatesDirty.value) params.candidates = candidates.value.map(candidate => ({
+    if (effectiveModelOptionsDirty.value) params.modelOptions = [...modelOptions.value]
+    if (effectiveCandidatesDirty.value) params.candidates = candidates.value.map(candidate => ({
       provider: candidate.provider,
       model: candidate.model,
       source: candidate.source || 'custom',
@@ -327,6 +363,10 @@ export function useSetupEnsembleForm() {
     return computed(() => {
       const credentialStatus = context.credentialStatus?.value ?? []
       const activeProvider = normalizeProvider(context.activeProvider.value)
+      const isOpenRouter = activeProvider === 'openrouter'
+      const openRouterCustomEnsemble = isOpenRouter
+        ? selectionMode.value !== 'static_openrouter_b5'
+        : false
       const tierCandidates = uniqueCandidateViews((context.tierCandidates?.value ?? [])
         .map(candidate => withCredential(candidate.provider, candidate.model, 'tier', credentialStatus))
         .filter(candidate => candidate.provider && candidate.model))
@@ -340,7 +380,10 @@ export function useSetupEnsembleForm() {
           return withCredential(provider, model, 'legacy_model_options', credentialStatus)
         })
       const customCandidates = uniqueCandidateViews([...structuredCandidates, ...legacyCandidates])
-      const fixedOpenRouterProfile: EnsembleFixedOpenRouterProfile | null = selectionMode.value === 'static_openrouter_b5'
+      const fixedOpenRouterProfile: EnsembleFixedOpenRouterProfile | null = (
+        isOpenRouter
+        && selectionMode.value === 'static_openrouter_b5'
+      )
         ? {
             proposers: OPENROUTER_FIXED_ENSEMBLE_PROPOSERS.map(model => withCredential('openrouter', model, 'openrouter_fixed', credentialStatus)),
             aggregator: withCredential('openrouter', OPENROUTER_FIXED_ENSEMBLE_AGGREGATOR, 'openrouter_fixed', credentialStatus),
@@ -356,17 +399,16 @@ export function useSetupEnsembleForm() {
         tierCandidates,
         customCandidates,
         fixedOpenRouterProfile,
+        showOpenRouterFixedSwitch: isOpenRouter,
+        openRouterCustomEnsemble,
         minSuccessfulProposers: minSuccessfulProposers.value,
         allFailedPolicy: allFailedPolicy.value,
         // model_options only drives the dynamic selection; static ignores it.
-        showModelOptions: selectionMode.value === 'router_dynamic',
-        showCandidateEditor: selectionMode.value === 'router_dynamic',
+        showModelOptions: selectionMode.value === 'router_dynamic' || !isOpenRouter,
+        showCandidateEditor: selectionMode.value === 'router_dynamic' || !isOpenRouter,
         // Static selection routes through OpenRouter regardless of the primary
         // provider — surface the credential dependency instead of failing quietly.
-        showOpenrouterHint: (
-          selectionMode.value === 'static_openrouter_b5'
-          && activeProvider !== 'openrouter'
-        ),
+        showOpenrouterHint: false,
         advancedOpen: (
           minSuccessfulProposers.value !== DEFAULT_MIN_SUCCESSFUL_PROPOSERS
           || allFailedPolicy.value !== DEFAULT_ALL_FAILED_POLICY
@@ -398,6 +440,7 @@ export function useSetupEnsembleForm() {
     addCandidate,
     removeCandidate,
     resetModelOptions,
+    setOpenRouterCustomEnsemble,
     setMinSuccessfulProposers,
     setAllFailedPolicy,
     payload,
