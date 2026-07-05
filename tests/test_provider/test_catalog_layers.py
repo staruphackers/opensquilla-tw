@@ -14,6 +14,7 @@ from importlib import resources
 import pytest
 
 from opensquilla.provider import model_catalog as model_catalog_module
+from opensquilla.provider.catalog_types import ModelCatalogEntry
 from opensquilla.provider.model_catalog import ModelCatalog
 
 
@@ -239,15 +240,72 @@ def test_corrections_drop_unknown_and_mistyped_fields() -> None:
     assert tables == {"vendor": {"model-z": {"context_window": 5_000}}}
 
 
-def test_packaged_corrections_file_parses_and_is_empty() -> None:
+def test_packaged_corrections_file_parses_with_expected_tables() -> None:
     text = (
         resources.files("opensquilla.provider")
         .joinpath("catalog_overrides.toml")
         .read_text(encoding="utf-8")
     )
-    # Bootstrapped with schema docs only — parses cleanly, no data rows yet.
-    assert tomllib.loads(text) == {}
-    assert isinstance(model_catalog_module._corrections_tables(), dict)
+    payload = tomllib.loads(text)
+    # Window/pricing corrections sourced from in-repo static tables.
+    assert set(payload) == {"moonshot", "anthropic"}
+    assert set(payload["moonshot"]) == {
+        "moonshot-v1-8k",
+        "moonshot-v1-32k",
+        "moonshot-v1-128k",
+    }
+    assert set(payload["anthropic"]) == {
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5-20251001",
+    }
+    # Every packaged row survives normalization — no unknown field names,
+    # no mistyped values (a dropped field would silently weaken a layer).
+    tables = model_catalog_module._normalize_corrections(payload)
+    assert {p: set(t) for p, t in tables.items()} == {p: set(t) for p, t in payload.items()}
+    assert all(fields for table in tables.values() for fields in table.values())
+
+
+# ---------------------------------------------------------------------------
+# Packaged corrections data rows (windows/pricing from in-repo static tables)
+# ---------------------------------------------------------------------------
+
+
+def test_moonshot_v1_windows_resolve_from_packaged_corrections() -> None:
+    # moonshot-v1-* is absent from the snapshot's moonshot table, so before
+    # these rows resolve_entry fell to the synthesized floor (32k/8k) while
+    # only the legacy paths knew the real windows via _STATIC_FALLBACK. The
+    # corrections layer now carries the same values as data.
+    catalog = ModelCatalog()
+    for model in ("moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"):
+        static_max_output, static_context = model_catalog_module._STATIC_FALLBACK[model]
+        entry = catalog.resolve_entry(model, provider="moonshot")
+        assert entry.source == "corrections", model
+        assert entry.context_window == static_context, model
+        assert entry.max_output_tokens == static_max_output, model
+    # Copied EXACTLY from the static table (which stays untouched for the
+    # legacy paths): the 8k SKU is 8192/8192, not the synthesized 32k/8k.
+    eight_k = catalog.resolve_entry("moonshot-v1-8k", provider="moonshot")
+    assert (eight_k.max_output_tokens, eight_k.context_window) == (8_192, 8_192)
+
+
+def test_anthropic_known_models_priced_via_packaged_corrections() -> None:
+    from opensquilla.provider.anthropic import _KNOWN_MODELS
+
+    catalog = ModelCatalog()
+    assert _KNOWN_MODELS  # the corrections rows mirror this table
+    for row in _KNOWN_MODELS:
+        entry = catalog.resolve_entry(row["model_id"], provider="anthropic")
+        assert entry.source == "corrections", row["model_id"]
+        # Windows copied from the same rows; corrections beat the snapshot.
+        assert entry.context_window == row["context_window"], row["model_id"]
+        assert entry.max_output_tokens == row["max_output_tokens"], row["model_id"]
+        # Per-1k costs converted to the canonical per-Mtok unit (x1000).
+        assert entry.input_cost_per_mtok == pytest.approx(row["input_cost_per_1k"] * 1000.0)
+        assert entry.output_cost_per_mtok == pytest.approx(row["output_cost_per_1k"] * 1000.0)
+        # _KNOWN_MODELS carries no cache pricing — those stay unknown.
+        assert entry.cache_read_cost_per_mtok is None
+        assert entry.cache_write_cost_per_mtok is None
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +386,57 @@ def test_explicit_false_and_zero_overrides_win() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Snapshot-layer cost emission (compact in/out/cr/cw_mtok keys → per-Mtok
+# fields). The committed snapshot carries no cost keys yet, so these drive
+# the layer through a synthetic entry.
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_cost_keys_emit_per_mtok_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        model_catalog_module,
+        "_models_dev_model",
+        lambda provider_id, model_id: {
+            "ctx": 200_000,
+            "out": 32_000,
+            "reasoning": True,
+            "tools": True,
+            "vision": False,
+            "in_mtok": 2.5,
+            "out_mtok": 10,  # int leaf — coerced to float
+            "cr_mtok": 0.25,
+            "cw_mtok": 3.125,
+        },
+    )
+
+    entry = ModelCatalog().resolve_entry("priced-model", provider="acme")
+
+    assert entry.source == "snapshot"
+    assert entry.input_cost_per_mtok == pytest.approx(2.5)
+    assert entry.output_cost_per_mtok == pytest.approx(10.0)
+    assert isinstance(entry.output_cost_per_mtok, float)
+    assert entry.cache_read_cost_per_mtok == pytest.approx(0.25)
+    assert entry.cache_write_cost_per_mtok == pytest.approx(3.125)
+
+
+def test_snapshot_partial_cost_keys_leave_missing_fields_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        model_catalog_module,
+        "_models_dev_model",
+        lambda provider_id, model_id: {"ctx": 8_192, "out": 4_096, "in_mtok": 0.5},
+    )
+
+    entry = ModelCatalog().resolve_entry("partial-model", provider="acme")
+
+    assert entry.input_cost_per_mtok == pytest.approx(0.5)
+    assert entry.output_cost_per_mtok is None
+    assert entry.cache_read_cost_per_mtok is None
+    assert entry.cache_write_cost_per_mtok is None
+
+
+# ---------------------------------------------------------------------------
 # PARITY NET — the legacy resolve paths must keep returning today's exact
 # values (captured as literals from the pre-change tree). resolve_entry is a
 # parallel substrate; any drift here is an accidental behavior change.
@@ -394,3 +503,48 @@ def test_parity_legacy_capabilities_unchanged() -> None:
             caps.reasoning_format,
         )
         assert observed == expected, (model, provider, base_url)
+
+
+def test_parity_snapshot_resolutions_unchanged_by_cost_plumbing() -> None:
+    # The committed snapshot carries no cost keys and the packaged
+    # corrections rows touch only moonshot-v1-* / anthropic ids, so
+    # snapshot-sourced resolutions elsewhere are IDENTICAL to the pre-change
+    # tree. Expected entries are full literals captured from a control run
+    # on the unmodified tree — frozen-dataclass equality covers every field,
+    # including the four cost fields staying None.
+    catalog = ModelCatalog()
+    expected_entries = (
+        ModelCatalogEntry(
+            provider_id="openai",
+            model_id="gpt-5.5",
+            context_window=1_050_000,
+            max_output_tokens=128_000,
+            supports_reasoning=True,
+            supports_tools=True,
+            supports_vision=True,
+            source="snapshot",
+        ),
+        ModelCatalogEntry(
+            provider_id="deepseek",
+            model_id="deepseek-chat",
+            context_window=1_000_000,
+            max_output_tokens=384_000,
+            supports_reasoning=False,
+            supports_tools=True,
+            supports_vision=False,
+            source="snapshot",
+        ),
+        ModelCatalogEntry(
+            provider_id="gemini",
+            model_id="gemini-2.5-pro",
+            context_window=1_048_576,
+            max_output_tokens=65_536,
+            supports_reasoning=True,
+            supports_tools=True,
+            supports_vision=True,
+            source="snapshot",
+        ),
+    )
+    for want in expected_entries:
+        got = catalog.resolve_entry(want.model_id, provider=want.provider_id)
+        assert got == want, (want.provider_id, want.model_id)

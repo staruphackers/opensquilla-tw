@@ -32,5 +32,46 @@
 #   (src/opensquilla/provider/catalog_types.py); unknown names or wrongly
 #   typed values are logged and ignored — a bad row degrades, never crashes.
 #
-# No data rows yet: this file is bootstrapped empty so per-model fixes land
-# here as data instead of as code branches.
+# Data rows follow — this file started bootstrapped-empty so per-model fixes
+# land here as data instead of as code branches.
+
+# --- window/pricing corrections (sources: in-repo static tables) ---
+#
+# moonshot-v1-* windows: copied verbatim from _STATIC_FALLBACK in
+# src/opensquilla/provider/model_catalog.py (its tuples are
+# (max_output_tokens, context_window)). The static table itself is untouched;
+# these rows let resolve_entry stop depending on it.
+
+[moonshot."moonshot-v1-8k"]
+context_window = 8192
+max_output_tokens = 8192
+
+[moonshot."moonshot-v1-32k"]
+context_window = 32768
+max_output_tokens = 32768
+
+[moonshot."moonshot-v1-128k"]
+context_window = 131072
+max_output_tokens = 131072
+
+# anthropic rows: windows and pricing copied from _KNOWN_MODELS in
+# src/opensquilla/provider/anthropic.py; its per-1k USD costs are converted
+# to per-Mtok (x1000) to match the catalog's canonical unit.
+
+[anthropic."claude-opus-4-6"]
+context_window = 200000
+max_output_tokens = 32000
+input_cost_per_mtok = 15.0
+output_cost_per_mtok = 75.0
+
+[anthropic."claude-sonnet-4-6"]
+context_window = 200000
+max_output_tokens = 16000
+input_cost_per_mtok = 3.0
+output_cost_per_mtok = 15.0
+
+[anthropic."claude-haiku-4-5-20251001"]
+context_window = 200000
+max_output_tokens = 8192
+input_cost_per_mtok = 0.25
+output_cost_per_mtok = 1.25

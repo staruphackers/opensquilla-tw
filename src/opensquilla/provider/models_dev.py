@@ -19,6 +19,13 @@ import structlog
 
 log = structlog.get_logger(__name__)
 
+# Optional per-Mtok cost keys a snapshot entry may carry (see
+# scripts/refresh_models_dev_snapshot.py). Provider-table hits pass them
+# through verbatim; the cross-provider merge strips them (costs are set by
+# the provider actually serving the request, so another provider's numbers
+# would be actively wrong rather than conservative).
+_COST_KEYS = ("in_mtok", "out_mtok", "cr_mtok", "cw_mtok")
+
 
 @cache
 def _snapshot_providers() -> dict[str, dict[str, dict[str, Any]]]:
@@ -77,6 +84,8 @@ def lookup_model(provider_id: str, model_id: str) -> dict[str, Any] | None:
         merged["out"] = min(int(merged.get("out") or 0), int(other.get("out") or 0))
         for flag in ("reasoning", "tools", "vision"):
             merged[flag] = bool(merged.get(flag)) and bool(other.get(flag))
+    for cost_key in _COST_KEYS:
+        merged.pop(cost_key, None)
     return merged
 
 

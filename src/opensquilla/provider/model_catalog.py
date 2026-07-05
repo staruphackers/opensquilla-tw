@@ -240,7 +240,10 @@ def _snapshot_layer_fields(provider_id: str, model_id: str) -> dict[str, Any]:
 
     The snapshot carries ``supports_reasoning`` as data but never a
     ``reasoning_format`` — the streaming dialect is provider knowledge the
-    snapshot does not have.
+    snapshot does not have. Optional per-Mtok cost keys (``in_mtok``,
+    ``out_mtok``, ``cr_mtok``, ``cw_mtok``) are emitted when present:
+    snapshot costs are explicit data, so a vendored 0 means a known-free
+    price (unlike the live cache's 0.0 "free or unknown" sentinel).
     """
     entry = _models_dev_model(provider_id, model_id)
     if entry is None:
@@ -259,6 +262,15 @@ def _snapshot_layer_fields(provider_id: str, model_id: str) -> dict[str, Any]:
     ):
         if snapshot_key in entry:
             fields[field_name] = bool(entry[snapshot_key])
+    for snapshot_key, field_name in (
+        ("in_mtok", "input_cost_per_mtok"),
+        ("out_mtok", "output_cost_per_mtok"),
+        ("cr_mtok", "cache_read_cost_per_mtok"),
+        ("cw_mtok", "cache_write_cost_per_mtok"),
+    ):
+        value = entry.get(snapshot_key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            fields[field_name] = float(value)
     return fields
 
 
