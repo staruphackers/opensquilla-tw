@@ -20,6 +20,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
+from opensquilla.gateway.config_secrets import inherit_runtime_secrets
 from opensquilla.gateway.rpc import RpcContext, RpcHandlerError, get_dispatcher
 from opensquilla.search.types import DEFAULT_SEARCH_MAX_RESULTS
 
@@ -84,8 +85,7 @@ def _apply_inplace(ctx: RpcContext, new_cfg: Any) -> None:
         return
     for field_name in type(new_cfg).model_fields:
         setattr(ctx.config, field_name, getattr(new_cfg, field_name))
-    if hasattr(ctx.config, "inherit_runtime_secrets"):
-        ctx.config.inherit_runtime_secrets(new_cfg)
+    inherit_runtime_secrets(new_cfg, ctx.config)
 
 
 def _sync_provider_selector(ctx: RpcContext, llm_cfg: Any) -> None:
@@ -152,7 +152,7 @@ def _persist(ctx: RpcContext, new_cfg: Any, *, restart_required: bool) -> str:
         and ctx.config is not new_cfg
         and hasattr(new_cfg, "inherit_runtime_secrets")
     ):
-        new_cfg.inherit_runtime_secrets(ctx.config)
+        inherit_runtime_secrets(ctx.config, new_cfg)
     path = _config_path_for(ctx, new_cfg) or _config_path_for(ctx, ctx.config)
     persist = persist_config(new_cfg, path=path, restart_required=restart_required)
     # Preserve the resolved path on the running config so subsequent saves
@@ -261,6 +261,9 @@ async def _provider_configure(params: Any, ctx: RpcContext) -> dict[str, Any]:
             api_key_env=params.get("apiKeyEnv", "") if isinstance(params, dict) else "",
             base_url=params.get("baseUrl", "") if isinstance(params, dict) else "",
             proxy=params.get("proxy", "") if isinstance(params, dict) else "",
+            # Explicit-user-action only (D18): a preset is applied exactly when
+            # the client sends presetId; a plain save never auto-applies one.
+            preset_id=params.get("presetId", "") if isinstance(params, dict) else "",
         )
     _apply_inplace(ctx, res.config)
     _sync_provider_selector(ctx, res.config.llm)
@@ -293,6 +296,51 @@ async def _provider_probe(params: Any, ctx: RpcContext) -> dict[str, Any]:
     return result.to_payload()
 
 
+@_d.method("onboarding.models.discover", scope="operator.admin")
+async def _models_discover(params: Any, ctx: RpcContext) -> dict[str, Any]:
+    """List a candidate provider's live models without persisting anything.
+
+    Admin-scoped (like ``onboarding.provider.probe``): the request carries
+    candidate credentials, so it must not be reachable at the read/write
+    tiers even though it changes no state.
+
+    No SSRF guard by design: discovery legitimately targets self-hosted and
+    loopback model servers (Ollama, vLLM, LM Studio), and the admin gate is
+    the trust boundary — an SSRF filter would break exactly those setups.
+
+    Blank credentials fall back to the stored config's, mirroring
+    ``upsert_llm_provider``'s keep semantics.
+    """
+    from opensquilla.onboarding.probe import discover_provider_models
+
+    provider_id = _require(params, "providerId")
+    p = params if isinstance(params, dict) else {}
+    cfg = _active_config(ctx)
+    api_key = str(p.get("apiKey", "") or "")
+    api_key_env = str(p.get("apiKeyEnv", "") or "")
+    base_url = str(p.get("baseUrl", "") or "")
+    proxy = str(p.get("proxy", "") or "")
+    # Keep-current fallback: blank secret/url on the same provider reuses the
+    # stored config (mirrors upsert_llm_provider's password-field affordance).
+    if str(getattr(cfg.llm, "provider", "") or "") == str(provider_id):
+        if not api_key and not api_key_env:
+            api_key = str(getattr(cfg.llm, "api_key", "") or "")
+            api_key_env = str(getattr(cfg.llm, "api_key_env", "") or "")
+        if not base_url:
+            base_url = str(getattr(cfg.llm, "base_url", "") or "")
+        if not proxy:
+            proxy = str(getattr(cfg.llm, "proxy", "") or "")
+    with _validation_error("onboarding.provider.invalid"):
+        result = await discover_provider_models(
+            provider_id=provider_id,
+            api_key=api_key,
+            api_key_env=api_key_env,
+            base_url=base_url,
+            proxy=proxy,
+        )
+    return result.to_payload()
+
+
 @_d.method("onboarding.router.catalog", scope="operator.read")
 async def _router_catalog(params: Any, ctx: RpcContext) -> dict[str, Any]:
     from opensquilla.onboarding.router_specs import router_catalog_payload
@@ -312,6 +360,37 @@ async def _router_configure(params: Any, ctx: RpcContext) -> dict[str, Any]:
         res = upsert_router(cfg, mode=mode, default_tier=default_tier, tiers=tiers)
     _apply_inplace(ctx, res.config)
     _sync_provider_selector(ctx, res.config.llm)
+    config_path = _persist(ctx, res.config, restart_required=res.restart_required)
+    return {
+        "changed": res.changed,
+        "restartRequired": res.restart_required,
+        "configPath": config_path,
+        "entry": res.public_payload,
+        "warnings": res.warnings,
+    }
+
+
+@_d.method("onboarding.ensemble.configure", scope="operator.admin")
+async def _ensemble_configure(params: Any, ctx: RpcContext) -> dict[str, Any]:
+    """Configure the [llm_ensemble] routing surface.
+
+    Omitted params keep the current value (partial-payload merge in the
+    mutation); the TurnRunner reads llm_ensemble live, so no restart.
+    """
+    from opensquilla.onboarding.mutations import upsert_llm_ensemble
+
+    cfg = _active_config(ctx)
+    p = params if isinstance(params, dict) else {}
+    with _validation_error("onboarding.ensemble.invalid"):
+        res = upsert_llm_ensemble(
+            cfg,
+            enabled=p.get("enabled"),
+            selection_mode=p.get("selectionMode"),
+            model_options=p.get("modelOptions"),
+            min_successful_proposers=p.get("minSuccessfulProposers"),
+            all_failed_policy=p.get("allFailedPolicy"),
+        )
+    _apply_inplace(ctx, res.config)
     config_path = _persist(ctx, res.config, restart_required=res.restart_required)
     return {
         "changed": res.changed,

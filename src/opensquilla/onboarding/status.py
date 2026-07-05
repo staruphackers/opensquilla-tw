@@ -26,6 +26,7 @@ from opensquilla.onboarding.section_status import (
     SectionStatus,
     audio_section_status,
     channels_section_status,
+    ensemble_section_status,
     image_generation_section_status,
     llm_section_status,
     memory_embedding_section_status,
@@ -75,6 +76,7 @@ class OnboardingStatus:
 _SECTION_LABELS: dict[str, str] = {
     "llm": "Provider",
     "router": "Router",
+    "ensemble": "LLM ensemble",
     "search": "Web search",
     "channels": "Channels",
     "image_generation": "Image generation",
@@ -138,6 +140,37 @@ def _router_detail(cfg: GatewayConfig, llm_source: str) -> str:
         return f"SquillaRouter profile: {profile}"
     default_tier = str(getattr(router, "default_tier", "") or "c1").strip()
     return f"SquillaRouter default tier: {default_tier}"
+
+
+def _ensemble_detail(cfg: GatewayConfig) -> str:
+    ensemble = getattr(cfg, "llm_ensemble", None)
+    if ensemble is None or not bool(getattr(ensemble, "enabled", False)):
+        return "disabled"
+    mode = str(getattr(ensemble, "selection_mode", "") or "")
+    options = list(getattr(ensemble, "model_options", []) or [])
+    return f"selection mode: {mode} ({len(options)} models)"
+
+
+def _router_mode(cfg: GatewayConfig) -> str:
+    """Compute the effective router mode the Web UI infers client-side today.
+
+    The mode is a pure function of ``(enabled, provider, tier_profile)``:
+
+    - ``disabled`` when the router is off;
+    - ``openrouter-mix`` when enabled, provider is ``openrouter``, and no
+      persisted ``tier_profile`` (the openrouter-only alias);
+    - ``custom`` when enabled with no ``tier_profile`` on a non-openrouter
+      provider (the provider-agnostic generalization);
+    - ``recommended`` otherwise (a persisted legacy tier_profile).
+    """
+    router = getattr(cfg, "squilla_router", None)
+    if router is None or not bool(getattr(router, "enabled", False)):
+        return "disabled"
+    provider = str(getattr(getattr(cfg, "llm", None), "provider", "") or "").strip().lower()
+    tier_profile = str(getattr(router, "tier_profile", "") or "").strip()
+    if not tier_profile:
+        return "openrouter-mix" if provider == "openrouter" else "custom"
+    return "recommended"
 
 
 def _llm_source(cfg: GatewayConfig, status: SectionStatus) -> tuple[str, str]:
@@ -407,6 +440,7 @@ def get_onboarding_status(config: GatewayConfig) -> OnboardingStatus:
     detail_text = {
         "llm": _source_detail(llm_source, llm_env_key),
         "router": _router_detail(config, llm_source),
+        "ensemble": _ensemble_detail(config),
         "search": _source_detail(search_source, search_env_key),
         "image_generation": _with_provider(
             image_provider,
@@ -427,6 +461,14 @@ def get_onboarding_status(config: GatewayConfig) -> OnboardingStatus:
     }
 
     enabled_channels = [c for c in config.channels.channels if c.enabled]
+
+    section_details = _section_details(sections, detail_text, runtime_blocking)
+    if "router" in section_details:
+        # Additive read-side key on the router card only: an explicit
+        # server-computed mode so clients stop inferring it from
+        # (provider, tier_profile) pairs. Contract-frozen in
+        # tests/test_contracts/test_onboarding_status.py.
+        section_details["router"]["routerMode"] = _router_mode(config)
 
     return OnboardingStatus(
         config_path=str(path),
@@ -457,7 +499,7 @@ def get_onboarding_status(config: GatewayConfig) -> OnboardingStatus:
         channels_configured=bool(enabled_channels),
         needs_onboarding=_needs_onboarding(sections) or bool(runtime_blocking),
         sections=sections,
-        section_details=_section_details(sections, detail_text, runtime_blocking),
+        section_details=section_details,
     )
 
 
@@ -467,6 +509,7 @@ __all__ = [
     "get_onboarding_status",
     "channels_section_status",
     "audio_section_status",
+    "ensemble_section_status",
     "image_generation_section_status",
     "llm_section_status",
     "memory_embedding_section_status",

@@ -756,6 +756,25 @@ class SessionStorage:
             except Exception as exc:  # noqa: BLE001
                 log.warning("session_delete.purge_meta_runs_failed: %s", exc)
 
+        # Router decision records (V017 router_decisions) share the session
+        # DB but are created by yoyo, so — like the meta-run rows above —
+        # there is no SQL FK to cascade on. Purge directly over this
+        # connection, best-effort; the table is absent on :memory: DBs that
+        # never ran migrations.
+        try:
+            async with self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='router_decisions'"
+            ) as cur:
+                has_router_decisions = await cur.fetchone() is not None
+            if has_router_decisions:
+                await self.conn.execute(
+                    "DELETE FROM router_decisions WHERE session_key = ?",
+                    (session_key,),
+                )
+                await self.conn.commit()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("session_delete.purge_router_decisions_failed: %s", exc)
+
     async def prune_stale_sessions(self, before_ms: int) -> int:
         """Delete sessions not updated since before_ms epoch ms. Returns count deleted."""
         async with self.conn.execute(

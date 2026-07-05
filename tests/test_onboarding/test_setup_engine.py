@@ -50,6 +50,32 @@ def test_setup_engine_can_derive_provider_model_from_router_default_tier(tmp_pat
     assert data["squilla_router"]["default_tier"] == "c1"
 
 
+def test_setup_engine_passes_preset_id_through_to_provider_upsert(tmp_path):
+    # The CLI's --preset flag rides this payload key; a synthesized preset
+    # must persist the custom-mode shape (no tier_profile, expanded tiers).
+    target = tmp_path / "config.toml"
+    engine = SetupEngine(path=target)
+
+    engine.apply(
+        "provider",
+        {
+            "providerId": "groq",
+            "model": "llama-3.3-70b",
+            "apiKeyEnv": "GROQ_API_KEY",
+            "presetId": "groq",
+        },
+    )
+    engine.persist()
+
+    data = tomllib.loads(target.read_text())
+    assert data["llm"]["provider"] == "groq"
+    assert data["squilla_router"]["enabled"] is True
+    assert "tier_profile" not in data["squilla_router"]
+    tier = data["squilla_router"]["tiers"]["c0"]
+    assert tier["provider"] == "groq"
+    assert tier["model"] == "llama-3.3-70b"
+
+
 def test_setup_engine_router_tier_override_updates_direct_fallback_model(tmp_path):
     target = tmp_path / "config.toml"
     engine = SetupEngine(path=target)
@@ -157,3 +183,55 @@ def test_setup_engine_catalog_includes_memory_embedding():
     provider_ids = {p["providerId"] for p in payload["memoryEmbeddingProviders"]}
     assert {"auto", "local", "openai", "ollama", "none"} <= provider_ids
     assert all("whatYouNeed" in p for p in payload["memoryEmbeddingProviders"])
+
+
+def test_setup_engine_applies_ensemble_with_keep_current_semantics(tmp_path):
+    import pytest
+
+    target = tmp_path / "config.toml"
+    engine = SetupEngine(path=target)
+    engine.apply(
+        "ensemble",
+        {
+            "enabled": True,
+            "selectionMode": "router_dynamic",
+            "modelOptions": ["prov/model-a", "prov/model-b"],
+            "minSuccessfulProposers": 2,
+            "allFailedPolicy": "error",
+        },
+    )
+    engine.persist()
+
+    data = tomllib.loads(target.read_text())
+    ensemble = data["llm_ensemble"]
+    assert ensemble["enabled"] is True
+    assert ensemble["selection_mode"] == "router_dynamic"
+    assert ensemble["model_options"] == ["prov/model-a", "prov/model-b"]
+    assert ensemble["min_successful_proposers"] == 2
+    assert ensemble["all_failed_policy"] == "error"
+
+    # A partial payload must only touch the keys it names.
+    second = SetupEngine(path=target)
+    second.apply("ensemble", {"enabled": False})
+    second.persist()
+
+    data = tomllib.loads(target.read_text())
+    ensemble = data["llm_ensemble"]
+    assert ensemble["enabled"] is False
+    assert ensemble["selection_mode"] == "router_dynamic"
+    assert ensemble["model_options"] == ["prov/model-a", "prov/model-b"]
+    assert ensemble["min_successful_proposers"] == 2
+    assert ensemble["all_failed_policy"] == "error"
+
+    with pytest.raises(ValueError, match="modelOptions must be a list"):
+        SetupEngine(path=target).apply("ensemble", {"modelOptions": "not-a-list"})
+
+
+def test_setup_engine_accepts_ensemble_section_aliases(tmp_path):
+    for alias in ("ensemble", "llm-ensemble", "llm_ensemble"):
+        target = tmp_path / f"{alias.replace('_', '-')}.toml"
+        engine = SetupEngine(path=target)
+        engine.apply(alias, {"enabled": False})
+        engine.persist()
+        data = tomllib.loads(target.read_text())
+        assert data["llm_ensemble"]["enabled"] is False

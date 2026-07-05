@@ -222,6 +222,7 @@ from opensquilla.session.terminal_reply import build_terminal_reply, sanitize_ag
 from opensquilla.tools.types import CallerKind, ToolContext
 
 if TYPE_CHECKING:
+    from opensquilla.engine.routing.health import ProviderHealthLedger
     from opensquilla.persistence.meta_run_writer import MetaRunWriter
 
 # Stable user-facing envelope for LLM timeouts.
@@ -1147,6 +1148,51 @@ def _should_use_selector_fallback(provider_name: str, event: ProviderErrorEvent)
     }
 
 
+def _report_credential_pool_failure(
+    provider_name: str,
+    turn_metadata: dict[str, Any] | None,
+    event: ProviderErrorEvent,
+) -> None:
+    """Park a pool-served profile key on rate-limit / credits / auth failures.
+
+    No-op unless this turn's provider was resolved through a profile
+    credential pool (the non-secret ``credential_pool`` stamp written at
+    resolution time) and the tier ProviderConfig was actually applied
+    (``routed_provider_applied`` names the same provider — instance
+    ``provider_name`` is not used because openai-compatible backends share
+    the generic ``"openai"`` name). The pool manager additionally ignores
+    kinds other than RATE_LIMITED / INSUFFICIENT_CREDITS / AUTH_INVALID and
+    sessions it never pinned. Never raises: credential bookkeeping must not
+    break the turn loop.
+    """
+    if not turn_metadata:
+        return
+    pool_info = turn_metadata.get("credential_pool")
+    if not isinstance(pool_info, dict):
+        return
+    pool_provider = str(pool_info.get("provider") or "")
+    if not pool_provider:
+        return
+    if str(turn_metadata.get("routed_provider_applied") or "") != pool_provider:
+        return
+    try:
+        kind = classify_provider_error(
+            provider_name=provider_name,
+            status_code=int(event.code) if str(event.code).isdigit() else None,
+            raw_code=event.code,
+            message=event.message,
+        )
+        from opensquilla.gateway.llm_runtime import profile_credential_pools
+
+        profile_credential_pools().report_failure(
+            pool_provider,
+            str(pool_info.get("session_key") or ""),
+            kind,
+        )
+    except Exception:  # noqa: BLE001 — credential bookkeeping only
+        log.debug("credential_pool.report_failed", provider=pool_provider)
+
+
 def _normalize_heartbeat_text(
     text: str,
     *,
@@ -1201,10 +1247,16 @@ class _SelectorFallbackProvider:
         provider: Any,
         selector: Any,
         turn_metadata: dict[str, Any] | None = None,
+        *,
+        health_ledger: ProviderHealthLedger | None = None,
     ) -> None:
         self._provider = provider
         self._selector = selector
         self._turn_metadata = turn_metadata
+        # Opt-in provider health ledger (engine/routing/health.py). None —
+        # the default everywhere today — makes every ledger hook below a
+        # no-op, keeping the default fallback path byte-identical.
+        self._health_ledger = health_ledger
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._provider, name)
@@ -1238,11 +1290,102 @@ class _SelectorFallbackProvider:
             if savings_key in metadata:
                 metadata[savings_key] = 0.0
 
+    def _note_fallback_hop(self) -> None:
+        """Count each selector fallback actually taken this turn.
+
+        Read at turn finalize by the router decision record
+        (engine/steps/router_decision_record.py) so persisted rows report
+        how many hops away from the routed model the executed one is.
+        """
+        metadata = self._turn_metadata
+        if metadata is None:
+            return
+        try:
+            metadata["router_fallback_hops"] = int(metadata.get("router_fallback_hops") or 0) + 1
+        except Exception:  # noqa: BLE001 — telemetry only
+            pass
+
+    def _active_deployment(self) -> tuple[str, str]:
+        """(provider id, model) of the selector's currently-active chain link."""
+        provider_id = str(
+            getattr(self._selector, "active_provider_id", "") or self.provider_name
+        )
+        current_config = getattr(self._selector, "current_config", None)
+        model = str(getattr(current_config, "model", "") or "")
+        return provider_id, model
+
+    def _record_health_failure(self, event: ProviderErrorEvent) -> None:
+        """Feed one pre-content provider error into the opt-in health ledger."""
+        ledger = self._health_ledger
+        if ledger is None:
+            return
+        provider_id, model = self._active_deployment()
+        if not provider_id and not model:
+            return
+        kind = classify_provider_error(
+            provider_name=provider_id,
+            status_code=int(event.code) if str(event.code).isdigit() else None,
+            raw_code=event.code,
+            message=event.message,
+        )
+        ledger.record_failure(
+            provider_id,
+            model,
+            kind,
+            retry_after_s=getattr(event, "retry_after_s", None),
+        )
+
+    def _record_health_success(self) -> None:
+        """A user-visible response clears the deployment's strike count."""
+        ledger = self._health_ledger
+        if ledger is None:
+            return
+        provider_id, model = self._active_deployment()
+        if not provider_id and not model:
+            return
+        ledger.record_success(provider_id, model)
+
+    def _skip_benched_fallbacks(self) -> None:
+        """Advance past benched fallback deployments (opt-in ledger only).
+
+        Uses :meth:`ProviderHealthLedger.eligible` with the remaining chain as
+        the candidate set, so the ledger's never-strand exemption applies: when
+        every remaining deployment is benched, the current one is reported
+        eligible and no hop is taken. No-op without a ledger.
+        """
+        ledger = self._health_ledger
+        if ledger is None:
+            return
+        remaining_chain = getattr(self._selector, "remaining_chain", None)
+        has_fallback = getattr(self._selector, "has_fallback", None)
+        next_fallback = getattr(self._selector, "next_fallback", None)
+        if remaining_chain is None or has_fallback is None or next_fallback is None:
+            return
+        while True:
+            candidates = [
+                (str(getattr(cfg, "provider", "")), str(getattr(cfg, "model", "")))
+                for cfg in remaining_chain()
+            ]
+            if not candidates:
+                return
+            provider_id, model = candidates[0]
+            if ledger.eligible(provider_id, model, candidates):
+                return
+            if not has_fallback():
+                return
+            try:
+                self._provider = next_fallback()
+            except Exception:  # noqa: BLE001 — a failed hop must not break the turn
+                return
+            self._note_fallback_hop()
+
     def fallback_after_invalid_response(self, reason: str) -> bool:
         try:
             self._provider = self._selector.next_fallback_after_failure(RuntimeError(reason))
         except Exception:
             return False
+        self._note_fallback_hop()
+        self._skip_benched_fallbacks()
         self._realign_routed_model_after_fallback()
         return True
 
@@ -1269,6 +1412,12 @@ class _SelectorFallbackProvider:
             return drained
 
         async for event in self._provider.chat(messages, tools=tools, config=config):
+            if isinstance(event, ProviderErrorEvent):
+                _report_credential_pool_failure(
+                    self.provider_name,
+                    self._turn_metadata,
+                    event,
+                )
             if emitted_user_visible_content:
                 yield event
                 continue
@@ -1276,6 +1425,7 @@ class _SelectorFallbackProvider:
             if isinstance(event, ProviderErrorEvent) and _should_use_selector_fallback(
                 self.provider_name, event
             ):
+                self._record_health_failure(event)
                 try:
                     self._provider = self._selector.next_fallback_after_failure(
                         RuntimeError(event.message)
@@ -1285,6 +1435,8 @@ class _SelectorFallbackProvider:
                         yield buffered_event
                     yield event
                     return
+                self._note_fallback_hop()
+                self._skip_benched_fallbacks()
                 self._realign_routed_model_after_fallback()
                 async for fallback_event in self._provider.chat(
                     messages,
@@ -1298,6 +1450,7 @@ class _SelectorFallbackProvider:
                 for buffered_event in drain_pre_text_buffer():
                     yield buffered_event
                 emitted_user_visible_content = True
+                self._record_health_success()
                 yield event
                 continue
 
@@ -2070,6 +2223,17 @@ class TurnRunner:
             session_totals=_TurnRunnerSessionTotalsAdapter(self),
             turn_error_persist=_TurnRunnerTurnErrorPersistAdapter(self),
         )
+
+    @property
+    def router_control_hold_store(self) -> RouterControlHoldStore:
+        """Session-keyed router-control hold store consulted by the router step.
+
+        This is the same instance forwarded into the turn loop through
+        ``initial_metadata["router_control_hold_store"]`` (and onto the
+        ``router_control`` tool context), so operator RPCs that read or write
+        holds here directly affect the routing of subsequent turns.
+        """
+        return self._router_control_hold_store
 
     def has_compacted_this_turn(self, session_key: str) -> bool:
         return session_key in self._turn_compacted_sessions
@@ -4631,6 +4795,32 @@ class TurnRunner:
             initial_metadata["channel_kind"] = tool_context.channel_kind
             initial_metadata["channel_id"] = tool_context.channel_id
 
+        # Budget gate (opt-in): seed the session's already-accumulated spend so
+        # the router step can read it. Gated on an active limit, so the default
+        # path pays no extra session read. Reads existing session cost totals;
+        # it never recomputes cost math.
+        budget_cfg = getattr(router_cfg, "budget", None)
+        if (
+            budget_cfg is not None
+            and str(getattr(budget_cfg, "action", "warn") or "warn").strip().lower() != "off"
+            and getattr(budget_cfg, "limit_usd", None)
+            and self._session_manager is not None
+        ):
+            try:
+                budget_session = await self._session_manager.get_session(session_key)
+            except Exception:  # noqa: BLE001 - budget seeding must never break a turn
+                budget_session = None
+            if budget_session is not None:
+                initial_metadata["session_billed_cost_usd"] = float(
+                    getattr(budget_session, "billed_cost_usd", 0.0) or 0.0
+                )
+                initial_metadata["session_total_cost_usd"] = float(
+                    getattr(budget_session, "total_cost_usd", 0.0) or 0.0
+                )
+                initial_metadata["session_estimated_cost_usd"] = float(
+                    getattr(budget_session, "estimated_cost_usd", 0.0) or 0.0
+                )
+
         turn = TurnContext(
             message=message,
             session_key=session_key,
@@ -4677,16 +4867,23 @@ class TurnRunner:
                     turn.metadata,
                     turn.model,
                     active_provider_id=getattr(cloned_selector, "active_provider_id", ""),
+                    session_key=turn.session_key,
                 ),
             )
 
         ensemble_cfg = getattr(self._config, "llm_ensemble", None)
         if provider is not None and getattr(ensemble_cfg, "enabled", False):
+            from opensquilla.provider.ensemble import (
+                build_ensemble_provider_from_config,
+                static_openrouter_b5_credential_available,
+            )
+
             current_provider_config = (
                 getattr(cloned_selector, "current_config", None)
                 if cloned_selector is not None
                 else None
             )
+            selection_mode = str(getattr(ensemble_cfg, "selection_mode", "") or "")
             if current_provider_config is None:
                 log.warning(
                     "llm_ensemble.wrap_skipped",
@@ -4701,9 +4898,24 @@ class TurnRunner:
                     "llm_ensemble.wrap_skipped",
                     reason="incomplete_provider_selector_current_config",
                 )
+            elif selection_mode == "static_openrouter_b5" and not (
+                static_openrouter_b5_credential_available(
+                    self._config,
+                    current_provider_config,
+                )
+            ):
+                # Without an OpenRouter credential the static-B5 members can
+                # never succeed; wrapping would still post the conversation to
+                # OpenRouter with an empty bearer token on every turn. Keep the
+                # single-model provider instead.
+                log.warning(
+                    "llm_ensemble.wrap_skipped",
+                    reason="static_openrouter_b5_no_credential",
+                )
+                turn.metadata["ensemble_wrap_skipped_reason"] = (
+                    "static_openrouter_b5_no_credential"
+                )
             else:
-                from opensquilla.provider.ensemble import build_ensemble_provider_from_config
-
                 turn.metadata["ensemble_enabled"] = True
                 turn.metadata["routed_model_before_ensemble"] = (
                     turn.model or getattr(current_provider_config, "model", "")
@@ -4938,6 +5150,24 @@ class TurnRunner:
         """
 
         try:
+            # Flush the staged router decision record (V017 router_decisions)
+            # with executed facts: executed_kind/ensemble_profile/fallback_hops
+            # are only knowable now that the provider ran. Best-effort — the
+            # hook never raises and no-ops when nothing was staged.
+            if turn_obj is not None:
+                from opensquilla.engine.steps.router_decision_record import (
+                    flush_router_decision,
+                )
+
+                flush_router_decision(
+                    turn_obj.metadata,
+                    ensemble_trace=(
+                        getattr(done_event, "ensemble_trace", None)
+                        if done_event is not None
+                        else None
+                    ),
+                )
+
             tool_names = [getattr(td, "name", "") for td in tool_defs]
             prompt_hash, system_prompt_hash, tool_list_hash = compute_hashes(
                 message, final_prompt, [n for n in tool_names if n]
@@ -5104,6 +5334,11 @@ class TurnRunner:
                 session_intent=session_intent,
                 intent_summary=build_intent_summary(message),
                 trace_id=trace_id or turn_id,
+                decision_id=(
+                    turn_obj.metadata.get("router_decision_id")
+                    if turn_obj is not None
+                    else None
+                ),
                 tool_profile=prompt_report.tool_profile if prompt_report else None,
                 prompt_hash=prompt_hash,
                 system_prompt_hash=system_prompt_hash,

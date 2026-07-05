@@ -85,17 +85,35 @@ def _ready_router(ctx: RpcContext, *, deep: bool = False) -> dict[str, Any]:
     }
 
 
+def _inactive_llm_ensemble(ctx: RpcContext) -> dict[str, Any]:
+    return {"enabled": False, "selectionMode": ""}
+
+
 def _patch_ready_support_surfaces(monkeypatch: pytest.MonkeyPatch, rpc_doctor: Any) -> None:
     monkeypatch.setattr(rpc_doctor, "_handle_doctor_memory_status", _ready_memory)
     monkeypatch.setattr(rpc_doctor, "_handle_channels_status", _ready_channels)
     monkeypatch.setattr(rpc_doctor, "_handle_search_status", _ready_search)
     monkeypatch.setattr(rpc_doctor, "_build_logs_status", _ready_logs)
     monkeypatch.setattr(rpc_doctor, "_router_payload", _ready_router)
+    monkeypatch.setattr(rpc_doctor, "_llm_ensemble_payload", _inactive_llm_ensemble)
     monkeypatch.setattr(
         rpc_doctor,
         "_image_generation_payload",
         _optional_image_generation,
     )
+
+
+@pytest.fixture(autouse=True)
+def _reset_router_strategy_cache():
+    # The squilla_router doctor surface reads the turn loop's strategy cache;
+    # keep these tests independent of whatever other tests left in it.
+    from opensquilla.engine.steps import squilla_router as squilla_router_step
+
+    squilla_router_step._strategy = None
+    squilla_router_step._strategy_key = None
+    yield
+    squilla_router_step._strategy = None
+    squilla_router_step._strategy_key = None
 
 
 @pytest.mark.asyncio
@@ -824,3 +842,320 @@ async def test_doctor_status_treats_no_channels_as_optional_setup(monkeypatch) -
     assert channel_finding["fixSteps"][0]["command"] == (
         "opensquilla configure --section channels"
     )
+
+
+def _patch_all_but_llm_ensemble(monkeypatch: pytest.MonkeyPatch, rpc_doctor: Any) -> None:
+    async def provider_status(params: dict[str, Any], ctx: RpcContext) -> dict[str, Any]:
+        return {
+            "activeProvider": "groq",
+            "providers": [
+                {
+                    "providerId": "groq",
+                    "active": True,
+                    "configured": True,
+                    "buildable": True,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(rpc_doctor, "_handle_providers_status", provider_status)
+    monkeypatch.setattr(rpc_doctor, "_handle_doctor_memory_status", _ready_memory)
+    monkeypatch.setattr(rpc_doctor, "_handle_channels_status", _ready_channels)
+    monkeypatch.setattr(rpc_doctor, "_handle_search_status", _ready_search)
+    monkeypatch.setattr(rpc_doctor, "_build_logs_status", _ready_logs)
+    monkeypatch.setattr(rpc_doctor, "_router_payload", _ready_router)
+    monkeypatch.setattr(
+        rpc_doctor,
+        "_image_generation_payload",
+        _optional_image_generation,
+    )
+
+
+@pytest.mark.asyncio
+async def test_doctor_status_warns_when_static_b5_ensemble_has_no_credential(
+    monkeypatch,
+) -> None:
+    import opensquilla.gateway.rpc_doctor as rpc_doctor
+
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    _patch_all_but_llm_ensemble(monkeypatch, rpc_doctor)
+
+    config = GatewayConfig(llm={"provider": "groq", "api_key": "sk-groq-synthetic"})
+    response = await get_dispatcher().dispatch(
+        "req-1",
+        "doctor.status",
+        {},
+        RpcContext(conn_id="test", config=config),
+    )
+
+    assert response.ok is True
+    finding = next(
+        finding
+        for finding in response.payload["findings"]
+        if finding["id"] == "llm_ensemble.static_openrouter_b5.credentials.missing"
+    )
+    assert finding["severity"] == "warn"
+    assert finding["readinessImpact"] == "degrades"
+    assert "OPENROUTER_API_KEY" in finding["detail"]
+    assert finding["evidence"]["activeProvider"] == "groq"
+    assert finding["evidence"]["credentialAvailable"] is False
+    commands = [step["command"] for step in finding["fixSteps"] if "command" in step]
+    assert "opensquilla config set llm_ensemble.enabled false" in commands
+    assert "opensquilla gateway restart" in commands
+
+
+@pytest.mark.asyncio
+async def test_doctor_status_reports_static_b5_ensemble_ready_when_keyed(
+    monkeypatch,
+) -> None:
+    import opensquilla.gateway.rpc_doctor as rpc_doctor
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-synthetic")
+    _patch_all_but_llm_ensemble(monkeypatch, rpc_doctor)
+
+    config = GatewayConfig(llm={"provider": "groq", "api_key": "sk-groq-synthetic"})
+    response = await get_dispatcher().dispatch(
+        "req-1",
+        "doctor.status",
+        {},
+        RpcContext(conn_id="test", config=config),
+    )
+
+    assert response.ok is True
+    ids = [finding["id"] for finding in response.payload["findings"]]
+    assert "llm_ensemble.static_openrouter_b5.credentials.missing" not in ids
+    assert "llm_ensemble.static_openrouter_b5.ready" in ids
+    assert response.payload["ready"] is True
+    assert response.payload["status"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_doctor_status_skips_ensemble_finding_when_ensemble_disabled(
+    monkeypatch,
+) -> None:
+    import opensquilla.gateway.rpc_doctor as rpc_doctor
+
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    _patch_all_but_llm_ensemble(monkeypatch, rpc_doctor)
+
+    config = GatewayConfig(
+        llm={"provider": "groq", "api_key": "sk-groq-synthetic"},
+        llm_ensemble={"enabled": False},
+    )
+    response = await get_dispatcher().dispatch(
+        "req-1",
+        "doctor.status",
+        {},
+        RpcContext(conn_id="test", config=config),
+    )
+
+    assert response.ok is True
+    assert not [
+        finding
+        for finding in response.payload["findings"]
+        if finding["surface"] == "llm_ensemble"
+    ]
+
+
+def _fake_runtime_status(status: dict[str, Any]):
+    return lambda: dict(status)
+
+
+def _patch_runtime_status(monkeypatch: pytest.MonkeyPatch, status: dict[str, Any]) -> None:
+    from opensquilla.engine.steps import squilla_router as squilla_router_step
+
+    monkeypatch.setattr(
+        squilla_router_step, "router_runtime_status", _fake_runtime_status(status)
+    )
+
+
+@pytest.mark.asyncio
+async def test_doctor_status_warns_persistently_when_required_router_runtime_failed(
+    monkeypatch,
+) -> None:
+    import opensquilla.gateway.rpc_doctor as rpc_doctor
+
+    _patch_all_but_llm_ensemble(monkeypatch, rpc_doctor)
+    _patch_runtime_status(
+        monkeypatch,
+        {
+            "initialized": True,
+            "loaded": False,
+            "code": "macos_libomp_missing",
+            "strategy": "heuristic",
+            "error": "Library not loaded: @rpath/libomp.dylib",
+        },
+    )
+
+    config = GatewayConfig(
+        llm={"provider": "groq", "api_key": "sk-groq-synthetic"},
+        llm_ensemble={"enabled": False},
+    )
+    assert config.squilla_router.require_router_runtime is True
+    response = await get_dispatcher().dispatch(
+        "req-1",
+        "doctor.status",
+        {},
+        RpcContext(conn_id="test", config=config),
+    )
+
+    assert response.ok is True
+    finding = next(
+        finding
+        for finding in response.payload["findings"]
+        if finding["id"] == "squilla_router.runtime.unavailable"
+    )
+    assert finding["severity"] == "warn"
+    assert finding["readinessImpact"] == "degrades"
+    assert finding["evidence"]["strategy"] == "heuristic"
+    assert finding["evidence"]["runtimeErrorKind"] == "macos_libomp_missing"
+    assert "brew install libomp" in finding["detail"]
+    commands = [step["command"] for step in finding["fixSteps"] if "command" in step]
+    assert "brew install libomp" in commands
+    assert "opensquilla gateway restart" in commands
+    # OQ#11: the flag surfaces loudly but never blocks startup/readiness.
+    assert response.payload["ready"] is True
+    assert response.payload["status"] == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_doctor_status_reports_router_runtime_ready_when_loaded(
+    monkeypatch,
+) -> None:
+    import opensquilla.gateway.rpc_doctor as rpc_doctor
+
+    _patch_all_but_llm_ensemble(monkeypatch, rpc_doctor)
+    _patch_runtime_status(
+        monkeypatch,
+        {
+            "initialized": True,
+            "loaded": True,
+            "code": None,
+            "strategy": "v4_phase3",
+            "error": None,
+        },
+    )
+
+    config = GatewayConfig(
+        llm={"provider": "groq", "api_key": "sk-groq-synthetic"},
+        llm_ensemble={"enabled": False},
+    )
+    response = await get_dispatcher().dispatch(
+        "req-1",
+        "doctor.status",
+        {},
+        RpcContext(conn_id="test", config=config),
+    )
+
+    assert response.ok is True
+    ids = [finding["id"] for finding in response.payload["findings"]]
+    assert "squilla_router.runtime.unavailable" not in ids
+    assert "squilla_router.runtime.ready" in ids
+    assert response.payload["ready"] is True
+    assert response.payload["status"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_doctor_status_softens_router_runtime_finding_when_flag_false(
+    monkeypatch,
+) -> None:
+    import opensquilla.gateway.rpc_doctor as rpc_doctor
+
+    _patch_all_but_llm_ensemble(monkeypatch, rpc_doctor)
+    _patch_runtime_status(
+        monkeypatch,
+        {
+            "initialized": True,
+            "loaded": False,
+            "code": "router_python_dependency_missing",
+            "strategy": "heuristic",
+            "error": "No module named 'onnxruntime'",
+        },
+    )
+
+    config = GatewayConfig(
+        llm={"provider": "groq", "api_key": "sk-groq-synthetic"},
+        llm_ensemble={"enabled": False},
+        squilla_router={"require_router_runtime": False},
+    )
+    response = await get_dispatcher().dispatch(
+        "req-1",
+        "doctor.status",
+        {},
+        RpcContext(conn_id="test", config=config),
+    )
+
+    assert response.ok is True
+    finding = next(
+        finding
+        for finding in response.payload["findings"]
+        if finding["id"] == "squilla_router.runtime.unavailable"
+    )
+    # Operator opted out of requiring the runtime: visible but optional.
+    assert finding["severity"] == "info"
+    assert finding["readinessImpact"] == "optional"
+    assert response.payload["ready"] is True
+    assert response.payload["status"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_doctor_status_stays_silent_before_router_strategy_initializes(
+    monkeypatch,
+) -> None:
+    import opensquilla.gateway.rpc_doctor as rpc_doctor
+
+    _patch_all_but_llm_ensemble(monkeypatch, rpc_doctor)
+    # No _patch_runtime_status: the autouse fixture guarantees an
+    # uninitialized strategy cache, mirroring a gateway whose boot preload
+    # has not landed yet.
+    config = GatewayConfig(llm={"provider": "groq", "api_key": "sk-groq-synthetic"})
+    response = await get_dispatcher().dispatch(
+        "req-1",
+        "doctor.status",
+        {},
+        RpcContext(conn_id="test", config=config),
+    )
+
+    assert response.ok is True
+    assert not [
+        finding
+        for finding in response.payload["findings"]
+        if finding["surface"] == "squilla_router"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_doctor_status_skips_router_runtime_surface_when_router_disabled(
+    monkeypatch,
+) -> None:
+    import opensquilla.gateway.rpc_doctor as rpc_doctor
+
+    _patch_all_but_llm_ensemble(monkeypatch, rpc_doctor)
+    _patch_runtime_status(
+        monkeypatch,
+        {
+            "initialized": True,
+            "loaded": False,
+            "code": "router_runtime_unavailable",
+            "strategy": "heuristic",
+            "error": "synthetic failure",
+        },
+    )
+
+    config = GatewayConfig(
+        llm={"provider": "groq", "api_key": "sk-groq-synthetic"},
+        squilla_router={"enabled": False},
+    )
+    response = await get_dispatcher().dispatch(
+        "req-1",
+        "doctor.status",
+        {},
+        RpcContext(conn_id="test", config=config),
+    )
+
+    assert response.ok is True
+    assert not [
+        finding
+        for finding in response.payload["findings"]
+        if finding["surface"] == "squilla_router"
+    ]

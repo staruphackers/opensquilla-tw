@@ -19,14 +19,17 @@ from pydantic import (
     field_validator,
     model_validator,
 )
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic.fields import FieldInfo
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, SettingsConfigDict
 
 from opensquilla import __version__
 from opensquilla.gateway.config_migration import (
+    LATEST_CONFIG_VERSION,
     backup_and_write_migrated_config,
     migrate_config_payload,
 )
 from opensquilla.paths import default_opensquilla_home
+from opensquilla.provider.preset_registry import get_preset, legacy_profile_ids
 from opensquilla.router_tiers import (
     DEFAULT_TEXT_TIER,
     normalize_text_tier,
@@ -374,12 +377,29 @@ def static_openrouter_b5_ensemble_enabled(config: Any) -> bool:
     )
 
 
+def static_openrouter_b5_ensemble_active(config: Any) -> bool:
+    """True when static-B5 is enabled *and* its members resolve a credential.
+
+    The stream-idle floors below exist for the real (slow) static-B5
+    ensemble. A keyless install can never run those members — the wrap is
+    skipped at turn time — so it keeps the default hang-detection budgets.
+    The credential check is the shared ensemble-side helper (lazy import;
+    ``provider`` never imports from ``gateway``, so no cycle) and therefore
+    cannot disagree with the turn-time wrap guard.
+    """
+    if not static_openrouter_b5_ensemble_enabled(config):
+        return False
+    from opensquilla.provider.ensemble import static_openrouter_b5_credential_available
+
+    return static_openrouter_b5_credential_available(config, getattr(config, "llm", None))
+
+
 def effective_agent_stream_idle_timeout_seconds(config: Any) -> float:
     value = _non_negative_float(
         getattr(config, "agent_stream_idle_timeout_seconds", 600.0),
         600.0,
     )
-    if static_openrouter_b5_ensemble_enabled(config):
+    if static_openrouter_b5_ensemble_active(config):
         value = max(value, STATIC_OPENROUTER_B5_MIN_AGENT_STREAM_IDLE_TIMEOUT_SECONDS)
     return value
 
@@ -389,7 +409,7 @@ def effective_webui_stream_idle_grace_seconds(config: Any) -> float:
         getattr(config, "webui_stream_idle_grace_seconds", 630.0),
         630.0,
     )
-    if static_openrouter_b5_ensemble_enabled(config):
+    if static_openrouter_b5_ensemble_active(config):
         server_idle = effective_agent_stream_idle_timeout_seconds(config)
         value = max(
             value,
@@ -695,75 +715,17 @@ class MemoryConfig(BaseSettings):
 
 
 def _default_tiers() -> dict:
-    """Default model routing config."""
-    return {
-        "c0": {
-            "provider": "openrouter",
-            "model": "deepseek/deepseek-v4-flash",
-            "description": (
-                "fast DeepSeek V4 Flash route for trivial chat, short rewrites, "
-                "extraction, and low-risk simple Q&A"
-            ),
-            "supports_image": False,
-            "thinking_level": "high",
-        },
-        "c1": {
-            "provider": "openrouter",
-            "model": "deepseek/deepseek-v4-pro",
-            "description": (
-                "default balanced text model for normal agent work, coding assistance, "
-                "debugging, and moderate analysis"
-            ),
-            "supports_image": False,
-            "thinking_level": "high",
-        },
-        "c2": {
-            "provider": "openrouter",
-            "model": "z-ai/glm-5.2",
-            "description": (
-                "stronger GLM 5.2 route for multi-step coding, structured reasoning, "
-                "larger context synthesis, and harder analysis"
-            ),
-            "supports_image": False,
-            "thinking_level": "high",
-        },
-        "c3": {
-            "provider": "openrouter",
-            "model": "z-ai/glm-5.2",
-            "description": (
-                "Highest-tier GLM 5.2 route for difficult planning, deep review, "
-                "complex debugging, and high-stakes synthesis"
-            ),
-            "supports_image": False,
-            "thinking_level": "high",
-        },
-        "image_model": {
-            "provider": "openrouter",
-            "model": "moonshotai/kimi-k2.6",
-            "description": (
-                "Image model: vision-capable route for user-supplied image attachments, "
-                "screenshots, diagrams, and visual question answering"
-            ),
-            "supports_image": True,
-            "image_only": True,
-            "thinking_level": "medium",
-        },
-    }
+    """Default model routing config (the packaged openrouter preset)."""
+    return _router_tier_profile_defaults("openrouter")
 
 
-ROUTER_TIER_PROFILE_IDS = frozenset(
-    {
-        "openrouter",
-        "dashscope",
-        "deepseek",
-        "gemini",
-        "volcengine",
-        "byteplus",
-        "openai",
-        "zhipu",
-        "moonshot",
-    }
-)
+# Accepted (persistable) squilla_router.tier_profile ids. Derived from the
+# packaged preset registry's non-synthesized ids, with an internal equality
+# check against the pinned legacy-nine literal (see preset_registry). Synthesized
+# presets are deliberately EXCLUDED: an rc1 gateway bricks on an unknown
+# tier_profile, so the accepted set stays pinned to the legacy nine (downgrade
+# contract). Kept as a module-level frozenset for compat with existing importers.
+ROUTER_TIER_PROFILE_IDS = legacy_profile_ids()
 
 
 def _merge_tier_dicts(defaults: dict, overrides: object) -> dict:
@@ -783,319 +745,67 @@ def _merge_tier_dicts(defaults: dict, overrides: object) -> dict:
 
 
 def _router_tier_profile_defaults(profile: str | None) -> dict:
+    """Effective tier defaults for a legacy tier_profile id.
+
+    Thin adapter over the packaged preset registry. Membership stays pinned
+    to the legacy nine ids (ROUTER_TIER_PROFILE_IDS): synthesized presets
+    exist in the registry but are rejected here, because a persisted
+    tier_profile outside the legacy set bricks rc1 loaders on downgrade.
+    """
     normalized = (profile or "openrouter").strip().lower()
     if normalized not in ROUTER_TIER_PROFILE_IDS:
         allowed = ", ".join(sorted(ROUTER_TIER_PROFILE_IDS))
         raise ValueError(
             f"unknown squilla_router.tier_profile {profile!r}; expected one of {allowed}"
         )
-    if normalized == "openrouter":
-        return _default_tiers()
-    profiles = {
-        "openai": {
-            "c0": {
-                "provider": "openai",
-                "model": "gpt-5.4-nano",
-                "description": (
-                    "OpenAI fast route: GPT-5.4 Nano for fast, high-throughput simple work."
-                ),
-                "supports_image": False,
-                "thinking_level": "none",
-            },
-            "c1": {
-                "provider": "openai",
-                "model": "gpt-5.4-mini",
-                "description": "OpenAI balanced route: GPT-5.4 Mini for normal agent work.",
-                "supports_image": False,
-                "thinking_level": "low",
-            },
-            "c2": {
-                "provider": "openai",
-                "model": "gpt-5.5",
-                "description": "OpenAI strong route: GPT-5.5 for complex text tasks.",
-                "supports_image": False,
-                "thinking_level": "medium",
-            },
-            "c3": {
-                "provider": "openai",
-                "model": "gpt-5.5",
-                "description": (
-                    "OpenAI highest route: GPT-5.5 with high reasoning; GPT-5.5 Pro is "
-                    "excluded because it is not streaming-compatible."
-                ),
-                "supports_image": False,
-                "thinking_level": "high",
-            },
-        },
-        "dashscope": {
-            "c0": {
-                "provider": "dashscope",
-                "model": "qwen3.6-flash",
-                "description": (
-                    "DashScope fast route: Qwen3.6 Flash for simple text tasks; "
-                    "pending live smoke."
-                ),
-                "supports_image": False,
-            },
-            "c1": {
-                "provider": "dashscope",
-                "model": "qwen3.6-plus",
-                "description": (
-                    "DashScope balanced route: Qwen3.6 Plus for normal agent and "
-                    "coding work; pending live smoke."
-                ),
-                "supports_image": False,
-            },
-            "c2": {
-                "provider": "dashscope",
-                "model": "qwen3-max",
-                "description": "DashScope strong route: Qwen3 Max for complex text tasks.",
-                "supports_image": False,
-            },
-            "c3": {
-                "provider": "dashscope",
-                "model": "qwen3-max",
-                "description": (
-                    "DashScope highest route: Qwen3 Max; higher-thinking behavior "
-                    "requires future payload support."
-                ),
-                "supports_image": False,
-            },
-        },
-        "deepseek": {
-            "c0": {
-                "provider": "deepseek",
-                "model": "deepseek-v4-flash",
-                "description": (
-                    "DeepSeek fast route: V4 Flash with no router-requested thinking; "
-                    "request ID pending live smoke."
-                ),
-                "supports_image": False,
-                "thinking_level": "off",
-            },
-            "c1": {
-                "provider": "deepseek",
-                "model": "deepseek-v4-flash",
-                "description": (
-                    "DeepSeek balanced route: V4 Flash with thinking enabled; request "
-                    "ID pending live smoke."
-                ),
-                "supports_image": False,
-                "thinking_level": "low",
-            },
-            "c2": {
-                "provider": "deepseek",
-                "model": "deepseek-v4-pro",
-                "description": (
-                    "DeepSeek strong route: V4 Pro with thinking enabled; request ID "
-                    "pending live smoke."
-                ),
-                "supports_image": False,
-                "thinking_level": "medium",
-            },
-            "c3": {
-                "provider": "deepseek",
-                "model": "deepseek-v4-pro",
-                "description": (
-                    "DeepSeek highest route: same V4 Pro wire behavior until "
-                    "effort-level support is added."
-                ),
-                "supports_image": False,
-                "thinking_level": "high",
-            },
-        },
-        "gemini": {
-            "c0": {
-                "provider": "gemini",
-                "model": "gemini-2.5-flash-lite",
-                "description": "Gemini fast route: 2.5 Flash-Lite for low-latency tasks.",
-                "supports_image": False,
-            },
-            "c1": {
-                "provider": "gemini",
-                "model": "gemini-2.5-flash",
-                "description": "Gemini balanced route: 2.5 Flash for normal agent work.",
-                "supports_image": False,
-                "thinking_level": "low",
-            },
-            "c2": {
-                "provider": "gemini",
-                "model": "gemini-2.5-pro",
-                "description": "Gemini strong route: 2.5 Pro for complex coding and reasoning.",
-                "supports_image": False,
-                "thinking_level": "medium",
-            },
-            "c3": {
-                "provider": "gemini",
-                "model": "gemini-2.5-pro",
-                "description": (
-                    "Gemini highest route: 2.5 Pro with high thinking; 3.1 preview "
-                    "remains opt-in."
-                ),
-                "supports_image": False,
-                "thinking_level": "high",
-            },
-        },
-        "zhipu": {
-            "c0": {
-                "provider": "zhipu",
-                "model": "glm-4.7-flashx",
-                "description": (
-                    "Zhipu fast route: GLM-4.7 FlashX for simple text tasks; live smoke "
-                    "may require fallback."
-                ),
-                "supports_image": False,
-            },
-            "c1": {
-                "provider": "zhipu",
-                "model": "glm-5",
-                "description": "Zhipu balanced route: GLM-5 for normal agent work.",
-                "supports_image": False,
-                "thinking_level": "low",
-            },
-            "c2": {
-                "provider": "zhipu",
-                "model": "glm-5.1",
-                "description": "Zhipu strong route: GLM-5.1 for complex text tasks.",
-                "supports_image": False,
-                "thinking_level": "medium",
-            },
-            "c3": {
-                "provider": "zhipu",
-                "model": "glm-5.1",
-                "description": "Zhipu highest route: GLM-5.1 with high reasoning effort.",
-                "supports_image": False,
-                "thinking_level": "high",
-            },
-        },
-        "moonshot": {
-            "c0": {
-                "provider": "moonshot",
-                "model": "kimi-k2.5",
-                "description": (
-                    "Moonshot fast route: Kimi K2.5 for cost-efficient agent work "
-                    "with 256K context."
-                ),
-                "supports_image": True,
-                "thinking_level": "low",
-            },
-            "c1": {
-                "provider": "moonshot",
-                "model": "kimi-k2.5",
-                "description": (
-                    "Moonshot balanced route: Kimi K2.5 for normal multimodal "
-                    "agent work."
-                ),
-                "supports_image": True,
-                "thinking_level": "medium",
-            },
-            "c2": {
-                "provider": "moonshot",
-                "model": "kimi-k2.6",
-                "description": (
-                    "Moonshot strong route: Kimi K2.6 for complex coding, reasoning, "
-                    "and multimodal tasks."
-                ),
-                "supports_image": True,
-                "thinking_level": "medium",
-            },
-            "c3": {
-                "provider": "moonshot",
-                "model": "kimi-k2.6",
-                "description": (
-                    "Moonshot highest route: Kimi K2.6 for the hardest long-horizon "
-                    "agent work."
-                ),
-                "supports_image": True,
-                "thinking_level": "high",
-            },
-        },
-        "volcengine": {
-            "c0": {
-                "provider": "volcengine",
-                "model": "doubao-seed-2-0-mini-260215",
-                "description": (
-                    "Volcengine fast route: Doubao Seed 2.0 Mini for low-latency, "
-                    "low-cost simple text tasks."
-                ),
-                "supports_image": False,
-                "thinking_level": "off",
-            },
-            "c1": {
-                "provider": "volcengine",
-                "model": "doubao-seed-2-0-lite-260215",
-                "description": (
-                    "Volcengine balanced route: Doubao Seed 2.0 Lite for daily agent "
-                    "work with lower cost than Pro."
-                ),
-                "supports_image": False,
-                "thinking_level": "low",
-            },
-            "c2": {
-                "provider": "volcengine",
-                "model": "doubao-seed-2-0-pro-260215",
-                "description": (
-                    "Volcengine strong route: Doubao Seed 2.0 Pro for complex "
-                    "reasoning and multimodal-capable text work."
-                ),
-                "supports_image": False,
-                "thinking_level": "medium",
-            },
-            "c3": {
-                "provider": "volcengine",
-                "model": "doubao-seed-2-0-code-preview-260215",
-                "description": (
-                    "Volcengine highest route: Doubao Seed 2.0 Code Preview for the "
-                    "hardest coding and code-review routes."
-                ),
-                "supports_image": False,
-                "thinking_level": "high",
-            },
-        },
-        "byteplus": {
-            "c0": {
-                "provider": "byteplus",
-                "model": "seed-2-0-lite-260228",
-                "description": (
-                    "BytePlus fast route: Seed 2.0 Lite for low-latency, "
-                    "low-cost simple text tasks."
-                ),
-                "supports_image": False,
-                "thinking_level": "off",
-            },
-            "c1": {
-                "provider": "byteplus",
-                "model": "seed-2-0-lite-260228",
-                "description": (
-                    "BytePlus balanced route: Seed 2.0 Lite for normal agent "
-                    "work with provider thinking available."
-                ),
-                "supports_image": False,
-                "thinking_level": "low",
-            },
-            "c2": {
-                "provider": "byteplus",
-                "model": "seed-2-0-lite-260228",
-                "description": (
-                    "BytePlus strong route: Seed 2.0 Lite with medium thinking "
-                    "for multi-step text tasks."
-                ),
-                "supports_image": False,
-                "thinking_level": "medium",
-            },
-            "c3": {
-                "provider": "byteplus",
-                "model": "seed-2-0-lite-260228",
-                "description": (
-                    "BytePlus highest route: Seed 2.0 Lite with high thinking "
-                    "for harder long-horizon text tasks."
-                ),
-                "supports_image": False,
-                "thinking_level": "high",
-            },
-        },
-    }
-    return {name: dict(value) for name, value in profiles[normalized].items()}
+    preset = get_preset(normalized)
+    if preset is None or preset.synthesized:  # pragma: no cover - packaging drift guard
+        allowed = ", ".join(sorted(ROUTER_TIER_PROFILE_IDS))
+        raise ValueError(
+            f"unknown squilla_router.tier_profile {profile!r}; expected one of {allowed}"
+        )
+    return preset.tier_defaults()
+
+
+class RouterBudgetConfig(BaseModel):
+    """Additive, opt-in per-session spend gate for the router.
+
+    Default state is a complete no-op: with no ``limit_usd`` set (or
+    ``action = "off"``) the routing policy's budget stage never runs, so the
+    chosen tier is byte-identical to a build without this block (the routing
+    parity golden pins that). The gate READS the session's already-accumulated
+    billed/estimated spend — it never recomputes cost math — and, when that
+    spend crosses ``limit_usd``, takes ``action``:
+
+    - ``"warn"`` (the default action) — annotate routing metadata + emit a
+      ``router_budget.warn`` log, but leave the routed tier UNCHANGED.
+    - ``"cap"`` — lower the routed tier to ``cap_tier`` (or the router
+      ``default_tier`` when unset), never raising it.
+    - ``"off"`` — disable the gate regardless of ``limit_usd``.
+
+    When the accumulated spend (or a required forward price) cannot be
+    determined, the gate SUSPENDS (a no-op) rather than acting on missing data.
+
+    ``extra="ignore"`` keeps the block downgrade-tolerant: an older loader
+    reading a config that carries it simply drops it and falls back to today's
+    un-gated routing. Nothing that activates the gate is persisted while it is
+    unset — ``limit_usd``/``cap_tier`` default to ``None`` and drop out of the
+    ``exclude_none`` TOML dump.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    action: Literal["off", "warn", "cap"] = "warn"
+    # Per-session ceiling in USD. ``None`` (or a non-positive value) disables
+    # the gate — this is the default, byte-identical no-op state.
+    limit_usd: float | None = None
+    # Cap target for ``action = "cap"``. ``None`` falls back to the router's
+    # ``default_tier`` at gather time. Normalized through router_tiers.
+    cap_tier: str | None = None
+    # Opt-in forward projection: add an estimate of the next turn's marginal
+    # input cost to the accumulated spend before comparing to ``limit_usd``.
+    # When the estimate cannot be determined the gate SUSPENDS.
+    include_next_turn_estimate: bool = False
 
 
 class SquillaRouterConfig(BaseSettings):
@@ -1115,6 +825,19 @@ class SquillaRouterConfig(BaseSettings):
     # key. Off: such tiers run on the active provider (with a logged
     # mismatch warning), preserving the historical behavior.
     cross_provider_tiers: bool = False
+    # What routing does when it lands on a tier naming a provider other than
+    # llm.provider while cross_provider_tiers is off. "route" preserves the
+    # historical, documented-intentional behavior: flag the mismatch loudly
+    # (warning log + router_tier_provider_mismatch metadata) but still run
+    # the tier's model id on the active provider's credentials. "veto"
+    # rebinds the turn to the nearest tier that executes on the active
+    # provider (or the default tier), recording the veto in the routing
+    # trail; without a usable rebind target it falls back to route-and-flag.
+    # Downgrade note: additive key. This section is extra="ignore", so an
+    # rc1 loader reading a config that carries this key simply drops it and
+    # falls back to the historical route-and-flag behavior — persisting it
+    # never bricks a downgraded gateway.
+    tier_provider_mismatch: Literal["route", "veto"] = "route"
     tiers: dict = Field(default_factory=_default_tiers)
     default_tier: str = DEFAULT_TEXT_TIER
     confidence_threshold: float = 0.5
@@ -1128,6 +851,25 @@ class SquillaRouterConfig(BaseSettings):
     complaint_upgrade_steps: int = 1
     complaint_upgrade_max_chars: int = 160
     require_router_runtime: bool = True
+    # Days router decision records (V017 router_decisions) are retained in
+    # the session DB before the writer's write-time opportunistic pruning
+    # deletes them. Additive key: the class-level extra="ignore" keeps old
+    # builds rollback-tolerant when this key is present in config files.
+    decision_retention_days: int = Field(default=30, ge=1)
+    # Opt-in on-device router calibration. When true, the routing policy applies
+    # the hard-clamped adjustment in <state>/router_calibration.json as a bias
+    # on the confidence gate, and the gateway runs a 24h in-process calibration
+    # job over local decision records. Default-off: the confidence gate stays
+    # byte-identical to today and no calibration job is scheduled. Additive key
+    # (class extra="ignore" keeps old builds rollback-tolerant). Never touches
+    # the router savings/cost math.
+    calibration_enabled: bool = False
+    # Opt-in per-session spend gate. Default (no limit) is a complete no-op:
+    # the routing policy's budget stage never runs, so the chosen tier stays
+    # byte-identical to today. Reads accumulated session spend; never
+    # recomputes cost. Additive key (class extra="ignore" keeps old builds
+    # rollback-tolerant).
+    budget: RouterBudgetConfig = Field(default_factory=RouterBudgetConfig)
     estimated_output_savings_pct: float = 0.03
     upgrade_to_c3_compaction_enabled: bool = True
     vision_history_lookback_turns: int = Field(default=8, ge=0)
@@ -1613,6 +1355,50 @@ class AgentSubagentDefaults(BaseModel):
     """When ``True``, killing a parent session also cancels its descendants."""
 
 
+class AgentRoutingConfig(BaseModel):
+    """Per-agent router tier overrides for a durable agent profile.
+
+    Both fields are optional and default to ``None`` ("unset"). Tier strings are
+    canonicalized to ``c0``–``c3`` exactly the way :class:`SquillaRouterConfig`
+    normalizes its ``default_tier``: legacy ``t0``–``t3`` aliases and a leading
+    ``tier:`` prefix are accepted, and an unrecognized value is kept verbatim
+    (normalize-or-keep). This matches every other tier-accepting surface in the
+    codebase (``SquillaRouterConfig``, ``engine/routing/policy.py``) rather than
+    inventing a stricter rejection path the rest of the codebase lacks.
+
+    Ordering between ``default_tier`` and ``max_tier`` is intentionally NOT
+    enforced: ``SquillaRouterConfig`` enforces no analogous ceiling constraint,
+    so this block mirrors that rigor. The block is additive schema only — no
+    consumer reads it yet, so it does not change routing behavior for any
+    existing config. Wiring ``max_tier`` as a routing ceiling / ``default_tier``
+    as a per-agent starting tier is a documented follow-up.
+    """
+
+    default_tier: str | None = None
+    """Preferred starting tier for turns run under this agent. ``None`` → unset;
+    routing falls back to ``squilla_router.default_tier`` (current behavior)."""
+
+    max_tier: str | None = None
+    """Ceiling tier this agent's turns may be routed to. ``None`` → unset; no
+    per-agent ceiling is applied (current behavior)."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_tiers(cls, values: Any) -> Any:
+        if not isinstance(values, dict):
+            return values
+        values = dict(values)
+        for key in ("default_tier", "max_tier"):
+            raw = values.get(key)
+            if raw is None:
+                continue
+            text = str(raw).strip()
+            if text[:5].lower() == "tier:":
+                text = text[5:]
+            values[key] = normalize_text_tier(text) or raw
+        return values
+
+
 class AgentEntryConfig(BaseModel):
     """Gateway config entry for a durable, user-managed agent."""
 
@@ -1626,6 +1412,9 @@ class AgentEntryConfig(BaseModel):
     enabled: bool = True
     system_prompt: str | None = None
     subagents: AgentSubagentDefaults | None = None
+    routing: AgentRoutingConfig | None = None
+    """Additive per-agent tier overrides. ``None`` → unset (nothing persisted;
+    current routing behavior preserved)."""
 
     @field_validator("id")
     @classmethod
@@ -1779,16 +1568,137 @@ class LlmProviderProfile(BaseSettings):
     Written as ``[llm_profiles.<provider_id>]`` in the config TOML and
     referenced by router tiers through their existing ``provider`` field.
     Resolution order per field matches the primary provider: explicit value,
-    then ``api_key_env`` (or the registry env key), then the registry
-    default base URL.
+    then ``api_key_env_pool`` (when non-empty), then ``api_key_env`` (or the
+    registry env key), then the registry default base URL.
     """
 
     model_config = SettingsConfigDict(extra="ignore")
 
     api_key: str = ""
     api_key_env: str = ""
+    # Rotation pool of env-var NAMES (never key values) for this profile,
+    # e.g. ["OPENAI_KEY_A", "OPENAI_KEY_B"]. Resolved from the environment at
+    # runtime; secrets are never persisted or logged. Profiles-only this
+    # cycle: the top-level [llm] model must NOT gain this field — [llm] is
+    # extra="forbid", so a stamped default would brick downgrade to 0.5.0rc1,
+    # while this profile model is extra="ignore" and rc1 tolerates the field
+    # on load (rc1's first persist silently strips it; release-noted).
+    api_key_env_pool: list[str] = Field(default_factory=list)
     base_url: str = ""
     proxy: str = ""
+
+
+class ModelCatalogConfig(BaseSettings):
+    """Model metadata catalog behavior (offline-first).
+
+    Schema-first landing: these knobs are validated and persisted now; the
+    provider layer consumes them in a follow-up change. ``refresh`` controls
+    whether the gateway may fetch model *metadata* (context windows, output
+    caps, pricing, capability flags) from the network at all. The default
+    ``"off"`` keeps every install fully offline — metadata resolves from
+    bundled/registry defaults, an optional ``pin_path`` file, and per-model
+    ``[models.*]`` overrides. Today's OpenRouter live model-list fetch is a
+    separate, existing mechanism that this flag does not govern yet.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="OPENSQUILLA_MODEL_CATALOG_")
+
+    # "off" = never fetch model metadata (offline-first default);
+    # "startup" = allow one refresh when the gateway boots.
+    refresh: Literal["off", "startup"] = "off"
+    # Local JSON/TOML catalog override file for air-gapped deploys. Validated
+    # only as a string here; existence/shape checks happen when the catalog
+    # wiring consumes it.
+    pin_path: str = ""
+    # Advisory age threshold (days) for doctor warnings about stale pinned or
+    # cached model metadata. Never blocks a turn.
+    stale_after_days: int = Field(default=45, ge=1)
+
+
+# Known provider reasoning-format dialects accepted by
+# ``ModelOverrideConfig.reasoning_format``. Deliberately a conservative
+# literal rather than an import: the canonical dialect registry may land in
+# a parallel branch, and this set must stay valid either way. Fold it into
+# the registry (and keep the names identical) once that lands.
+KNOWN_REASONING_FORMATS: frozenset[str] = frozenset(
+    {
+        "openrouter",
+        "openai",
+        "deepseek",
+        "gemini",
+        "zai",
+        "dashscope",
+        "moonshot",
+        "volcengine",
+        "none",
+    }
+)
+
+
+class ModelOverrideConfig(BaseModel):
+    """Per-model metadata override, written as ``[models.<provider_id>."<model_id>"]``.
+
+    Every field is optional; ``None`` means "no override" and the value keeps
+    resolving from the model catalog / provider registry as before. Model ids
+    are matched *exactly* (TOML quoted keys carry dots and slashes verbatim).
+    Globs are deliberately not supported in user config: exact ids keep
+    override semantics unambiguous, and the shipped catalog corrections layer
+    owns pattern matching. Keys are not screened for glob-looking syntax
+    either — a key that matches no model is simply inert, and rejecting
+    characters here could break unusual but legitimate model ids.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    context_window: int | None = Field(default=None, ge=1)
+    max_output_tokens: int | None = Field(default=None, ge=1)
+    reasoning_format: str | None = None
+    supports_reasoning: bool | None = None
+    supports_tools: bool | None = None
+    supports_vision: bool | None = None
+    input_cost_per_mtok: float | None = Field(default=None, ge=0)
+    output_cost_per_mtok: float | None = Field(default=None, ge=0)
+    thinking_level_map: dict[str, str] | None = None
+
+    @field_validator("reasoning_format")
+    @classmethod
+    def _validate_reasoning_format(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip().lower()
+        if normalized not in KNOWN_REASONING_FORMATS:
+            allowed = ", ".join(sorted(KNOWN_REASONING_FORMATS))
+            raise ValueError(
+                f"reasoning_format {value!r} is not a known dialect; "
+                f"expected one of {allowed}"
+            )
+        return normalized
+
+
+class _EnvWithoutConfigVersion(PydanticBaseSettingsSource):
+    """Env-backed settings source that never yields ``config_version``.
+
+    ``config_version`` is the migration stamp owned by the config payload:
+    ``migrate_config_payload`` injects it at every disk-load boundary, and
+    injected payload keys already outrank environment values. This wrapper
+    closes the remaining gap — bare ``GatewayConfig()`` constructions with no
+    payload at all (e.g. the no-file default branch of ``GatewayConfig.load``
+    and ``config_store.load_config``) — so
+    ``OPENSQUILLA_GATEWAY_CONFIG_VERSION`` can never gate or skip migrations.
+    Only this one key is filtered; every other env override is untouched.
+    """
+
+    def __init__(self, inner: PydanticBaseSettingsSource) -> None:
+        super().__init__(inner.settings_cls)
+        self._inner = inner
+
+    def get_field_value(self, field: FieldInfo, field_name: str) -> tuple[Any, str, bool]:
+        return self._inner.get_field_value(field, field_name)
+
+    def __call__(self) -> dict[str, Any]:
+        values = dict(self._inner())
+        values.pop("config_version", None)
+        return values
 
 
 class GatewayConfig(BaseSettings):
@@ -1836,6 +1746,11 @@ class GatewayConfig(BaseSettings):
     # provider id; consumed by cross-provider router tiers.
     llm_profiles: dict[str, LlmProviderProfile] = Field(default_factory=dict)
     llm_ensemble: LlmEnsembleConfig = Field(default_factory=LlmEnsembleConfig)
+    # Model metadata catalog behavior (offline-first; see ModelCatalogConfig).
+    model_catalog: ModelCatalogConfig = Field(default_factory=ModelCatalogConfig)
+    # Per-model metadata overrides keyed [models.<provider_id>."<model_id>"].
+    # Exact model ids only (quoted TOML keys); see ModelOverrideConfig.
+    models: dict[str, dict[str, ModelOverrideConfig]] = Field(default_factory=dict)
     prompt_cache: PromptCacheConfig = Field(default_factory=PromptCacheConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     prompt: PromptConfig = Field(default_factory=PromptConfig)
@@ -1869,6 +1784,11 @@ class GatewayConfig(BaseSettings):
         if getattr(router, "tier_profile", None):
             return self
         provider = str(getattr(self.llm, "provider", "") or "").strip().lower()
+        # D18: the boot auto-default gate stays pinned to the legacy nine.
+        # Boot never auto-applies a synthesized preset — an auto-applied
+        # non-legacy tier_profile would be rejected by the validator and would
+        # brick rc1 loaders on downgrade. Onboarding preset-application UX is a
+        # later PR; membership here does not widen to the full registry.
         if provider == "openrouter" or provider not in ROUTER_TIER_PROFILE_IDS:
             return self
         fields_set = set(getattr(router, "model_fields_set", set()))
@@ -1970,6 +1890,32 @@ class GatewayConfig(BaseSettings):
     # State/config paths
     state_dir: str | None = Field(default_factory=lambda: str(default_opensquilla_home() / "state"))
     config_path: str | None = None
+
+    # Config schema migration stamp. Owned by migrate_config_payload
+    # (gateway/config_migration.py), which injects LATEST_CONFIG_VERSION into
+    # every payload it returns so version-gated one-time migrations run
+    # exactly once per config file. Must stay optional with a default: a bare
+    # GatewayConfig() is constructed throughout the codebase.
+    config_version: int = LATEST_CONFIG_VERSION
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        # Default source order, with env-backed sources filtered so
+        # OPENSQUILLA_GATEWAY_CONFIG_VERSION can never populate the migration
+        # stamp — see _EnvWithoutConfigVersion for the full rationale.
+        return (
+            init_settings,
+            _EnvWithoutConfigVersion(env_settings),
+            _EnvWithoutConfigVersion(dotenv_settings),
+            file_secret_settings,
+        )
 
     def model_post_init(self, __context: Any) -> None:
         self._apply_concurrency_env_overrides()
@@ -2116,12 +2062,24 @@ class GatewayConfig(BaseSettings):
         )
         router = data.get("squilla_router")
         if isinstance(router, dict) and router.get("tier_profile"):
-            try:
-                defaults = _router_tier_profile_defaults(str(router["tier_profile"]))
-            except ValueError:
-                defaults = None
-            if defaults is not None and router.get("tiers") == defaults:
-                router.pop("tiers", None)
+            profile = str(router["tier_profile"]).strip().lower()
+            if profile not in ROUTER_TIER_PROFILE_IDS:
+                # Downgrade-contract enforcement point: rc1 loaders hard-reject
+                # unknown tier_profile ids at validation time, so persisting a
+                # non-legacy id (e.g. a synthesized preset id) would brick the
+                # config on downgrade. Keep the dump loadable everywhere by
+                # omitting the unknown profile id and leaving the effective
+                # tiers expanded inline. Unreachable today — validation still
+                # rejects non-legacy ids — but this chokepoint enforces the
+                # invariant independently of the validator.
+                router.pop("tier_profile", None)
+            else:
+                try:
+                    defaults = _router_tier_profile_defaults(profile)
+                except ValueError:  # pragma: no cover - membership checked above
+                    defaults = None
+                if defaults is not None and router.get("tiers") == defaults:
+                    router.pop("tiers", None)
         for path in sorted(self._runtime_secret_paths):
             _delete_path(data, path)
         return data
@@ -2241,6 +2199,17 @@ _PUBLIC_SECRET_EXACT_KEYS = frozenset(
         "signing_secret",
         "app_secret",
         "verification_token",
+        # Channel-crypto secrets that no generic suffix above catches:
+        # channels.feishu.encrypt_key (event decryption key) and
+        # channels.wecom.encoding_aes_key (callback AES key). Exact names on
+        # purpose — NOT a blanket "_key" suffix: key-NAME/reference fields
+        # must stay readable (llm.api_key_env and the other *_env fields name
+        # WHICH env var a secret loads from and clients render them), and a
+        # "_key" suffix would also swallow future non-secret identifiers
+        # (session/public/idempotency keys). Add further crypto-material
+        # fields here individually, never by widening the suffix set.
+        "encrypt_key",
+        "encoding_aes_key",
     }
 )
 _PUBLIC_SECRET_SUFFIXES = ("_token", "_secret", "_password", "_api_key")

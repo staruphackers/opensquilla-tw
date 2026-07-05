@@ -10,6 +10,7 @@ import {
   normalizeRouterVisualMode,
   type RouterVisualMode,
 } from '@/utils/chat/routerVisualMode'
+import type { DiscoveredModel } from '@/composables/setup/useSetupProviderForm'
 
 export interface SetupTierValue {
   provider: string
@@ -75,6 +76,11 @@ interface RouterPanelContext {
   isOpenrouter: ComputedRef<boolean>
   textTiers: readonly string[]
   tierLabel: (tier: string) => string
+  // Optional: live-discovered models (provider connection machine) so tier
+  // model cells can upgrade to the combobox. Absent = plain inputs, as before.
+  discoveredModels?: ComputedRef<DiscoveredModel[]>
+  discoveredModelsProvider?: ComputedRef<string>
+  discoveredModelSource?: ComputedRef<string>
 }
 
 export function useSetupRouterForm() {
@@ -84,7 +90,13 @@ export function useSetupRouterForm() {
   const tierValues = ref<Record<string, SetupTierValue>>({})
   const mode = computed(() => routerMode.value)
   const defaultTier = computed(() => routerDefaultTier.value)
-  const routerModeChoice = computed(() => (routerMode.value === 'disabled' ? 'disabled' : 'recommended'))
+  const routerModeChoice = computed(() =>
+    routerMode.value === 'disabled'
+      ? 'disabled'
+      : routerMode.value === 'openrouter-mix'
+        ? 'openrouter-mix'
+        : 'recommended',
+  )
 
   function routerConfigDisabledReason(ensembleProfileActive: boolean): RouterConfigDisabledReason {
     if (ensembleProfileActive) return 'ensemble'
@@ -196,6 +208,9 @@ export function useSetupRouterForm() {
         textTiers: context.textTiers,
         tierRows: tierRows(context.textTiers),
         tierLabel: context.tierLabel,
+        discoveredModels: context.discoveredModels?.value ?? [],
+        discoveredModelsProvider: context.discoveredModelsProvider?.value ?? '',
+        discoveredModelSource: context.discoveredModelSource?.value ?? 'none',
       }
     })
   }

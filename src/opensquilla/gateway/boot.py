@@ -537,6 +537,8 @@ class ServiceContainer:
     flush_service: Any = None  # SessionFlushService | None (gated by OPENSQUILLA_SESSION_FLUSH)
     memory_repair_service: Any = None
     meta_run_writer: Any = None
+    router_decision_writer: Any = None
+    router_calibration_service: Any = None
     task_runtime: Any = None
     heartbeat_loop: Any = None
     heartbeat_watcher: Any = None
@@ -621,15 +623,46 @@ class ServiceContainer:
                 await self.memory_repair_service.stop()
             except Exception:
                 pass
+        if self.router_calibration_service is not None:
+            # Stop the 24h job before its writer is closed below.
+            try:
+                await self.router_calibration_service.stop()
+            except Exception:
+                pass
         if self.meta_run_writer is not None:
             try:
                 self.meta_run_writer.close()
+            except Exception:
+                pass
+        if self.router_decision_writer is not None:
+            # Unregister the process-wide hook before closing so a torn-down
+            # container cannot leave the router step handing records to a
+            # closed connection (same pattern as set_shared_catalog below).
+            try:
+                from opensquilla.engine.steps.router_decision_record import (
+                    set_decision_writer,
+                )
+
+                set_decision_writer(None)
+            except Exception:
+                pass
+            try:
+                self.router_decision_writer.close()
             except Exception:
                 pass
         try:
             from opensquilla.gateway.auto_propose_bridge import reset_runtime
 
             reset_runtime()
+        except Exception:
+            pass
+        # Clear the shared catalog installed by build_services() so a torn-down
+        # container does not keep serving its (possibly warmed) catalog to
+        # module-level consumers; they revert to the cold-fallback semantics.
+        try:
+            from opensquilla.provider.model_catalog import set_shared_catalog
+
+            set_shared_catalog(None)
         except Exception:
             pass
 
@@ -1897,9 +1930,14 @@ async def build_services(
     # Keep a catalog for every provider so direct-provider runtime paths still
     # get static fallback capabilities (for example DeepSeek v4 thinking
     # replay) even when only OpenRouter performs a remote model-list fetch.
-    from opensquilla.provider.model_catalog import ModelCatalog
+    from opensquilla.provider.model_catalog import ModelCatalog, set_shared_catalog
 
     model_catalog = ModelCatalog()
+    # Publish the (soon-to-be-warmed) gateway catalog as the process-wide
+    # shared instance so module-level consumers (router decision events,
+    # usage RPC context windows, ensemble member wiring) resolve against
+    # live data instead of cold snapshot/static-only copies.
+    set_shared_catalog(model_catalog)
 
     async def _warm_model_catalog_and_pricing() -> None:
         if not (api_key and config.llm.provider == "openrouter"):
@@ -2237,6 +2275,80 @@ async def build_services(
         log.warning("build_services.meta_run_writer_failed", error=str(e))
         meta_run_writer = None
 
+    # ── Router decision records (V017 router_decisions) ─────────────
+    # Same yoyo-only-table pattern as meta_run_writer: the writer exists only
+    # when the session DB is real (not :memory:); with no writer registered
+    # the router step's stage/flush hooks are no-ops. Boot also rehydrates
+    # the in-process sticky/anti-downgrade history from the last <=5 records
+    # per recently-active session so it survives a gateway restart.
+    router_decision_writer = None
+    try:
+        router_cfg_for_decisions = getattr(config, "squilla_router", None)
+        if getattr(router_cfg_for_decisions, "enabled", False):
+            decisions_storage = get_session_storage(session_manager)
+            decisions_db_path = (
+                getattr(decisions_storage, "_db_path", None)
+                if decisions_storage is not None
+                else None
+            )
+            if decisions_db_path and decisions_db_path != ":memory:":
+                from opensquilla.engine.steps.router_decision_record import (
+                    rehydrate_history_from_writer,
+                    set_decision_writer,
+                )
+                from opensquilla.persistence.router_decision_writer import (
+                    open_router_decision_writer,
+                )
+
+                router_decision_writer = open_router_decision_writer(
+                    decisions_db_path,
+                    retention_days=int(
+                        getattr(router_cfg_for_decisions, "decision_retention_days", 30)
+                        or 30
+                    ),
+                )
+                set_decision_writer(router_decision_writer)
+                rehydrated = rehydrate_history_from_writer(router_decision_writer)
+                if rehydrated:
+                    log.info(
+                        "build_services.router_history_rehydrated",
+                        sessions=rehydrated,
+                    )
+    except Exception as e:  # noqa: BLE001 - decision records must not block boot.
+        log.warning("build_services.router_decision_writer_failed", error=str(e))
+        try:
+            from opensquilla.engine.steps.router_decision_record import set_decision_writer
+
+            set_decision_writer(None)
+            if router_decision_writer is not None:
+                router_decision_writer.close()
+        except Exception:
+            pass
+        router_decision_writer = None
+
+    # ── Router calibration (opt-in 24h in-process job) ──────────────
+    # Only when squilla_router.calibration_enabled is true AND a real decision
+    # writer exists. Default-off: no service is constructed, so gateway boot is
+    # unchanged and the confidence gate stays byte-identical to today.
+    router_calibration_service = None
+    try:
+        _router_cfg_calib = getattr(config, "squilla_router", None)
+        if (
+            router_decision_writer is not None
+            and getattr(_router_cfg_calib, "enabled", False)
+            and getattr(_router_cfg_calib, "calibration_enabled", False)
+        ):
+            from opensquilla.engine.routing.calibration_service import (
+                RouterCalibrationService,
+            )
+
+            router_calibration_service = RouterCalibrationService(
+                writer=router_decision_writer,
+            )
+    except Exception as e:  # noqa: BLE001 - calibration must not block boot.
+        log.warning("build_services.router_calibration_service_failed", error=str(e))
+        router_calibration_service = None
+
     svc = ServiceContainer(
         config=config,
         provider_selector=provider_selector,
@@ -2256,6 +2368,8 @@ async def build_services(
         flush_service=flush_service,
         memory_repair_service=memory_repair_service,
         meta_run_writer=meta_run_writer,
+        router_decision_writer=router_decision_writer,
+        router_calibration_service=router_calibration_service,
         deferred_warmups=deferred_warmups,
     )
     # Attach deferred callback ref so start_gateway_server can wire TurnRunner
@@ -2478,6 +2592,11 @@ async def start_gateway_server(
     if memory_repair_service is not None:
         memory_repair_service.start()
         log.info("gateway.memory_repair_service_started")
+
+    router_calibration_service = getattr(svc, "router_calibration_service", None)
+    if router_calibration_service is not None:
+        router_calibration_service.start()
+        log.info("gateway.router_calibration_service_started")
 
     # Lazy ref for channel_manager — cron handler captures it via closure,
     # populated after channel_manager is constructed below.

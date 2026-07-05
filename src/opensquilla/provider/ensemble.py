@@ -11,7 +11,7 @@ from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
-from .model_catalog import ModelCatalog
+from .model_catalog import shared_catalog
 from .protocol import LLMProvider, ProviderMetadata
 from .registry import get_provider_spec
 from .selector import ModelSelector, ProviderConfig, SelectorConfig
@@ -241,7 +241,7 @@ def _member_model_capabilities(member: EnsembleMemberConfig) -> ModelCapabilitie
         if static_caps is not None:
             return static_caps
     try:
-        return ModelCatalog().get_capabilities(
+        return shared_catalog().get_capabilities(
             cfg.model,
             provider_name=provider,
             base_url=cfg.base_url,
@@ -255,7 +255,7 @@ def _member_max_tokens(member: EnsembleMemberConfig) -> int:
         return member.max_tokens
     cfg = member.provider_config
     try:
-        return ModelCatalog().resolve_max_tokens(
+        return shared_catalog().resolve_max_tokens(
             cfg.model,
             user_override=0,
             provider=cfg.provider,
@@ -1304,9 +1304,10 @@ _DYNAMIC_SELECTED_PENALTY = {
     "aggregator_strong": 0.12,
 }
 
-# quality/cost_latency are a manually-refreshed static snapshot (same pattern as
-# _STATIC_FALLBACK in model_catalog.py), not live-fetched. Refresh both columns together
-# so they stay apples-to-apples with the formulas below when models are added/renamed.
+# quality/cost_latency are a manually-refreshed static snapshot (same pattern as the
+# packaged budget rows in catalog_overrides.toml), not live-fetched. Refresh both columns
+# together so they stay apples-to-apples with the formulas below when models are
+# added/renamed.
 #
 # quality = Artificial Analysis Intelligence Index / 100, v4.1 methodology, single leaderboard
 #   snapshot fetched 2026-07-03 from https://artificialanalysis.ai/leaderboards/models (reasoning
@@ -2089,6 +2090,46 @@ def _member_provider_config(ref: Any, inherited: ProviderConfig) -> ProviderConf
         org_id=inherited.org_id if same_provider else "",
         proxy=proxy,
         provider_routing=dict(provider_routing),
+    )
+
+
+def static_openrouter_b5_credential_available(
+    config: Any,
+    inherited_provider_config: Any,
+) -> bool:
+    """Return True when every static-B5 member resolves a non-empty API key.
+
+    Mirrors the ``_member_provider_config`` key-resolution order for the
+    static OpenRouter B5 members (all ``provider="openrouter"`` refs with no
+    member-level ``api_key_env``): the inherited provider key when the active
+    provider is OpenRouter, then the registry env key for OpenRouter
+    (``OPENROUTER_API_KEY``). A user whose active provider is not OpenRouter
+    but whose environment carries ``OPENROUTER_API_KEY`` is treated as opted
+    in: the members resolve a key and the ensemble runs. Read-only and
+    side-effect-free; ``config`` is accepted for call-site symmetry (the
+    static profile has no config-level member overrides today).
+    """
+    if isinstance(inherited_provider_config, ProviderConfig):
+        inherited = inherited_provider_config
+    else:
+        inherited = ProviderConfig(
+            provider=str(getattr(inherited_provider_config, "provider", "") or ""),
+            model=str(getattr(inherited_provider_config, "model", "") or ""),
+            api_key=str(getattr(inherited_provider_config, "api_key", "") or ""),
+            base_url=str(getattr(inherited_provider_config, "base_url", "") or ""),
+            org_id=str(getattr(inherited_provider_config, "org_id", "") or ""),
+            proxy=str(getattr(inherited_provider_config, "proxy", "") or ""),
+            provider_routing=dict(
+                getattr(inherited_provider_config, "provider_routing", {}) or {}
+            ),
+        )
+    member_models = (
+        *_STATIC_OPENROUTER_B5_PROPOSER_MODELS,
+        _STATIC_OPENROUTER_B5_AGGREGATOR_MODEL,
+    )
+    return all(
+        bool(_member_provider_config(_openrouter_ref(model), inherited).api_key.strip())
+        for model in member_models
     )
 
 

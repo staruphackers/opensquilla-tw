@@ -5,6 +5,7 @@ from __future__ import annotations
 import platform
 import tomllib
 
+import httpx
 import pytest
 
 import opensquilla.gateway.rpc_onboarding  # noqa: F401  ensures registration
@@ -320,6 +321,105 @@ async def test_router_catalog_rpc(tmp_path, monkeypatch):
     assert res.error is None, res.error
     profile_ids = {p["profileId"] for p in res.payload["profiles"]}
     assert {"openrouter", "deepseek"} <= profile_ids
+
+
+@pytest.mark.asyncio
+async def test_ensemble_configure_partial_payload_updates_and_persists(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("OPENSQUILLA_GATEWAY_CONFIG_PATH", str(tmp_path / "c.toml"))
+    from opensquilla.gateway.config import GatewayConfig
+
+    ctx = _admin_ctx()
+    ctx.config = GatewayConfig(
+        llm_ensemble={
+            "enabled": False,
+            "selection_mode": "router_dynamic",
+            "model_options": ["custom/model-a"],
+        }
+    )
+    ctx.config.config_path = str(tmp_path / "c.toml")
+
+    res = await get_dispatcher().dispatch(
+        "r1",
+        "onboarding.ensemble.configure",
+        {"enabled": True},
+        ctx,
+    )
+
+    assert res.error is None, res.error
+    assert res.payload["changed"] is True
+    assert res.payload["restartRequired"] is False
+    assert res.payload["entry"]["enabled"] is True
+    # Omitted params keep the operator's explicit values.
+    assert res.payload["entry"]["selection_mode"] == "router_dynamic"
+    assert res.payload["entry"]["model_options"] == ["custom/model-a"]
+    assert ctx.config.llm_ensemble.enabled is True
+    assert ctx.config.llm_ensemble.selection_mode == "router_dynamic"
+    persisted = tomllib.loads((tmp_path / "c.toml").read_text())
+    assert persisted["llm_ensemble"]["enabled"] is True
+    assert persisted["llm_ensemble"]["selection_mode"] == "router_dynamic"
+    assert persisted["llm_ensemble"]["model_options"] == ["custom/model-a"]
+
+
+@pytest.mark.asyncio
+async def test_ensemble_configure_accepts_full_camel_case_payload(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("OPENSQUILLA_GATEWAY_CONFIG_PATH", str(tmp_path / "c.toml"))
+    res = await get_dispatcher().dispatch(
+        "r1",
+        "onboarding.ensemble.configure",
+        {
+            "enabled": True,
+            "selectionMode": "router_dynamic",
+            "modelOptions": ["custom/model-a", "custom/model-b"],
+            "minSuccessfulProposers": 2,
+            "allFailedPolicy": "error",
+        },
+        _admin_ctx(),
+    )
+
+    assert res.error is None, res.error
+    assert res.payload["entry"] == {
+        "enabled": True,
+        "selection_mode": "router_dynamic",
+        "model_options": ["custom/model-a", "custom/model-b"],
+        "min_successful_proposers": 2,
+        "all_failed_policy": "error",
+    }
+    persisted = tomllib.loads((tmp_path / "c.toml").read_text())
+    assert persisted["llm_ensemble"]["selection_mode"] == "router_dynamic"
+    assert persisted["llm_ensemble"]["min_successful_proposers"] == 2
+    assert persisted["llm_ensemble"]["all_failed_policy"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_ensemble_configure_rejects_unknown_selection_mode(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENSQUILLA_GATEWAY_CONFIG_PATH", str(tmp_path / "c.toml"))
+    res = await get_dispatcher().dispatch(
+        "r1",
+        "onboarding.ensemble.configure",
+        {"selectionMode": "static_unknown"},
+        _admin_ctx(),
+    )
+
+    assert res.error is not None
+    assert res.error.code == "onboarding.ensemble.invalid"
+
+
+@pytest.mark.asyncio
+async def test_ensemble_configure_requires_admin(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENSQUILLA_GATEWAY_CONFIG_PATH", str(tmp_path / "c.toml"))
+    res = await get_dispatcher().dispatch(
+        "r1",
+        "onboarding.ensemble.configure",
+        {"enabled": False},
+        _read_ctx(),
+    )
+
+    assert res.error is not None
+    assert res.error.code == "UNAUTHORIZED"
 
 
 @pytest.mark.asyncio
@@ -980,3 +1080,50 @@ async def test_channel_disable_then_remove(tmp_path, monkeypatch):
     res2 = await d.dispatch("r3", "onboarding.channel.remove", {"name": "w"}, _admin_ctx())
     assert res2.error is None
     assert res2.payload["changed"] is True
+
+
+def _stub_openai_transport(monkeypatch, response):
+    transport = httpx.MockTransport(lambda request: response)
+    real_async_client = httpx.AsyncClient
+
+    def patched(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr("opensquilla.provider.openai.httpx.AsyncClient", patched)
+
+
+@pytest.mark.asyncio
+async def test_models_discover_requires_admin_scope(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENSQUILLA_GATEWAY_CONFIG_PATH", str(tmp_path / "c.toml"))
+    res = await get_dispatcher().dispatch(
+        "r1",
+        "onboarding.models.discover",
+        {"providerId": "openai", "apiKey": "sk-test"},
+        _read_ctx(),
+    )
+    assert res.error is not None
+    assert "scope" in res.error.message.lower()
+
+
+@pytest.mark.asyncio
+async def test_models_discover_lists_live_models(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENSQUILLA_GATEWAY_CONFIG_PATH", str(tmp_path / "c.toml"))
+    _stub_openai_transport(
+        monkeypatch,
+        httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            content=b'{"data": [{"id": "gpt-x", "name": "GPT X", "context_length": 32000}]}',
+        ),
+    )
+    res = await get_dispatcher().dispatch(
+        "r1",
+        "onboarding.models.discover",
+        {"providerId": "openai", "apiKey": "sk-test"},
+        _admin_ctx(),
+    )
+    assert res.error is None, res.error
+    assert res.payload["ok"] is True
+    assert res.payload["source"] == "live"
+    assert [m["id"] for m in res.payload["models"]] == ["gpt-x"]
