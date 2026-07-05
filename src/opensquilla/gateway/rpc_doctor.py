@@ -25,6 +25,7 @@ from opensquilla.health.evaluator import (
     evaluate_router,
     evaluate_sandbox,
     evaluate_search,
+    evaluate_squilla_router_runtime,
 )
 from opensquilla.health.model import FixStep, HealthFinding, HealthSeverity, build_report
 from opensquilla.health.recovery_commands import command_with_config as _command_with_config
@@ -43,6 +44,7 @@ _COLLECTION_INSPECT_COMMANDS = {
     "channels": "opensquilla channels status --json",
     "sandbox": "opensquilla sandbox status --json",
     "router": "opensquilla diagnostics status",
+    "squilla_router": "opensquilla diagnostics status",
     "memory_embedding": "opensquilla memory status --deep --json",
     "search": "opensquilla search status --json",
     "image_generation": "opensquilla onboard status --json",
@@ -275,6 +277,30 @@ def _router_payload(ctx: RpcContext, *, deep: bool = False) -> dict[str, Any]:
     }
 
 
+def _squilla_router_runtime_payload(ctx: RpcContext) -> dict[str, Any]:
+    """Live router runtime load outcome from the turn loop's strategy cache.
+
+    Complements ``_router_payload`` (config/asset re-validation) with what is
+    actually serving turns. This collector only reads: the strategy cache is
+    populated by the gateway's boot-time background preload, the first routed
+    turn, or the router surface's deep validation (which runs just before
+    this collector). Until one of those lands the payload reports
+    ``initialized=False`` and the evaluator stays silent.
+    """
+    config = getattr(ctx, "config", None)
+    router = getattr(config, "squilla_router", None) if config is not None else None
+    payload: dict[str, Any] = {
+        "enabled": bool(getattr(router, "enabled", False)),
+        "requireRouterRuntime": bool(getattr(router, "require_router_runtime", False)),
+    }
+    if not payload["enabled"]:
+        return payload
+    from opensquilla.engine.steps.squilla_router import router_runtime_status
+
+    payload.update(router_runtime_status())
+    return payload
+
+
 def _llm_ensemble_payload(ctx: RpcContext) -> dict[str, Any]:
     config = getattr(ctx, "config", None)
     ensemble_cfg = getattr(config, "llm_ensemble", None) if config is not None else None
@@ -385,6 +411,11 @@ async def _handle_doctor_status(params: dict | None, ctx: RpcContext) -> dict[st
         ("channels", lambda: _handle_channels_status({}, ctx), evaluate_channels),
         ("sandbox", lambda: _sandbox_payload(ctx), evaluate_sandbox),
         ("router", lambda: _router_payload(ctx, deep=deep), evaluate_router),
+        (
+            "squilla_router",
+            lambda: _squilla_router_runtime_payload(ctx),
+            evaluate_squilla_router_runtime,
+        ),
         (
             "memory_embedding",
             lambda: _memory_embedding_payload(ctx),

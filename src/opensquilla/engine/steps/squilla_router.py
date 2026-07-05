@@ -26,7 +26,10 @@ from opensquilla.engine.routing import (
 from opensquilla.engine.routing.policy_data import DEFAULT_CONTEXT_WINDOW_TOKENS
 from opensquilla.provider.context_capabilities import provider_state_continuity_diagnostic
 from opensquilla.router_control import RouterControlHoldStore
-from opensquilla.router_runtime_diagnostics import router_runtime_operator_message
+from opensquilla.router_runtime_diagnostics import (
+    classify_router_runtime_error,
+    router_runtime_operator_message,
+)
 from opensquilla.router_tiers import (
     DEFAULT_TEXT_TIER,
     TEXT_TIERS,
@@ -252,6 +255,23 @@ def _warn_router_runtime_fallback_once(error: Exception | str) -> None:
     _log_std.warning("%s Error: %s", router_runtime_operator_message(error), error)
 
 
+def _degraded_fallback_strategy(error: Exception) -> RouterStrategy:
+    """Fallback chain for a failed ML runtime load: heuristic, then default-only.
+
+    The heuristic strategy is dependency-free, so the import is expected to
+    succeed on every install; the guard is a defensive final safety net that
+    preserves the legacy degrade-to-default behavior rather than taking the
+    router step down entirely.
+    """
+    try:
+        from opensquilla.engine.routing.heuristic import HeuristicRouterStrategy
+
+        return cast(RouterStrategy, HeuristicRouterStrategy(error=error))
+    except Exception:  # noqa: BLE001 - any failure here must not break the turn loop.
+        log.warning("squilla_router.heuristic_fallback_unavailable", exc_info=True)
+        return _UnavailableV4Strategy(error)
+
+
 def _get_strategy(config: object) -> RouterStrategy:
     global _strategy, _strategy_key  # noqa: PLW0603
     with _strategy_lock:
@@ -260,9 +280,10 @@ def _get_strategy(config: object) -> RouterStrategy:
             return _strategy
         if _strategy_key is not None and _strategy_key != key:
             _history_store.clear()
-        from opensquilla.squilla_router.v4_phase3 import V4Phase3Strategy
 
         try:
+            from opensquilla.squilla_router.v4_phase3 import V4Phase3Strategy
+
             strategy = cast(
                 RouterStrategy,
                 V4Phase3Strategy(
@@ -275,12 +296,17 @@ def _get_strategy(config: object) -> RouterStrategy:
         except Exception as exc:  # noqa: BLE001
             log.warning("squilla_router.strategy_unavailable", error=str(exc))
             _warn_router_runtime_fallback_once(exc)
-            strategy = _UnavailableV4Strategy(exc)
+            strategy = _degraded_fallback_strategy(exc)
         else:
             if getattr(strategy, "source", "") == "v4_phase3" and not getattr(
                 strategy, "_available", True
             ):
-                _warn_router_runtime_fallback_once("V4 Phase 3 router did not become available")
+                # require_router_runtime=false: the V4 adapter swallowed its
+                # own init failure. Fall back to heuristic tiering here too —
+                # the flag opts out of loud failure, not of useful routing.
+                error = RuntimeError("V4 Phase 3 router did not become available")
+                _warn_router_runtime_fallback_once(error)
+                strategy = _degraded_fallback_strategy(error)
         _strategy = strategy
         _strategy_key = key
         return strategy
@@ -288,6 +314,51 @@ def _get_strategy(config: object) -> RouterStrategy:
 
 def preload_strategy(config: object) -> RouterStrategy:
     return _get_strategy(config)
+
+
+def router_runtime_status() -> dict[str, Any]:
+    """Read-only snapshot of the router runtime load outcome.
+
+    Derived entirely from the existing strategy cache (no extra mutable
+    state). Consumed by the gateway doctor so a degraded router stays
+    visible after the one-time startup warning has scrolled away.
+
+    Shape: ``initialized`` is False until the first strategy construction
+    (gateway boot preloads in the background, so this is a transient
+    startup state); ``loaded`` reports whether the ML runtime is serving
+    turns; ``strategy`` is ``"v4_phase3"`` / ``"heuristic"`` /
+    ``"unavailable"``; ``code`` carries the
+    ``router_runtime_diagnostics`` failure classification when not loaded.
+    """
+    with _strategy_lock:
+        strategy = _strategy
+    if strategy is None:
+        return {
+            "initialized": False,
+            "loaded": False,
+            "code": None,
+            "strategy": "unavailable",
+            "error": None,
+        }
+    source = str(getattr(strategy, "source", "") or "")
+    if source == "v4_phase3" and getattr(strategy, "_available", False):
+        return {
+            "initialized": True,
+            "loaded": True,
+            "code": None,
+            "strategy": "v4_phase3",
+            "error": None,
+        }
+    error = getattr(strategy, "error", None)
+    return {
+        "initialized": True,
+        "loaded": False,
+        "code": classify_router_runtime_error(
+            error if error is not None else "router runtime unavailable"
+        ),
+        "strategy": "heuristic" if source == "heuristic" else "unavailable",
+        "error": str(error) if error is not None else None,
+    }
 
 
 def _classify_context_kwargs(strategy: object, values: dict[str, object]) -> dict[str, object]:
@@ -700,6 +771,10 @@ async def apply_squilla_router(ctx: TurnContext) -> TurnContext:
             "prev_assistant_usage": ctx.metadata.get("router_prev_assistant_usage"),
             "history_user_texts": ctx.metadata.get("router_history_user_texts"),
             "flags_text_override": ctx.metadata.get("router_flags_text_override"),
+            # Non-image attachments only: image turns were routed to a vision
+            # tier before classification. Signature-filtered like the other
+            # context keys, so strategies that don't declare it never see it.
+            "attachment_count": len(ctx.attachments or []),
         },
     )
     tier_name, confidence, source, extra = await strategy.classify(
