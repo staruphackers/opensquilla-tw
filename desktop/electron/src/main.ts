@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, Menu, ipcMain, nativeTheme, safeStorage, sh
 import electronUpdater from 'electron-updater'
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { createWriteStream, existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { appendFileSync, createWriteStream, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { access, constants, readFile, readdir, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import net from 'node:net'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -140,6 +140,23 @@ let mainWindow: BrowserWindow | null = null
 let onboardingWindow: BrowserWindow | null = null
 let gatewayProcess: ChildProcessWithoutNullStreams | null = null
 let isQuitting = false
+
+// Main-process lifecycle log (distinct from the gateway child's gateway.log).
+// Records launch, single-instance-lock acquisition, and quit phases so a
+// "second launch does nothing" report (issue #446) is diagnosable from a user
+// machine. Synchronous append: these events are rare and must survive an
+// imminent app.exit().
+function desktopLog(event: string, detail?: Record<string, unknown>): void {
+  try {
+    const logDir = join(app.getPath('userData'), 'logs')
+    mkdirSync(logDir, { recursive: true })
+    const line = JSON.stringify({ at: new Date().toISOString(), event, ...detail }) + '\n'
+    appendFileSync(join(logDir, 'desktop.log'), line, 'utf-8')
+  } catch {
+    // Logging must never break the lifecycle it observes.
+  }
+}
+
 let gatewayStartPromise: Promise<GatewayState> | null = null
 let resolveOnboarding: ((credential: DesktopConnection) => void) | null = null
 let rejectOnboarding: ((error: Error) => void) | null = null
@@ -4424,8 +4441,42 @@ ipcMain.handle('desktop:onboarding:cancel', () => {
   return { ok: true }
 })
 
-app.on('before-quit', () => {
+// Set once the Windows graceful-drain-on-quit sequence has run so the re-issued
+// quit (after app.exit is deferred) is not intercepted a second time.
+let windowsQuitDrainDone = false
+
+app.on('before-quit', (event) => {
+  desktopLog('before_quit', { platform: process.platform, drained: windowsQuitDrainDone })
   isQuitting = true
+  // On Windows there is no real SIGTERM, so the normal close path would
+  // TerminateProcess the gateway with no drain (unlike the update/uninstall
+  // paths which already wait for a graceful exit). Give the daily close path the
+  // same graceful drain: defer the quit once, ask the gateway to shut down over
+  // HTTP, wait for the child to exit (bounded), then exit for real. Fall back to
+  // a hard terminate on timeout via stopGateway's own backstop.
+  if (
+    process.platform === 'win32' &&
+    !windowsQuitDrainDone &&
+    gatewayProcess &&
+    gatewayState.owned &&
+    !hasGatewayProcessExited(gatewayProcess)
+  ) {
+    event.preventDefault()
+    const child = gatewayProcess
+    void (async () => {
+      try {
+        const accepted = await requestGatewayShutdown(gatewayState.url || '')
+        desktopLog('quit_gateway_shutdown_requested', { accepted })
+        const exited = await waitForGatewayProcessExit(child)
+        desktopLog('quit_gateway_exit', { exited })
+        if (!exited) stopGateway()
+      } finally {
+        windowsQuitDrainDone = true
+        app.exit(0)
+      }
+    })()
+    return
+  }
   stopGateway()
 })
 
@@ -4448,12 +4499,55 @@ app.on('activate', () => {
 
 configureChromiumKeychainPolicy()
 
-const gotSingleInstanceLock = app.requestSingleInstanceLock()
+// Bounded retry for the single-instance lock. A relaunch immediately after
+// closing the previous instance can race that instance's teardown (Electron
+// exit + gateway TerminateProcess), during which the lock is briefly still
+// held. Without a retry the new process silently quits and no window appears
+// (issue #446). Retry synchronously for a short window, then — if still
+// unavailable — surface an explicit error instead of exiting silently.
+function acquireSingleInstanceLockWithRetry(): boolean {
+  const deadline = Date.now() + 5_000
+  let attempt = 0
+  for (;;) {
+    attempt += 1
+    if (app.requestSingleInstanceLock()) {
+      desktopLog('single_instance_lock_acquired', { attempt })
+      return true
+    }
+    if (Date.now() >= deadline) {
+      desktopLog('single_instance_lock_unavailable', { attempt })
+      return false
+    }
+    // Synchronous busy-wait bounded by the deadline: app.whenReady has not
+    // fired yet, so there is no event loop to await on and the window is short.
+    const spinUntil = Math.min(deadline, Date.now() + 150)
+    while (Date.now() < spinUntil) {
+      /* brief spin before the next lock attempt */
+    }
+  }
+}
+
+desktopLog('launch', { platform: process.platform, argv: process.argv.length })
+const gotSingleInstanceLock = acquireSingleInstanceLockWithRetry()
 
 if (!gotSingleInstanceLock) {
+  // Another instance genuinely holds the lock past the retry window. Signal it
+  // to surface its window (the second-instance handler calls
+  // openOrResumeDesktopApp), show an explicit dialog so the launch is never a
+  // silent no-op, then quit.
+  desktopLog('launch_aborted_lock_held')
+  try {
+    dialog.showErrorBox(
+      'OpenSquilla is already running',
+      'Another OpenSquilla window is already open on this machine. Bringing it to the front.',
+    )
+  } catch {
+    // Dialog is best-effort; the diagnostic log is the durable record.
+  }
   app.quit()
 } else {
   app.on('second-instance', () => {
+    desktopLog('second_instance')
     void openOrResumeDesktopApp()
   })
 
