@@ -120,7 +120,11 @@ async def test_rag_search_tool_marks_untrusted_evidence():
 
     assert payload["source_kind"] == "rag"
     assert payload["untrusted_evidence"] is True
-    assert payload["results"][0]["citation"]["label"] == "[来源：guide.md]"
+    assert payload["resultFormat"] == "evidence_text"
+    assert "results" not in payload
+    assert payload["text"].startswith('<external-content source="rag://local">')
+    assert "[来源：guide.md]" in payload["text"]
+    assert "local document content" in payload["text"]
 
 
 @pytest.mark.asyncio
@@ -150,7 +154,7 @@ async def test_rag_search_tool_respects_explicit_mode_override():
 
 
 @pytest.mark.asyncio
-async def test_rag_search_tool_returns_compact_evidence_with_strict_budget():
+async def test_rag_search_tool_returns_evidence_text_with_strict_budget():
     registry = ToolRegistry()
     create_rag_tools(rag_manager=LargeRagManager(), registry=registry)
     registered = registry.get("rag_search")
@@ -159,18 +163,58 @@ async def test_rag_search_tool_returns_compact_evidence_with_strict_budget():
     payload = json.loads(raw)
 
     assert len(raw) <= 8000
-    assert payload["resultFormat"] == "compact_evidence"
+    assert payload["resultFormat"] == "evidence_text"
     assert payload["payloadBudget"]["maxChars"] == 8000
     assert payload["payloadBudget"]["actualChars"] <= 8000
-    assert payload["resultCount"] <= 10
-    assert payload["results"]
-    first = payload["results"][0]
-    assert "content" not in first
-    assert first["contentPreview"].endswith("...")
-    assert first["citation"]["label"] == "[来源：docs/0.md]"
-    assert first["scoreBreakdown"]["textWeight"] == 0.3
-    assert first["sourceKind"] == "rag"
-    assert first["untrustedEvidence"] is True
+    assert payload["resultCount"] == 10
+    assert payload["originalResultCount"] == 10
+    assert payload["availableResultCount"] == 10
+    assert payload["returnedResultCount"] == payload["evidenceBlockCount"]
+    assert payload["evidenceResultCount"] == payload["returnedResultCount"]
+    assert payload["returnedResultCount"] >= 1
+    assert "results" not in payload
+    assert "evidenceText" not in payload
+    assert payload["text"].startswith('<external-content source="rag://local">')
+    assert payload["text"].endswith("</external-content>")
+    assert payload["length"] == payload["original_length"]
+    assert payload["length"] > payload["returned_length"]
+    assert payload["resultsTruncated"] is (
+        payload["returnedResultCount"] < payload["availableResultCount"]
+    )
+    assert payload["contentTruncated"] is True
+    assert "[1] RAG evidence" in payload["text"]
+    assert "path: docs/0.md" in payload["text"]
+    assert "chunk_id: chk_0" in payload["text"]
+    assert "document_id: doc_0" in payload["text"]
+    assert "citation: [来源：docs/0.md]" in payload["text"]
+    assert "text_weight: 0.3" in payload["text"]
+    assert "content_truncated: True" in payload["text"]
+    assert "\n..." in payload["text"]
+
+
+@pytest.mark.asyncio
+async def test_rag_search_tool_preview_keeps_result_count_metadata_after_runtime_compaction():
+    from opensquilla.engine.runtime import _json_tool_result_preview
+
+    registry = ToolRegistry()
+    create_rag_tools(rag_manager=LargeRagManager(), registry=registry)
+    registered = registry.get("rag_search")
+
+    raw = await registered.handler(query="guide", limit=50)
+    payload = json.loads(raw)
+    preview = json.loads(_json_tool_result_preview(payload, len(raw), 2000))
+
+    assert len(raw) > 2000
+    assert preview["result_truncated"] is True
+    assert preview["result_original_chars"] == len(raw)
+    assert preview["availableResultCount"] == 10
+    assert preview["resultCount"] == 10
+    assert preview["returnedResultCount"] >= 1
+    assert preview["evidenceResultCount"] == preview["returnedResultCount"]
+    assert preview["evidenceBlockCount"] == preview["returnedResultCount"]
+    assert "results" not in preview
+    assert "text" in preview
+    assert len(preview["text"]) < len(payload["text"])
 
 
 def test_rag_tool_budget_class_is_local():

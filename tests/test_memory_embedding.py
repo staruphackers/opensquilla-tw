@@ -114,6 +114,42 @@ async def test_openai_embedding_provider_skips_app_attribution_for_non_openroute
 
 
 @pytest.mark.asyncio
+async def test_openai_embedding_provider_splits_batch_from_env(monkeypatch) -> None:
+    requests: list[list[str]] = []
+
+    class BatchClient:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        async def post(self, _url, *, headers, json, timeout):
+            inputs = list(json["input"])
+            requests.append(inputs)
+            return _FakeEmbeddingResponse(
+                {
+                    "data": [
+                        {"index": index, "embedding": [float(value), 1.0]}
+                        for index, value in enumerate(inputs)
+                    ]
+                }
+            )
+
+    monkeypatch.setenv("OPENSQUILLA_OPENAI_EMBEDDING_BATCH_INPUTS", "2")
+    monkeypatch.setattr("opensquilla.memory.embedding.httpx.AsyncClient", BatchClient)
+    provider = OpenAIEmbeddingProvider(api_key="openai-test")
+
+    embeddings = await provider.embed_batch(["0", "1", "2", "3", "4"])
+
+    assert requests == [["0", "1"], ["2", "3"], ["4"]]
+    assert embeddings == [[0.0, 1.0], [1.0, 1.0], [2.0, 1.0], [3.0, 1.0], [4.0, 1.0]]
+
+
+@pytest.mark.asyncio
 async def test_openai_embedding_provider_sends_dimensions_when_configured(
     monkeypatch,
 ) -> None:

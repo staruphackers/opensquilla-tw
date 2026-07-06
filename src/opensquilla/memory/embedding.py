@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
@@ -22,6 +23,8 @@ BATCH_FAILURE_LIMIT = 2
 DEFAULT_RETRY_ATTEMPTS = 3
 DEFAULT_RETRY_BASE_MS = 500
 DEFAULT_RETRY_MAX_MS = 8000
+OPENAI_EMBEDDING_BATCH_INPUTS_ENV = "OPENSQUILLA_OPENAI_EMBEDDING_BATCH_INPUTS"
+OPENAI_EMBEDDING_BATCH_PAUSE_MS_ENV = "OPENSQUILLA_OPENAI_EMBEDDING_BATCH_PAUSE_MS"
 
 RETRYABLE_ERROR_PATTERNS = [
     "rate_limit",
@@ -38,6 +41,21 @@ RETRYABLE_ERROR_PATTERNS = [
 def _is_retryable(error_msg: str) -> bool:
     msg = error_msg.lower()
     return any(p in msg for p in RETRYABLE_ERROR_PATTERNS)
+
+
+def _positive_int_from_env(name: str) -> int | None:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("embedding_invalid_int_env", name=name, value=raw)
+        return None
+    if value <= 0:
+        logger.warning("embedding_nonpositive_int_env", name=name, value=raw)
+        return None
+    return value
 
 
 async def _retry_with_backoff(
@@ -145,6 +163,21 @@ class OpenAIEmbeddingProvider:
         return await _retry_with_backoff(_call)  # type: ignore[no-any-return]
 
     async def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        batch_inputs = _positive_int_from_env(OPENAI_EMBEDDING_BATCH_INPUTS_ENV)
+        if batch_inputs is None or len(texts) <= batch_inputs:
+            return await self._embed_batch_request(texts)
+
+        import asyncio
+
+        pause_ms = _positive_int_from_env(OPENAI_EMBEDDING_BATCH_PAUSE_MS_ENV) or 0
+        vectors: list[list[float]] = []
+        for start in range(0, len(texts), batch_inputs):
+            if start > 0 and pause_ms:
+                await asyncio.sleep(pause_ms / 1000.0)
+            vectors.extend(await self._embed_batch_request(texts[start : start + batch_inputs]))
+        return vectors
+
+    async def _embed_batch_request(self, texts: list[str]) -> list[list[float]]:
         async def _call():
             async with httpx.AsyncClient(trust_env=_trust_env()) as client:
                 resp = await client.post(
