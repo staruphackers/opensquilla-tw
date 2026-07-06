@@ -75,6 +75,7 @@ GROUP_SPECS: dict[str, dict[str, str]] = {
         "server_tool_profile": "openrouter_fusion",
     },
     "B9": {"kind": "single", "model": "anthropic/claude-fable-5"},
+    "B10": {"kind": "single", "model": "sakana/fugu-ultra"},
     "G1": {"kind": "profile", "profile": "g1_code"},
     "G2": {"kind": "profile", "profile": "g2_general"},
     "G3": {"kind": "profile", "profile": "g3_standard"},
@@ -145,6 +146,7 @@ DEFAULT_MODEL_MAX_GENERATION_THINKING: dict[str, str] = {
     "moonshotai/kimi-k2.7-code": "max",
     "openai/gpt-5.5-pro": "xhigh",
     "qwen/qwen3.7-max": "xhigh",
+    "sakana/fugu-ultra": "max",
     "z-ai/glm-5.2": "xhigh",
 }
 DEFAULT_GENERATION_TEMPERATURE = 0.0
