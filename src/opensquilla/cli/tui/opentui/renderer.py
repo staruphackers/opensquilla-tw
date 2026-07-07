@@ -153,12 +153,13 @@ class OpenTuiStreamRenderer:
         await self._emit("block.append", BlockAppend(id=self._open_text_id, delta=visible))
 
     async def aappend_reasoning(self, delta: str) -> None:
-        # Reasoning is the model's internal extended-thinking PROCESS, not a
-        # result the user asked to see. We deliberately do not stream its text
-        # onto the timeline; instead the first reasoning delta opens a single
-        # collapsed "reasoning" marker block (a "Thinking…" affordance) so the
-        # user knows the model is reasoning, while the verbatim process stays
-        # hidden. Subsequent deltas are swallowed — the marker is already shown.
+        # Reasoning is the model's extended-thinking PROCESS. The first delta
+        # opens a "reasoning" block whose header pulses "Thinking · Ns"; the
+        # text itself streams as block.append so the host can show a live,
+        # dim rolling peek of the latest reasoning lines. When the stream ends
+        # the host collapses the block to a one-line "Thought for Ns" record,
+        # so the process is visible while it happens without cluttering the
+        # finished transcript.
         if not delta:
             return
         await self._ensure_begin()
@@ -168,6 +169,9 @@ class OpenTuiStreamRenderer:
                 "block.begin",
                 BlockBegin(id=self._open_reasoning_id, kind="reasoning", meta={}),
             )
+        await self._emit(
+            "block.append", BlockAppend(id=self._open_reasoning_id, delta=delta)
+        )
 
     async def _close_text(self) -> None:
         # A held tail that never completed into a directive tag is ordinary

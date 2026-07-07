@@ -13,8 +13,8 @@ const FACTORIES = {
   // intermediate narration the model speaks between tool calls (a result the
   // user should see) — verbatim purple ✻ text
   thinking: createThinkingBlock,
-  // the model's internal extended-thinking PROCESS — collapsed to a single
-  // "Thinking…" marker, text never shown
+  // the model's extended-thinking PROCESS — a live dim peek of the latest
+  // lines while streaming, collapsed to "Thought for Ns" when it ends
   reasoning: createReasoningBlock,
   tool: createToolBlock,
   answer: createAnswerBlock,

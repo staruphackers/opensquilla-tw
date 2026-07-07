@@ -103,16 +103,43 @@ test("an assistant turn wraps its answer in a single squilla card", async () => 
   expect(text).toContain("╰");
 });
 
-test("a reasoning block shows only a collapsed Thinking… marker, never the process text", async () => {
-  // The reasoning block is fed the same deltas via renderBlock (which calls
-  // append), but it must NOT surface the verbatim reasoning — only the marker.
+test("a streaming reasoning block shows a live peek under the Thinking header", async () => {
+  // Mid-stream (before end()), the latest reasoning lines are visible as a
+  // dim peek beneath the pulsing header — live feedback while the model thinks.
   const text = flatText(await renderBlock(createReasoningBlock));
   expect(text).toContain("✻");
   expect(text).toContain("Thinking");
-  // the decisive checks: the reasoning PROCESS text is never shown, and no card
-  expect(text).not.toContain("partial reasoning");
-  expect(text).not.toContain("still streaming");
-  expect(text).not.toContain("answer");
+  expect(text).toContain("partial reasoning still streaming");
+  // no card chrome leaks around the peek
   expect(text).not.toContain("╭");
   expect(text).not.toContain("╰");
+});
+
+test("a finished reasoning block collapses to a one-line Thought record", async () => {
+  const setup = await createTestRenderer({ width: WIDTH, height: HEIGHT });
+  const { renderer, renderOnce, captureSpans } = setup;
+  const box = new BoxRenderable(renderer, {
+    id: "turn", position: "absolute", left: 0, top: 0, right: 0, bottom: 0,
+    flexDirection: "column",
+  });
+  renderer.root.add(box);
+  const block = createReasoningBlock({
+    renderer, BoxRenderable, TextRenderable, MarkdownRenderable,
+    syntaxStyle: undefined, box, idPrefix: "blk",
+  });
+  block.begin({});
+  block.append("line one\nline two\nline three\nline four");
+  await renderOnce();
+  // The peek is a rolling tail: only the newest lines stay visible.
+  const streaming = flatText(captureSpans());
+  expect(streaming).not.toContain("line one");
+  expect(streaming).toContain("line four");
+
+  block.end();
+  await renderOnce();
+  const done = flatText(captureSpans());
+  // Collapsed: the process text is gone, the one-line record remains.
+  expect(done).toContain("Thought for");
+  expect(done).not.toContain("line four");
+  renderer.destroy?.();
 });

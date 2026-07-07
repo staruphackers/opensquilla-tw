@@ -57,7 +57,9 @@ export function createTurnView(deps, id) {
   }
 
   function footerContent() {
-    if (cardCancelled) return "╰ ⚠ cancelled";
+    if (cardCancelled) {
+      return usageText ? `╰ ⚠ cancelled · ${usageText}` : "╰ ⚠ cancelled";
+    }
     return usageText ? `╰ ${usageText}` : "╰";
   }
 

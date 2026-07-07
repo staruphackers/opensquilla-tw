@@ -89,15 +89,16 @@ async def test_final_answer_is_a_card_from_the_first_delta() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reasoning_renders_as_collapsed_marker_not_streamed_text() -> None:
-    """Reasoning (the model's extended-thinking process) must NOT be shown
-    verbatim. aappend_reasoning opens a collapsed 'reasoning' marker block — a
-    single 'Thinking…' affordance — and the raw reasoning text is never streamed
-    onto the timeline as block.append deltas."""
+async def test_reasoning_streams_into_its_own_block_and_closes_before_text() -> None:
+    """Reasoning (the model's extended-thinking process) streams live into a
+    dedicated 'reasoning' block — the host shows a dim rolling peek and
+    collapses it to 'Thought for Ns' on block.end — and the block closes
+    before the answer text opens so the two never interleave."""
     handle = _RecordingHandle()
     r = OpenTuiStreamRenderer(output_handle=handle)
     r.__enter__()
-    await r.aappend_reasoning("let me think step by step about the internals")
+    await r.aappend_reasoning("let me think ")
+    await r.aappend_reasoning("step by step about the internals")
     await r.aappend_text("the answer")
     await r.afinalize(None)
 
@@ -108,16 +109,22 @@ async def test_reasoning_renders_as_collapsed_marker_not_streamed_text() -> None
     ]
     assert len(reasoning_begins) == 1
     reasoning_id = reasoning_begins[0]["id"]
-    # the verbatim reasoning text is NEVER appended to the timeline
+    # every reasoning delta streams into that block (the host renders the peek)
     reasoning_appends = [
-        p for t, p in handle.sent if t == "block.append" and p["id"] == reasoning_id
+        p["delta"] for t, p in handle.sent if t == "block.append" and p["id"] == reasoning_id
     ]
-    assert reasoning_appends == [], "reasoning process text must not be streamed"
-    assert not any(
-        "step by step" in p.get("delta", "")
+    assert reasoning_appends == ["let me think ", "step by step about the internals"]
+    # the reasoning block closes before the answer block opens
+    events = [
+        (t, p.get("id"), p.get("kind"))
         for t, p in handle.sent
-        if t == "block.append"
+        if t in ("block.begin", "block.end")
+    ]
+    end_reasoning = events.index(("block.end", reasoning_id, None))
+    begin_answer = next(
+        i for i, (t, _i, kind) in enumerate(events) if t == "block.begin" and kind == "answer"
     )
+    assert end_reasoning < begin_answer
     assert not [t for t, _ in handle.sent if t == "block.retype"]
     # the reasoning marker is closed before the answer block opens
     ends = [p["id"] for t, p in handle.sent if t == "block.end"]

@@ -148,6 +148,15 @@ if (scenario === "full") {
     saving: "62%",
     context: "12% · 9.4k",
   });
+} else if (scenario === "reasoning") {
+  promptEcho("prove the Collatz conjecture");
+  const t = flow.ensure();
+  t.begin("r1", "reasoning", {});
+  t.append("r1", "The user asks for a proof of an open problem.\n");
+  t.append("r1", "I should explain why no proof is known rather than invent one.\n");
+  t.append("r1", "Let me survey what IS known: verified up to 2^68, Terras density results…\n");
+  t.append("r1", "I will structure the answer around partial results and heuristics.\n");
+  composer.setTurnStatus({ phase: "thinking", label: "thinking", active: true });
 } else if (scenario === "idle") {
   composer.setTurnStatus({ phase: "idle", label: "ready", active: false });
 }

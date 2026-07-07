@@ -154,22 +154,44 @@ test("relayout skips entirely when the terminal width is unchanged", async () =>
   renderer.destroy?.();
 });
 
-test("a reasoning-only turn leaves no empty card shell behind", async () => {
-  // Cancel during extended thinking: the transient Thinking… marker removes
-  // itself when the reasoning block ends, then the trailing usage block closes
-  // the card — which must drop its chrome instead of framing nothing.
+test("a turn cancelled during reasoning keeps the Thought record in its card", async () => {
+  // Cancel during extended thinking: the reasoning block collapses to its
+  // "Thought for Ns" record, so the card keeps a real body and closes into a
+  // footer that carries both the cancel marker and the usage receipt.
   const { renderer, renderOnce, captureSpans, turn } = await makeTurnHarness();
   turn.begin("r1", "reasoning", {});
+  turn.append("r1", "weighing the options");
   turn.end("r1");
   turn.begin("u1", "usage", { text: "in 10 / out 0" });
   turn.end("u1");
   turn.finish(true);
   await renderOnce();
   const text = frameText(captureSpans());
-  expect(text).not.toContain("╭"); // no stranded header rule
+  expect(text).toContain("╭ squilla");
+  expect(text).toContain("Thought for"); // the collapsed reasoning record
+  expect(text).not.toContain("weighing the options"); // the peek is gone
+  const footer = text.split("\n").find((line) => line.includes("╰"));
+  expect(footer).toContain("cancelled");
+  expect(footer).toContain("in 10 / out 0");
+  renderer.destroy?.();
+});
+
+test("an empty card shell (no surviving body rows) still drops its chrome", async () => {
+  // An unknown block kind that renders nothing must not leave a framed void:
+  // the fallback block only mounts nodes when content arrives, so a card whose
+  // body kept no children closes by dropping the chrome — and the usage
+  // receipt still renders as a plain standalone row.
+  const { renderer, renderOnce, captureSpans, turn } = await makeTurnHarness();
+  turn.begin("x1", "future-kind", {}); // fallback block, no content appended
+  turn.end("x1");
+  turn.begin("u1", "usage", { text: "in 10 / out 0" });
+  turn.end("u1");
+  turn.finish(false);
+  await renderOnce();
+  const text = frameText(captureSpans());
+  expect(text).not.toContain("╭"); // no stranded header
   expect(text).not.toContain("╰"); // no footer wrapping an empty body
-  expect(text).toContain("in 10 / out 0"); // the usage line still renders
-  expect(text).toContain("cancelled"); // and the cancel marker tells the story
+  expect(text).toContain("in 10 / out 0"); // the receipt still renders
   renderer.destroy?.();
 });
 
