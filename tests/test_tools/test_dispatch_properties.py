@@ -174,8 +174,14 @@ async def test_corpus_execution_status_is_already_normalised(case: CorpusCase) -
             case.teardown()
 
     if result.execution_status is not None:
-        re_normalised = normalize_execution_status(result.execution_status)
-        assert result.execution_status == re_normalised, (
+        # Preflight rejections annotate the normalised status with two
+        # diagnostic keys (preflight_rejected, reason_code); strip them before
+        # checking the remainder is already in normalised form.
+        comparable = dict(result.execution_status)
+        comparable.pop("preflight_rejected", None)
+        comparable.pop("reason_code", None)
+        re_normalised = normalize_execution_status(comparable)
+        assert comparable == re_normalised, (
             f"[{case.name}] execution_status not already normalised: "
             f"{result.execution_status!r} != {re_normalised!r}"
         )
