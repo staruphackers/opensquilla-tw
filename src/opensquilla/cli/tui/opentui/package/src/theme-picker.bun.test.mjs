@@ -145,7 +145,10 @@ test("paste while the picker is open never reaches the composer draft", async ()
   composer.openThemePicker();
   renderer.keyInput.emit("paste", { bytes: new TextEncoder().encode("sneaky") });
   renderer.keyInput.emit("keypress", { name: "return" }); // keep theme, close picker
-  renderer.keyInput.emit("keypress", { name: "return" }); // submit the draft
-  expect(sent.find((m) => m.type === "input.submit")?.text).toBe(""); // untouched
+  // Enter on an empty draft is a no-op (no submit frame), so prove the draft
+  // stayed untouched with a sentinel: the submission must be ONLY the sentinel.
+  renderer.keyInput.emit("keypress", { name: "x", sequence: "X" });
+  renderer.keyInput.emit("keypress", { name: "return" });
+  expect(sent.find((m) => m.type === "input.submit")?.text).toBe("X");
   renderer.destroy?.();
 });

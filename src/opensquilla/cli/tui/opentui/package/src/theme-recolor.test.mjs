@@ -45,7 +45,7 @@ function findById(node, id) {
 
 afterEach(() => applyTheme("opensquilla-dark"));
 
-test("prompt block recolors every node and the body rail to the new theme accent", () => {
+test("prompt block recolors every line node and the body rail to the new theme tokens", () => {
   applyTheme("opensquilla-dark");
   const box = new FakeNode();
   const block = createPromptBlock({
@@ -53,18 +53,22 @@ test("prompt block recolors every node and the body rail to the new theme accent
   });
   block.begin({ text: "line one\nline two" });
 
-  const dark = THEME.promptAccent;
+  const darkRail = THEME.promptAccent;
+  const darkText = THEME.muted;
   const body = findById(box, "p-body");
   assert.ok(body);
-  assert.equal(body.borderColor, dark);
+  assert.equal(body.borderColor, darkRail);
+  // Compact prompt: one node per line, no header/footer chrome nodes.
   assert.equal(body.children.length, 2);
-  const textNodes = [findById(box, "p-top"), ...body.children, findById(box, "p-bot")];
-  assert.ok(textNodes.every((n) => n && n.fg === dark));
+  assert.equal(findById(box, "p-top"), null);
+  assert.equal(findById(box, "p-bot"), null);
+  assert.ok(body.children.every((n) => n.fg === darkText));
 
   applyTheme("opensquilla-light");
   block.recolor();
-  assert.notStrictEqual(THEME.promptAccent, dark); // the two themes genuinely differ
-  assert.ok(textNodes.every((n) => n.fg === THEME.promptAccent));
+  assert.notStrictEqual(THEME.promptAccent, darkRail); // the two themes genuinely differ
+  assert.notStrictEqual(THEME.muted, darkText);
+  assert.ok(body.children.every((n) => n.fg === THEME.muted));
   assert.equal(body.borderColor, THEME.promptAccent);
 });
 

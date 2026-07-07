@@ -1,6 +1,7 @@
 // Layout/spacing regression tests for the modern-TUI refinements:
-//   - card header rules adapt to terminal width (align to the full-width body)
-//     instead of a fixed length that strands on wide / overflows narrow screens;
+//   - card chrome is width-INDEPENDENT (a short "╭ squilla" label and a bare
+//     "╰ …" footer) so a scrollbar stealing a viewport column can never wrap
+//     a full-width rule into stray dash rows;
 //   - turns carry one blank line of vertical rhythm so they read as distinct
 //     groups (proximity) and the conversation breathes;
 //   - card open/close discipline (empty shells removed, prompts never seal a
@@ -12,7 +13,6 @@ import { test, expect } from "bun:test";
 import { createTestRenderer } from "@opentui/core/testing";
 import { BoxRenderable, ScrollBoxRenderable, TextRenderable } from "@opentui/core";
 
-import { cardHeaderRule, textWidth } from "./primitives.mjs";
 import { shouldFollowBottom } from "./main.mjs";
 import { createTurnView } from "./turnView.mjs";
 import { applyTheme } from "./theme.mjs";
@@ -39,22 +39,6 @@ async function makeTurnHarness({ width = 60, height = 14 } = {}) {
   );
   return { ...setup, conversationBox, turn };
 }
-
-test("card header rule fills to content width and scales with the terminal", () => {
-  // Content width is terminalWidth - 2 (turn box pads 1 cell each side).
-  expect(textWidth(cardHeaderRule("answer ─ squilla", 60))).toBe(58);
-  expect(textWidth(cardHeaderRule("answer ─ squilla", 120))).toBe(118);
-  // Wider terminal => longer rule (adaptive, not fixed).
-  expect(textWidth(cardHeaderRule("prompt", 120))).toBeGreaterThan(
-    textWidth(cardHeaderRule("prompt", 60)),
-  );
-  // Keeps the corner + label so the header still reads as a card.
-  expect(cardHeaderRule("answer ─ squilla", 80).startsWith("╭─ answer ─ squilla ─")).toBe(true);
-  // Never collapses below a sane minimum on tiny widths.
-  expect(textWidth(cardHeaderRule("answer ─ squilla", 10))).toBeGreaterThan(
-    textWidth("╭─ answer ─ squilla "),
-  );
-});
 
 test("turns are separated by a blank line of vertical rhythm", async () => {
   const { renderer, renderOnce, captureSpans } = await createTestRenderer({ width: 50, height: 14 });
@@ -94,10 +78,11 @@ test("turns are separated by a blank line of vertical rhythm", async () => {
   renderer.destroy?.();
 });
 
-test("a resize re-rules existing card headers to the new width", async () => {
-  // The bug: card header rules are baked TextRenderables created at the width at
-  // begin() time, so on resize they wrap (shrink) or strand (grow). relayout()
-  // re-rules them to the current width.
+test("card chrome is width-independent: a resize strands no dash rules", async () => {
+  // The old full-width header rule was baked at begin() time and wrapped a
+  // stray "─" run onto its own row whenever the viewport narrowed (e.g. the
+  // scrollbar stealing a column). The chrome is now a fixed short label, so a
+  // resize must leave it byte-identical with no dash-only lines anywhere.
   const { renderer, renderOnce, captureSpans, resize } = await createTestRenderer({
     width: 100,
     height: 16,
@@ -124,10 +109,11 @@ test("a resize re-rules existing card headers to the new width", async () => {
   await renderOnce();
 
   const lines = (f) => f.lines.map((l) => l.spans.map((s) => s.text).join("").trim());
+  const strandedDash = (ls) => ls.some((line) => /^─+$/.test(line));
 
-  // At width 100 the rules fill to the wide form.
-  expect(lines(captureSpans())).toContain(cardHeaderRule("squilla", 100));
-  expect(lines(captureSpans())).toContain(cardHeaderRule("prompt", 100));
+  // At width 100 the header is the short label, not a rule filled to 100 cells.
+  expect(lines(captureSpans())).toContain("╭ squilla");
+  expect(strandedDash(lines(captureSpans()))).toBe(false);
 
   // Shrink to 50 and reflow.
   const doResize = resize || ((w, h) => renderer.resize(w, h));
@@ -136,18 +122,17 @@ test("a resize re-rules existing card headers to the new width", async () => {
   turn.relayout();
   await renderOnce();
 
-  // Both headers re-ruled to the narrow form; the stale wide rule (which would
-  // wrap into stray dash lines) is gone.
+  // Same label, still no stranded dash run wrapped onto its own line.
   const after = lines(captureSpans());
-  expect(after).toContain(cardHeaderRule("squilla", 50));
-  expect(after).toContain(cardHeaderRule("prompt", 50));
-  expect(after).not.toContain(cardHeaderRule("squilla", 100));
+  expect(after).toContain("╭ squilla");
+  expect(strandedDash(after)).toBe(false);
   renderer.destroy?.();
 });
 
-test("relayout skips re-ruling when the terminal width is unchanged", async () => {
+test("relayout skips entirely when the terminal width is unchanged", async () => {
   const { renderer, renderOnce, resize, turn } = await makeTurnHarness({ width: 80, height: 16 });
   turn.begin("tl", "tool", { name: "grep", args: "x" }); // opens the squilla card
+  turn.append("tl", "a result preview that gets width-clipped"); // the └ corner
   await renderOnce();
 
   let renders = 0;
@@ -158,7 +143,7 @@ test("relayout skips re-ruling when the terminal width is unchanged", async () =
   turn.relayout();
   expect(renders).toBe(0);
 
-  // A real width change still re-rules.
+  // A real width change still re-clips block content (the result corner).
   const doResize = resize || ((w, h) => renderer.resize(w, h));
   await doResize(50, 16);
   const before = renders;
@@ -211,16 +196,21 @@ test("a prompt block never seals an open card; only usage closes it", async () =
   // A queued submission's echo can land while the assistant card is still
   // streaming; the prompt kind must not draw the card footer under it.
   const { renderer, renderOnce, captureSpans, turn } = await makeTurnHarness();
-  const footerCount = () => (frameText(captureSpans()).match(/╰/g) ?? []).length;
+  const footers = () =>
+    frameText(captureSpans()).split("\n").filter((l) => l.trimStart().startsWith("╰"));
   turn.begin("tl", "tool", { name: "grep", args: "x" }); // opens the squilla card
   turn.begin("p1", "prompt", { text: "queued question" });
   await renderOnce();
-  // Exactly one ╰ on screen: the prompt block's own footer. The assistant card
-  // is still open (no second footer).
-  expect(footerCount()).toBe(1);
+  // The prompt block is chrome-free and the assistant card is still open, so
+  // no ╰ footer exists anywhere yet.
+  expect(footers()).toHaveLength(0);
   turn.begin("u1", "usage", { text: "in 5 / out 2" });
   await renderOnce();
-  expect(footerCount()).toBe(2); // the trailing usage summary closed the card
+  // The trailing usage summary closed the card into exactly one footer, and
+  // the receipt rides on that footer line instead of a row below it.
+  const closed = footers();
+  expect(closed).toHaveLength(1);
+  expect(closed[0]).toContain("in 5 / out 2");
   renderer.destroy?.();
 });
 

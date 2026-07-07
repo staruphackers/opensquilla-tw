@@ -27,7 +27,11 @@ export function createToolBlock(ctx) {
   function resultContent() {
     const prefix = `${TOOL_INDENT}${RESULT_CORNER}`;
     const avail = timelineAvailCells(prefix, renderer.terminalWidth);
-    return `${prefix}${clipToCells(resultRaw, avail)}`;
+    // The Python side collapses results to one preview line, but a raw
+    // multi-line delta must not smear unaligned rows under the corner: join
+    // the lines into the single-row "line1 · line2" corner form.
+    const flat = resultRaw.replace(/\s*\n+\s*/g, DURATION_SEP).trim();
+    return `${prefix}${clipToCells(flat, avail)}`;
   }
 
   return {

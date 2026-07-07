@@ -258,6 +258,13 @@ async def run_tui_runtime(
                         hooks.notice("[yellow]Goodbye.[/yellow]")
                     return runtime_state
 
+                # A blank line is never a message: dispatching it would echo an
+                # empty prompt card and queue a phantom entry behind a running
+                # turn. Surfaces guard this too; this is the backend's defense
+                # for every frontend.
+                if not user_input.strip():
+                    continue
+
                 category = config.classify_input(user_input)
 
                 if category is TuiInputKind.LOCAL:

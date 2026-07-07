@@ -63,13 +63,17 @@ def test_turn_card_owns_one_continuous_gutter() -> None:
     # unbroken through narration + tool calls, so the timeline reads as one
     # assistant block (opencode/codex style). That gutter is the turn card's
     # border (answerFrame) owned by turnView — in-card blocks no longer redraw
-    # their own "│" rail nodes.
+    # their own "│" rail nodes. The chrome is width-independent: a short
+    # "╭ squilla" label on top and a bare "╰ …" footer, never a full-width rule
+    # (which wraps a stray dash when the scrollbar steals a viewport column).
     tv = _read("turnView.mjs")
     tool = _read("blocks/toolBlock.mjs")
     thinking = _read("blocks/thinkingBlock.mjs")
     assert 'border: ["left"]' in tv
     assert "borderColor: THEME.answerFrame" in tv
-    assert 'cardHeaderRule("squilla"' in tv
+    assert '"╭ squilla"' in tv
+    assert "╰" in tv
+    assert "cardHeaderRule" not in tv
     # the card opens once and closes once per turn (header + footer drawn once)
     assert "openCard" in tv and "closeCard" in tv
     # in-card blocks defer the gutter to the turn card — no per-block rail node
@@ -83,10 +87,10 @@ def test_answer_block_is_streaming_markdown_in_the_turn_card() -> None:
     assert "streaming: true" in answer
     # streaming stops on end()
     assert "md.streaming = false" in answer
-    # the card chrome (left border, header rule, footer) now belongs to the TURN,
+    # the card chrome (left border, header label, footer) now belongs to the TURN,
     # not the answer block — the answer is purely the streamed markdown body.
     assert 'border: ["left"]' not in answer
-    assert "cardHeaderRule" not in answer
+    assert "╭" not in answer and "╰" not in answer
     # the retype mechanism is gone: no teardown contract with turnView
     assert "teardown" not in answer
 
@@ -126,8 +130,12 @@ def test_prompt_and_usage_and_error_blocks() -> None:
     prompt = _read("blocks/promptBlock.mjs")
     usage = _read("blocks/usageBlock.mjs")
     error = _read("blocks/errorBlock.mjs")
-    assert 'cardHeaderRule("prompt"' in prompt
+    # the prompt is a compact chrome-free row set: a border-left rail box with
+    # one muted text node per line — no header rule, no footer
+    assert 'border: ["left"]' in prompt
     assert "THEME.promptAccent" in prompt
+    assert "THEME.muted" in prompt
+    assert "╭" not in prompt and "╰" not in prompt
     assert "·" in usage
     assert "THEME.muted" in usage
     assert "✗" in error
@@ -252,17 +260,21 @@ def test_main_is_thin_entry_with_mouse_and_alt_screen() -> None:
     assert "answer.demote" not in main
 
 
-def test_resize_reflows_existing_card_headers() -> None:
-    # Baked full-width header rules ("╭─ squilla ─…" / "╭─ prompt ─…") must
-    # re-rule to the new width on resize instead of wrapping (shrink) or
-    # stranding (grow). main tracks every turn and reflows them; turnView and
-    # promptBlock expose relayout() that recomputes their header rule.
+def test_resize_reflows_width_clipped_block_content() -> None:
+    # The card chrome is width-independent, so a resize only re-clips block
+    # content (tool result corners, narration wraps): main tracks every turn
+    # and calls relayout(), which skips entirely on a height-only resize and
+    # otherwise defers to each block. No module bakes a width-dependent header
+    # rule anymore.
     main = _read("main.mjs")
     turn = _read("turnView.mjs")
+    tool = _read("blocks/toolBlock.mjs")
     prompt = _read("blocks/promptBlock.mjs")
     assert "turns" in main and "relayout" in main
-    assert "relayout()" in turn and 'cardHeaderRule("squilla"' in turn
-    assert "relayout()" in prompt and 'cardHeaderRule("prompt"' in prompt
+    assert "relayout()" in turn and "lastRelayoutWidth" in turn
+    assert "relayout()" in tool
+    # the compact prompt has nothing width-dependent left to reflow
+    assert "relayout()" not in prompt
     # A resize must force a FULL repaint, else OpenTUI's diff-render leaves the old
     # (wider) layout's cells uncleared — the router box bleeds through as stale
     # glyphs when the window shrinks.

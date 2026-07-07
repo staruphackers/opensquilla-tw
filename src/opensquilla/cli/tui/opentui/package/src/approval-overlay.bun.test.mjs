@@ -158,8 +158,11 @@ test("Ctrl+Y while the overlay is open neither approves nor yanks into the draft
   expect(findDeep(overlayLayer, "approval-overlay")).not.toBeNull();
 
   press({ name: "n", sequence: "n" }); // deny, close the overlay
-  press({ name: "return" }); // submit the draft — the swallowed chord inserted nothing
-  expect(sent.find((m) => m.type === "input.submit")?.text).toBe("");
+  // Enter on an empty draft is a no-op (no submit frame), so prove the chord
+  // inserted nothing with a sentinel: the submission must be ONLY the sentinel.
+  type("X");
+  press({ name: "return" });
+  expect(sent.find((m) => m.type === "input.submit")?.text).toBe("X");
 });
 
 test("overlay mounts on approval.request with tool, summary, and hint", () => {
@@ -234,9 +237,12 @@ test("the overlay swallows typing and paste so keys never leak into the draft", 
   type("abc");
   paste("sneaky");
   press({ name: "n", sequence: "n" }); // deny, close the overlay
-  press({ name: "return" }); // submit the draft — it must still be empty
+  // Enter on an empty draft is a no-op (no submit frame): a sentinel typed
+  // after the deny proves nothing leaked — the submission is ONLY the sentinel.
+  type("X");
+  press({ name: "return" });
 
-  expect(sent.find((m) => m.type === "input.submit")?.text).toBe("");
+  expect(sent.find((m) => m.type === "input.submit")?.text).toBe("X");
 });
 
 test("Ctrl+C keeps its cancel path while the overlay is open", () => {

@@ -145,8 +145,11 @@ test("Ctrl+W and Alt+Backspace delete the previous word", async () => {
 });
 
 test("Ctrl+U cuts to line start and Ctrl+K cuts to line end", async () => {
-  expect(await submittedAfter([...typed("hello world"), ctrl("u")])).toBe("");
-  expect(await submittedAfter([...typed("hello world"), ctrl("a"), ctrl("k")])).toBe("");
+  // A fully-cut draft cannot be observed via submit (blank Enter is a no-op),
+  // so type a sentinel after the cut: only the sentinel must remain.
+  const X = { name: "X", sequence: "X" };
+  expect(await submittedAfter([...typed("hello world"), ctrl("u"), X])).toBe("X");
+  expect(await submittedAfter([...typed("hello world"), ctrl("a"), ctrl("k"), X])).toBe("X");
 });
 
 test("Ctrl+Y yanks the last kill back at the caret", async () => {
@@ -259,14 +262,16 @@ test("Shift+Enter inserts a newline in terminals that can report it", async () =
 // ---- grapheme-cluster editing ----------------------------------------------
 
 test("backspace removes a whole emoji family / flag, not one code point", async () => {
-  // ZWJ family: one backspace deletes the entire cluster.
+  // ZWJ family: one backspace deletes the entire cluster (only the sentinel
+  // typed afterwards remains — an emptied draft cannot be observed via submit).
+  const X = { name: "X", sequence: "X" };
   expect(
-    await submittedAfter([{ name: "👨‍👩‍👧", sequence: "👨‍👩‍👧" }, { name: "backspace" }]),
-  ).toBe("");
+    await submittedAfter([{ name: "👨‍👩‍👧", sequence: "👨‍👩‍👧" }, { name: "backspace" }, X]),
+  ).toBe("X");
   // Regional-indicator flag: no lone half survives.
   expect(
-    await submittedAfter([{ name: "🇺🇸", sequence: "🇺🇸" }, { name: "backspace" }]),
-  ).toBe("");
+    await submittedAfter([{ name: "🇺🇸", sequence: "🇺🇸" }, { name: "backspace" }, X]),
+  ).toBe("X");
 });
 
 test("arrows step over grapheme clusters instead of into them", async () => {
@@ -297,8 +302,11 @@ test("Ctrl+C with text clears the draft without cancelling the turn", async () =
   for (const key of typed("abc")) renderer.keyInput.emit("keypress", key);
   renderer.keyInput.emit("keypress", { name: "c", ctrl: true });
   expect(sent.some((m) => m.type === "input.cancel")).toBe(false);
+  // The cleared draft cannot be observed via submit (blank Enter is a no-op):
+  // type a sentinel and submit — only the sentinel proves "abc" is gone.
+  renderer.keyInput.emit("keypress", { name: "X", sequence: "X" });
   renderer.keyInput.emit("keypress", { name: "return" });
-  expect(sent.find((m) => m.type === "input.submit")?.text).toBe(""); // draft cleared
+  expect(sent.find((m) => m.type === "input.submit")?.text).toBe("X");
   renderer.destroy?.();
 });
 
@@ -586,4 +594,21 @@ test("composerLayout: soft-wrapped rows count toward the caret row", () => {
   const layout = composerLayout("aaaabbbbcc", 10, 4, 3);
   expect(layout.caretRow).toBe(2);
   expect(layout.caretCol).toBe(2);
+});
+
+test("Enter on a blank composer submits nothing (no phantom queued message)", async () => {
+  const { renderer, sent } = await setupComposer();
+  renderer.keyInput.emit("keypress", { name: "return" });
+  renderer.keyInput.emit("keypress", { name: "space", sequence: " " });
+  renderer.keyInput.emit("keypress", { name: "return" });
+  expect(sent.filter((m) => m.type === "input.submit")).toEqual([]);
+
+  // Real text still submits, and the whitespace-only attempt left no history.
+  renderer.keyInput.emit("keypress", { name: "h", sequence: "h" });
+  renderer.keyInput.emit("keypress", { name: "i", sequence: "i" });
+  renderer.keyInput.emit("keypress", { name: "return" });
+  expect(sent.filter((m) => m.type === "input.submit")).toEqual([
+    { type: "input.submit", text: " hi" },
+  ]);
+  renderer.destroy?.();
 });

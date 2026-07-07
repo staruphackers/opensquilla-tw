@@ -424,12 +424,15 @@ test("pulse ticks do not re-assert an unchanged hardware-cursor cell", () => {
 });
 
 test("paste is ignored while the theme picker is modal", () => {
-  const { composer, press, paste, sent } = makeHarness();
+  const { composer, press, paste, type, sent } = makeHarness();
   composer.openThemePicker();
   paste("sneaky");
   press({ name: "return" }); // keep the theme, close the picker
-  press({ name: "return" }); // submit the (still empty) draft
-  assert.equal(sent.find((m) => m.type === "input.submit")?.text, "");
+  // Enter on an empty draft is a no-op (no submit frame), so prove the paste
+  // never landed with a sentinel: the submission must be ONLY the sentinel.
+  type("X");
+  press({ name: "return" });
+  assert.equal(sent.find((m) => m.type === "input.submit")?.text, "X");
 });
 
 test("PageUp/PageDown scroll the conversation, not the composer", () => {

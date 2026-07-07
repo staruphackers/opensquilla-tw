@@ -186,7 +186,7 @@ def all_scenarios() -> tuple[TuiScenario, ...]:
                 ScenarioStep(
                     "wait-architecture",
                     "wait_any_text",
-                    "architecture-analysis-complete\n· in 1 / out 2",
+                    "architecture-analysis-complete\n╰ in 1 / out 2",
                     "after-architecture",
                     timeout_s=10.0,
                 ),

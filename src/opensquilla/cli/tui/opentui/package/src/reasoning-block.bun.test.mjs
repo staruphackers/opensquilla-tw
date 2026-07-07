@@ -1,12 +1,12 @@
 // Renderer-level regression for the reasoning/answer block split.
 //
 // The original bug: a streaming thinking block briefly flashed the cyan answer
-// CARD (╭─ answer ─ … ╰─) because the renderer opened text as an answer block
-// and only later retyped it to thinking. With reasoning now a first-class
-// stream, a thinking block must render as plain purple ✻ lines with NO card
-// border, while an answer block keeps its card. A text-snapshot harness could
-// miss colour, but the card is made of border glyphs, so we assert on the
-// captured glyphs directly.
+// card because the renderer opened text as an answer block and only later
+// retyped it to thinking. With reasoning now a first-class stream, a thinking
+// block must render as plain purple ✻ lines with NO card border, while an
+// answer block keeps its card. A text-snapshot harness could miss colour, but
+// the card is made of corner glyphs (╭/╰), so we assert on the captured glyphs
+// directly.
 //
 // Must run under bun: @opentui/core/testing needs bun FFI.
 import { test, expect } from "bun:test";
@@ -74,8 +74,8 @@ test("a streaming thinking block shows purple ✻ text with no answer card", asy
 test("an assistant turn wraps its answer in a single squilla card", async () => {
   // Contrast case proving the assertion above discriminates. The card chrome now
   // belongs to the TURN (one card per turn), not the answer block, so drive a
-  // turn view: an answer renders inside a labelled squilla card with top and
-  // bottom rules.
+  // turn view: an answer renders inside a card with the short "╭ squilla" label
+  // on top and a "╰" footer below.
   const { renderer, renderOnce, captureSpans } = await createTestRenderer({ width: WIDTH, height: HEIGHT });
   const conversationBox = new BoxRenderable(renderer, {
     id: "conversation",
@@ -99,8 +99,7 @@ test("an assistant turn wraps its answer in a single squilla card", async () => 
   const text = flatText(captureSpans());
   renderer.destroy?.();
 
-  expect(text).toContain("squilla");
-  expect(text).toContain("╭");
+  expect(text).toContain("╭ squilla");
   expect(text).toContain("╰");
 });
 

@@ -1036,7 +1036,7 @@ export function createComposer(deps) {
       height: Math.max(1, effFooterHeight() - 1), // the router strip takes the top row
       borderStyle: "rounded",
       borderColor: composer.disabled ? THEME.composerDisabledBorder : THEME.composerBorder,
-      bottomTitle: `${statusIcon()} ${turnStatus.label}`,
+      bottomTitle: ` ${statusIcon()} ${turnStatus.label} `,
       bottomTitleAlignment: "left",
       paddingLeft: 1,
       paddingRight: 1,
@@ -1113,7 +1113,11 @@ export function createComposer(deps) {
 
   function submitInput() {
     const text = inputText;
-    if (text.trim() && inputHistory[inputHistory.length - 1] !== text) {
+    // Enter on a blank composer is a no-op, like every shell/REPL: submitting
+    // whitespace would echo an empty prompt card and queue a phantom message
+    // behind a running turn.
+    if (!text.trim()) return;
+    if (inputHistory[inputHistory.length - 1] !== text) {
       inputHistory.push(text);
     }
     historyIndex = inputHistory.length;

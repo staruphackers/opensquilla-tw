@@ -1,8 +1,9 @@
 // Renderer-level pins for the trailing usage summary and the in-card error
 // block. The Python renderer emits the usage block BEFORE turn.end and relies
-// on begin(usage) sealing the assistant card, so the "· in X / out Y" summary
-// must render BELOW the "╰────" footer — that ordering is a cross-language
-// visual contract with no other renderer-level coverage.
+// on begin(usage) sealing the assistant card, so the "in X / out Y" summary
+// must ride ON the "╰ …" footer line itself (the card closes into its
+// receipt) — that folding is a cross-language visual contract with no other
+// renderer-level coverage.
 //
 // Must run under bun: @opentui/core/testing needs bun FFI.
 import { test, expect } from "bun:test";
@@ -47,7 +48,7 @@ function spanFgIs(span, hex) {
   return [fg.r, fg.g, fg.b].every((c, i) => Math.abs(c - want[i]) < 0.004);
 }
 
-test("the usage summary renders BELOW the card footer", async () => {
+test("the usage summary folds into the card footer line", async () => {
   applyTheme("opensquilla-dark");
   const { renderer, renderOnce, captureSpans, turn } = await createTurnHarness();
   try {
@@ -59,14 +60,20 @@ test("the usage summary renders BELOW the card footer", async () => {
     turn.finish();
     await renderOnce();
 
-    const lines = rows(captureSpans());
+    const frame = captureSpans();
+    const lines = rows(frame);
     const footerRow = lines.findIndex((l) => l.trimStart().startsWith("╰"));
-    const usageRow = lines.findIndex((l) => l.includes("· in 1 / out 2"));
     expect(footerRow).toBeGreaterThanOrEqual(0);
-    expect(usageRow).toBeGreaterThanOrEqual(0);
-    expect(usageRow).toBeGreaterThan(footerRow);
+    // The footer IS the receipt: "╰ <usage>", nothing more on that line.
+    expect(lines[footerRow].trim()).toBe("╰ in 1 / out 2");
+    // No separate usage row anywhere else — the text lives only on the footer.
+    expect(lines.filter((l) => l.includes("in 1 / out 2")).length).toBe(1);
     // Exactly one footer: begin(usage) closed the card, finish() was a no-op.
     expect(lines.filter((l) => l.trimStart().startsWith("╰")).length).toBe(1);
+    // A footer carrying a usage receipt renders muted, not frame-colored.
+    const footerSpan = frame.lines[footerRow].spans.find((s) => s.text.includes("in 1"));
+    expect(footerSpan).toBeDefined();
+    expect(spanFgIs(footerSpan, THEME.muted)).toBe(true);
   } finally {
     renderer.destroy?.();
   }
