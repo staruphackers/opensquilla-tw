@@ -26,6 +26,16 @@ _STATUS_STYLES = {
 }
 
 
+def status_markup(message: str, *, style: str = "dim") -> str:
+    """Render one status line as Rich markup with the message escaped.
+
+    Shared with the native chat runtime, which writes router-decision status
+    lines through the output handle without going through the renderer.
+    """
+    rich_style = _STATUS_STYLES.get(style, "dim")
+    return f"[{rich_style}]{_escape(message)}[/{rich_style}]\n"
+
+
 class NativeStreamRenderer:
     """Async renderer that writes assistant output directly to the terminal."""
 
@@ -127,8 +137,7 @@ class NativeStreamRenderer:
         if not message:
             return
         await self._close_reasoning()
-        rich_style = _STATUS_STYLES.get(style, "dim")
-        await self._write(f"[{rich_style}]{_escape(message)}[/{rich_style}]\n")
+        await self._write(status_markup(message, style=style))
 
     async def aerror(self, message: str) -> None:
         await self._close_reasoning()

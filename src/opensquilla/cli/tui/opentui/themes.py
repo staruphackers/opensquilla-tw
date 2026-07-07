@@ -22,6 +22,9 @@ THEME_NAMES: tuple[str, ...] = (
     "mono",
 )
 DEFAULT_THEME = "opensquilla-dark"
+# Read by the JS host as ``process.env.OPENSQUILLA_TUI_THEME`` (main.mjs); the
+# literal on both sides is pinned by
+# tests/unit/cli/tui/test_opentui_themes.py::test_theme_env_var_matches_js_host.
 THEME_ENV_VAR = "OPENSQUILLA_TUI_THEME"
 
 

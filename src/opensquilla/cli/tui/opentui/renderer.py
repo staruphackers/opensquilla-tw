@@ -3,11 +3,13 @@
 Implements the async TUI renderer protocol by emitting one structured timeline
 message per call so the JS host can render each block by type. The renderer's
 lifetime equals one turn, so turn.begin/status/end are driven by
-enter/method-calls/afinalize.
+enter/method-calls/afinalize, with aclose as the teardown safety net for turns
+that end on an error path without reaching afinalize.
 """
 
 from __future__ import annotations
 
+import contextlib
 import time
 from dataclasses import asdict
 from itertools import count
@@ -36,7 +38,10 @@ class OpenTuiStreamRenderer:
         self.buffer = ""
         self._turn_id = ""
         self._began = False
-        self._saw_output = False
+        self._finalized = False
+        # Phase currently shown on the composer pill; None after a transient
+        # status label so the next delta restores the phase label.
+        self._pill_phase: str | None = None
         self._block_seq = 0
         self._open_text_id: str | None = None
         self._open_text_presentation: str = "answer"
@@ -71,6 +76,7 @@ class OpenTuiStreamRenderer:
         await self._emit(
             "turn.status", TurnStatusState(phase="thinking", label="thinking", active=True)
         )
+        self._pill_phase = "thinking"
         await self._emit_raw("composer.set", {"disabled": True})
 
     def __enter__(self) -> OpenTuiStreamRenderer:
@@ -96,8 +102,10 @@ class OpenTuiStreamRenderer:
         if not delta:
             return
         await self._ensure_begin()
-        if not self._saw_output:
-            self._saw_output = True
+        if self._pill_phase != "output":
+            # Re-emitted whenever text resumes (e.g. the final answer streaming
+            # after a tool call) so the pill never sticks on a finished tool.
+            self._pill_phase = "output"
             await self._emit(
                 "turn.status", TurnStatusState(phase="output", label="output", active=True)
             )
@@ -158,11 +166,25 @@ class OpenTuiStreamRenderer:
         await self._emit("block.end", BlockEnd(id=block_id))
 
     async def astatus(self, message: str, *, style: str = "dim") -> None:
-        # status messages drive only the pill, not a content block: they are
-        # transient progress notes, not model output, so the block protocol
-        # deliberately emits nothing onto the timeline for them.
+        # Status lines carry real user-facing information (artifact saved, task
+        # group progress, warnings): mirror the native backend by rendering a
+        # dim in-card line, and surface the message transiently on the pill.
+        # The pill phase is cleared so the next delta restores the phase label.
         await self._ensure_begin()
-        return None
+        text = message.strip()
+        if not text:
+            return
+        await self._emit(
+            "turn.status",
+            TurnStatusState(phase=self._pill_phase or "thinking", label=text, active=True),
+        )
+        self._pill_phase = None
+        block_id = self._next_block_id()
+        await self._emit(
+            "block.begin",
+            BlockBegin(id=block_id, kind="status", meta={"text": text, "style": style}),
+        )
+        await self._emit("block.end", BlockEnd(id=block_id))
 
     async def atool_start(
         self,
@@ -182,6 +204,7 @@ class OpenTuiStreamRenderer:
         await self._emit(
             "turn.status", TurnStatusState(phase="tool", label=name, active=True)
         )
+        self._pill_phase = "tool"
         await self._emit(
             "block.begin",
             BlockBegin(id=block_id, kind="tool", meta={"name": name, "args": summary}),
@@ -234,6 +257,7 @@ class OpenTuiStreamRenderer:
         await self._emit("block.end", BlockEnd(id=block_id))
 
     async def afinalize(self, usage: Any | None = None, *, cancelled: bool = False) -> None:
+        self._finalized = True
         await self._ensure_begin()
         await self._close_reasoning()
         await self._close_text()
@@ -256,6 +280,7 @@ class OpenTuiStreamRenderer:
         await self._emit(
             "turn.status", TurnStatusState(phase="idle", label="ready", active=False)
         )
+        self._pill_phase = "idle"
         await self._emit_raw("composer.set", {"disabled": False})
         self._publish_usage_to_router_toolbar(usage)
 
@@ -288,7 +313,31 @@ class OpenTuiStreamRenderer:
             invalidate()
 
     async def aclose(self) -> None:
-        return None
+        # The stream callers guarantee aclose via finally even on error paths
+        # that never reach afinalize (provider errors, timeouts, error frames).
+        # Without teardown the host pill would pulse forever, the composer
+        # would stay disabled-colored, and the next turn would merge into the
+        # unfinished card — so emit the minimal turn-teardown sequence here.
+        if not self._began or self._finalized:
+            return
+        self._finalized = True
+        # Best-effort: the bridge may already be gone, and teardown must never
+        # mask the error that ended the turn.
+        with contextlib.suppress(Exception):
+            await self._close_reasoning()
+            await self._close_text()
+            for block_id in list(self._open_tool_ids):
+                await self._emit(
+                    "block.update", BlockUpdate(id=block_id, patch={"status": "error"})
+                )
+                await self._emit("block.end", BlockEnd(id=block_id))
+            self._open_tool_ids.clear()
+            await self._emit("turn.end", TurnEnd(id=self._turn_id))
+            await self._emit(
+                "turn.status", TurnStatusState(phase="idle", label="ready", active=False)
+            )
+            self._pill_phase = "idle"
+            await self._emit_raw("composer.set", {"disabled": False})
 
 
 def _format_tokens(value: Any) -> str:

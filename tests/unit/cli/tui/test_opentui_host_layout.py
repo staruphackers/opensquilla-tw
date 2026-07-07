@@ -51,9 +51,9 @@ def test_host_split_into_block_modules() -> None:
         assert (SRC / f).exists(), f"missing host module {f}"
 
 
-def test_registry_covers_six_kinds() -> None:
+def test_registry_covers_seven_kinds() -> None:
     reg = _read("blockRegistry.mjs")
-    for kind in ["prompt", "thinking", "tool", "answer", "usage", "error"]:
+    for kind in ["prompt", "thinking", "reasoning", "tool", "answer", "usage", "error"]:
         assert f"{kind}:" in reg, f"registry missing kind {kind}"
     assert "createBlock" in reg
 
@@ -156,12 +156,18 @@ def test_dispatcher_routes_block_and_legacy_messages() -> None:
         "turn.status",
         "composer.set",
         "completion.context",
+        "completion.response",
         "router.update",
         "block.begin",
         "block.append",
         "block.update",
         "block.end",
         "prompt.echo",
+        "model.text",
+        "scrollback.write",
+        "notice.write",
+        "theme.set",
+        "theme.pick",
         "shutdown",
     ]:
         assert f'"{t}"' in ipc, f"dispatcher missing case {t}"
@@ -171,7 +177,7 @@ def test_composer_input_region_behaviors() -> None:
     composer = _read("composer.mjs")
     assert "createComposer" in composer
     assert "inputHistory" in composer
-    assert "cursorVisible" in composer
+    assert "syncTerminalCursorToCaret" in composer
     assert "scrollBy" in composer
     # esc cancels the turn; ctrl+C clears-or-eofs; option/meta+return inserts newline
     assert '"escape"' in composer
@@ -201,22 +207,33 @@ def test_composer_router_model_downgrade_keeps_target_model_visible() -> None:
         "./src/opensquilla/cli/tui/opentui/package/src/"
         "composer.mjs"
     )
+    prim_path = (
+        "./src/opensquilla/cli/tui/opentui/package/src/"
+        "primitives.mjs"
+    )
     data = _node_json(
         f"""
-        const mod = await import("{module_path}");
-        const {{ fixedRouterRow, formatRouterModelValue }} = mod;
-        const target = "anthropic/claude-sonnet-4.6";
-        const baseline = "anthropic/claude-opus-4.7";
+        const {{ routerStripValue, formatRouterModelValue }} = await import("{module_path}");
+        const {{ textWidth }} = await import("{prim_path}");
+        const target = "vendor/small-fast";
+        const baseline = "vendor/big-heavy";
         const downgrade = formatRouterModelValue(target, baseline);
         const unchanged = formatRouterModelValue(target, target);
-        const row = fixedRouterRow("model", downgrade);
-        console.log(JSON.stringify({{ downgrade, unchanged, row }}));
+        const row = routerStripValue(downgrade);
+        const clippedLong = routerStripValue("x".repeat(30));
+        console.log(JSON.stringify({{
+          downgrade, unchanged, row,
+          clippedLong, clippedWidth: textWidth(clippedLong),
+        }}));
         """
     )
-    assert data["downgrade"] == "↓ claude-sonnet-4.6"
-    assert data["unchanged"] == "claude-sonnet-4.6"
-    assert "claude-sonnet-4.6" in data["row"]
-    assert "claude-opus-4.7" not in data["row"]
+    assert data["downgrade"] == "↓ small-fast"
+    assert data["unchanged"] == "small-fast"
+    assert "small-fast" in data["row"]
+    assert "big-heavy" not in data["row"]
+    # The live strip clips every value cell to 18 display cells.
+    assert data["clippedLong"].endswith("…")
+    assert data["clippedWidth"] <= 18
 
 
 def test_main_is_thin_entry_with_mouse_and_alt_screen() -> None:

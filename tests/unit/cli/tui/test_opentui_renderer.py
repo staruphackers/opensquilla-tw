@@ -176,6 +176,136 @@ async def test_cancel_midtool_closes_open_tool_block() -> None:
 
 
 @pytest.mark.asyncio
+async def test_aclose_without_finalize_tears_down_errored_turn() -> None:
+    """Error paths end the turn without afinalize; the guaranteed aclose must
+    still end the turn, idle the pill, and re-enable the composer so the UI
+    never stays busy and the next turn never merges into the errored card."""
+    handle = _RecordingHandle()
+    r = OpenTuiStreamRenderer(output_handle=handle)
+    r.__enter__()
+    await r.aappend_text("partial answer")
+    await r.aerror("provider exploded")
+    await r.aclose()
+
+    types = [t for t, _ in handle.sent]
+    assert "turn.end" in types
+    statuses = [p for t, p in handle.sent if t == "turn.status"]
+    assert statuses[-1]["phase"] == "idle"
+    assert statuses[-1]["active"] is False
+    composer_sets = [p for t, p in handle.sent if t == "composer.set"]
+    assert composer_sets[-1] == {"disabled": False}
+    # the open answer block was force-closed
+    begins = {p["id"] for t, p in handle.sent if t == "block.begin" and p.get("kind") == "answer"}
+    ends = {p["id"] for t, p in handle.sent if t == "block.end"}
+    assert begins <= ends
+
+
+@pytest.mark.asyncio
+async def test_aclose_force_closes_inflight_tool_block() -> None:
+    handle = _RecordingHandle()
+    r = OpenTuiStreamRenderer(output_handle=handle)
+    r.__enter__()
+    await r.atool_start("grep", {"pattern": "x"}, "c7")
+    # NO atool_finished, NO afinalize — e.g. a provider timeout mid-tool
+    await r.aclose()
+
+    updates = [p for t, p in handle.sent if t == "block.update" and p["id"] == "c7"]
+    ends = [p for t, p in handle.sent if t == "block.end" and p["id"] == "c7"]
+    assert updates and updates[-1]["patch"].get("status") == "error"
+    assert ends
+    assert [t for t, _ in handle.sent if t == "turn.end"]
+
+
+@pytest.mark.asyncio
+async def test_aclose_after_afinalize_emits_no_second_teardown() -> None:
+    handle = _RecordingHandle()
+    r = OpenTuiStreamRenderer(output_handle=handle)
+    r.__enter__()
+    await r.aappend_text("done")
+    await r.afinalize(None)
+    await r.aclose()
+
+    assert len([t for t, _ in handle.sent if t == "turn.end"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_aclose_before_any_output_is_a_noop() -> None:
+    handle = _RecordingHandle()
+    r = OpenTuiStreamRenderer(output_handle=handle)
+    r.__enter__()
+    await r.aclose()
+    assert handle.sent == []
+
+
+@pytest.mark.asyncio
+async def test_aclose_tolerates_dead_output_handle() -> None:
+    class _DeadHandle:
+        async def send_message(self, message_type: str, payload: dict) -> None:
+            raise RuntimeError("OpenTUI bridge is not started")
+
+    handle = _RecordingHandle()
+    r = OpenTuiStreamRenderer(output_handle=handle)
+    r.__enter__()
+    await r.aappend_text("partial")
+    # the bridge dies before teardown; aclose must not raise from its emits
+    r.output_handle = _DeadHandle()
+    await r.aclose()
+
+
+@pytest.mark.asyncio
+async def test_status_pill_returns_to_output_when_text_resumes_after_tool() -> None:
+    """In the narrate-then-act flow the pill must not stay stuck on the
+    finished tool's name while the final answer streams."""
+    handle = _RecordingHandle()
+    r = OpenTuiStreamRenderer(output_handle=handle)
+    r.__enter__()
+    await r.aappend_text("Let me look", presentation="intermediate")
+    await r.atool_start("grep", {"pattern": "x"}, "c1")
+    await r.atool_finished("c1", success=True, result="hit")
+    await r.aappend_text("Final answer", presentation="answer")
+    await r.afinalize(None)
+
+    phases = [p["phase"] for t, p in handle.sent if t == "turn.status"]
+    assert phases == ["thinking", "output", "tool", "output", "idle"]
+
+
+@pytest.mark.asyncio
+async def test_astatus_updates_pill_and_renders_dim_status_line() -> None:
+    """Status messages (artifact saved, task-group progress) must be visible:
+    a transient pill label plus a dim in-card status line."""
+    handle = _RecordingHandle()
+    r = OpenTuiStreamRenderer(output_handle=handle)
+    r.__enter__()
+    await r.aappend_text("working")
+    await r.astatus("artifact written: report.md")
+    await r.aappend_text(" more")
+    await r.afinalize(None)
+
+    status_blocks = [
+        p for t, p in handle.sent if t == "block.begin" and p.get("kind") == "status"
+    ]
+    assert status_blocks and status_blocks[0]["meta"]["text"] == "artifact written: report.md"
+    assert status_blocks[0]["meta"]["style"] == "dim"
+    ends = {p["id"] for t, p in handle.sent if t == "block.end"}
+    assert status_blocks[0]["id"] in ends
+
+    labels = [(p["phase"], p["label"]) for t, p in handle.sent if t == "turn.status"]
+    assert ("output", "artifact written: report.md") in labels
+    # the pill label is transient: the next text delta restores the phase label
+    status_index = labels.index(("output", "artifact written: report.md"))
+    assert ("output", "output") in labels[status_index + 1 :]
+
+
+@pytest.mark.asyncio
+async def test_astatus_ignores_blank_messages() -> None:
+    handle = _RecordingHandle()
+    r = OpenTuiStreamRenderer(output_handle=handle)
+    r.__enter__()
+    await r.astatus("   ")
+    assert not [p for t, p in handle.sent if t == "block.begin"]
+
+
+@pytest.mark.asyncio
 async def test_usage_block_emitted_before_turn_end() -> None:
     handle = _RecordingHandle()
     r = OpenTuiStreamRenderer(output_handle=handle)
