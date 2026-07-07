@@ -314,25 +314,42 @@ def _require(params: Any, key: str) -> Any:
     return params[key]
 
 
+def _param(params: Any, key: str, default: Any) -> Any:
+    """``params.get`` that also maps an explicit JSON ``null`` to ``default``.
+
+    The onboarding mutations widened several parameters to ``None`` =
+    keep-current for the CLI, but over RPC the legacy contract is pinned:
+    an absent key AND an explicit ``null`` both mean the legacy default
+    (reset/derive/clear), so hand-written clients sending ``null`` keep the
+    pre-widening behavior instead of silently keeping stored values.
+    """
+    if not isinstance(params, dict):
+        return default
+    value = params.get(key, default)
+    return default if value is None else value
+
+
 @_d.method("onboarding.provider.configure", scope="operator.admin")
 async def _provider_configure(params: Any, ctx: RpcContext) -> dict[str, Any]:
     from opensquilla.onboarding.mutations import upsert_llm_provider
 
     provider_id = _require(params, "providerId")
-    model = params.get("model", "") if isinstance(params, dict) else ""
+    # Legacy null semantics pinned: absent key OR explicit null = legacy
+    # default ("" -> derive/reset), never keep-current (see _param).
+    model = _param(params, "model", "")
     cfg = _active_config(ctx)
     with _validation_error("onboarding.provider.invalid"):
         res = upsert_llm_provider(
             cfg,
             provider_id=provider_id,
             model=model,
-            api_key=params.get("apiKey", "") if isinstance(params, dict) else "",
-            api_key_env=params.get("apiKeyEnv", "") if isinstance(params, dict) else "",
-            base_url=params.get("baseUrl", "") if isinstance(params, dict) else "",
-            proxy=params.get("proxy", "") if isinstance(params, dict) else "",
+            api_key=_param(params, "apiKey", ""),
+            api_key_env=_param(params, "apiKeyEnv", ""),
+            base_url=_param(params, "baseUrl", ""),
+            proxy=_param(params, "proxy", ""),
             # Explicit-user-action only (D18): a preset is applied exactly when
             # the client sends presetId; a plain save never auto-applies one.
-            preset_id=params.get("presetId", "") if isinstance(params, dict) else "",
+            preset_id=_param(params, "presetId", ""),
         )
     _apply_inplace(ctx, res.config)
     _sync_provider_selector(ctx, res.config.llm)
@@ -506,14 +523,23 @@ async def _ensemble_configure(params: Any, ctx: RpcContext) -> dict[str, Any]:
 
 @_d.method("onboarding.channel.probe", scope="operator.admin")
 async def _channel_probe(params: Any, ctx: RpcContext) -> dict[str, Any]:
-    from opensquilla.onboarding.mutations import validate_channel_entry
+    from opensquilla.onboarding.mutations import (
+        merge_channel_entry_secrets,
+        validate_channel_entry,
+    )
     from opensquilla.onboarding.redaction import redact_channel_entry
 
     entry = _require(params, "entry")
     if not isinstance(entry, dict):
         raise ValueError("params.entry must be an object")
+    # Merge-aware probe: blank secrets resolve against the stored entry the
+    # same way onboarding.channel.upsert does, so probing a keep-current
+    # payload validates the entry the upsert would actually persist instead
+    # of hard-failing on the non-blank-secret requirement. A genuinely blank
+    # secret (no stored entry to merge from) still fails validation.
+    cfg = _active_config(ctx)
     with _channel_error():
-        normalized = validate_channel_entry(entry)
+        normalized = validate_channel_entry(merge_channel_entry_secrets(cfg, entry))
     type_name = str(normalized.get("type") or "")
     return {
         "status": "ready",
@@ -534,19 +560,15 @@ async def _search_configure(params: Any, ctx: RpcContext) -> dict[str, Any]:
         res = upsert_search_provider(
             cfg,
             provider_id=provider_id,
-            api_key=params.get("apiKey", "") if isinstance(params, dict) else "",
-            api_key_env=params.get("apiKeyEnv", "") if isinstance(params, dict) else "",
-            max_results=(
-                params.get("maxResults", DEFAULT_SEARCH_MAX_RESULTS)
-                if isinstance(params, dict)
-                else DEFAULT_SEARCH_MAX_RESULTS
-            ),
-            proxy=params.get("proxy", "") if isinstance(params, dict) else "",
-            use_env_proxy=(params.get("useEnvProxy", False) if isinstance(params, dict) else False),
-            fallback_policy=(
-                params.get("fallbackPolicy", "off") if isinstance(params, dict) else "off"
-            ),
-            diagnostics=params.get("diagnostics", False) if isinstance(params, dict) else False,
+            # Legacy null semantics pinned: absent key OR explicit null maps
+            # to the legacy default (reset/clear), never keep-current.
+            api_key=_param(params, "apiKey", ""),
+            api_key_env=_param(params, "apiKeyEnv", ""),
+            max_results=_param(params, "maxResults", DEFAULT_SEARCH_MAX_RESULTS),
+            proxy=_param(params, "proxy", ""),
+            use_env_proxy=_param(params, "useEnvProxy", False),
+            fallback_policy=_param(params, "fallbackPolicy", "off"),
+            diagnostics=_param(params, "diagnostics", False),
         )
     _apply_inplace(ctx, res.config)
     _sync_search_provider(res.config)

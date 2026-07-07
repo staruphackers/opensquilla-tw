@@ -1,5 +1,7 @@
 """Tests for OnboardingStatus derivation."""
 
+import pytest
+
 from opensquilla.gateway.config import GatewayConfig, LlmProviderConfig
 from opensquilla.onboarding.mutations import upsert_channel
 from opensquilla.onboarding.status import get_onboarding_status
@@ -169,6 +171,41 @@ def test_ollama_without_key_is_configured():
     assert s.section_details["channels"]["optional"] is True
 
 
+def test_no_key_provider_reports_not_required_source():
+    cfg = GatewayConfig()
+    cfg.llm = LlmProviderConfig(
+        provider="ollama",
+        model="llama3",
+        api_key="",
+        base_url="http://localhost:11434",
+    )
+
+    s = get_onboarding_status(cfg)
+
+    assert s.llm_source == "not_required"
+    assert s.section_details["llm"]["detail"] == "no key required"
+
+
+@pytest.mark.parametrize(
+    "provider_id",
+    ["byteplus_coding_plan", "volcengine_coding_plan"],
+)
+def test_runtime_unsupported_provider_is_not_reported_as_key_free(provider_id):
+    # Coding-plan stubs are registered with real env keys but have no runtime
+    # backend; the status must not collapse that into "no key required".
+    cfg = GatewayConfig()
+    cfg.llm = LlmProviderConfig(provider=provider_id, model="m", api_key="")
+
+    s = get_onboarding_status(cfg)
+
+    assert s.llm_configured is False
+    assert s.llm_source == "unsupported"
+    assert s.sections["llm"].value == "unknown"
+    detail = str(s.section_details["llm"]["detail"])
+    assert detail == "registered but not runtime-supported"
+    assert "no key required" not in detail
+
+
 def test_zero_channels_means_not_messaging_configured():
     cfg = GatewayConfig()
     s = get_onboarding_status(cfg)
@@ -290,3 +327,16 @@ def test_ensemble_section_detail_shows_disabled():
 
     assert s.sections["ensemble"].value == "optional"
     assert s.section_details["ensemble"]["detail"] == "disabled"
+
+
+def test_ensemble_credential_status_reports_unsupported_provider():
+    """The per-provider credential rows must use the same "unsupported"
+    enumerant as llm_source for a registered but runtime-unsupported
+    provider — never a satisfied-looking "not_required"."""
+    from opensquilla.onboarding.status import _llm_provider_credential_status
+
+    cfg = GatewayConfig()
+    row = _llm_provider_credential_status(cfg, "github_copilot")
+
+    assert row["source"] == "unsupported"
+    assert row["available"] is False

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 import shlex
 from pathlib import Path
 from typing import Any
@@ -12,8 +13,10 @@ from opensquilla.onboarding.image_generation_specs import (
     get_image_generation_provider_setup_spec,
 )
 from opensquilla.onboarding.search_specs import get_search_provider_setup_spec
+from opensquilla.onboarding.section_status import SECTION_STATUS_DISPLAY
 from opensquilla.onboarding.setup_paths import web_setup_url
 from opensquilla.onboarding.status import get_onboarding_status
+from opensquilla.paths import default_opensquilla_home
 
 _KEY_URLS = {
     "openrouter": "https://openrouter.ai/keys",
@@ -28,12 +31,11 @@ _CAPABILITY_SECTIONS = (
     "audio",
     "memory_embedding",
 )
-_CAPABILITY_STATUS_DISPLAY = {
-    "ok": "Ready",
-    "optional": "Later",
-    "missing": "Missing",
-    "degraded": "Needs action",
-    "unknown": "Check",
+# String-keyed view of the shared status words (section_status is the single
+# source of truth); derived so the summary lookup below can use raw ``.value``
+# strings without drifting from the ``onboard status`` table wording.
+_CAPABILITY_STATUS_DISPLAY: dict[str, str] = {
+    status.value: display for status, display in SECTION_STATUS_DISPLAY.items()
 }
 _HEADLESS_SECTION_ALIASES = {
     "llm": "provider",
@@ -104,10 +106,53 @@ def setup_catalog_command(config_arg: str = "") -> tuple[str, str]:
     return "Explore options", f"opensquilla onboard catalog{config_arg}"
 
 
-def set_env_hint(env_key: str) -> str:
-    if platform.system().lower().startswith("win"):
-        return f'PowerShell: $env:{env_key} = "<your-key>"'
+def _is_windows() -> bool:
+    return platform.system().lower().startswith("win")
+
+
+# Mirror of the character class ``shlex.quote`` treats as safe, so POSIX and
+# PowerShell quoting agree on *when* to quote and only differ in *how*.
+_SHELL_UNSAFE_RE = re.compile(r"[^\w@%+=:,./-]", re.ASCII)
+
+
+def quote_cli_arg(value: str | Path) -> str:
+    """Quote one copy-paste CLI argument for the operator's shell.
+
+    POSIX shells get ``shlex.quote``. On Windows the copyable commands are
+    presented as PowerShell (matching the env hints below), whose
+    single-quoted strings are literal except for doubled single quotes —
+    ``shlex.quote``'s ``'"'"'`` escape is not valid there.
+    """
+    text = str(value)
+    if not _is_windows():
+        return shlex.quote(text)
+    if not text:
+        return "''"
+    if _SHELL_UNSAFE_RE.search(text) is None:
+        return text
+    return "'" + text.replace("'", "''") + "'"
+
+
+def persistent_env_file() -> str:
+    """Path of the supported persistent ``.env`` file (names only, no values)."""
+    return str(default_opensquilla_home() / ".env")
+
+
+def set_env_command(env_key: str) -> str:
+    """The bare set-this-env-var command for the operator's shell.
+
+    Machine-readable surfaces (``onboard status --json`` and the RPC status
+    payload) must carry only this command — no human labels.
+    """
+    if _is_windows():
+        return f'$env:{env_key} = "<your-key>"'
     return f'export {env_key}="<your-key>"'
+
+
+def set_env_hint(env_key: str) -> str:
+    """Human-facing variant of :func:`set_env_command` (labels the shell)."""
+    command = set_env_command(env_key)
+    return f"PowerShell: {command}" if _is_windows() else command
 
 
 def _set_env_hint(env_key: str) -> str:
@@ -153,7 +198,9 @@ def env_recovery_commands(status: Any) -> list[dict[str, str]]:
             {
                 "section": section,
                 "label": label,
-                "command": set_env_hint(env_key),
+                # Machine-readable field: the bare command only. Human
+                # renderers wanting a shell label wrap it via set_env_hint.
+                "command": set_env_command(env_key),
             }
         )
     return commands
@@ -163,14 +210,15 @@ def _missing_env_warning(surface: str, env_key: str) -> str:
     return (
         f"{surface}: ${env_key} is not set in this shell. "
         "The config saved the environment-variable reference, but this feature "
-        "will not work until the gateway is started with that variable set."
+        "will not work until the gateway is started with that variable set. "
+        f"Persist it by adding {env_key}=<your-key> to {persistent_env_file()}."
     )
 
 
 def _config_cli_arg(config_path: str | Path | None) -> str:
     if not config_path:
         return ""
-    return f" --config {shlex.quote(str(config_path))}"
+    return f" --config {quote_cli_arg(config_path)}"
 
 
 def _image_generation_provider_id(config: Any) -> str:
@@ -296,6 +344,10 @@ def format_next_steps(config: Any, *, config_path: str | Path | None = None) -> 
     ]
     if key_source == "missing_env" and env_key:
         lines.append(f"  Set key before starting gateway: {set_env_hint(env_key)}")
+        lines.append(
+            f"  Persist key across restarts: add {env_key}=<your-key> to "
+            f"{persistent_env_file()}"
+        )
     lines.extend(["", "Reference:"])
     setup_url = web_setup_url(config)
     if setup_url:

@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -23,6 +24,7 @@ from opensquilla.onboarding.config_store import (
     default_config_path,
     load_config,
     persist_config,
+    resolve_config_path,
 )
 from opensquilla.onboarding.errors import UserCancelledError
 from opensquilla.onboarding.image_generation_specs import (
@@ -56,6 +58,11 @@ from opensquilla.onboarding.provider_specs import (
 from opensquilla.onboarding.search_specs import (
     get_search_provider_setup_spec,
     list_search_provider_setup_specs,
+)
+from opensquilla.onboarding.setup_engine import (
+    ENSEMBLE_SECTION_ALIASES,
+    IMAGE_GENERATION_SECTION_ALIASES,
+    MEMORY_EMBEDDING_SECTION_ALIASES,
 )
 from opensquilla.onboarding.setup_paths import web_setup_url
 from opensquilla.onboarding.status import get_onboarding_status
@@ -202,39 +209,6 @@ def run_noninteractive_provider_configure(
     return engine.persist()
 
 
-def run_noninteractive_channel_add(
-    type_name: str,
-    values: dict[str, Any],
-    *,
-    path: str | Path | None = None,
-) -> PersistResult:
-    cfg = load_config(path)
-    payload = {"type": type_name, **values}
-    result = upsert_channel(cfg, entry_payload=payload)
-    return persist_config(result.config, path=path, restart_required=True)
-
-
-def run_noninteractive_search_configure(
-    provider_id: str,
-    values: dict[str, Any],
-    *,
-    path: str | Path | None = None,
-) -> PersistResult:
-    cfg = load_config(path)
-    result = upsert_search_provider(
-        cfg,
-        provider_id=provider_id,
-        api_key=values.get("api_key", ""),
-        api_key_env=values.get("api_key_env", ""),
-        max_results=int(values.get("max_results", DEFAULT_SEARCH_MAX_RESULTS)),
-        proxy=values.get("proxy", ""),
-        use_env_proxy=bool(values.get("use_env_proxy", False)),
-        fallback_policy=values.get("fallback_policy", "off"),
-        diagnostics=bool(values.get("diagnostics", False)),
-    )
-    return persist_config(result.config, path=path, restart_required=False)
-
-
 def _config_cli_arg(config_path: str | Path | None) -> str:
     if config_path is None:
         return ""
@@ -374,6 +348,18 @@ def _api_key_source_default(env_key: str) -> str:
     return _PASTE_API_KEY_CHOICE
 
 
+def _secret_paste_error(value: str) -> str | None:
+    stripped = str(value or "").strip()
+    if _TERMINAL_ESCAPE_RE.search(stripped) or _LEADING_TERMINAL_KEY_RE.search(
+        stripped
+    ):
+        return (
+            "Paste was not read correctly by this terminal. Use right-click, "
+            "Shift+Insert, or the environment variable option."
+        )
+    return None
+
+
 def _secret_value_validator(label: str):
     required = _required_value(label)
 
@@ -381,14 +367,71 @@ def _secret_value_validator(label: str):
         result = cast(bool | str, required(value))
         if result is not True:
             return result
+        paste_error = _secret_paste_error(value)
+        if paste_error is not None:
+            return paste_error
+        return True
+
+    return _validate
+
+
+def _secret_keep_current_validator(label: str):
+    """Secret validator for edit prompts: blank keeps the stored value."""
+
+    def _validate(value: str) -> bool | str:
+        if not str(value or "").strip():
+            return True
+        paste_error = _secret_paste_error(value)
+        if paste_error is not None:
+            return paste_error
+        return True
+
+    return _validate
+
+
+def _int_value_validator(label: str, *, minimum: int | None = None):
+    """Re-prompt on non-numeric input instead of crashing at ``int()`` time.
+
+    Blank input stays valid — callers coerce it to their own default, so an
+    accepted-as-is Enter keeps the quick-start path free of new friction.
+    """
+
+    def _validate(value: str) -> bool | str:
         stripped = str(value or "").strip()
-        if _TERMINAL_ESCAPE_RE.search(stripped) or _LEADING_TERMINAL_KEY_RE.search(
-            stripped
-        ):
-            return (
-                "Paste was not read correctly by this terminal. Use right-click, "
-                "Shift+Insert, or the environment variable option."
-            )
+        if not stripped:
+            return True
+        try:
+            parsed = int(stripped)
+        except ValueError:
+            return f"{label} must be a whole number"
+        if minimum is not None and parsed < minimum:
+            return f"{label} must be at least {minimum}"
+        return True
+
+    return _validate
+
+
+def _float_value_validator(label: str):
+    def _validate(value: str) -> bool | str:
+        stripped = str(value or "").strip()
+        if not stripped:
+            return True
+        try:
+            float(stripped)
+        except ValueError:
+            return f"{label} must be a number"
+        return True
+
+    return _validate
+
+
+def _base_url_validator(label: str = "Base URL"):
+    def _validate(value: str) -> bool | str:
+        stripped = str(value or "").strip()
+        if not stripped:
+            return f"{label} is required for this provider"
+        if not stripped.lower().startswith(("http://", "https://")):
+            return f"{label} must start with http:// or https://"
         return True
 
     return _validate
@@ -403,10 +446,26 @@ def _search_api_key_prompt(spec) -> str:
     return "Search API key"
 
 
+def _stored_llm_entry(config: Any, provider_id: str) -> Any | None:
+    """Return ``config.llm`` when it already holds this provider's entry.
+
+    A wizard re-run must seed prompt defaults from what the operator stored
+    last time, not from spec defaults — otherwise accepting the defaults
+    silently wipes a custom ``base_url``/``proxy``.
+    """
+    llm = getattr(config, "llm", None)
+    if str(getattr(llm, "provider", "") or "") == provider_id:
+        return llm
+    return None
+
+
 def _ask_provider_fields(
-    questionary, spec, options: OnboardOptions
+    questionary, spec, options: OnboardOptions, *, config: Any = None
 ) -> dict[str, Any]:
     answers: dict[str, Any] = {}
+    stored = _stored_llm_entry(config, spec.provider_id) if config is not None else None
+    stored_base_url = str(getattr(stored, "base_url", "") or "")
+    stored_proxy = str(getattr(stored, "proxy", "") or "")
     # Resolve credentials and endpoint BEFORE the model so an optional live
     # discovery can enumerate the candidate provider's models for the picker.
     if spec.requires_api_key:
@@ -418,11 +477,14 @@ def _ask_provider_fields(
             answers["api_key"] = ""
             answers["api_key_env"] = options.api_key_env
         else:
-            key_source = questionary.select(
-                "LLM API key source",
-                choices=_api_key_source_choices(env_key or ""),
-                default=_api_key_source_default(env_key or ""),
-            ).ask()
+            key_source = _ask_or_cancel(
+                questionary.select(
+                    "LLM API key source",
+                    choices=_api_key_source_choices(env_key or ""),
+                    default=_api_key_source_default(env_key or ""),
+                ),
+                section="provider",
+            )
             selected_env_key = _api_key_env_from_choice(key_source or "")
             answers["api_key_env"] = selected_env_key
             answers["api_key"] = ""
@@ -439,20 +501,52 @@ def _ask_provider_fields(
         answers["api_key"] = options.api_key or ""
         answers["api_key_env"] = ""
     if spec.requires_base_url:
-        answers["base_url"] = options.base_url or (
-            questionary.text("Base URL", default=spec.default_base_url).ask() or ""
-        )
+        answers["base_url"] = options.base_url or str(
+            _ask_or_cancel(
+                questionary.text(
+                    "Base URL",
+                    default=stored_base_url or spec.default_base_url,
+                    validate=_base_url_validator("Base URL"),
+                ),
+                section="provider",
+            )
+        ).strip()
     else:
-        answers["base_url"] = options.base_url or spec.default_base_url
-    answers["proxy"] = options.proxy or ""
+        answers["base_url"] = options.base_url or stored_base_url or spec.default_base_url
+    answers["proxy"] = options.proxy or stored_proxy
 
     if options.model:
         answers["model"] = options.model
     elif getattr(spec, "router_supported", False):
+        _verify_router_provider_connection(questionary, spec, answers)
         answers["model"] = ""
     else:
         answers["model"] = _ask_direct_provider_model(questionary, spec, answers)
     return answers
+
+
+def _quiet_provider_logs():
+    """Silence structlog output while a wizard-run probe/discovery is in flight.
+
+    The provider layer logs request/response details at debug/warning level.
+    The wizard process leaves structlog unconfigured, so those records would
+    print raw into the interactive prompt stream; the probe outcome is already
+    surfaced to the user through the redacted result panel.
+    """
+    import contextlib
+
+    import structlog
+
+    @contextlib.contextmanager
+    def _suppressed():
+        saved = structlog.get_config()
+        structlog.configure(logger_factory=structlog.ReturnLoggerFactory())
+        try:
+            yield
+        finally:
+            structlog.configure(**saved)
+
+    return _suppressed()
 
 
 def _run_provider_probe(
@@ -476,16 +570,17 @@ def _run_provider_probe(
     from opensquilla.onboarding.probe import probe_llm_provider
 
     try:
-        return asyncio.run(
-            probe_llm_provider(
-                provider_id=provider_id,
-                model=model,
-                api_key=api_key,
-                api_key_env=api_key_env,
-                base_url=base_url,
-                proxy=proxy,
+        with _quiet_provider_logs():
+            return asyncio.run(
+                probe_llm_provider(
+                    provider_id=provider_id,
+                    model=model,
+                    api_key=api_key,
+                    api_key_env=api_key_env,
+                    base_url=base_url,
+                    proxy=proxy,
+                )
             )
-        )
     except Exception:  # noqa: BLE001 - verification is best-effort, never fatal
         return None
 
@@ -508,15 +603,16 @@ def _run_provider_discovery(
     from opensquilla.onboarding.probe import discover_provider_models
 
     try:
-        return asyncio.run(
-            discover_provider_models(
-                provider_id=provider_id,
-                api_key=api_key,
-                api_key_env=api_key_env,
-                base_url=base_url,
-                proxy=proxy,
+        with _quiet_provider_logs():
+            return asyncio.run(
+                discover_provider_models(
+                    provider_id=provider_id,
+                    api_key=api_key,
+                    api_key_env=api_key_env,
+                    base_url=base_url,
+                    proxy=proxy,
+                )
             )
-        )
     except Exception:  # noqa: BLE001 - discovery is best-effort, never fatal
         return None
 
@@ -537,7 +633,17 @@ def _discovered_model_label(model: dict[str, Any]) -> str:
 
 
 def _prompt_free_text_model(questionary) -> str:
-    return questionary.text("Model id").ask() or ""
+    # Non-empty validation: providers without a derivable default model raise
+    # "model is required" deep in the mutation layer, so an empty submit must
+    # re-prompt here instead of surfacing a raw error after the operator has
+    # already typed the API key.
+    return str(
+        _ask_or_cancel(
+            questionary.text("Model id", validate=_required_value("Model id")),
+            section="provider",
+        )
+        or ""
+    )
 
 
 def _ask_direct_provider_model(questionary, spec, answers: dict[str, Any]) -> str:
@@ -633,6 +739,45 @@ def _confirm_save_after_failed_check(questionary, spec, detail: str) -> bool:
     )
 
 
+def _verify_router_provider_connection(questionary, spec, answers: dict[str, Any]) -> None:
+    """Pre-save connection check for router-supported providers.
+
+    A router-driven provider never types a direct model, so the free-text
+    verify/discover path never runs for it — historically a bad API key
+    surfaced only as an HTTP error in the middle of the first chat. The save
+    applies the provider's router tier profile, and the spec's
+    ``default_direct_model`` is that profile's default-tier model — i.e. the
+    model the first routed turn will actually use — so probe with it.
+
+    The UX mirrors the direct-provider check exactly: a failed probe surfaces
+    the redacted detail plus the default-yes "Save anyway?" escape, an
+    unattemptable probe (``None``) degrades silently, and a spec without a
+    determinable model (or without probe support) keeps the old behavior of
+    verifying nothing.
+    """
+    if not getattr(spec, "can_probe", False):
+        return
+    probe_model = str(getattr(spec, "default_direct_model", "") or "").strip()
+    if not probe_model:
+        return
+    console.print("[dim]Checking the connection…[/dim]")
+    probe = _run_provider_probe(
+        provider_id=spec.provider_id,
+        model=probe_model,
+        api_key=answers.get("api_key", ""),
+        api_key_env=answers.get("api_key_env", ""),
+        base_url=answers.get("base_url", ""),
+        proxy=answers.get("proxy", ""),
+    )
+    if probe is None:
+        return
+    if not probe.ok:
+        if not _confirm_save_after_failed_check(questionary, spec, probe.message):
+            raise UserCancelledError(section="provider")
+        return
+    console.print(f"[{ACCENT_SOFT}]◆[/] [dim]connection verified[/dim]")
+
+
 def _ask_search_choice(questionary):
     supported = [s for s in list_search_provider_setup_specs() if s.runtime_supported]
     provider_id = _ask_or_cancel(
@@ -646,7 +791,26 @@ def _ask_search_choice(questionary):
     return get_search_provider_setup_spec(provider_id_clean), provider_id_clean
 
 
-def _ask_search_fields(questionary, spec) -> dict[str, Any]:
+def _ask_search_fields(questionary, spec, config: Any = None) -> dict[str, Any]:
+    """Collect search settings, seeding every default from the stored config.
+
+    A wizard re-run (e.g. rotating a key) must not reset the stored global
+    search settings to factory defaults: pressing Enter through the prompts
+    keeps ``max_results``/``proxy``/``use_env_proxy``/``fallback_policy``/
+    ``diagnostics`` exactly as persisted, matching the headless keep-current
+    contract.
+    """
+    stored_max_results = int(
+        getattr(config, "search_max_results", DEFAULT_SEARCH_MAX_RESULTS)
+        or DEFAULT_SEARCH_MAX_RESULTS
+    )
+    stored_proxy = str(getattr(config, "search_proxy", "") or "")
+    stored_use_env_proxy = bool(getattr(config, "search_use_env_proxy", False))
+    stored_fallback = str(getattr(config, "search_fallback_policy", "off") or "off")
+    if stored_fallback not in _SEARCH_FALLBACK_LABELS:
+        stored_fallback = "off"
+    stored_diagnostics = bool(getattr(config, "search_diagnostics", False))
+
     answers: dict[str, Any] = {}
     if spec.requires_api_key:
         env_key = spec.env_key or ""
@@ -676,19 +840,26 @@ def _ask_search_fields(questionary, spec) -> dict[str, Any]:
     else:
         answers["api_key"] = ""
         answers["api_key_env"] = ""
-    max_results = _ask_or_cancel(
+    max_results_raw = _ask_or_cancel(
         questionary.text(
-            "Max search results", default=str(DEFAULT_SEARCH_MAX_RESULTS)
+            "Max search results",
+            default=str(stored_max_results),
+            validate=_int_value_validator("Max search results", minimum=1),
         ),
         section="search",
-    ) or str(DEFAULT_SEARCH_MAX_RESULTS)
-    answers["max_results"] = int(max_results)
+    )
+    max_results_clean = str(max_results_raw or "").strip()
+    answers["max_results"] = (
+        int(max_results_clean) if max_results_clean else stored_max_results
+    )
     answers["proxy"] = _ask_or_cancel(
-        questionary.text("Search HTTP proxy", default=""), section="search"
+        questionary.text("Search HTTP proxy", default=stored_proxy), section="search"
     )
     answers["use_env_proxy"] = bool(
         _ask_or_cancel(
-            questionary.confirm("Use environment proxy for search?", default=False),
+            questionary.confirm(
+                "Use environment proxy for search?", default=stored_use_env_proxy
+            ),
             section="search",
         )
     )
@@ -696,14 +867,14 @@ def _ask_search_fields(questionary, spec) -> dict[str, Any]:
         questionary.select(
             "Search fallback policy",
             choices=list(_SEARCH_FALLBACK_LABELS.values()),
-            default=_SEARCH_FALLBACK_LABELS["off"],
+            default=_SEARCH_FALLBACK_LABELS[stored_fallback],
         ),
         section="search",
     )
     answers["fallback_policy"] = _search_fallback_choice_to_value(fallback_choice)
     answers["diagnostics"] = bool(
         _ask_or_cancel(
-            questionary.confirm(_SEARCH_DIAGNOSTICS_PROMPT, default=False),
+            questionary.confirm(_SEARCH_DIAGNOSTICS_PROMPT, default=stored_diagnostics),
             section="search",
         )
     )
@@ -720,9 +891,9 @@ def run_interactive_search_configure(
     questionary = _styled(_qmod)
 
     console.print(banner_panel("Search Setup", "Wire a web search provider"))
-    spec, provider_id = _ask_search_choice(questionary)
-    answers = _ask_search_fields(questionary, spec)
     cfg = load_config(config_path)
+    spec, provider_id = _ask_search_choice(questionary)
+    answers = _ask_search_fields(questionary, spec, cfg)
     result = upsert_search_provider(
         cfg,
         provider_id=provider_id,
@@ -766,11 +937,14 @@ def _ask_image_generation_choice(questionary, config):
         (spec for spec in supported if spec.provider_id == preferred),
         supported[0],
     )
-    selected = questionary.select(
-        "Image generation provider",
-        choices=[_image_generation_choice_label(spec) for spec in supported],
-        default=_image_generation_choice_label(default_spec),
-    ).ask()
+    selected = _ask_or_cancel(
+        questionary.select(
+            "Image generation provider",
+            choices=[_image_generation_choice_label(spec) for spec in supported],
+            default=_image_generation_choice_label(default_spec),
+        ),
+        section="image-generation",
+    )
     provider_id = _image_generation_choice_to_provider_id(selected)
     return get_image_generation_provider_setup_spec(provider_id), provider_id
 
@@ -780,9 +954,36 @@ def _ask_image_generation_fields(
     spec: ImageGenerationProviderSetupSpec,
     config,
 ) -> dict[str, Any]:
+    """Collect image settings, seeding defaults from the stored config.
+
+    A wizard re-run (e.g. rotating a key) must not reset a stored custom
+    primary model, base URL, or a deliberate ``enabled = false`` back to
+    factory defaults: pressing Enter through the prompts keeps what the
+    operator persisted, matching the headless keep-current contract.
+    """
+    image_cfg = getattr(config, "image_generation", None)
+    stored_primary = str(getattr(image_cfg, "primary", "") or "")
+    if not stored_primary.startswith(f"{spec.provider_id}/"):
+        stored_primary = ""
+    provider_cfg = getattr(
+        getattr(image_cfg, "providers", None), spec.provider_id, None
+    )
+    stored_base_url = str(getattr(provider_cfg, "base_url", "") or "")
+    if image_cfg is not None and "enabled" in image_cfg.model_fields_set:
+        stored_enabled = bool(image_cfg.enabled)
+    else:
+        stored_enabled = True
+
     answers: dict[str, Any] = {}
     answers["primary"] = (
-        questionary.text("Primary image model", default=spec.default_model).ask()
+        _ask_or_cancel(
+            questionary.text(
+                "Primary image model",
+                default=stored_primary or spec.default_model,
+            ),
+            section="image-generation",
+        )
+        or stored_primary
         or spec.default_model
     )
 
@@ -801,19 +1002,22 @@ def _ask_image_generation_fields(
     if env_choice and not os.environ.get(spec.env_key):
         key_choices.append(env_choice)
 
-    key_source = questionary.select(
-        "Image API key source",
-        choices=key_choices,
-        default=key_choices[0],
-    ).ask()
+    key_source = _ask_or_cancel(
+        questionary.select(
+            "Image API key source",
+            choices=key_choices,
+            default=key_choices[0],
+        ),
+        section="image-generation",
+    )
     selected_env_key = _api_key_env_from_choice(key_source or "")
     if key_source == _PASTE_API_KEY_CHOICE:
-        answers["api_key"] = (
+        answers["api_key"] = _ask_or_cancel(
             questionary.password(
                 "Image API key",
                 validate=_secret_value_validator("Image API key"),
-            ).ask()
-            or ""
+            ),
+            section="image-generation",
         )
         answers["api_key_env"] = ""
     elif selected_env_key:
@@ -824,12 +1028,25 @@ def _ask_image_generation_fields(
         answers["api_key_env"] = ""
 
     answers["base_url"] = (
-        questionary.text("Image base URL", default=spec.default_base_url).ask()
+        _ask_or_cancel(
+            questionary.text(
+                "Image base URL",
+                default=stored_base_url or spec.default_base_url,
+            ),
+            section="image-generation",
+        )
+        or stored_base_url
         or spec.default_base_url
     )
-    answers["enabled"] = questionary.confirm(
-        "Image generation enabled?", default=True
-    ).ask()
+    # A cancel at the consent confirm must cancel the section — coercing the
+    # ``None`` answer through ``bool()`` would silently persist enabled=false
+    # while the wizard prints a success message.
+    answers["enabled"] = bool(
+        _ask_or_cancel(
+            questionary.confirm("Image generation enabled?", default=stored_enabled),
+            section="image-generation",
+        )
+    )
     return answers
 
 
@@ -1043,7 +1260,14 @@ def run_interactive_memory_embedding_configure(
         base_url=answers.get("base_url"),
         onnx_dir=answers.get("onnx_dir"),
     )
-    persisted = persist_config(result.config, path=config_path, restart_required=False)
+    # The mutation knows whether the edit actually changed the embedding
+    # setup (embedding changes need a full gateway restart to take effect);
+    # hardcoding False here silently dropped that signal.
+    persisted = persist_config(
+        result.config,
+        path=config_path,
+        restart_required=result.restart_required,
+    )
     console.print(
         f"[bold {ACCENT}]◆[/] [bold]Memory embedding configured.[/]"
     )
@@ -1174,25 +1398,37 @@ def _router_tier_overrides(questionary, config) -> dict[str, dict[str, Any]]:
         if isinstance(config.squilla_router.tiers.get(tier_name), dict)
     ]
     while True:
-        selected = questionary.select(
-            "Tier to edit",
-            choices=choices,
-            default=_DONE_LABEL,
-        ).ask()
+        # Cancel contract: Esc/Ctrl+C must abort the router section, not map
+        # to "Done"/keep-current — the callers persist the returned payload,
+        # so a swallowed cancel would rewrite config.toml on explicit abort.
+        selected = _ask_or_cancel(
+            questionary.select(
+                "Tier to edit",
+                choices=choices,
+                default=_DONE_LABEL,
+            ),
+            section="router",
+        )
         tier_name = _tier_choice_to_internal(selected)
         if not tier_name:
             break
         tier = config.squilla_router.tiers.get(tier_name)
         if not isinstance(tier, dict):
             continue
-        provider = questionary.text(
-            f"{tier_name} provider",
-            default=str(tier.get("provider") or ""),
-        ).ask() or str(tier.get("provider") or "")
-        model = questionary.text(
-            f"{tier_name} model",
-            default=str(tier.get("model") or ""),
-        ).ask() or str(tier.get("model") or "")
+        provider = _ask_or_cancel(
+            questionary.text(
+                f"{tier_name} provider",
+                default=str(tier.get("provider") or ""),
+            ),
+            section="router",
+        ) or str(tier.get("provider") or "")
+        model = _ask_or_cancel(
+            questionary.text(
+                f"{tier_name} model",
+                default=str(tier.get("model") or ""),
+            ),
+            section="router",
+        ) or str(tier.get("model") or "")
         overrides[tier_name] = {"provider": provider, "model": model}
         if tier_name == "image_model":
             overrides[tier_name]["supportsImage"] = True
@@ -1207,11 +1443,17 @@ def _ask_router_fields(
     requested_mode: str,
 ) -> dict[str, Any]:
     choices = _router_mode_choices(provider_id)
-    selected_mode = questionary.select(
-        "Router mode",
-        choices=choices,
-        default=_router_mode_default(provider_id, requested_mode),
-    ).ask()
+    # A cancel here must never be read as consent: mapping the ``None`` answer
+    # through ``_router_mode_to_internal`` would silently persist
+    # ``squilla_router.enabled = true`` and print the success handoff.
+    selected_mode = _ask_or_cancel(
+        questionary.select(
+            "Router mode",
+            choices=choices,
+            default=_router_mode_default(provider_id, requested_mode),
+        ),
+        section="router",
+    )
     mode = _router_mode_to_internal(selected_mode)
     if mode == "disabled":
         preview = upsert_router(config, mode=mode).config
@@ -1220,19 +1462,67 @@ def _ask_router_fields(
 
     preview = upsert_router(config, mode=mode).config
     _print_router_defaults(preview)
-    default_tier_choice = questionary.select(
-        "Default text model",
-        choices=[_TEXT_TIER_LABELS[tier] for tier in _TEXT_ROUTER_TIERS],
-        default=_text_tier_label(str(preview.squilla_router.default_tier or "c1")),
-    ).ask()
+    default_tier_choice = _ask_or_cancel(
+        questionary.select(
+            "Default text model",
+            choices=[_TEXT_TIER_LABELS[tier] for tier in _TEXT_ROUTER_TIERS],
+            default=_text_tier_label(str(preview.squilla_router.default_tier or "c1")),
+        ),
+        section="router",
+    )
     default_tier = _text_tier_to_internal(default_tier_choice)
     preview = upsert_router(config, mode=mode, default_tier=default_tier).config
     _print_router_defaults(preview)
 
     payload: dict[str, Any] = {"mode": mode, "defaultTier": default_tier}
-    if questionary.confirm("Edit router tier models now?", default=False).ask():
+    if bool(
+        _ask_or_cancel(
+            questionary.confirm("Edit router tier models now?", default=False),
+            section="router",
+        )
+    ):
         payload["tiers"] = _router_tier_overrides(questionary, preview)
     return payload
+
+
+def _apply_router_section(
+    questionary,
+    config,
+    *,
+    provider_id: str,
+    requested_mode: str,
+    config_path: str | Path | None = None,
+):
+    """Run the inline router step of the full wizard; a cancel skips it.
+
+    The router prompts follow directly after the provider credentials in
+    ``run_interactive_onboard``. Letting a router-stage cancel propagate would
+    discard the API key the user just pasted, so the cancel is scoped to the
+    router section here: nothing router-related is persisted and the caller
+    keeps the provider config it already collected.
+    """
+    try:
+        payload = _ask_router_fields(
+            questionary,
+            config,
+            provider_id=provider_id,
+            requested_mode=requested_mode,
+        )
+    except UserCancelledError:
+        config_arg = _config_cli_arg(config_path)
+        console.print("[yellow]router setup cancelled — keeping current router settings.[/yellow]")
+        console.print(
+            f"  [dim]Resume later with[/dim] "
+            f"[{ACCENT_SOFT}]opensquilla onboard configure router{config_arg}[/]"
+        )
+        return config
+    result = upsert_router(
+        config,
+        mode=payload["mode"],
+        default_tier=payload.get("defaultTier"),
+        tiers=payload.get("tiers"),
+    )
+    return result.config
 
 
 def run_interactive_router_configure(
@@ -1331,6 +1621,7 @@ def _ask_ensemble_fields(questionary, cfg) -> dict[str, Any]:
         questionary.text(
             "Minimum successful proposers",
             default=str(getattr(ensemble, "min_successful_proposers", 1)),
+            validate=_int_value_validator("Minimum successful proposers", minimum=1),
         ),
         section="ensemble",
     )
@@ -1353,10 +1644,15 @@ def _print_ensemble_saved(cfg) -> None:
     ensemble = cfg.llm_ensemble
     state = "enabled" if getattr(ensemble, "enabled", False) else "disabled"
     console.print(f"[bold {ACCENT}]◆[/] [bold]LLM ensemble {state}.[/]")
+    # This runner writes the config file on disk, which the gateway only
+    # reads at boot — unlike the RPC hot-apply path, the change is NOT live
+    # on the next turn until a reload/restart picks the file up.
     console.print(
         f"  [dim]Selection mode:[/dim] "
         f"[{ACCENT_SOFT}]{markup_escape(getattr(ensemble, 'selection_mode', ''))}[/]"
-        " [dim]· applies to the next turn, no restart needed[/dim]"
+        " [dim]· saved to the config file — run[/dim]"
+        f" [{ACCENT_SOFT}]opensquilla gateway reload[/]"
+        " [dim](or restart) to apply it[/dim]"
     )
 
 
@@ -1447,30 +1743,76 @@ def _ask_channel_field(questionary, field: ChannelSetupField, default: Any) -> A
         )
     if field.field_type == "select":
         select_default = default if isinstance(default, str) else None
-        return questionary.select(
-            field.label, choices=list(field.choices), default=select_default
-        ).ask()
+        return _ask_or_cancel(
+            questionary.select(
+                field.label, choices=list(field.choices), default=select_default
+            ),
+            section="channels",
+        )
     if field.field_type == "bool":
-        return questionary.confirm(field.label, default=bool(default)).ask()
+        return bool(
+            _ask_or_cancel(
+                questionary.confirm(field.label, default=bool(default)),
+                section="channels",
+            )
+        )
     if field.field_type == "password":
+        if field.secret and default not in (None, ""):
+            # Editing an entry that already stores this secret: the wizard
+            # keeps the stored value for a blank submit. Resolving it here
+            # (instead of relying on the mutation's by-name merge) keeps the
+            # promise even when the operator renames the entry in the same
+            # edit — a blank submit then must not crash with "requires a
+            # non-empty value".
+            console.print(
+                f"  [dim]{markup_escape(field.label)}: "
+                "leave blank to keep the stored value[/dim]"
+            )
+            answer = _ask_or_cancel(
+                questionary.password(
+                    field.label,
+                    validate=_secret_keep_current_validator(field.label),
+                ),
+                section="channels",
+            )
+            return answer if str(answer or "").strip() else default
         return (
-            questionary.password(
-                field.label,
-                validate=_secret_value_validator(field.label),
-            ).ask()
+            _ask_or_cancel(
+                questionary.password(
+                    field.label,
+                    validate=_secret_value_validator(field.label),
+                ),
+                section="channels",
+            )
             or ""
         )
     if field.field_type == "int":
-        raw = questionary.text(
-            field.label, default=str(default if default is not None else 0)
-        ).ask() or "0"
-        return int(raw)
+        raw = _ask_or_cancel(
+            questionary.text(
+                field.label,
+                default=str(default if default is not None else 0),
+                validate=_int_value_validator(field.label),
+            ),
+            section="channels",
+        )
+        return int(str(raw or "").strip() or "0")
     if field.field_type == "float":
-        raw = questionary.text(
-            field.label, default=str(default if default is not None else 0.0)
-        ).ask() or "0"
-        return float(raw)
-    return questionary.text(field.label, default=str(default or "")).ask() or ""
+        raw = _ask_or_cancel(
+            questionary.text(
+                field.label,
+                default=str(default if default is not None else 0.0),
+                validate=_float_value_validator(field.label),
+            ),
+            section="channels",
+        )
+        return float(str(raw or "").strip() or "0")
+    return (
+        _ask_or_cancel(
+            questionary.text(field.label, default=str(default or "")),
+            section="channels",
+        )
+        or ""
+    )
 
 
 def _ask_channel_fields(
@@ -1949,6 +2291,7 @@ def _use_imported_provider_credentials_with_router_defaults(
     cfg: Any,
     *,
     requested_mode: str,
+    config_path: str | Path | None = None,
 ):
     llm = getattr(cfg, "llm", None)
     provider = _provider_id_from_config(cfg)
@@ -1965,19 +2308,13 @@ def _use_imported_provider_credentials_with_router_defaults(
     )
     cfg_after_provider = res.config
     if requested_mode:
-        router_payload = _ask_router_fields(
+        cfg_after_provider = _apply_router_section(
             questionary,
             cfg_after_provider,
             provider_id=provider,
             requested_mode=requested_mode,
+            config_path=config_path,
         )
-        router_res = upsert_router(
-            cfg_after_provider,
-            mode=router_payload["mode"],
-            default_tier=router_payload.get("defaultTier"),
-            tiers=router_payload.get("tiers"),
-        )
-        cfg_after_provider = router_res.config
     return cfg_after_provider
 
 
@@ -2058,6 +2395,38 @@ def _ask_imported_provider_credentials(
     }
 
 
+def _ensure_config_dir_writable(config_path: str | Path | None) -> None:
+    """Fail fast (exit code 2) when the config directory cannot be written.
+
+    The wizard saves only after every prompt has been answered, so an
+    unwritable state/config directory used to surface as a raw
+    ``PermissionError`` traceback after the operator had already typed
+    everything — including the API key. Probe writability before the first
+    prompt so the failure is actionable and costs no input.
+    """
+    target, _source = resolve_config_path(config_path)
+    directory = target.parent
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        fd, probe_name = tempfile.mkstemp(
+            prefix=".opensquilla-setup-probe-", dir=str(directory)
+        )
+        os.close(fd)
+        os.unlink(probe_name)
+    except OSError as exc:
+        console.print(
+            warning_panel(
+                f"Cannot write the configuration directory "
+                f"{markup_escape(str(directory))}: {markup_escape(str(exc))}\n\n"
+                "Fix the directory permissions, or point --config / "
+                "OPENSQUILLA_GATEWAY_CONFIG_PATH at a writable location, "
+                "then re-run setup.",
+                title="Setup directory not writable",
+            )
+        )
+        raise SystemExit(2) from exc
+
+
 def run_interactive_onboard(options: OnboardOptions) -> PersistResult:
     cfg = load_config(options.config_path)
     status = get_onboarding_status(cfg)
@@ -2071,6 +2440,8 @@ def run_interactive_onboard(options: OnboardOptions) -> PersistResult:
 
     if not _is_tty():
         return _print_noninteractive_hint(cfg, options.config_path)
+
+    _ensure_config_dir_writable(options.config_path)
 
     import questionary as _qmod
     questionary = _styled(_qmod)
@@ -2119,6 +2490,7 @@ def run_interactive_onboard(options: OnboardOptions) -> PersistResult:
                     questionary,
                     cfg,
                     requested_mode=options.router_mode,
+                    config_path=options.config_path,
                 )
                 persist = persist_config(
                     cfg_after_provider,
@@ -2145,19 +2517,13 @@ def run_interactive_onboard(options: OnboardOptions) -> PersistResult:
         if completed_imported is not None:
             cfg_after_provider = completed_imported
             if _imported_provider_router_supported(cfg_after_provider) and options.router_mode:
-                router_payload = _ask_router_fields(
+                cfg_after_provider = _apply_router_section(
                     questionary,
                     cfg_after_provider,
                     provider_id=_provider_id_from_config(cfg_after_provider),
                     requested_mode=options.router_mode,
+                    config_path=options.config_path,
                 )
-                router_res = upsert_router(
-                    cfg_after_provider,
-                    mode=router_payload["mode"],
-                    default_tier=router_payload.get("defaultTier"),
-                    tiers=router_payload.get("tiers"),
-                )
-                cfg_after_provider = router_res.config
         else:
             if migration_result is not None and not status.llm_configured:
                 console.print(
@@ -2167,7 +2533,7 @@ def run_interactive_onboard(options: OnboardOptions) -> PersistResult:
                     )
                 )
             spec, provider_id = _ask_provider_choice(questionary, options)
-            answers = _ask_provider_fields(questionary, spec, options)
+            answers = _ask_provider_fields(questionary, spec, options, config=cfg)
             res = upsert_llm_provider(
                 cfg,
                 provider_id=provider_id,
@@ -2179,19 +2545,13 @@ def run_interactive_onboard(options: OnboardOptions) -> PersistResult:
             )
             cfg_after_provider = res.config
             if options.router_mode:
-                router_payload = _ask_router_fields(
+                cfg_after_provider = _apply_router_section(
                     questionary,
                     cfg_after_provider,
                     provider_id=provider_id,
                     requested_mode=options.router_mode,
+                    config_path=options.config_path,
                 )
-                router_res = upsert_router(
-                    cfg_after_provider,
-                    mode=router_payload["mode"],
-                    default_tier=router_payload.get("defaultTier"),
-                    tiers=router_payload.get("tiers"),
-                )
-                cfg_after_provider = router_res.config
         persist = persist_config(
             cfg_after_provider,
             path=options.config_path,
@@ -2376,10 +2736,13 @@ def run_interactive_channel_add(
     questionary = _styled(_qmod)
 
     if type_name is None:
-        type_name = questionary.select(
-            "Channel type",
-            choices=[s.type for s in list_channel_setup_specs()],
-        ).ask()
+        type_name = _ask_or_cancel(
+            questionary.select(
+                "Channel type",
+                choices=[s.type for s in list_channel_setup_specs()],
+            ),
+            section="channels",
+        )
     spec = get_channel_setup_spec(type_name)
     _print_channel_intro(spec)
     answers = _ask_channel_fields(questionary, spec, type_name=type_name)
@@ -2418,10 +2781,13 @@ def run_interactive_channel_edit(
         )
 
     if name is None:
-        name = questionary.select(
-            "Channel to edit",
-            choices=[e["name"] for e in existing_entries],
-        ).ask()
+        name = _ask_or_cancel(
+            questionary.select(
+                "Channel to edit",
+                choices=[e["name"] for e in existing_entries],
+            ),
+            section="channels",
+        )
     target_entry = next(e for e in existing_entries if e["name"] == name)
     type_name = target_entry["type"]
     spec = get_channel_setup_spec(type_name)
@@ -2454,50 +2820,65 @@ def run_interactive_configure(
     import questionary as _qmod
     questionary = _styled(_qmod)
 
-    section = section or questionary.select(
-        "Section",
-        choices=[
-            "provider",
-            "router",
-            "ensemble",
-            "channels",
-            "search",
-            "image-generation",
-            "memory-embedding",
-        ],
-    ).ask()
+    section = section or _ask_or_cancel(
+        questionary.select(
+            "Section",
+            choices=[
+                "provider",
+                "router",
+                "ensemble",
+                "channels",
+                "search",
+                "image-generation",
+                "memory-embedding",
+            ],
+        ),
+        section="configure",
+    )
     if section in {"provider", "providers"}:
+        # A scoped provider re-run: swapping a key must not re-trigger the
+        # legacy-migration pre-step or the optional capability prompts the
+        # full first-run wizard walks through.
         return run_interactive_onboard(
             OnboardOptions(
                 skip_channels=True,
                 skip_search=True,
+                skip_image_generation=True,
+                skip_migration=True,
                 config_path=config_path,
             )
         )
     if section == "router":
         return run_interactive_router_configure(config_path=config_path)
-    if section in {"ensemble", "llm-ensemble", "llm_ensemble"}:
+    if section in ENSEMBLE_SECTION_ALIASES:
         return run_interactive_ensemble_configure(config_path=config_path)
     if section in {"channel", "channels"}:
         existing = load_config(config_path).channels.channels
         if existing:
-            mode = questionary.select(
-                "Channel action",
-                choices=["add", "edit"],
-                default="add",
-            ).ask()
+            mode = _ask_or_cancel(
+                questionary.select(
+                    "Channel action",
+                    choices=["add", "edit"],
+                    default="add",
+                ),
+                section="channels",
+            )
             if mode == "edit":
                 return run_interactive_channel_edit(None, config_path=config_path)
         return run_interactive_channel_add(None, config_path=config_path)
     if section == "search":
         return run_interactive_search_configure(config_path=config_path)
-    if section in {"image-generation", "image_generation"}:
+    # The alias sets are shared with the setup engine and the CLI help, so
+    # every advertised spelling (including the short "image"/"memory"
+    # aliases) reaches the wizard instead of the unsupported-section notice.
+    if section in IMAGE_GENERATION_SECTION_ALIASES:
         return run_interactive_image_generation_configure(config_path=config_path)
-    if section in {"memory-embedding", "memory_embedding"}:
+    if section in MEMORY_EMBEDDING_SECTION_ALIASES:
         return run_interactive_memory_embedding_configure(config_path=config_path)
+    fallback_path, _source = resolve_config_path(config_path)
     console.print(
         f"[{ACCENT_DIM}]section[/] [{ACCENT_SOFT}]{markup_escape(repr(section))}[/]"
         " [dim]not yet supported in the wizard · edit "
-        "~/.opensquilla/config.toml directly[/dim]"
+        f"{markup_escape(str(fallback_path))} directly[/dim]"
     )
     return None

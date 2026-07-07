@@ -96,9 +96,14 @@ def test_interactive_provider_choice_offers_all_runtime_supported_providers():
     assert any("(experimental)" in choice for choice in captured["choices"])
 
 
-def test_interactive_router_supported_provider_does_not_prompt_for_model():
+def test_interactive_router_supported_provider_does_not_prompt_for_model(monkeypatch):
+    from opensquilla.onboarding import flow
     from opensquilla.onboarding.flow import OnboardOptions, _ask_provider_fields
     from opensquilla.onboarding.provider_specs import get_provider_setup_spec
+
+    # The router-supported pre-save probe is exercised in
+    # test_flow_provider_verify.py; here it degrades silently (offline).
+    monkeypatch.setattr(flow, "_run_provider_probe", lambda **_kw: None)
 
     class _Questionary:
         def text(self, message: str, **_kwargs):
@@ -117,10 +122,12 @@ def test_interactive_router_supported_provider_does_not_prompt_for_model():
 
 
 def test_interactive_provider_fields_default_to_pasted_api_key(monkeypatch):
+    from opensquilla.onboarding import flow
     from opensquilla.onboarding.flow import OnboardOptions, _ask_provider_fields
     from opensquilla.onboarding.provider_specs import get_provider_setup_spec
 
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(flow, "_run_provider_probe", lambda **_kw: None)
 
     class _Answer:
         def __init__(self, value):
@@ -164,10 +171,12 @@ def test_interactive_provider_fields_default_to_pasted_api_key(monkeypatch):
 
 
 def test_interactive_provider_fields_explains_detected_env_key(monkeypatch):
+    from opensquilla.onboarding import flow
     from opensquilla.onboarding.flow import OnboardOptions, _ask_provider_fields
     from opensquilla.onboarding.provider_specs import get_provider_setup_spec
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-from-env")
+    monkeypatch.setattr(flow, "_run_provider_probe", lambda **_kw: None)
 
     class _Answer:
         def __init__(self, value):
@@ -202,10 +211,12 @@ def test_interactive_provider_fields_explains_detected_env_key(monkeypatch):
 
 
 def test_interactive_provider_fields_requires_pasted_api_key(monkeypatch):
+    from opensquilla.onboarding import flow
     from opensquilla.onboarding.flow import OnboardOptions, _ask_provider_fields
     from opensquilla.onboarding.provider_specs import get_provider_setup_spec
 
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(flow, "_run_provider_probe", lambda **_kw: None)
 
     class _Answer:
         def __init__(self, value):
@@ -239,10 +250,12 @@ def test_interactive_provider_fields_requires_pasted_api_key(monkeypatch):
 
 
 def test_interactive_provider_fields_rejects_terminal_paste_escape(monkeypatch):
+    from opensquilla.onboarding import flow
     from opensquilla.onboarding.flow import OnboardOptions, _ask_provider_fields
     from opensquilla.onboarding.provider_specs import get_provider_setup_spec
 
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(flow, "_run_provider_probe", lambda **_kw: None)
 
     class _Answer:
         def __init__(self, value):
@@ -288,6 +301,7 @@ def test_interactive_onboard_prompts_router_defaults_before_persist(tmp_path, mo
     monkeypatch.setattr(flow, "_is_tty", lambda: True)
     monkeypatch.setattr(flow, "_wait_for_setup_start", lambda: calls.append("start gate"))
     monkeypatch.setattr(flow, "detect_default_sources", lambda: [])
+    monkeypatch.setattr(flow, "_run_provider_probe", lambda **_kw: None)
 
     calls: list[str] = []
 
@@ -347,11 +361,13 @@ def test_interactive_onboard_prompts_router_defaults_before_persist(tmp_path, mo
     assert calls[0] == "start gate"
     assert calls[1] == "LLM provider"
     assert calls.index("Router mode") < calls.index("Configure a messaging channel now?")
-    data = target.read_text()
-    assert 'api_key = ""' in data
-    assert 'api_key_env = "OPENROUTER_API_KEY"' in data
-    assert 'default_tier = "c2"' in data
-    assert 'model = "z-ai/glm-5.2"' in data
+    # Persistence is sparse (default-equal values may be omitted from the
+    # TOML), so pin the reloaded semantic state rather than raw file lines.
+    saved = flow.load_config(target)
+    assert saved.llm.api_key == ""
+    assert saved.llm.api_key_env == "OPENROUTER_API_KEY"
+    assert saved.squilla_router.default_tier == "c2"
+    assert saved.llm.model == "z-ai/glm-5.2"
 
 
 def test_interactive_onboard_migration_defaults_to_all_sources_and_keeps_imported_provider(
@@ -494,12 +510,15 @@ def test_interactive_onboard_migration_defaults_to_all_sources_and_keeps_importe
     assert "LLM provider" not in calls
     assert "Router mode" in calls
     data = tomllib.loads(target.read_text())
-    assert data["llm"]["provider"] == "openrouter"
-    assert data["llm"]["api_key_env"] == "OPENROUTER_API_KEY"
-    assert data["llm"]["model"] == "deepseek/deepseek-v4-pro"
-    assert data["squilla_router"]["enabled"] is True
-    assert data["squilla_router"]["tier_profile"] == "openrouter"
-    assert "api_key" not in data["llm"]
+    # Sparse persistence may omit default-equal keys from the raw TOML, so
+    # the enabled/provider pins go through the reloaded semantic state.
+    saved = flow.load_config(target)
+    assert saved.llm.provider == "openrouter"
+    assert saved.llm.api_key_env == "OPENROUTER_API_KEY"
+    assert saved.llm.model == "deepseek/deepseek-v4-pro"
+    assert saved.squilla_router.enabled is True
+    assert saved.squilla_router.tier_profile == "openrouter"
+    assert "api_key" not in data.get("llm", {})
 
 
 def test_interactive_onboard_imported_provider_prefers_inline_key_over_env(
@@ -637,6 +656,7 @@ def test_interactive_onboard_imported_provider_finalize_error_continues_setup(
         "_use_imported_provider_credentials_with_router_defaults",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad imported provider")),
     )
+    monkeypatch.setattr(flow, "_run_provider_probe", lambda **_kw: None)
 
     calls: list[str] = []
 
@@ -840,6 +860,7 @@ def test_interactive_onboard_migration_preview_failure_continues_provider_setup(
     monkeypatch.setattr(flow, "_wait_for_setup_start", lambda: calls.append("start gate"))
     detected = [flow.DetectedMigrationSource("openclaw", tmp_path / ".openclaw")]
     monkeypatch.setattr(flow, "detect_default_sources", lambda: detected)
+    monkeypatch.setattr(flow, "_run_provider_probe", lambda **_kw: None)
 
     calls: list[str] = []
     batches: list[tuple[tuple[str, ...], bool]] = []
@@ -912,9 +933,10 @@ def test_interactive_onboard_migration_preview_failure_continues_provider_setup(
     assert batches == [(("openclaw",), False)]
     assert "Apply this migration now?" not in calls
     assert "LLM provider" in calls
-    data = target.read_text()
-    assert 'provider = "openrouter"' in data
-    assert 'api_key_env = "OPENROUTER_API_KEY"' in data
+    # Sparse persistence may omit default-equal keys; pin the reloaded state.
+    saved = flow.load_config(target)
+    assert saved.llm.provider == "openrouter"
+    assert saved.llm.api_key_env == "OPENROUTER_API_KEY"
 
 
 def test_interactive_onboard_migration_prompts_for_missing_imported_provider_key(
@@ -1043,6 +1065,7 @@ def test_interactive_onboard_can_enable_image_generation(tmp_path, monkeypatch):
     monkeypatch.setattr(flow, "_is_tty", lambda: True)
     monkeypatch.setattr(flow, "_wait_for_setup_start", lambda: None)
     monkeypatch.setattr(flow, "detect_default_sources", lambda: [])
+    monkeypatch.setattr(flow, "_run_provider_probe", lambda **_kw: None)
 
     calls: list[str] = []
 
@@ -1220,7 +1243,6 @@ def test_onboard_if_needed_core_ready_repairs_memory_embedding_without_provider_
 
 def test_interactive_configure_image_generation_persists(tmp_path, monkeypatch):
     import sys
-    import tomllib
     import types
 
     from opensquilla.onboarding import flow
@@ -1277,9 +1299,10 @@ def test_interactive_configure_image_generation_persists(tmp_path, monkeypatch):
         "Image base URL",
         "Image generation enabled?",
     ]
-    data = tomllib.loads(target.read_text())
-    assert data["image_generation"]["enabled"] is True
-    assert data["image_generation"]["primary"] == "openai/gpt-image-1"
+    # Sparse persistence may omit default-equal keys; pin the reloaded state.
+    saved = flow.load_config(target)
+    assert saved.image_generation.enabled is True
+    assert saved.image_generation.primary == "openai/gpt-image-1"
 
 
 def test_interactive_configure_image_generation_uses_explicit_config_path(
@@ -1287,7 +1310,6 @@ def test_interactive_configure_image_generation_uses_explicit_config_path(
     monkeypatch,
 ):
     import sys
-    import tomllib
     import types
 
     from opensquilla.onboarding import flow
@@ -1333,9 +1355,10 @@ def test_interactive_configure_image_generation_uses_explicit_config_path(
 
     flow.run_interactive_configure("image-generation", config_path=target)
 
-    data = tomllib.loads(target.read_text())
-    assert data["image_generation"]["enabled"] is True
-    assert data["image_generation"]["providers"]["openai"]["api_key_env"] == "OPENAI_API_KEY"
+    # Sparse persistence may omit default-equal keys; pin the reloaded state.
+    saved = flow.load_config(target)
+    assert saved.image_generation.enabled is True
+    assert saved.image_generation.providers.openai.api_key_env == "OPENAI_API_KEY"
     assert not default_target.exists()
 
 
@@ -1882,17 +1905,15 @@ def test_noninteractive_provider_configure_writes_config(tmp_path, monkeypatch):
     assert "openrouter" in target.read_text()
 
 
-def test_noninteractive_channel_add_writes_config(tmp_path, monkeypatch):
-    target = tmp_path / "c.toml"
-    monkeypatch.setenv("OPENSQUILLA_GATEWAY_CONFIG_PATH", str(target))
-    from opensquilla.onboarding.flow import run_noninteractive_channel_add
+def test_flow_module_exposes_no_engine_bypassing_noninteractive_writers():
+    """Headless channel/search writes go through the CLI's SetupEngine path;
+    the old module-level helpers persisted config while bypassing the
+    engine's restart/warning accumulation and must stay deleted."""
 
-    result = run_noninteractive_channel_add(
-        "slack",
-        {"name": "w", "token": "x", "signing_secret": "ss"},
-    )
-    assert result.path == target
-    assert "slack" in target.read_text()
+    from opensquilla.onboarding import flow
+
+    assert not hasattr(flow, "run_noninteractive_channel_add")
+    assert not hasattr(flow, "run_noninteractive_search_configure")
 
 
 def test_interactive_configure_search_uses_explicit_config_path(tmp_path, monkeypatch):
@@ -1945,7 +1966,10 @@ def test_interactive_configure_search_uses_explicit_config_path(tmp_path, monkey
     flow.run_interactive_configure("search", config_path=target)
 
     data = tomllib.loads(target.read_text())
-    assert data["search_provider"] == "duckduckgo"
+    # Sparse persistence may omit default-equal keys (duckduckgo is the
+    # default provider); pin the reloaded semantic state instead.
+    saved = flow.load_config(target)
+    assert saved.search_provider == "duckduckgo"
     assert data["search_max_results"] == 7
     assert not default_target.exists()
 
@@ -2143,3 +2167,195 @@ def test_interactive_configure_without_tty_does_not_create_config(
     assert "Headless provider:" not in out
     assert "Check status:" in out
     assert not target.exists()
+
+
+def test_interactive_configure_provider_scopes_out_migration_and_optional_sections(
+    tmp_path,
+    monkeypatch,
+):
+    """``onboard configure provider`` is a scoped key swap: it must not
+    re-trigger the legacy-migration pre-step or the optional image-generation
+    prompt that the full first-run wizard walks through."""
+
+    from opensquilla.onboarding import flow
+    from opensquilla.onboarding.config_store import PersistResult
+
+    target = tmp_path / "custom.toml"
+    seen = {}
+    monkeypatch.setattr(flow, "_is_tty", lambda: True)
+
+    def fake_run_interactive_onboard(options):
+        seen["options"] = options
+        return PersistResult(
+            path=target,
+            backup_path=None,
+            restart_required=False,
+            warnings=[],
+        )
+
+    monkeypatch.setattr(flow, "run_interactive_onboard", fake_run_interactive_onboard)
+
+    result = flow.run_interactive_configure("provider", config_path=target)
+
+    assert result is not None
+    options = seen["options"]
+    assert options.skip_migration is True
+    assert options.skip_image_generation is True
+    assert options.skip_channels is True
+    assert options.skip_search is True
+    assert options.config_path == target
+
+
+def test_interactive_configure_dispatches_short_image_and_memory_aliases(
+    tmp_path,
+    monkeypatch,
+):
+    """The CLI help advertises ``configure image`` / ``configure memory``;
+    the wizard dispatch must consume the setup engine's alias sets instead
+    of a hand-copied subset that dropped the short spellings and answered
+    "not yet supported"."""
+
+    from opensquilla.onboarding import flow
+    from opensquilla.onboarding.config_store import PersistResult
+
+    target = tmp_path / "custom.toml"
+    dispatched: list[str] = []
+    monkeypatch.setattr(flow, "_is_tty", lambda: True)
+
+    def _fake_runner(name):
+        def runner(config_path=None):
+            dispatched.append(name)
+            assert config_path == target
+            return PersistResult(
+                path=target,
+                backup_path=None,
+                restart_required=False,
+                warnings=[],
+            )
+
+        return runner
+
+    monkeypatch.setattr(
+        flow,
+        "run_interactive_image_generation_configure",
+        _fake_runner("image-generation"),
+    )
+    monkeypatch.setattr(
+        flow,
+        "run_interactive_memory_embedding_configure",
+        _fake_runner("memory-embedding"),
+    )
+
+    assert flow.run_interactive_configure("image", config_path=target) is not None
+    assert flow.run_interactive_configure("memory", config_path=target) is not None
+    assert dispatched == ["image-generation", "memory-embedding"]
+
+
+class _RecordingConsole:
+    def __init__(self):
+        self.messages: list[str] = []
+
+    def print(self, message="", *_a, **_kw):
+        self.messages.append(str(message))
+
+    def joined(self) -> str:
+        return "\n".join(self.messages)
+
+
+def test_interactive_configure_unknown_section_names_explicit_config_path(
+    tmp_path,
+    monkeypatch,
+):
+    """The unsupported-section notice must name the config file this run
+    would actually edit (the explicit ``--config`` path here), not a
+    hardcoded ``~/.opensquilla/config.toml``."""
+
+    from opensquilla.onboarding import flow
+
+    target = tmp_path / "custom.toml"
+    recorder = _RecordingConsole()
+    monkeypatch.setattr(flow, "console", recorder)
+    monkeypatch.setattr(flow, "_is_tty", lambda: True)
+
+    result = flow.run_interactive_configure(
+        "definitely-not-a-section", config_path=target
+    )
+
+    assert result is None
+    joined = recorder.joined()
+    assert str(target) in joined
+    assert "~/.opensquilla/config.toml" not in joined
+
+
+def test_interactive_configure_unknown_section_honours_env_config_path(
+    tmp_path,
+    monkeypatch,
+):
+    from opensquilla.onboarding import flow
+
+    target = tmp_path / "env-config.toml"
+    monkeypatch.setenv("OPENSQUILLA_GATEWAY_CONFIG_PATH", str(target))
+    recorder = _RecordingConsole()
+    monkeypatch.setattr(flow, "console", recorder)
+    monkeypatch.setattr(flow, "_is_tty", lambda: True)
+
+    result = flow.run_interactive_configure("definitely-not-a-section")
+
+    assert result is None
+    joined = recorder.joined()
+    assert str(target) in joined
+    assert "~/.opensquilla/config.toml" not in joined
+
+
+def test_interactive_memory_embedding_configure_reports_mutation_restart_required(
+    tmp_path,
+    monkeypatch,
+):
+    """The embedding mutation reports ``restart_required`` when the setup
+    actually changed (embedding edits only take effect after a full gateway
+    restart); the interactive runner used to hardcode ``False`` over it."""
+
+    import sys
+    import types
+
+    from opensquilla.onboarding import flow
+
+    target = tmp_path / "c.toml"
+    monkeypatch.setenv("OPENSQUILLA_GATEWAY_CONFIG_PATH", str(target))
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-memory-env")
+    monkeypatch.setattr(flow, "_is_tty", lambda: True)
+
+    class _Answer:
+        def __init__(self, value):
+            self.value = value
+
+        def ask(self):
+            return self.value
+
+    class _Questionary(types.SimpleNamespace):
+        def select(self, message: str, **kwargs):
+            if message == "Memory embedding provider":
+                return _Answer("openai (OpenAI)")
+            if message == "Memory API key source":
+                return _Answer("Use environment variable OPENAI_API_KEY (detected)")
+            raise AssertionError(f"unexpected select prompt: {message}")
+
+        def text(self, message: str, **kwargs):
+            if message in {"Memory embedding model", "Memory embedding base URL"}:
+                return _Answer(kwargs.get("default"))
+            raise AssertionError(f"unexpected text prompt: {message}")
+
+        def password(self, message: str, **_kwargs):
+            raise AssertionError(f"unexpected password prompt: {message}")
+
+        def confirm(self, message: str, **_kwargs):
+            raise AssertionError(f"unexpected confirm prompt: {message}")
+
+        def checkbox(self, message: str, **_kwargs):
+            raise AssertionError(f"unexpected checkbox prompt: {message}")
+
+    monkeypatch.setitem(sys.modules, "questionary", _Questionary())
+
+    result = flow.run_interactive_memory_embedding_configure(config_path=target)
+
+    assert result.restart_required is True
