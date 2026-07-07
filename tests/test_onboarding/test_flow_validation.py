@@ -453,3 +453,114 @@ def test_free_text_model_prompt_cancel_raises_user_cancelled():
     with pytest.raises(UserCancelledError) as exc_info:
         flow._prompt_free_text_model(_Questionary())
     assert exc_info.value.section == "provider"
+
+
+# ---------------------------------------------------------------------------
+# Wizard numeric channel fields share the headless --field coercer (F32).
+# ---------------------------------------------------------------------------
+
+
+def test_channel_int_field_blank_keeps_the_displayed_default():
+    """Clearing the pre-filled default must keep it — the wizard twin of the
+    headless contract where omitting --field keeps the stored/spec value.
+    The old hand-rolled coercion silently turned a blank answer into 0."""
+
+    field = ChannelSetupField(
+        name="poll_timeout_s",
+        label="Polling timeout (s)",
+        field_type="int",
+        required=False,
+        default=30,
+    )
+
+    class _Questionary:
+        def text(self, message: str, **kwargs: Any):
+            return _ValidatedPrompt([""], kwargs.get("validate"))
+
+    assert flow._ask_channel_field(_Questionary(), field, field.default) == 30
+
+
+def test_channel_int_field_agrees_with_headless_coercion_semantics():
+    """The wizard validator and the headless --field parser must accept and
+    reject exactly the same spellings for the same spec field."""
+
+    from opensquilla.cli.channel_fields import coerce_channel_field_value
+
+    field = ChannelSetupField(
+        name="intents",
+        label="Intents bitmask",
+        field_type="int",
+        required=False,
+        default=0,
+    )
+    validate = flow._channel_number_validator(field)
+
+    import typer
+
+    for raw in ("5", "-3", " 12 "):
+        assert validate(raw) is True
+        expected = coerce_channel_field_value("int", raw.strip(), field_name="intents")
+        value, error = flow._coerce_channel_prompt_value(field, raw.strip())
+        assert error is None
+        assert value == expected
+
+    for raw in ("abc", "7.5", "0x10"):
+        wizard_verdict = validate(raw)
+        assert wizard_verdict is not True
+        with pytest.raises(typer.BadParameter) as exc_info:
+            coerce_channel_field_value("int", raw, field_name="intents")
+        # Same wording too, with the flag swapped for the field label the
+        # wizard user actually sees.
+        assert wizard_verdict == str(exc_info.value.message).replace(
+            "--field intents", "Intents bitmask"
+        )
+
+
+def test_channel_int_field_error_names_the_label_not_the_flag():
+    """The wizard user never typed --field: the re-prompt message must carry
+    the field label while keeping the shared coercer's wording."""
+
+    field = ChannelSetupField(
+        name="intents",
+        label="Intents bitmask",
+        field_type="int",
+        required=False,
+        default=0,
+    )
+    verdict = flow._channel_number_validator(field)("banana")
+
+    assert isinstance(verdict, str)
+    assert "Intents bitmask" in verdict
+    assert "--field" not in verdict
+    assert "expects an integer" in verdict
+
+
+def test_channel_float_field_agrees_with_headless_coercion_semantics():
+    import typer
+
+    from opensquilla.cli.channel_fields import coerce_channel_field_value
+
+    field = ChannelSetupField(
+        name="poll_idle_sleep_s",
+        label="Poll idle sleep (s)",
+        field_type="float",
+        required=False,
+        default=1.5,
+    )
+
+    class _Questionary:
+        def text(self, message: str, **kwargs: Any):
+            return _ValidatedPrompt(["not-a-number", "2.5"], kwargs.get("validate"))
+
+    value = flow._ask_channel_field(_Questionary(), field, field.default)
+
+    assert value == coerce_channel_field_value("float", "2.5", field_name=field.name)
+    assert isinstance(value, float)
+
+    # Rejection wording stays in lockstep with the headless parser as well.
+    wizard_verdict = flow._channel_number_validator(field)("not-a-number")
+    with pytest.raises(typer.BadParameter) as exc_info:
+        coerce_channel_field_value("float", "not-a-number", field_name=field.name)
+    assert wizard_verdict == str(exc_info.value.message).replace(
+        f"--field {field.name}", field.label
+    )

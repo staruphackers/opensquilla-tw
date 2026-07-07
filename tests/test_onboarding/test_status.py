@@ -1,5 +1,7 @@
 """Tests for OnboardingStatus derivation."""
 
+from __future__ import annotations
+
 import pytest
 
 from opensquilla.gateway.config import GatewayConfig, LlmProviderConfig

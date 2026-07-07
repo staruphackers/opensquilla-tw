@@ -233,3 +233,303 @@ def test_channel_edit_rename_with_blank_secret_keeps_token(tmp_path, monkeypatch
     }
     assert "t2" in entries
     assert entries["t2"].token == "tg-stored-token"
+
+
+# ---------------------------------------------------------------------------
+# Provider re-save keeps the stored model (router-supported and direct).
+# ---------------------------------------------------------------------------
+
+
+def _stored_llm_config(provider: str, model: str) -> Any:
+    from opensquilla.gateway.config import GatewayConfig
+
+    return GatewayConfig(llm={"provider": provider, "model": model, "api_key": "sk-old"})
+
+
+def test_same_provider_resave_passes_keep_current_model_not_reset_sentinel(
+    monkeypatch,
+):
+    """A same-provider re-save of a router-supported provider must send
+    ``model=None`` (the mutation layer's keep-current) — the legacy ``""``
+    sentinel means "derive the tier default", which silently swapped a
+    hand-set ``llm.model`` on an Enter-through key rotation."""
+    from opensquilla.onboarding.provider_specs import get_provider_setup_spec
+
+    monkeypatch.setattr(flow, "_run_provider_probe", lambda **_kw: None)
+
+    class _Questionary:
+        def text(self, message, **_kwargs):
+            raise AssertionError(f"unexpected text prompt: {message}")
+
+    answers = flow._ask_provider_fields(
+        _Questionary(),
+        get_provider_setup_spec("openrouter"),
+        flow.OnboardOptions(api_key_env="OPENROUTER_API_KEY"),
+        config=_stored_llm_config("openrouter", "corp/pinned-model"),
+    )
+
+    assert answers["model"] is None, (
+        "same-provider re-save must engage keep-current, not the reset sentinel"
+    )
+
+
+def test_provider_switch_keeps_the_legacy_derive_default_sentinel(monkeypatch):
+    """Switching providers has no stored model to keep: the legacy ``""``
+    (derive the provider's default model) must stay pinned."""
+    from opensquilla.onboarding.provider_specs import get_provider_setup_spec
+
+    monkeypatch.setattr(flow, "_run_provider_probe", lambda **_kw: None)
+
+    class _Questionary:
+        def text(self, message, **_kwargs):
+            raise AssertionError(f"unexpected text prompt: {message}")
+
+    answers = flow._ask_provider_fields(
+        _Questionary(),
+        get_provider_setup_spec("openrouter"),
+        flow.OnboardOptions(api_key_env="OPENROUTER_API_KEY"),
+        config=_stored_llm_config("groq", "some/other-model"),
+    )
+
+    assert answers["model"] == ""
+
+
+def test_same_provider_enter_through_resave_keeps_stored_model_end_to_end(
+    monkeypatch,
+):
+    """The mutation layer really keeps the stored model for the wizard's
+    keep-current answer — the ``""`` regression resets it to the derived
+    tier default."""
+    from opensquilla.onboarding.mutations import upsert_llm_provider
+    from opensquilla.onboarding.provider_specs import get_provider_setup_spec
+
+    monkeypatch.setattr(flow, "_run_provider_probe", lambda **_kw: None)
+    stored = _stored_llm_config("openrouter", "corp/pinned-model")
+
+    class _Questionary:
+        def text(self, message, **_kwargs):
+            raise AssertionError(f"unexpected text prompt: {message}")
+
+    answers = flow._ask_provider_fields(
+        _Questionary(),
+        get_provider_setup_spec("openrouter"),
+        flow.OnboardOptions(api_key_env="OPENROUTER_API_KEY"),
+        config=stored,
+    )
+    res = upsert_llm_provider(
+        stored,
+        provider_id="openrouter",
+        model=answers["model"],
+        api_key=answers.get("api_key", ""),
+        api_key_env=answers.get("api_key_env", ""),
+        base_url=answers.get("base_url", ""),
+        proxy=answers.get("proxy", ""),
+    )
+
+    assert res.config.llm.model == "corp/pinned-model"
+
+
+def test_direct_provider_free_text_model_prompt_seeds_the_stored_model(
+    monkeypatch,
+):
+    """On a same-provider re-run the free-text "Model id" prompt must default
+    to the stored model so plain Enter keeps it instead of retyping it."""
+    from opensquilla.onboarding.provider_specs import get_provider_setup_spec
+
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.setattr(flow, "_run_provider_probe", lambda **_kw: None)
+    monkeypatch.setattr(flow, "_run_provider_discovery", lambda **_kw: None)
+
+    q = _EnterThroughQuestionary(password_value="sk-rotated")
+    answers = flow._ask_provider_fields(
+        q,
+        get_provider_setup_spec("groq"),
+        flow.OnboardOptions(),
+        config=_stored_llm_config("groq", "stored-direct-model"),
+    )
+
+    assert q.defaults["Model id"] == "stored-direct-model"
+    assert answers["model"] == "stored-direct-model"
+
+
+def test_direct_provider_discovery_select_preselects_the_stored_model(
+    monkeypatch,
+):
+    """When live discovery upgrades the prompt to a select, the stored model
+    must be pre-selected — defaulting to the first discovered row switches
+    models on an Enter-through re-save."""
+    from opensquilla.onboarding.probe import ProviderModelsDiscoverResult
+    from opensquilla.onboarding.provider_specs import get_provider_setup_spec
+
+    monkeypatch.setattr(flow, "_run_provider_probe", lambda **_kw: None)
+    monkeypatch.setattr(
+        flow,
+        "_run_provider_discovery",
+        lambda **_kw: ProviderModelsDiscoverResult(
+            ok=True,
+            provider_id="groq",
+            source="live",
+            models=[
+                {"id": "llama-first", "contextWindow": 0},
+                {"id": "stored-direct-model", "contextWindow": 0},
+            ],
+        ),
+    )
+
+    captured: dict[str, Any] = {}
+
+    class _Questionary:
+        def select(self, message, **kwargs):
+            assert message == "Model"
+            captured["default"] = kwargs.get("default")
+            return _Answer(kwargs.get("default"))
+
+        def text(self, message, **_kwargs):
+            raise AssertionError(f"unexpected text prompt: {message}")
+
+    answers = flow._ask_provider_fields(
+        _Questionary(),
+        get_provider_setup_spec("groq"),
+        flow.OnboardOptions(api_key="sk-live"),
+        config=_stored_llm_config("groq", "stored-direct-model"),
+    )
+
+    assert captured["default"] == "stored-direct-model"
+    assert answers["model"] == "stored-direct-model"
+
+
+# ---------------------------------------------------------------------------
+# Router re-enable keeps a preserved operator-authored ladder.
+# ---------------------------------------------------------------------------
+
+
+_HAND_TIERS = {
+    "c0": {"provider": "openrouter", "model": "hand-c0"},
+    "c1": {"provider": "openrouter", "model": "hand-c1"},
+    "c2": {"provider": "openrouter", "model": "hand-c2"},
+    "c3": {"provider": "openrouter", "model": "hand-c3"},
+}
+
+
+def _config_with_preserved_hand_ladder(*, enabled: bool) -> Any:
+    from opensquilla.gateway.config import GatewayConfig
+
+    return GatewayConfig(
+        llm={"provider": "openrouter", "model": "hand-c1", "api_key": "sk-old"},
+        squilla_router={
+            "enabled": enabled,
+            "tier_profile": None,
+            "tiers": {name: dict(tier) for name, tier in _HAND_TIERS.items()},
+        },
+    )
+
+
+class _RouterEnterThroughQuestionary:
+    def select(self, message, **kwargs):
+        if message == "Router mode":
+            return _Answer("SquillaRouter")
+        if message == "Default text model":
+            return _Answer(kwargs.get("default"))
+        raise AssertionError(f"unexpected select prompt: {message}")
+
+    def confirm(self, message, **kwargs):
+        if message == "Edit router tier models now?":
+            return _Answer(False)
+        raise AssertionError(f"unexpected confirm prompt: {message}")
+
+
+def test_router_reenable_over_preserved_hand_ladder_restores_it(monkeypatch):
+    """Disabling the router preserves an operator-authored inline ladder so a
+    later re-enable can restore it. The wizard's re-enable maps the
+    "SquillaRouter" choice to the custom mode in that state — plain
+    "recommended" would wipe the preserved ladder with the packaged profile,
+    the exact silent reset the preservation exists to prevent."""
+    from opensquilla.onboarding.mutations import upsert_router
+
+    cfg = _config_with_preserved_hand_ladder(enabled=False)
+
+    payload = flow._ask_router_fields(
+        _RouterEnterThroughQuestionary(),
+        cfg,
+        provider_id="openrouter",
+        requested_mode="recommended",
+    )
+
+    assert payload["mode"] == "custom"
+    reenabled = upsert_router(
+        cfg,
+        mode=payload["mode"],
+        default_tier=payload.get("defaultTier"),
+        tiers=payload.get("tiers"),
+    ).config
+    assert reenabled.squilla_router.enabled is True
+    for tier in ("c0", "c1", "c2", "c3"):
+        assert reenabled.squilla_router.tiers[tier]["model"] == f"hand-{tier}"
+
+
+def test_router_enter_through_on_enabled_hand_ladder_keeps_it(monkeypatch):
+    """The hub Router section's Enter-through over an ENABLED hand-edited
+    ladder must not reset it either."""
+    payload = flow._ask_router_fields(
+        _RouterEnterThroughQuestionary(),
+        _config_with_preserved_hand_ladder(enabled=True),
+        provider_id="openrouter",
+        requested_mode="recommended",
+    )
+
+    assert payload["mode"] == "custom"
+
+
+def test_router_explicit_recommended_still_resets_the_ladder(monkeypatch):
+    """An explicit ``--router recommended`` is a deliberate reset request:
+    the hand-customized guard must not override it."""
+    payload = flow._ask_router_fields(
+        _RouterEnterThroughQuestionary(),
+        _config_with_preserved_hand_ladder(enabled=False),
+        provider_id="openrouter",
+        requested_mode="recommended",
+        explicit_mode=True,
+    )
+
+    assert payload["mode"] == "recommended"
+
+
+def test_router_custom_tier_edit_sends_the_full_effective_ladder(monkeypatch):
+    """When the operator edits one tier over a preserved custom ladder, the
+    payload must carry the FULL effective ladder: sending only the edited
+    tier would merge it onto the packaged preset base and wipe the untouched
+    stored tiers."""
+
+    class _Questionary(_RouterEnterThroughQuestionary):
+        def __init__(self) -> None:
+            self._tier_picks = iter(["Route c2", "Done"])
+
+        def select(self, message, **kwargs):
+            if message == "Tier to edit":
+                return _Answer(next(self._tier_picks))
+            return super().select(message, **kwargs)
+
+        def text(self, message, **kwargs):
+            if message == "c2 provider":
+                return _Answer(kwargs.get("default"))
+            if message == "c2 model":
+                return _Answer("edited-c2")
+            raise AssertionError(f"unexpected text prompt: {message}")
+
+        def confirm(self, message, **kwargs):
+            if message == "Edit router tier models now?":
+                return _Answer(True)
+            raise AssertionError(f"unexpected confirm prompt: {message}")
+
+    payload = flow._ask_router_fields(
+        _Questionary(),
+        _config_with_preserved_hand_ladder(enabled=False),
+        provider_id="openrouter",
+        requested_mode="recommended",
+    )
+
+    assert payload["mode"] == "custom"
+    tiers = payload["tiers"]
+    assert tiers["c2"]["model"] == "edited-c2"
+    for untouched in ("c0", "c1", "c3"):
+        assert tiers[untouched]["model"] == f"hand-{untouched}"

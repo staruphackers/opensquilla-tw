@@ -276,10 +276,9 @@ def test_onboard_provider_key_rotation_keeps_base_url_and_proxy(
     tmp_path, monkeypatch
 ):
     # The top-level `onboard --provider` path must honor the same
-    # keep-current contract for endpoint settings. Its `--router` flag
-    # defaults to "recommended" (stable contract), so the model stays
-    # router-governed on this path; `configure provider` pins model
-    # keep-current end to end.
+    # keep-current contract as `configure provider`: an omitted --router
+    # never re-applies a router profile on a configured install, so the
+    # stored model and endpoint settings all survive a key rotation.
     target = tmp_path / "c.toml"
     target.write_text(
         "[llm]\n"
@@ -299,6 +298,7 @@ def test_onboard_provider_key_rotation_keeps_base_url_and_proxy(
 
     assert result.exit_code == 0, result.output
     cfg = load_config(target)
+    assert cfg.llm.model == "custom/model-x"
     assert cfg.llm.base_url == "https://gateway.example.test/v1"
     assert cfg.llm.proxy == "http://127.0.0.1:7890"
     assert cfg.llm.api_key == "sk-new"
@@ -537,10 +537,17 @@ def test_onboard_provider_validation_error_never_echoes_input_value(
     target = tmp_path / "c.toml"
     monkeypatch.setenv("OPENSQUILLA_GATEWAY_CONFIG_PATH", str(target))
 
-    def raising(*_a, **_kw):
-        raise captured
+    class _RaisingEngine:
+        def __init__(self, *_a, **_kw):
+            pass
 
-    monkeypatch.setattr(onboard_cmd, "run_noninteractive_provider_configure", raising)
+        def apply(self, *_a, **_kw):
+            raise captured
+
+        def persist(self, *_a, **_kw):  # pragma: no cover - apply raises first
+            raise AssertionError("persist must not run after a failed apply")
+
+    monkeypatch.setattr(onboard_cmd, "SetupEngine", _RaisingEngine)
 
     result = runner.invoke(
         app,

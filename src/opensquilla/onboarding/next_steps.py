@@ -229,17 +229,33 @@ def _image_generation_provider_id(config: Any) -> str:
     return "openai"
 
 
+def _capability_section_view(status: Any, name: str) -> tuple[str, str, str, bool]:
+    """Resolve one capability section to ``(label, display, value, needs_action)``.
+
+    Single source for the "Capabilities:" summary and the "Fix next:"
+    checklist: both lines print in the same next-steps block from the same
+    status object, so their label and status wording must come from one
+    resolver — a one-sided edit must not make the two lines disagree.
+    """
+    detail = status.section_details.get(name, {})
+    label = str(detail.get("label") or name.replace("_", " ").title())
+    state = status.sections.get(name)
+    value = str(getattr(state, "value", detail.get("status") or ""))
+    needs_action = bool(detail.get("blocking") or detail.get("actionRequired"))
+    if needs_action:
+        display = "Needs action"
+    else:
+        display_value = value or "optional"
+        display = _CAPABILITY_STATUS_DISPLAY.get(
+            display_value, display_value.replace("_", " ").title()
+        )
+    return label, display, value, needs_action
+
+
 def _capabilities_summary(status: Any) -> str:
     parts: list[str] = []
     for name in _CAPABILITY_SECTIONS:
-        detail = status.section_details.get(name, {})
-        label = str(detail.get("label") or name.replace("_", " ").title())
-        if detail.get("blocking") or detail.get("actionRequired"):
-            display = "Needs action"
-        else:
-            state = status.sections.get(name)
-            value = str(getattr(state, "value", detail.get("status") or "optional"))
-            display = _CAPABILITY_STATUS_DISPLAY.get(value, value.replace("_", " ").title())
+        label, display, _value, _needs_action = _capability_section_view(status, name)
         parts.append(f"{label}={display}")
     return " | ".join(parts)
 
@@ -250,25 +266,17 @@ def _capability_fix_lines(status: Any, config_arg: str) -> list[str]:
     Deliberate opt-outs ("Later") are not nagged about; only blocking,
     missing, degraded, or unverifiable capabilities get a line, and each
     names the exact command that fixes it. Audio has no `configure audio`
-    path, so it points at the catalog instead of a command that exits 2.
+    path, so it points at the catalog command recorded once in
+    ``_HEADLESS_SETUP_COMMANDS`` instead of a command that exits 2.
     """
     fix_lines: list[str] = []
     for name in _CAPABILITY_SECTIONS:
-        detail = status.section_details.get(name, {})
-        state = status.sections.get(name)
-        value = str(getattr(state, "value", detail.get("status") or ""))
-        needs_action = bool(detail.get("blocking") or detail.get("actionRequired"))
+        label, display, value, needs_action = _capability_section_view(status, name)
         if not needs_action and value not in {"missing", "degraded", "unknown"}:
             continue
-        label = str(detail.get("label") or name.replace("_", " ").title())
-        display = (
-            "Needs action"
-            if needs_action
-            else _CAPABILITY_STATUS_DISPLAY.get(value, value.replace("_", " ").title())
-        )
         slug = _normalize_headless_section(name)
         if slug == "audio":
-            command = f"opensquilla onboard catalog audio{config_arg}"
+            command = f"{_HEADLESS_SETUP_COMMANDS['audio'][1]}{config_arg}"
         else:
             command = f"opensquilla onboard configure {slug}{config_arg}"
         fix_lines.append(f"  {label} ({display}): {command}")

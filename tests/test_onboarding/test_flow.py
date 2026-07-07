@@ -2223,6 +2223,180 @@ def test_interactive_configure_provider_scopes_out_migration_and_optional_sectio
     assert options.config_path == target
 
 
+def test_scoped_section_run_skips_banner_start_gate_and_trailing_prompts(
+    tmp_path,
+    monkeypatch,
+):
+    """A scoped section entry (``configure provider``, the hub's Provider
+    item) is not a first run: it must not re-print the onboarding banner,
+    must not block on the raw "Press Enter to start setup" ``input()`` gate
+    (where Ctrl+C would escape the hub's cancel handling entirely), and must
+    stop at its own section instead of appending the full walk's trailing
+    action-required prompts."""
+
+    import sys
+    import types
+
+    from opensquilla.onboarding import flow
+
+    target = tmp_path / "c.toml"
+    # Memory embedding needs action: on a FULL walk this appends the
+    # "Configure memory embeddings now?" prompt after the provider save.
+    target.write_text(
+        "[llm]\n"
+        'provider = "openrouter"\n'
+        'model = "dummy/model"\n'
+        'api_key = "sk-dummy"\n'
+        "\n"
+        "[memory.embedding]\n"
+        'provider = "openai"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(flow, "_is_tty", lambda: True)
+    monkeypatch.setattr(flow, "_run_provider_probe", lambda **_kw: None)
+
+    banner_calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        flow,
+        "banner_panel",
+        lambda title, subtitle: banner_calls.append((title, subtitle)) or title,
+    )
+    gate_calls: list[str] = []
+    monkeypatch.setattr(flow, "_wait_for_setup_start", lambda: gate_calls.append("gate"))
+
+    class _Answer:
+        def __init__(self, value):
+            self.value = value
+
+        def ask(self):
+            return self.value
+
+    class _Questionary(types.SimpleNamespace):
+        def select(self, message: str, **kwargs):
+            if message in {"LLM provider", "Router mode", "Default text model"}:
+                choices = list(kwargs.get("choices") or [])
+                return _Answer(kwargs.get("default") or choices[0])
+            if message == "LLM API key source":
+                return _Answer("Paste API key now")
+            raise AssertionError(f"unexpected select prompt: {message}")
+
+        def password(self, message: str, **_kwargs):
+            return _Answer("sk-scoped-rotation")
+
+        def text(self, message: str, **_kwargs):
+            raise AssertionError(f"unexpected text prompt: {message}")
+
+        def confirm(self, message: str, **kwargs):
+            if message == "Edit router tier models now?":
+                return _Answer(False)
+            raise AssertionError(
+                f"a scoped section edit must not prompt: {message}"
+            )
+
+        def checkbox(self, message: str, **_kwargs):
+            raise AssertionError(f"unexpected checkbox prompt: {message}")
+
+    monkeypatch.setitem(sys.modules, "questionary", _Questionary())
+
+    result = flow.run_interactive_configure("provider", config_path=target)
+
+    assert result is not None
+    assert banner_calls == [], "scoped edits must not re-print the first-run banner"
+    assert gate_calls == [], "scoped edits must not block on the Enter start gate"
+    saved = flow.load_config(target)
+    assert saved.llm.api_key == "sk-scoped-rotation"
+
+
+def test_full_walk_folds_optional_section_restart_flag_into_result(
+    tmp_path,
+    monkeypatch,
+):
+    """An optional section's ``restart_required`` (e.g. memory embedding)
+    must reach the CLI's restart guidance: ``_run_optional_section`` used to
+    drop the runner's PersistResult, so the full walk returned only the
+    provider-stage result with ``restart_required=False``."""
+
+    import sys
+    import types
+
+    from opensquilla.onboarding import flow
+    from opensquilla.onboarding.config_store import PersistResult
+
+    target = tmp_path / "c.toml"
+    # Memory embedding action-required after the provider save (remote
+    # provider, no key), llm NOT configured so the walk runs linearly.
+    target.write_text('[memory.embedding]\nprovider = "openai"\n', encoding="utf-8")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(flow, "_is_tty", lambda: True)
+    monkeypatch.setattr(flow, "_wait_for_setup_start", lambda: None)
+    monkeypatch.setattr(flow, "detect_default_sources", lambda: [])
+    monkeypatch.setattr(flow, "_run_provider_probe", lambda **_kw: None)
+
+    embedding_runs: list[object] = []
+
+    def _fake_embedding_runner(*, config_path=None):
+        embedding_runs.append(config_path)
+        return PersistResult(
+            path=target,
+            backup_path=None,
+            restart_required=True,
+            warnings=["w-embedding"],
+        )
+
+    monkeypatch.setattr(
+        flow, "run_interactive_memory_embedding_configure", _fake_embedding_runner
+    )
+
+    class _Answer:
+        def __init__(self, value):
+            self.value = value
+
+        def ask(self):
+            return self.value
+
+    class _Questionary(types.SimpleNamespace):
+        def select(self, message: str, **kwargs):
+            if message in {"LLM provider", "Router mode", "Default text model"}:
+                choices = list(kwargs.get("choices") or [])
+                return _Answer(kwargs.get("default") or choices[0])
+            if message == "LLM API key source":
+                return _Answer("Paste API key now")
+            raise AssertionError(f"unexpected select prompt: {message}")
+
+        def password(self, message: str, **_kwargs):
+            return _Answer("sk-full-walk")
+
+        def text(self, message: str, **_kwargs):
+            raise AssertionError(f"unexpected text prompt: {message}")
+
+        def confirm(self, message: str, **kwargs):
+            if message == "Edit router tier models now?":
+                return _Answer(False)
+            if message in {
+                "Configure a messaging channel now?",
+                "Configure web search now?",
+                "Enable image generation now?",
+            }:
+                return _Answer(False)
+            if message == "Configure memory embeddings now?":
+                return _Answer(True)
+            raise AssertionError(f"unexpected confirm prompt: {message}")
+
+        def checkbox(self, message: str, **_kwargs):
+            raise AssertionError(f"unexpected checkbox prompt: {message}")
+
+    monkeypatch.setitem(sys.modules, "questionary", _Questionary())
+
+    result = flow.run_interactive_onboard(flow.OnboardOptions(config_path=target))
+
+    assert embedding_runs == [target]
+    assert result.restart_required is True, (
+        "the embedding section's restart flag must survive to the CLI boundary"
+    )
+    assert "w-embedding" in result.warnings
+
+
 def test_interactive_configure_dispatches_short_image_and_memory_aliases(
     tmp_path,
     monkeypatch,
@@ -2376,3 +2550,49 @@ def test_interactive_memory_embedding_configure_reports_mutation_restart_require
     result = flow.run_interactive_memory_embedding_configure(config_path=target)
 
     assert result.restart_required is True
+
+
+def test_flow_config_cli_arg_is_powershell_safe_on_windows(monkeypatch):
+    """flow's resume hints must quote --config with the shared platform-aware
+    helper: shlex's '"'"' escape is invalid PowerShell, while next_steps and
+    onboard status already print the PowerShell-quoted form of the same
+    command in the same session."""
+
+    from opensquilla.onboarding import flow, next_steps
+
+    monkeypatch.setattr(next_steps.platform, "system", lambda: "Windows")
+
+    arg = flow._config_cli_arg("C:\\Setup Files\\config.toml")
+
+    assert arg == " --config 'C:\\Setup Files\\config.toml'"
+    assert arg == next_steps._config_cli_arg("C:\\Setup Files\\config.toml")
+
+    quoted = flow._config_cli_arg("C:\\it's.toml")
+    assert quoted == " --config 'C:\\it''s.toml'"
+    assert '\'"\'"\'' not in quoted
+
+
+def test_declared_questionary_floor_supports_use_search_filter():
+    """The provider select passes ``use_search_filter=True`` — a questionary
+    2.1 kwarg that crashes 2.0.x installs at prompt construction with
+    ``TypeError: PromptSession.__init__() got an unexpected keyword argument``.
+    The declared dependency floor must therefore exclude every 2.0.x release
+    the wizard cannot run on (dev/CI lockfiles mask this, downstream installs
+    resolving the floor do not)."""
+    import tomllib
+    from pathlib import Path
+
+    from packaging.requirements import Requirement
+
+    pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    requirement = next(
+        Requirement(dep)
+        for dep in data["project"]["dependencies"]
+        if Requirement(dep).name == "questionary"
+    )
+
+    assert not requirement.specifier.contains("2.0.1"), (
+        "questionary 2.0.x lacks use_search_filter; the floor must be >=2.1"
+    )
+    assert requirement.specifier.contains("2.1.0")

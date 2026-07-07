@@ -591,3 +591,166 @@ def test_wizard_discovery_suppresses_provider_log_noise(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert result is sentinel
     assert "models_http_error" not in captured.out + captured.err
+
+
+def test_quiet_provider_logs_is_a_plain_module_level_contextmanager():
+    """The suppression seam is one directly decorated function, not a factory
+    returning a freshly decorated closure per call: the decorated form keeps
+    the call sites identical while dropping the per-probe indirection."""
+    import inspect
+
+    # ``contextlib.contextmanager`` exposes the generator via ``__wrapped__``;
+    # the old factory shape had no such attribute on the module-level name.
+    wrapped = getattr(flow._quiet_provider_logs, "__wrapped__", None)
+    assert wrapped is not None
+    assert inspect.isgeneratorfunction(wrapped)
+
+    # And it still behaves as a context manager end to end.
+    import structlog
+
+    config_before = dict(structlog.get_config())
+    with flow._quiet_provider_logs():
+        assert dict(structlog.get_config()) != config_before
+    assert dict(structlog.get_config()) == config_before
+
+
+def test_direct_and_router_checks_share_the_probe_and_confirm_helper(monkeypatch):
+    """Both provider checks must run through _probe_and_confirm so a UX fix
+    (wording, retry, redaction) lands on the direct and the router path at
+    once instead of drifting between two copies."""
+    calls: list[str] = []
+    real = flow._probe_and_confirm
+
+    def _tracing(questionary, spec, answers):
+        calls.append(spec.provider_id)
+        return real(questionary, spec, answers)
+
+    monkeypatch.setattr(flow, "_probe_and_confirm", _tracing)
+    monkeypatch.setattr(
+        flow,
+        "_run_provider_probe",
+        lambda **kwargs: ProviderProbeResult(
+            ok=True, provider_id=kwargs["provider_id"], model=kwargs["model"]
+        ),
+    )
+    monkeypatch.setattr(
+        flow,
+        "_run_provider_discovery",
+        lambda **_kw: _live_models({"id": "fake-model-a", "contextWindow": 8192}),
+    )
+    _capture_console(monkeypatch)
+
+    class _Questionary:
+        def select(self, message: str, **kwargs: Any) -> _Answer:
+            assert message == "Model"
+            return _Answer(kwargs["choices"][0])
+
+        def text(self, message: str, **_kwargs: Any) -> _Answer:
+            raise AssertionError(f"unexpected text prompt: {message}")
+
+        def confirm(self, message: str, **_kwargs: Any) -> _Answer:
+            raise AssertionError(f"unexpected confirm prompt: {message}")
+
+    # Direct-provider path.
+    flow._ask_direct_provider_model(
+        _Questionary(), _probing_spec(), {"api_key": "sk-live"}
+    )
+    # Router-provider path.
+    flow._verify_router_provider_connection(
+        _Questionary(),
+        _probing_spec(provider_id="fakerouterprov", router_supported=True),
+        {"api_key": "sk-live"},
+    )
+
+    assert calls == ["fakeprov", "fakerouterprov"]
+
+
+def test_probe_and_confirm_save_anyway_decline_cancels(monkeypatch):
+    _capture_console(monkeypatch)
+    monkeypatch.setattr(
+        flow,
+        "_run_provider_probe",
+        lambda **kwargs: ProviderProbeResult(
+            ok=False,
+            provider_id=kwargs["provider_id"],
+            model=kwargs["model"],
+            failure_kind="auth_invalid",
+            message="Incorrect API key provided",
+        ),
+    )
+
+    class _Questionary:
+        def confirm(self, message: str, **_kwargs: Any) -> _Answer:
+            assert message == "Save anyway?"
+            return _Answer(False)
+
+    with pytest.raises(UserCancelledError) as exc_info:
+        flow._probe_and_confirm(_Questionary(), _probing_spec(), {"api_key": "sk-bad"})
+    assert exc_info.value.section == "provider"
+
+
+def test_probe_keyboard_interrupt_skips_the_check_not_the_wizard(monkeypatch):
+    """Ctrl+C while the live probe waits on a stalled network interrupts the
+    CHECK, not the setup session: ``_run_provider_probe`` must degrade to
+    ``None`` (probe skipped) instead of letting KeyboardInterrupt reach the
+    CLI boundary and discard the operator's typed answers."""
+    from opensquilla.onboarding import probe as probe_module
+
+    output = _capture_console(monkeypatch)
+
+    async def _stalled_probe(**_kwargs: Any) -> Any:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(probe_module, "probe_llm_provider", _stalled_probe)
+
+    result = flow._run_provider_probe(
+        provider_id="openrouter", model="dummy/model", api_key="sk-live"
+    )
+
+    assert result is None
+    assert "connection check skipped" in output.getvalue()
+
+
+def test_discovery_keyboard_interrupt_skips_discovery_not_the_wizard(monkeypatch):
+    from opensquilla.onboarding import probe as probe_module
+
+    output = _capture_console(monkeypatch)
+
+    async def _stalled_discovery(**_kwargs: Any) -> Any:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(probe_module, "discover_provider_models", _stalled_discovery)
+
+    result = flow._run_provider_discovery(provider_id="groq", api_key="sk-live")
+
+    assert result is None
+    assert "model discovery skipped" in output.getvalue()
+
+
+def test_router_check_interrupted_probe_saves_without_save_anyway_prompt(monkeypatch):
+    """An interrupted probe is check-skipped inside _probe_and_confirm: the
+    router-provider verification must continue to the save with no failure
+    panel, no "Save anyway?" prompt, and no exception."""
+    from opensquilla.onboarding import probe as probe_module
+
+    output = _capture_console(monkeypatch)
+
+    async def _stalled_probe(**_kwargs: Any) -> Any:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(probe_module, "probe_llm_provider", _stalled_probe)
+
+    class _Questionary:
+        def confirm(self, message: str, **_kwargs: Any) -> _Answer:
+            raise AssertionError(f"unexpected confirm prompt: {message}")
+
+    flow._verify_router_provider_connection(
+        _Questionary(),
+        _probing_spec(provider_id="fakerouterprov", router_supported=True),
+        {"api_key": "sk-live"},
+    )
+
+    out = output.getvalue()
+    assert "connection check skipped" in out
+    assert "connection verified" not in out
+    assert "Save anyway?" not in out

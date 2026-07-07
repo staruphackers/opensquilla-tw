@@ -14,7 +14,6 @@ support, so a save rewrites the file without them (pre-existing limitation).
 from __future__ import annotations
 
 import copy
-import logging
 import os
 import tempfile
 import types
@@ -22,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Union, get_args, get_origin
 
+import structlog
 import tomli_w
 from pydantic import BaseModel
 
@@ -38,7 +38,7 @@ from opensquilla.gateway.config_migration import (
 )
 from opensquilla.paths import default_opensquilla_home
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger(__name__)
 
 # Persist baselines are INSTANCE-scoped: load_config (and persist_config)
 # snapshot the model's TOML dump onto the GatewayConfig object itself
@@ -167,7 +167,7 @@ def load_config(path: str | Path | None = None) -> GatewayConfig:
         backup_and_write_migrated_config(target, migration.payload, migration)
     _mark_env_absorbed_runtime_secrets(cfg, data)
     cfg.config_path = str(target)
-    _remember_load_baseline(cfg)
+    _remember_load_baseline(cfg, migration.payload)
     return cfg
 
 
@@ -206,8 +206,20 @@ def _config_to_toml_dict(cfg: GatewayConfig) -> dict[str, Any]:
     return coerced
 
 
-def _remember_load_baseline(cfg: GatewayConfig) -> None:
+def _remember_load_baseline(
+    cfg: GatewayConfig, raw_payload: dict[str, Any] | None = None
+) -> None:
     cfg._persist_baseline = copy.deepcopy(_model_toml_payload(cfg))
+    # Also remember the raw (migrated) TOML payload the file held at load
+    # time. If the file vanishes between load and persist (a reset from
+    # another session, an operator ``mv``, cleanup during a long wizard run),
+    # the sparse diff must be merged onto THIS payload — not onto an empty
+    # base, which would silently drop every unchanged loaded section (e.g.
+    # the [llm] block and its api_key) from the recreated file. Stored as an
+    # instance attribute so mutation clones (``model_copy(deep=True)``)
+    # carry it; it never contains env-derived values because it came from
+    # disk. ``None`` means the file did not exist at load time.
+    setattr(cfg, "_persist_raw_base", copy.deepcopy(raw_payload) if raw_payload else None)
 
 
 def _get_dotted(obj: dict[str, Any], path: str) -> Any:
@@ -356,10 +368,10 @@ def _persist_plan(
         except (tomllib.TOMLDecodeError, ValueError) as exc:
             disk_usable = False
             log.warning(
-                "onboarding.config_persist_unreadable_toml path=%s error=%s; "
-                "rewriting from the in-memory config",
-                str(target),
-                exc,
+                "onboarding.config_persist_unreadable_toml",
+                path=str(target),
+                error=str(exc),
+                action="rewriting from the in-memory config",
             )
     if raw is not None:
         migration = migrate_config_payload(raw)
@@ -368,10 +380,10 @@ def _persist_plan(
         except Exception as exc:
             disk_usable = False
             log.warning(
-                "onboarding.config_persist_invalid_existing path=%s error=%s; "
-                "rewriting from the in-memory config",
-                str(target),
-                type(exc).__name__,
+                "onboarding.config_persist_invalid_existing",
+                path=str(target),
+                error=type(exc).__name__,
+                action="rewriting from the in-memory config",
             )
         else:
             if instance_baseline is not None:
@@ -380,6 +392,21 @@ def _persist_plan(
 
     merge_base = migrate_config_payload({}).payload
     if disk_usable and instance_baseline is not None:
+        raw_base = getattr(config, "_persist_raw_base", None)
+        if isinstance(raw_base, dict):
+            # The file EXISTED at load time but is gone now (reset from
+            # another session, operator ``mv``, cleanup during a long wizard
+            # run). Merging the sparse diff onto an empty base would silently
+            # drop every unchanged loaded section — including the [llm] block
+            # and its api_key — from the recreated file, so rebuild the base
+            # from the raw payload the load saw: the recreated file carries
+            # the loaded state plus exactly this caller's changes.
+            log.warning(
+                "onboarding.config_persist_target_vanished",
+                path=str(target),
+                action="recreating from the load-time contents plus this save's changes",
+            )
+            return copy.deepcopy(instance_baseline), copy.deepcopy(raw_base)
         # target file simply does not exist yet
         return copy.deepcopy(instance_baseline), merge_base
     return _model_toml_payload(GatewayConfig()), merge_base
@@ -458,12 +485,16 @@ def persist_config(
     # THAT snapshot, not the copy's contents.
     if same_path:
         config._persist_baseline = copy.deepcopy(current_dump)
+        # The written payload is the new on-disk truth: refresh the raw base
+        # so a later vanish-then-persist recreates from what was just
+        # written, not from the original load-time contents.
+        setattr(config, "_persist_raw_base", copy.deepcopy(merged))
 
     log.debug(
-        "onboarding.config_persisted path=%s backup=%s restart_required=%s",
-        str(target),
-        str(backup_path) if backup_path else None,
-        restart_required,
+        "onboarding.config_persisted",
+        path=str(target),
+        backup=str(backup_path) if backup_path else None,
+        restart_required=restart_required,
     )
 
     return PersistResult(

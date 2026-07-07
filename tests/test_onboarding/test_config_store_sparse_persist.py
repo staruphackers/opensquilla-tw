@@ -530,3 +530,176 @@ def test_gateway_persist_keeps_operator_edit_over_env_override(tmp_path, monkeyp
 
     data = tomllib.loads(target.read_text())
     assert data["llm"]["base_url"] == "https://operator.example.test/v1"
+
+
+# ---------------------------------------------------------------------------
+# A9: the config file vanishing between load and persist must not drop the
+# unchanged loaded sections from the recreated file (F6).
+# ---------------------------------------------------------------------------
+
+
+def _write_provider_config(target) -> None:
+    target.write_text(
+        "\n".join(
+            [
+                'search_provider = "tavily"',
+                'search_api_key = "tvly-synthetic-old"',
+                "",
+                "[llm]",
+                'provider = "openrouter"',
+                'model = "deepseek/deepseek-v4-flash"',
+                'api_key = "sk-or-synthetic"',
+                "",
+            ]
+        )
+    )
+
+
+def test_persist_recreates_loaded_sections_when_file_vanished(tmp_path):
+    """load -> file deleted -> mutate one field -> persist: the recreated
+    file must contain BOTH the mutation and the previously loaded sections
+    (notably the [llm] block and its api_key), not just the sparse diff."""
+    target = tmp_path / "config.toml"
+    _write_provider_config(target)
+
+    cfg = load_config(target)
+    target.unlink()  # reset from another session / operator mv
+
+    cfg.search_api_key = "tvly-synthetic-new"
+    result = persist_config(cfg, path=target)
+    assert result.path == target
+
+    data = tomllib.loads(target.read_text())
+    assert data["search_api_key"] == "tvly-synthetic-new"  # the mutation
+    assert data["llm"]["provider"] == "openrouter"  # loaded sections survive
+    assert data["llm"]["model"] == "deepseek/deepseek-v4-flash"
+    assert data["llm"]["api_key"] == "sk-or-synthetic"
+
+    reloaded = load_config(target)
+    assert reloaded.llm.provider == "openrouter"
+    assert reloaded.llm.api_key == "sk-or-synthetic"
+    assert reloaded.search_api_key == "tvly-synthetic-new"
+
+
+def test_persist_recreates_loaded_sections_for_mutation_clone(tmp_path):
+    """Same vanish scenario through the RPC-shaped path: the mutation clone
+    (model_copy(deep=True) inside the mutation) carries the load-time raw
+    contents, so persisting the clone recreates the full file too."""
+    from opensquilla.onboarding.mutations import upsert_search_provider
+
+    target = tmp_path / "config.toml"
+    _write_provider_config(target)
+
+    cfg = load_config(target)
+    res = upsert_search_provider(cfg, provider_id="tavily", api_key="tvly-synthetic-new")
+    target.unlink()
+
+    persist_config(res.config, path=target)
+
+    data = tomllib.loads(target.read_text())
+    assert data["search_api_key"] == "tvly-synthetic-new"
+    assert data["llm"]["provider"] == "openrouter"
+    assert data["llm"]["api_key"] == "sk-or-synthetic"
+
+
+def test_persist_after_vanish_uses_last_written_contents(tmp_path):
+    """A persist refreshes the remembered raw contents: a later
+    vanish-then-persist recreates from what was just written, keeping the
+    earlier save's changes alongside the new one."""
+    target = tmp_path / "config.toml"
+    _write_provider_config(target)
+
+    cfg = load_config(target)
+    cfg.port = 18795
+    persist_config(cfg, path=target)
+
+    target.unlink()
+    cfg.memory.flush_enabled = True
+    persist_config(cfg, path=target)
+
+    data = tomllib.loads(target.read_text())
+    assert data["port"] == 18795  # first save survives the vanish
+    assert data["memory"]["flush_enabled"] is True
+    assert data["llm"]["api_key"] == "sk-or-synthetic"
+
+
+def test_persist_vanished_file_does_not_bake_env_values(tmp_path, monkeypatch):
+    """The recreated file is rebuilt from the load-time DISK contents, so
+    env-derived values still never leak into it."""
+    monkeypatch.setenv("OPENSQUILLA_AUTH_TOKEN", "tok-synthetic-vanish")
+    target = tmp_path / "config.toml"
+    _write_provider_config(target)
+
+    cfg = load_config(target)
+    assert cfg.auth.token == "tok-synthetic-vanish"
+    target.unlink()
+
+    cfg.port = 18795
+    persist_config(cfg, path=target)
+
+    text = target.read_text()
+    assert "tok-synthetic-vanish" not in text
+    data = tomllib.loads(text)
+    assert data["port"] == 18795
+    assert data["llm"]["api_key"] == "sk-or-synthetic"
+
+
+def test_persist_never_loaded_missing_file_still_writes_sparse(tmp_path):
+    """A config whose file never existed keeps the old behavior: the first
+    persist writes only what differs from defaults (no full-default dump)."""
+    target = tmp_path / "config.toml"
+
+    cfg = load_config(target)  # first run: nothing on disk
+    cfg.port = 18795
+    persist_config(cfg, path=target)
+
+    data = tomllib.loads(target.read_text())
+    assert data["port"] == 18795
+    assert "memory" not in data  # defaults are not dumped wholesale
+
+
+# ---------------------------------------------------------------------------
+# A10: persist-plan warnings go through structlog (F42).
+# ---------------------------------------------------------------------------
+
+
+def test_persist_plan_warnings_use_structlog(tmp_path):
+    import structlog
+
+    target = tmp_path / "config.toml"
+    target.write_text("port = 18791\n")
+    cfg = load_config(target)
+    target.write_text("port = [not-valid-toml\n")  # corrupt after load
+
+    cfg.port = 18795
+    with structlog.testing.capture_logs() as captured:
+        persist_config(cfg, path=target)
+
+    events = [entry["event"] for entry in captured]
+    assert "onboarding.config_persist_unreadable_toml" in events
+    entry = next(
+        e for e in captured if e["event"] == "onboarding.config_persist_unreadable_toml"
+    )
+    assert entry["log_level"] == "warning"
+    assert entry["path"] == str(target)
+    assert "error" in entry
+
+
+def test_persist_plan_invalid_existing_warning_uses_structlog(tmp_path):
+    import structlog
+
+    target = tmp_path / "config.toml"
+    target.write_text("port = 18791\n")
+    cfg = load_config(target)
+    target.write_text('port = "not-a-port"\n')  # parseable TOML, invalid model
+
+    cfg.port = 18795
+    with structlog.testing.capture_logs() as captured:
+        persist_config(cfg, path=target)
+
+    entry = next(
+        e for e in captured if e["event"] == "onboarding.config_persist_invalid_existing"
+    )
+    assert entry["log_level"] == "warning"
+    assert entry["path"] == str(target)
+    assert entry["error"] == "ValidationError"

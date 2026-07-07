@@ -541,10 +541,15 @@ def upsert_llm_provider(
         clear_runtime_secret_paths(new_cfg, {"llm.api_key"})
     # Explicit endpoint/proxy values override any boot-time env resolution:
     # drop the runtime-override record so the persist layer writes exactly
-    # what the operator passed even when it equals the env value.
-    if base_url is not None and hasattr(new_cfg, "clear_runtime_override"):
+    # what the operator passed even when it equals the env value. Only a
+    # genuinely explicit NON-EMPTY value counts: ``None`` is keep-current and
+    # the empty string is the legacy RPC reset sentinel ("derive default"),
+    # so neither names an operator endpoint — clearing the record for them
+    # would let a boot-time env value get baked into config.toml by a plain
+    # re-save (e.g. a WebUI key rotation that sends baseUrl="").
+    if base_url:
         new_cfg.clear_runtime_override("llm.base_url")
-    if proxy is not None and hasattr(new_cfg, "clear_runtime_override"):
+    if proxy:
         new_cfg.clear_runtime_override("llm.proxy")
 
     payload = {
@@ -786,7 +791,7 @@ def upsert_llm_ensemble(
 
     new_cfg = _clone(config)
     new_cfg.llm_ensemble = new_ensemble
-    if enabled is not None and hasattr(new_cfg, "mark_force_persist"):
+    if enabled is not None:
         # An explicit enabled/disabled decision must be visible in the file
         # even when it equals the model default — otherwise a headless
         # `configure ensemble --disabled` on a fresh config persists nothing
@@ -1044,8 +1049,7 @@ def upsert_image_generation_provider(
     # equals the model default, otherwise a first-time enabled=false is
     # dropped by the sparse persist and a later key rotation flips the tool
     # back on via the legacy configure-implies-enable fallback.
-    if hasattr(new_cfg, "mark_force_persist"):
-        new_cfg.mark_force_persist("image_generation.enabled")
+    new_cfg.mark_force_persist("image_generation.enabled")
     new_cfg.image_generation.primary = primary_model
     new_cfg.image_generation.size = effective_size
     new_cfg.image_generation.output_format = cast(ImageOutputFormat, effective_output_format)
@@ -1086,8 +1090,7 @@ def disable_image_generation(config: GatewayConfig) -> MutationResult:
     # Explicit off switch: must land in the file even on a fresh config where
     # it equals the model default, so a later provider save that omits the
     # flag keeps it off instead of re-enabling via configure-implies-enable.
-    if hasattr(new_cfg, "mark_force_persist"):
-        new_cfg.mark_force_persist("image_generation.enabled")
+    new_cfg.mark_force_persist("image_generation.enabled")
     return MutationResult(
         config=new_cfg,
         changed=True,

@@ -27,7 +27,6 @@ from opensquilla.onboarding.flow import (
     OnboardOptions,
     run_interactive_configure,
     run_interactive_onboard,
-    run_noninteractive_provider_configure,
 )
 from opensquilla.onboarding.next_steps import (
     env_recovery_commands,
@@ -37,12 +36,14 @@ from opensquilla.onboarding.next_steps import (
     quote_cli_arg,
     setup_catalog_command,
 )
+from opensquilla.onboarding.redaction import redact_error_text
 from opensquilla.onboarding.section_status import SECTION_STATUS_DISPLAY, SectionStatus
 from opensquilla.onboarding.setup_engine import (
     AUDIO_SECTION_ALIASES,
     ENSEMBLE_SECTION_ALIASES,
     IMAGE_GENERATION_SECTION_ALIASES,
     MEMORY_EMBEDDING_SECTION_ALIASES,
+    SetupEngine,
     setup_catalog_payload,
 )
 from opensquilla.onboarding.setup_paths import web_setup_url
@@ -188,14 +189,18 @@ def _format_validation_error(exc: ValidationError) -> str:
     """Render a ValidationError as a field-naming summary.
 
     Never echoes pydantic's ``input_value`` dump — a mispasted secret must
-    not surface on stderr. Only field paths and validator messages appear.
+    not surface on stderr. Only field paths and validator messages appear,
+    and the free-text redactor runs as a final guard so a validator message
+    that interpolates the offending value cannot leak a secret either
+    (mirrors the channel-entry formatter in ``onboarding.mutations``).
     """
     parts: list[str] = []
     for error in exc.errors(include_url=False, include_context=False, include_input=False):
         loc = ".".join(str(item) for item in error.get("loc", ()) or ())
         msg = str(error.get("msg") or "invalid value")
         parts.append(f"{loc}: {msg}" if loc else msg)
-    return "; ".join(parts) or "invalid value"
+    detail = "; ".join(parts) or "invalid value"
+    return redact_error_text(detail, max_len=500)
 
 
 def _exit_cancelled(exc: BaseException) -> NoReturn:
@@ -242,6 +247,23 @@ def _load_config_for_cli(path: str | Path | None = None):
         return load_config(path)
     except (OSError, tomllib.TOMLDecodeError, ValidationError) as exc:
         _exit_config_load_error(exc, path)
+
+
+def _has_stored_setup_state(cfg) -> bool:
+    """True when the loaded config already carries provider or router state.
+
+    Gates the keep-current default of ``onboard --router``: a re-save over an
+    install with explicit ``[llm]`` or ``[squilla_router]`` state must not
+    re-apply a router profile, while a fresh install keeps today's
+    recommended-profile first-run behavior. Env-absorbed credentials (marked
+    runtime secrets) do not count — a key exported in the shell says nothing
+    about provider/model/router preferences.
+    """
+    secret_paths: set[str] = getattr(cfg, "_runtime_secret_paths", set()) or set()
+    llm_fields = {
+        name for name in cfg.llm.model_fields_set if f"llm.{name}" not in secret_paths
+    }
+    return bool(llm_fields or cfg.squilla_router.model_fields_set)
 
 
 def _format_section_names(status: OnboardingStatus, names: list[str]) -> str:
@@ -491,11 +513,14 @@ def onboard_command(
         "--proxy",
         help="Explicit HTTP proxy URL for upstream calls (unchanged if omitted on a re-save).",
     ),
-    router: str = typer.Option(
-        "recommended",
+    router: str | None = typer.Option(
+        None,
         "--router",
         metavar="MODE",
-        help="Router profile: recommended, openrouter-mix, or disabled.",
+        help=(
+            "Router profile: recommended, openrouter-mix, or disabled. "
+            "Unchanged if omitted on a re-save; recommended on first setup."
+        ),
     ),
     minimal: bool = typer.Option(False, "--minimal", help="Keep interactive setup to core fields."),
     skip_channels: bool = typer.Option(
@@ -561,21 +586,34 @@ def onboard_command(
     if provider:
         # Productize config-file load failures up front so a corrupt config
         # surfaces as the standard config-error handoff instead of leaking a
-        # mutation-shaped error (or a raw traceback) below.
-        _load_config_for_cli(config_path)
+        # mutation-shaped error (or a raw traceback) below. The loaded config
+        # feeds the SetupEngine directly, so this path parses the file once
+        # before the save instead of loading, discarding, and loading again.
+        cfg_before = _load_config_for_cli(config_path)
+        # Keep-current router semantics: an omitted --router never touches
+        # the stored router state on an already-configured install (a key
+        # rotation must not re-enable a disabled router or rewrite a custom
+        # tier ladder/model); on a fresh install it keeps today's first-run
+        # behavior and applies the recommended profile.
+        router_mode = router
+        if router_mode is None and not _has_stored_setup_state(cfg_before):
+            router_mode = "recommended"
         try:
-            result = run_noninteractive_provider_configure(
-                provider,
+            engine = SetupEngine(cfg_before, path=config_path)
+            engine.apply(
+                "provider",
                 {
+                    "providerId": provider,
                     "model": model,
-                    "api_key": api_key,
-                    "api_key_env": api_key_env,
-                    "base_url": base_url,
+                    "apiKey": api_key,
+                    "apiKeyEnv": api_key_env,
+                    "baseUrl": base_url,
                     "proxy": proxy,
-                    "router": router,
                 },
-                path=config_path,
             )
+            if router_mode:
+                engine.apply("router", {"mode": router_mode})
+            result = engine.persist()
         except ValidationError as exc:
             # Handle before ValueError (its base class): pydantic's message
             # embeds input_value, which can echo a secret pasted into the
@@ -600,6 +638,7 @@ def onboard_command(
                 provider,
             )
         )
+        _print_restart_guidance(result, config_path)
         cfg = _load_config_for_cli(result.path)
         _print_env_reference_warnings(cfg)
         console.print(
@@ -612,6 +651,13 @@ def onboard_command(
             raise typer.Exit(code=1)
         return
 
+    # Pre-validate the config load so a corrupt or unreadable file surfaces
+    # as the standard config-error handoff BEFORE the wizard collects any
+    # input; the wizard-phase handlers below then never have to guess
+    # whether an I/O failure was a load or a write problem. The --if-needed
+    # gate above already load-validated the config on its way here.
+    if not if_needed:
+        _load_config_for_cli(config_path)
     options = OnboardOptions(
         skip_channels=skip_channels,
         skip_search=skip_search,
@@ -623,6 +669,8 @@ def onboard_command(
         api_key_env=api_key_env or None,
         base_url=base_url or None,
         proxy=proxy or None,
+        # None = keep-current router on a re-save; the wizard resolves the
+        # first-run default itself.
         router_mode=router,
         minimal=minimal,
         skip_migration=skip_migration,
@@ -630,12 +678,28 @@ def onboard_command(
     )
     try:
         result = run_interactive_onboard(options)
-    except (UserCancelledError, KeyboardInterrupt) as exc:
+    except (UserCancelledError, KeyboardInterrupt, EOFError) as exc:
+        # EOFError covers Ctrl+D / exhausted piped stdin at a prompt — the
+        # same operator intent as Esc/Ctrl+C, so the same productized exit.
         _exit_cancelled(exc)
-    except (OSError, tomllib.TOMLDecodeError, ValidationError) as exc:
-        # Corrupt or unreadable config: route through the same productized
-        # handoff as `--if-needed`/`status` instead of a raw traceback.
+    except (tomllib.TOMLDecodeError, ValidationError) as exc:
+        # Corrupt config discovered mid-wizard (e.g. re-loaded after an
+        # out-of-band edit): route through the same productized handoff as
+        # `--if-needed`/`status` instead of a raw traceback.
         _exit_config_load_error(exc, config_path)
+    except OSError as exc:
+        # The config loaded fine above, so an OSError out of the wizard is a
+        # runtime I/O failure (disk full at persist time, permissions revoked
+        # mid-wizard) — not a config-load problem, and the load-error "edit
+        # or move this config" recovery advice would be wrong here.
+        error_console.print(
+            f"[red]Error:[/red] setup hit a file I/O error: {markup_escape(str(exc))}"
+        )
+        error_console.print(
+            "[dim]Check disk space and permissions for the config directory, "
+            "then rerun `opensquilla onboard`.[/dim]"
+        )
+        raise typer.Exit(code=2) from exc
     except (KeyError, TypeError, ValueError) as exc:
         # Mutation-level validation failures (e.g. "model is required") must
         # exit like the headless path does, not as a raw traceback after the
@@ -650,6 +714,7 @@ def onboard_command(
             str(result.path),
         )
     )
+    _print_restart_guidance(result, config_path)
     cfg = _load_config_for_cli(result.path)
     _print_env_reference_warnings(cfg)
     console.print(
@@ -1682,7 +1747,9 @@ def configure_command(
         interactive_result = run_interactive_configure(
             wizard_section, config_path=config_path
         )
-    except (UserCancelledError, KeyboardInterrupt) as exc:
+    except (UserCancelledError, KeyboardInterrupt, EOFError) as exc:
+        # EOFError covers Ctrl+D / exhausted piped stdin at a prompt — the
+        # same operator intent as Esc/Ctrl+C, so the same productized exit.
         _exit_cancelled(exc)
     except (OSError, tomllib.TOMLDecodeError, ValidationError) as exc:
         _exit_config_load_error(exc, config_path)

@@ -87,6 +87,17 @@ def _apply_inplace(ctx: RpcContext, new_cfg: Any) -> None:
     for field_name in type(new_cfg).model_fields:
         setattr(ctx.config, field_name, getattr(new_cfg, field_name))
     inherit_runtime_secrets(new_cfg, ctx.config)
+    # The mutation clone started from a deep copy of ctx.config's provenance
+    # state and then applied the operator's clear_runtime_override /
+    # mark_force_persist decisions, so it is authoritative — adopt it
+    # wholesale. Without this, a runtime-override record cleared on the
+    # clone never reaches the live config, and the stale live record makes a
+    # later unrelated persist rewrite the field back to the value the
+    # operator just replaced (env-URL / user-URL flip-flops on disk).
+    if hasattr(ctx.config, "inherit_persist_provenance") and hasattr(
+        new_cfg, "_runtime_field_overrides"
+    ):
+        ctx.config.inherit_persist_provenance(new_cfg)
 
 
 def _sync_provider_selector(ctx: RpcContext, llm_cfg: Any) -> None:
@@ -97,10 +108,25 @@ def _sync_provider_selector(ctx: RpcContext, llm_cfg: Any) -> None:
     if config is not None:
         from opensquilla.gateway.llm_runtime import resolve_llm_runtime_config
 
-        runtime = resolve_llm_runtime_config(config)
+        # Resolve on a throwaway deep copy: resolve_llm_runtime_config
+        # mutates config.llm in place (env application) and records override
+        # provenance, but this sync only needs the resolved runtime VALUES
+        # for the selector. After _apply_inplace, ctx.config.llm IS the
+        # mutation result's llm submodel — resolving against the live graph
+        # would clobber an explicit operator base_url/proxy with the env
+        # value right before _persist writes the file, and would record the
+        # override on ctx.config only, desynchronizing it from the config
+        # the persist layer actually consults.
+        scratch = config.model_copy(deep=True)
+        runtime = resolve_llm_runtime_config(scratch)
         api_key = runtime.api_key
         base_url = runtime.base_url
         proxy = runtime.proxy
+        # Preserve the one live-config side effect the old in-place resolve
+        # provided: an env-resolved api_key must stay marked as a runtime
+        # secret on the running config so no persist path can write it out.
+        if runtime.api_key_from_env and hasattr(config, "mark_runtime_secret"):
+            config.mark_runtime_secret("llm.api_key")
     else:
         api_key = llm_cfg.api_key
         base_url = llm_cfg.base_url

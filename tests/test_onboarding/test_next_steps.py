@@ -411,3 +411,52 @@ def test_fix_next_never_advertises_the_nonexistent_configure_audio(monkeypatch):
     assert "Fix next:" in text
     assert "onboard configure audio" not in text
     assert "opensquilla onboard catalog audio" in text
+
+
+def test_fix_next_audio_command_comes_from_the_headless_command_table(monkeypatch):
+    """The audio fix line must advertise the command recorded once in
+    _HEADLESS_SETUP_COMMANDS — a rename there must not leave a stale
+    hardcoded copy in the Fix-next checklist."""
+    from opensquilla.gateway.config import GatewayConfig
+    from opensquilla.onboarding import next_steps
+
+    cfg = GatewayConfig()
+    cfg.audio.enabled = True  # enabled without any provider credential
+    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+    monkeypatch.setitem(
+        next_steps._HEADLESS_SETUP_COMMANDS,
+        "audio",
+        ("Audio recipes", "opensquilla onboard catalog audio-renamed"),
+    )
+
+    text = next_steps.format_next_steps(cfg, config_path="/tmp/config.toml")
+
+    fix_block = text.split("Fix next:", 1)[1]
+    assert "opensquilla onboard catalog audio-renamed --config /tmp/config.toml" in fix_block
+    assert "catalog audio --config" not in fix_block
+
+
+def test_capability_summary_and_fix_lines_share_one_label_status_resolver(monkeypatch):
+    """Both lines of the same printed block derive (label, display) through
+    _capability_section_view, so a wording change can never make the
+    Capabilities summary and the Fix-next checklist disagree."""
+    from opensquilla.gateway.config import GatewayConfig
+    from opensquilla.onboarding import next_steps
+    from opensquilla.onboarding.status import get_onboarding_status
+
+    cfg = GatewayConfig()
+    cfg.search_provider = "tavily"
+    cfg.search_api_key = ""
+    cfg.search_api_key_env = "DUMMY_UNSET_SEARCH_KEY"
+    monkeypatch.delenv("DUMMY_UNSET_SEARCH_KEY", raising=False)
+    status = get_onboarding_status(cfg)
+
+    label, display, _value, needs_action = next_steps._capability_section_view(
+        status, "search"
+    )
+
+    assert needs_action is True
+    summary = next_steps._capabilities_summary(status)
+    assert f"{label}={display}" in summary
+    fix_lines = next_steps._capability_fix_lines(status, "")
+    assert any(line.startswith(f"  {label} ({display}): ") for line in fix_lines)

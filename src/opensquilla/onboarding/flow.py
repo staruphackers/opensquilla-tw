@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import importlib.util
 import os
 import re
-import shlex
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -38,6 +38,7 @@ from opensquilla.onboarding.memory_embedding_specs import (
     list_memory_embedding_provider_setup_specs,
 )
 from opensquilla.onboarding.mutations import (
+    _router_tiers_hand_customized,
     upsert_channel,
     upsert_image_generation_provider,
     upsert_llm_ensemble,
@@ -49,6 +50,7 @@ from opensquilla.onboarding.mutations import (
 from opensquilla.onboarding.next_steps import (
     headless_setup_command,
     headless_setup_commands,
+    quote_cli_arg,
     setup_catalog_command,
 )
 from opensquilla.onboarding.provider_specs import (
@@ -143,10 +145,17 @@ class OnboardOptions:
     api_key_env: str | None = None
     base_url: str | None = None
     proxy: str | None = None
-    router_mode: str = "recommended"
+    # ``None`` = not passed (an omitted ``--router``): keep the stored router
+    # state on a configured install. The wizard applies the recommended
+    # profile only when no working provider is stored yet (first-run walk).
+    router_mode: str | None = None
     minimal: bool = False
     skip_migration: bool = False
     config_path: str | Path | None = None
+    # Internal: a scoped section entry (``onboard configure provider`` or the
+    # hub's Provider item). Skips the first-run banner, the "Press Enter"
+    # start gate, and the trailing action-required prompts of the full walk.
+    scoped_section: bool = False
 
 
 def _is_tty() -> bool:
@@ -213,7 +222,10 @@ def run_noninteractive_provider_configure(
 def _config_cli_arg(config_path: str | Path | None) -> str:
     if config_path is None:
         return ""
-    return f" --config {shlex.quote(str(config_path))}"
+    # quote_cli_arg is platform-aware (PowerShell on Windows): the resume
+    # hints printed here must paste cleanly in the same shell as the
+    # next-steps/status output built from the sibling helper in next_steps.
+    return f" --config {quote_cli_arg(config_path)}"
 
 
 def _first_blocking_setup_section(cfg: Any) -> str:
@@ -420,16 +432,49 @@ def _int_value_validator(label: str, *, minimum: int | None = None):
     return _validate
 
 
-def _float_value_validator(label: str):
+def _coerce_channel_prompt_value(
+    field: ChannelSetupField, raw: str
+) -> tuple[Any, str | None]:
+    """Coerce one wizard answer with the headless ``--field`` semantics.
+
+    The wizard and ``onboard configure channels --field`` must accept exactly
+    the same spellings — and reject with the same wording — for the same spec
+    field. The headless coercer (``cli.channel_fields.coerce_channel_field_value``)
+    lives in the CLI package, which the architecture contract forbids importing
+    from ``onboarding``, so this is its value-for-value mirror, held in lockstep
+    by a parity test; the only deliberate difference is that rejections name the
+    field label instead of the ``--field`` flag the wizard user never typed.
+
+    Returns ``(value, None)`` on success, ``(None, message)`` with the
+    re-prompt message on rejection.
+    """
+    if field.field_type == "int":
+        try:
+            return int(raw), None
+        except ValueError:
+            return None, f"{field.label} expects an integer, got {raw!r}"
+    if field.field_type == "float":
+        try:
+            return float(raw), None
+        except ValueError:
+            return None, f"{field.label} expects a number, got {raw!r}"
+    return raw, None
+
+
+def _channel_number_validator(field: ChannelSetupField):
+    """Re-prompt on input the channel-field coercer rejects instead of crashing.
+
+    Blank input stays valid — the caller keeps the prompt's displayed
+    default, matching the headless contract where an omitted ``--field``
+    keeps the stored/spec value.
+    """
+
     def _validate(value: str) -> bool | str:
         stripped = str(value or "").strip()
         if not stripped:
             return True
-        try:
-            float(stripped)
-        except ValueError:
-            return f"{label} must be a number"
-        return True
+        _value, error = _coerce_channel_prompt_value(field, stripped)
+        return True if error is None else error
 
     return _validate
 
@@ -475,6 +520,7 @@ def _ask_provider_fields(
     stored = _stored_llm_entry(config, spec.provider_id) if config is not None else None
     stored_base_url = str(getattr(stored, "base_url", "") or "")
     stored_proxy = str(getattr(stored, "proxy", "") or "")
+    stored_model = str(getattr(stored, "model", "") or "")
     # Resolve credentials and endpoint BEFORE the model so an optional live
     # discovery can enumerate the candidate provider's models for the picker.
     if spec.requires_api_key:
@@ -528,12 +574,19 @@ def _ask_provider_fields(
         answers["model"] = options.model
     elif getattr(spec, "router_supported", False):
         _verify_router_provider_connection(questionary, spec, answers)
-        answers["model"] = ""
+        # Same-provider re-save: ``None`` engages the mutation layer's
+        # keep-current so an Enter-through re-run never resets a hand-set
+        # ``llm.model`` to the derived tier default. A first-time save keeps
+        # the legacy ``""`` sentinel (derive the provider's default model).
+        answers["model"] = None if stored is not None else ""
     else:
-        answers["model"] = _ask_direct_provider_model(questionary, spec, answers)
+        answers["model"] = _ask_direct_provider_model(
+            questionary, spec, answers, stored_model=stored_model
+        )
     return answers
 
 
+@contextlib.contextmanager
 def _quiet_provider_logs():
     """Silence structlog output while a wizard-run probe/discovery is in flight.
 
@@ -542,20 +595,14 @@ def _quiet_provider_logs():
     print raw into the interactive prompt stream; the probe outcome is already
     surfaced to the user through the redacted result panel.
     """
-    import contextlib
+    import structlog  # deferred: only probe/discovery paths need it
 
-    import structlog
-
-    @contextlib.contextmanager
-    def _suppressed():
-        saved = structlog.get_config()
-        structlog.configure(logger_factory=structlog.ReturnLoggerFactory())
-        try:
-            yield
-        finally:
-            structlog.configure(**saved)
-
-    return _suppressed()
+    saved = structlog.get_config()
+    structlog.configure(logger_factory=structlog.ReturnLoggerFactory())
+    try:
+        yield
+    finally:
+        structlog.configure(**saved)
 
 
 def _run_provider_probe(
@@ -572,7 +619,9 @@ def _run_provider_probe(
     Returns a ``ProviderProbeResult`` or ``None`` when the probe cannot even
     be attempted (validation-level rejection or an unexpected error). A probe
     NEVER blocks setup, so any failure degrades to ``None`` here and the caller
-    falls back to the offline free-text path.
+    falls back to the offline free-text path. Ctrl+C during the network wait
+    skips the check (never the whole wizard): the operator interrupted the
+    probe, not their setup session.
     """
     import asyncio
 
@@ -590,6 +639,9 @@ def _run_provider_probe(
                     proxy=proxy,
                 )
             )
+    except KeyboardInterrupt:
+        console.print("[dim]connection check skipped[/dim]")
+        return None
     except Exception:  # noqa: BLE001 - verification is best-effort, never fatal
         return None
 
@@ -606,6 +658,7 @@ def _run_provider_discovery(
 
     Returns a ``ProviderModelsDiscoverResult`` or ``None`` when discovery could
     not be attempted; the caller then keeps the free-text model prompt.
+    Ctrl+C during the network wait skips discovery (never the whole wizard).
     """
     import asyncio
 
@@ -622,6 +675,9 @@ def _run_provider_discovery(
                     proxy=proxy,
                 )
             )
+    except KeyboardInterrupt:
+        console.print("[dim]model discovery skipped[/dim]")
+        return None
     except Exception:  # noqa: BLE001 - discovery is best-effort, never fatal
         return None
 
@@ -641,21 +697,27 @@ def _discovered_model_label(model: dict[str, Any]) -> str:
     return model_id
 
 
-def _prompt_free_text_model(questionary) -> str:
+def _prompt_free_text_model(questionary, *, stored_model: str = "") -> str:
     # Non-empty validation: providers without a derivable default model raise
     # "model is required" deep in the mutation layer, so an empty submit must
     # re-prompt here instead of surfacing a raw error after the operator has
-    # already typed the API key.
+    # already typed the API key. On a same-provider re-run the stored model
+    # seeds the prompt so plain Enter keeps it instead of retyping it.
+    kwargs: dict[str, Any] = {"validate": _required_value("Model id")}
+    if stored_model:
+        kwargs["default"] = stored_model
     return str(
         _ask_or_cancel(
-            questionary.text("Model id", validate=_required_value("Model id")),
+            questionary.text("Model id", **kwargs),
             section="provider",
         )
         or ""
     )
 
 
-def _ask_direct_provider_model(questionary, spec, answers: dict[str, Any]) -> str:
+def _ask_direct_provider_model(
+    questionary, spec, answers: dict[str, Any], *, stored_model: str = ""
+) -> str:
     """Free-text model path, optionally upgraded by live verify + discovery.
 
     Scoped to providers that expose a direct model prompt (``router_supported``
@@ -670,28 +732,23 @@ def _ask_direct_provider_model(questionary, spec, answers: dict[str, Any]) -> st
     when present. Direct providers that ship no default model still verify
     connectivity through discovery, which needs no model and doubles as the
     credential check.
+
+    On a same-provider re-run ``stored_model`` seeds the free-text prompt and
+    pre-selects the stored model in the discovery picker, so Enter-through
+    keeps the operator's model instead of switching to the first discovered
+    one.
     """
     if not getattr(spec, "can_probe", False):
-        return _prompt_free_text_model(questionary)
+        return _prompt_free_text_model(questionary, stored_model=stored_model)
 
-    console.print("[dim]Checking the connection…[/dim]")
-    probe_model = str(getattr(spec, "default_direct_model", "") or "").strip()
-    probed = False
-    if probe_model:
-        probe = _run_provider_probe(
-            provider_id=spec.provider_id,
-            model=probe_model,
-            api_key=answers.get("api_key", ""),
-            api_key_env=answers.get("api_key_env", ""),
-            base_url=answers.get("base_url", ""),
-            proxy=answers.get("proxy", ""),
-        )
-        if probe is not None:
-            probed = True
-            if not probe.ok:
-                if not _confirm_save_after_failed_check(questionary, spec, probe.message):
-                    raise UserCancelledError(section="provider")
-                return _prompt_free_text_model(questionary)
+    outcome = _probe_and_confirm(questionary, spec, answers)
+    if outcome == "no_model":
+        # No probe model: the discovery below doubles as the connection
+        # check, so the announcement still belongs before it.
+        console.print("[dim]Checking the connection…[/dim]")
+    elif outcome == "failed":
+        return _prompt_free_text_model(questionary, stored_model=stored_model)
+    probed = outcome == "verified"
 
     discovery = _run_provider_discovery(
         provider_id=spec.provider_id,
@@ -707,23 +764,31 @@ def _ask_direct_provider_model(questionary, spec, answers: dict[str, Any]) -> st
         if not probed:
             if not _confirm_save_after_failed_check(questionary, spec, discovery.detail):
                 raise UserCancelledError(section="provider")
-        return _prompt_free_text_model(questionary)
+        return _prompt_free_text_model(questionary, stored_model=stored_model)
 
     if probed:
         console.print(f"[{ACCENT_SOFT}]◆[/] [dim]connection verified[/dim]")
     models = list(getattr(discovery, "models", []) or []) if discovery else []
     if not models:
-        return _prompt_free_text_model(questionary)
+        return _prompt_free_text_model(questionary, stored_model=stored_model)
 
     choices = [_discovered_model_label(model) for model in models] + [
         _TYPE_MODEL_ID_CHOICE
     ]
+    stored_choice = next(
+        (
+            choice
+            for choice, model in zip(choices, models)
+            if stored_model and str(model.get("id") or "") == stored_model
+        ),
+        None,
+    )
     selected = _ask_or_cancel(
-        questionary.select("Model", choices=choices, default=choices[0]),
+        questionary.select("Model", choices=choices, default=stored_choice or choices[0]),
         section="provider",
     )
     if selected == _TYPE_MODEL_ID_CHOICE:
-        return _prompt_free_text_model(questionary)
+        return _prompt_free_text_model(questionary, stored_model=stored_model)
     return str(selected).split(" ")[0]
 
 
@@ -748,27 +813,28 @@ def _confirm_save_after_failed_check(questionary, spec, detail: str) -> bool:
     )
 
 
-def _verify_router_provider_connection(questionary, spec, answers: dict[str, Any]) -> None:
-    """Pre-save connection check for router-supported providers.
+def _probe_and_confirm(questionary, spec, answers: dict[str, Any]) -> str:
+    """The shared probe-then-"Save anyway?" core of both provider checks.
 
-    A router-driven provider never types a direct model, so the free-text
-    verify/discover path never runs for it — historically a bad API key
-    surfaced only as an HTTP error in the middle of the first chat. The save
-    applies the provider's router tier profile, and the spec's
-    ``default_direct_model`` is that profile's default-tier model — i.e. the
-    model the first routed turn will actually use — so probe with it.
+    Direct and router-supported providers verify with the exact same UX —
+    the same "Checking the connection…" line, the same redacted failure
+    panel, the same default-yes "Save anyway?" escape — so a UX change made
+    here reaches both paths at once. Returns one of:
 
-    The UX mirrors the direct-provider check exactly: a failed probe surfaces
-    the redacted detail plus the default-yes "Save anyway?" escape, an
-    unattemptable probe (``None``) degrades silently, and a spec without a
-    determinable model (or without probe support) keeps the old behavior of
-    verifying nothing.
+    - ``"no_model"``: the spec ships no probe model; nothing was attempted
+      and nothing was printed (the caller decides what verification, if
+      any, replaces the probe).
+    - ``"skipped"``: the probe could not even be attempted — degrade
+      silently, verification never blocks setup.
+    - ``"verified"``: the probe succeeded (the caller prints the verified
+      line at the point its own flow is actually done verifying).
+    - ``"failed"``: the probe failed and the operator chose to save anyway.
+
+    Declining the save raises ``UserCancelledError(section="provider")``.
     """
-    if not getattr(spec, "can_probe", False):
-        return
     probe_model = str(getattr(spec, "default_direct_model", "") or "").strip()
     if not probe_model:
-        return
+        return "no_model"
     console.print("[dim]Checking the connection…[/dim]")
     probe = _run_provider_probe(
         provider_id=spec.provider_id,
@@ -779,12 +845,34 @@ def _verify_router_provider_connection(questionary, spec, answers: dict[str, Any
         proxy=answers.get("proxy", ""),
     )
     if probe is None:
-        return
+        return "skipped"
     if not probe.ok:
         if not _confirm_save_after_failed_check(questionary, spec, probe.message):
             raise UserCancelledError(section="provider")
+        return "failed"
+    return "verified"
+
+
+def _verify_router_provider_connection(questionary, spec, answers: dict[str, Any]) -> None:
+    """Pre-save connection check for router-supported providers.
+
+    A router-driven provider never types a direct model, so the free-text
+    verify/discover path never runs for it — historically a bad API key
+    surfaced only as an HTTP error in the middle of the first chat. The save
+    applies the provider's router tier profile, and the spec's
+    ``default_direct_model`` is that profile's default-tier model — i.e. the
+    model the first routed turn will actually use — so probe with it.
+
+    The check is the shared ``_probe_and_confirm`` sequence: a failed probe
+    surfaces the redacted detail plus the default-yes "Save anyway?" escape,
+    an unattemptable probe degrades silently, and a spec without a
+    determinable model (or without probe support) keeps the old behavior of
+    verifying nothing.
+    """
+    if not getattr(spec, "can_probe", False):
         return
-    console.print(f"[{ACCENT_SOFT}]◆[/] [dim]connection verified[/dim]")
+    if _probe_and_confirm(questionary, spec, answers) == "verified":
+        console.print(f"[{ACCENT_SOFT}]◆[/] [dim]connection verified[/dim]")
 
 
 def _ask_search_choice(questionary):
@@ -1450,6 +1538,7 @@ def _ask_router_fields(
     *,
     provider_id: str,
     requested_mode: str,
+    explicit_mode: bool = False,
 ) -> dict[str, Any]:
     choices = _router_mode_choices(provider_id)
     # A cancel here must never be read as consent: mapping the ``None`` answer
@@ -1468,6 +1557,17 @@ def _ask_router_fields(
         preview = upsert_router(config, mode=mode).config
         _print_router_defaults(preview)
         return {"mode": mode}
+
+    if (
+        mode == "recommended"
+        and not explicit_mode
+        and _router_tiers_hand_customized(config)
+    ):
+        # (Re-)enabling routing over an operator-customized inline ladder —
+        # including one preserved across a disable — must keep that ladder;
+        # the custom mode restores it instead of resetting to the packaged
+        # profile. An explicit ``--router recommended`` still resets.
+        mode = "custom"
 
     preview = upsert_router(config, mode=mode).config
     _print_router_defaults(preview)
@@ -1490,7 +1590,19 @@ def _ask_router_fields(
             section="router",
         )
     ):
-        payload["tiers"] = _router_tier_overrides(questionary, preview)
+        overrides = _router_tier_overrides(questionary, preview)
+        if mode == "custom":
+            # The tier editor showed the preserved ladder; passing only the
+            # edited tiers would merge them onto the packaged preset base and
+            # wipe the untouched stored tiers. Send the full effective ladder.
+            effective = {
+                name: dict(tier)
+                for name, tier in preview.squilla_router.tiers.items()
+                if isinstance(tier, dict)
+            }
+            effective.update(overrides)
+            overrides = effective
+        payload["tiers"] = overrides
     return payload
 
 
@@ -1500,6 +1612,7 @@ def _apply_router_section(
     *,
     provider_id: str,
     requested_mode: str,
+    explicit_mode: bool = False,
     config_path: str | Path | None = None,
 ):
     """Run the inline router step of the full wizard; a cancel skips it.
@@ -1516,6 +1629,7 @@ def _apply_router_section(
             config,
             provider_id=provider_id,
             requested_mode=requested_mode,
+            explicit_mode=explicit_mode,
         )
     except UserCancelledError:
         config_arg = _config_cli_arg(config_path)
@@ -1795,26 +1909,25 @@ def _ask_channel_field(questionary, field: ChannelSetupField, default: Any) -> A
             )
             or ""
         )
-    if field.field_type == "int":
+    if field.field_type in ("int", "float"):
+        fallback = default if default is not None else (0 if field.field_type == "int" else 0.0)
         raw = _ask_or_cancel(
             questionary.text(
                 field.label,
-                default=str(default if default is not None else 0),
-                validate=_int_value_validator(field.label),
+                default=str(fallback),
+                validate=_channel_number_validator(field),
             ),
             section="channels",
         )
-        return int(str(raw or "").strip() or "0")
-    if field.field_type == "float":
-        raw = _ask_or_cancel(
-            questionary.text(
-                field.label,
-                default=str(default if default is not None else 0.0),
-                validate=_float_value_validator(field.label),
-            ),
-            section="channels",
-        )
-        return float(str(raw or "").strip() or "0")
+        stripped = str(raw or "").strip()
+        if not stripped:
+            # Blank keeps the displayed default — the wizard twin of the
+            # headless contract where an omitted --field keeps the value.
+            stripped = str(fallback)
+        value, error = _coerce_channel_prompt_value(field, stripped)
+        if error is not None:
+            raise ValueError(error)
+        return value
     return (
         _ask_or_cancel(
             questionary.text(field.label, default=str(default or "")),
@@ -2300,6 +2413,7 @@ def _use_imported_provider_credentials_with_router_defaults(
     cfg: Any,
     *,
     requested_mode: str,
+    explicit_mode: bool = False,
     config_path: str | Path | None = None,
 ):
     llm = getattr(cfg, "llm", None)
@@ -2322,6 +2436,7 @@ def _use_imported_provider_credentials_with_router_defaults(
             cfg_after_provider,
             provider_id=provider,
             requested_mode=requested_mode,
+            explicit_mode=explicit_mode,
             config_path=config_path,
         )
     return cfg_after_provider
@@ -2414,6 +2529,11 @@ def _ensure_config_dir_writable(config_path: str | Path | None) -> None:
     prompt so the failure is actionable and costs no input.
     """
     target, _source = resolve_config_path(config_path)
+    if target.is_symlink():
+        # persist_config writes through the symlink into the parent of the
+        # TARGET file; probing the link's own parent would pass even when
+        # the directory that actually receives the temp file is read-only.
+        target = target.resolve()
     directory = target.parent
     try:
         directory.mkdir(parents=True, exist_ok=True)
@@ -2441,26 +2561,29 @@ _ONBOARD_SECTIONS_CHOICE = "Change specific sections"
 _ONBOARD_RESET_CHOICE = "Start fresh (back up current config first)"
 
 
+# The only OnboardOptions fields whose non-default values still describe a
+# plain full re-run: an explicit --config targets a different file but not a
+# different walk. EVERY other field (including future additions) scopes the
+# run automatically — a new option can never silently trigger the re-run
+# fork without being reviewed onto this allowlist.
+_FORK_COMPATIBLE_OPTION_FIELDS = frozenset({"config_path"})
+
+
 def _is_full_interactive_rerun(options: OnboardOptions) -> bool:
     """True only for a plain `opensquilla onboard` over a working install.
 
     Scoped invocations (configure provider re-runs, --if-needed, --minimal,
-    any skip flag, or headless-shaped provider/model/key options) keep the
-    linear walk so their pinned prompt sequences stay unchanged.
+    any skip flag, an explicit --router, or headless-shaped
+    provider/model/key options) keep the linear walk so their pinned prompt
+    sequences stay unchanged. Detection compares field-by-field against a
+    fresh ``OnboardOptions()`` so a future field cannot drift out of the
+    check unnoticed.
     """
-    return not (
-        options.if_needed
-        or options.minimal
-        or options.skip_migration
-        or options.skip_channels
-        or options.skip_search
-        or options.skip_image_generation
-        or options.provider_id
-        or options.model
-        or options.api_key
-        or options.api_key_env
-        or options.base_url
-        or options.proxy
+    defaults = OnboardOptions()
+    return all(
+        getattr(options, fld.name) == getattr(defaults, fld.name)
+        for fld in fields(OnboardOptions)
+        if fld.name not in _FORK_COMPATIBLE_OPTION_FIELDS
     )
 
 
@@ -2517,23 +2640,49 @@ def _ask_existing_setup_action(
     return "update"
 
 
-def _backup_and_reset_config(config_path: str | Path | None) -> None:
-    """Move the existing config aside (never delete) before a fresh walk."""
-    import time as _time
+def _backup_and_reset_config(config_path: str | Path | None) -> tuple[Path, Path] | None:
+    """Move the existing config aside (never delete) before a fresh walk.
+
+    The backup is created by the shared ``make_config_backup`` helper — the
+    same collision-safe (O_EXCL) writer the persist/migration paths use — so
+    every config backup in the state dir carries one naming scheme
+    (``config.toml.backup.<stamp>``) that backup-aware tooling such as the
+    uninstall purge inventory already recognizes.
+
+    Returns ``(original_target, backup_path)`` so a cancelled fresh walk can
+    restore the previous config, or ``None`` when nothing existed to back up.
+    """
+    from opensquilla.gateway.config_migration import make_config_backup
 
     resolved, _source = resolve_config_path(config_path)
+    # Back up the real file next to itself and leave the symlink in place:
+    # the fresh walk then writes through the untouched link as before.
     target = resolved.resolve() if resolved.is_symlink() else resolved
     if not target.exists():
-        return
-    stamp = _time.strftime("%Y%m%d-%H%M%S")
-    backup = target.with_name(f"{target.name}.bak-{stamp}")
-    counter = 0
-    while backup.exists():
-        counter += 1
-        backup = target.with_name(f"{target.name}.bak-{stamp}-{counter}")
-    os.replace(target, backup)
+        return None
+    backup = make_config_backup(target)
+    target.unlink()
     console.print(
         f"[dim]Backed up existing config to {markup_escape(str(backup))}[/dim]"
+    )
+    return target, backup
+
+
+def _restore_reset_backup(reset_backup: tuple[Path, Path]) -> None:
+    """Put the pre-"Start fresh" config back after a cancelled fresh walk.
+
+    Cancelling after the reset must leave the previous config active — an
+    Esc'd walk otherwise strands the install unconfigured with only a dim
+    backup notice. The restore is skipped when the fresh walk already
+    persisted a new config (the operator's new answers win over the backup).
+    """
+    target, backup = reset_backup
+    if target.exists() or not backup.exists():
+        return
+    os.replace(backup, target)
+    console.print(
+        f"[dim]Setup cancelled — restored previous config to "
+        f"{markup_escape(str(target))}[/dim]"
     )
 
 
@@ -2556,25 +2705,33 @@ def run_interactive_onboard(options: OnboardOptions) -> PersistResult:
     import questionary as _qmod
     questionary = _styled(_qmod)
 
-    console.print(
-        banner_panel(
-            "OpenSquilla Onboarding",
-            "Migration · Provider · SquillaRouter · Channels · Capabilities",
+    if not options.scoped_section:
+        # A scoped section edit (configure provider, the hub's Provider item)
+        # is not a first run: re-printing the banner and blocking on the raw
+        # "Press Enter" gate inside a one-section edit is wrong, and Ctrl+C at
+        # that raw input() would escape the hub's cancel handling entirely.
+        console.print(
+            banner_panel(
+                "OpenSquilla Onboarding",
+                "Migration · Provider · SquillaRouter · Channels · Capabilities",
+            )
         )
-    )
-    _wait_for_setup_start()
+        _wait_for_setup_start()
     if options.if_needed and status.has_config and status.llm_configured:
-        _run_action_required_optional_sections(
+        sections_result = _run_action_required_optional_sections(
             questionary,
             status,
             options=options,
         )
-        return persist_config(
+        persist = persist_config(
             load_config(options.config_path),
             path=options.config_path,
             restart_required=False,
             backup=False,
         )
+        if sections_result is not None:
+            persist = _merge_persist_results(sections_result, persist)
+        return persist
 
     config_path = _config_path_from_loaded_config(cfg)
     rerun_action = _ask_existing_setup_action(questionary, cfg, status, options)
@@ -2582,16 +2739,64 @@ def run_interactive_onboard(options: OnboardOptions) -> PersistResult:
         hub_result = _run_configure_hub(questionary, config_path=options.config_path)
         if hub_result is not None:
             return hub_result
-        return persist_config(
-            load_config(options.config_path),
-            path=options.config_path,
+        # Explicit "Exit (nothing changed)": report the resolved path without
+        # rewriting the file — a no-change exit must not normalize a
+        # hand-maintained config.toml (comments, key order, mode, mtime).
+        resolved, _source = resolve_config_path(options.config_path)
+        return PersistResult(
+            path=resolved,
+            backup_path=None,
             restart_required=False,
-            backup=False,
+            warnings=[],
         )
     if rerun_action == "reset":
-        _backup_and_reset_config(options.config_path)
-        cfg = load_config(options.config_path)
+        # Pin the pre-reset path: after the backup renames a cwd-resolved
+        # ./opensquilla.toml away, a dynamic re-resolve would silently switch
+        # the rest of the walk to the HOME config — seeding from and
+        # overwriting a different file than the one just backed up.
+        reset_backup = _backup_and_reset_config(config_path)
+        options = replace(options, config_path=config_path)
+        cfg = load_config(config_path)
         status = get_onboarding_status(cfg)
+        if reset_backup is not None:
+            try:
+                return _run_onboard_walk(
+                    questionary, cfg, status, options, config_path=config_path
+                )
+            except (UserCancelledError, KeyboardInterrupt):
+                # Cancelling after "Start fresh" must leave the previous
+                # config active, not an unconfigured install.
+                _restore_reset_backup(reset_backup)
+                raise
+
+    return _run_onboard_walk(questionary, cfg, status, options, config_path=config_path)
+
+
+def _effective_router_mode(options: OnboardOptions, cfg: Any) -> str:
+    """Resolve the walk's router mode when ``--router`` was not passed.
+
+    An omitted flag is keep-current: the router consent prompt defaults to
+    the stored state (a re-run over a disabled router must not steer the
+    operator toward re-enabling it). A fresh install keeps the historical
+    first-run default of the recommended profile.
+    """
+    if options.router_mode:
+        return options.router_mode
+    enabled = bool(getattr(getattr(cfg, "squilla_router", None), "enabled", True))
+    return "recommended" if enabled else "disabled"
+
+
+def _run_onboard_walk(
+    questionary,
+    cfg: Any,
+    status: Any,
+    options: OnboardOptions,
+    *,
+    config_path: Path,
+) -> PersistResult:
+    """The linear wizard walk: migration, provider, router, optional sections."""
+    requested_router_mode = _effective_router_mode(options, cfg)
+    explicit_router_mode = options.router_mode is not None
 
     migration_result: Any | None = None
     if not options.skip_migration:
@@ -2615,7 +2820,8 @@ def run_interactive_onboard(options: OnboardOptions) -> PersistResult:
                 cfg_after_provider = _use_imported_provider_credentials_with_router_defaults(
                     questionary,
                     cfg,
-                    requested_mode=options.router_mode,
+                    requested_mode=requested_router_mode,
+                    explicit_mode=explicit_router_mode,
                     config_path=options.config_path,
                 )
                 persist = persist_config(
@@ -2642,12 +2848,13 @@ def run_interactive_onboard(options: OnboardOptions) -> PersistResult:
         )
         if completed_imported is not None:
             cfg_after_provider = completed_imported
-            if _imported_provider_router_supported(cfg_after_provider) and options.router_mode:
+            if _imported_provider_router_supported(cfg_after_provider):
                 cfg_after_provider = _apply_router_section(
                     questionary,
                     cfg_after_provider,
                     provider_id=_provider_id_from_config(cfg_after_provider),
-                    requested_mode=options.router_mode,
+                    requested_mode=requested_router_mode,
+                    explicit_mode=explicit_router_mode,
                     config_path=options.config_path,
                 )
         else:
@@ -2670,14 +2877,14 @@ def run_interactive_onboard(options: OnboardOptions) -> PersistResult:
                 proxy=answers.get("proxy", ""),
             )
             cfg_after_provider = res.config
-            if options.router_mode:
-                cfg_after_provider = _apply_router_section(
-                    questionary,
-                    cfg_after_provider,
-                    provider_id=provider_id,
-                    requested_mode=options.router_mode,
-                    config_path=options.config_path,
-                )
+            cfg_after_provider = _apply_router_section(
+                questionary,
+                cfg_after_provider,
+                provider_id=provider_id,
+                requested_mode=requested_router_mode,
+                explicit_mode=explicit_router_mode,
+                config_path=options.config_path,
+            )
         persist = persist_config(
             cfg_after_provider,
             path=options.config_path,
@@ -2687,46 +2894,77 @@ def run_interactive_onboard(options: OnboardOptions) -> PersistResult:
     if options.minimal:
         return persist
 
+    if options.scoped_section:
+        # A scoped section edit stops at its own section: the trailing
+        # optional and action-required prompts belong to the full walk only.
+        return persist
+
     if not options.skip_channels and questionary.confirm(
         "Configure a messaging channel now?", default=False
     ).ask():
-        _run_optional_section(
-            section="channel",
-            label="channel",
-            runner=run_interactive_channel_add,
-            args=(None,),
-            config_path=options.config_path,
+        persist = _fold_persist_result(
+            persist,
+            _run_optional_section(
+                section="channel",
+                label="channel",
+                runner=run_interactive_channel_add,
+                args=(None,),
+                config_path=options.config_path,
+            ),
         )
 
     if not options.skip_search and questionary.confirm(
         "Configure web search now?", default=False
     ).ask():
-        _run_optional_section(
-            section="search",
-            label="search",
-            runner=run_interactive_search_configure,
-            config_path=options.config_path,
+        persist = _fold_persist_result(
+            persist,
+            _run_optional_section(
+                section="search",
+                label="search",
+                runner=run_interactive_search_configure,
+                config_path=options.config_path,
+            ),
         )
 
     if not options.skip_image_generation and questionary.confirm(
         "Enable image generation now?", default=False
     ).ask():
-        _run_optional_section(
-            section="image-generation",
-            label="image generation",
-            runner=run_interactive_image_generation_configure,
-            config_path=options.config_path,
+        persist = _fold_persist_result(
+            persist,
+            _run_optional_section(
+                section="image-generation",
+                label="image generation",
+                runner=run_interactive_image_generation_configure,
+                config_path=options.config_path,
+            ),
         )
 
     refreshed_status = get_onboarding_status(load_config(options.config_path))
-    _run_action_required_optional_sections(
-        questionary,
-        refreshed_status,
-        options=options,
-        sections=("memory_embedding",),
+    persist = _fold_persist_result(
+        persist,
+        _run_action_required_optional_sections(
+            questionary,
+            refreshed_status,
+            options=options,
+            sections=("memory_embedding",),
+        ),
     )
 
     return persist
+
+
+def _fold_persist_result(
+    persist: PersistResult, latest: PersistResult | None
+) -> PersistResult:
+    """Fold an optional section's save into the walk's returned result.
+
+    Optional sections persist on their own; dropping their ``PersistResult``
+    used to lose a ``restart_required`` signal before it reached the CLI's
+    restart guidance.
+    """
+    if latest is None:
+        return persist
+    return _merge_persist_results(persist, latest)
 
 
 def _run_optional_section(
@@ -2737,7 +2975,7 @@ def _run_optional_section(
     args: tuple[Any, ...] = (),
     kwargs: dict | None = None,
     config_path: str | Path | None = None,
-) -> None:
+) -> PersistResult | None:
     """Run an optional onboarding step, isolating cancellation from siblings.
 
     ``section`` is the slug consumed by ``opensquilla onboard configure <section>``;
@@ -2745,12 +2983,17 @@ def _run_optional_section(
     cancellation-shaped exceptions are caught here — real validation or
     programming errors propagate so they surface in the operator's terminal
     instead of being silently buried alongside the "skipping" message.
+
+    Returns the runner's ``PersistResult`` (``None`` on cancel or for legacy
+    runners without one) so a section's ``restart_required`` reaches the CLI
+    boundary instead of being discarded here.
     """
     try:
         runner_kwargs = {**(kwargs or {})}
         if config_path is not None:
             runner_kwargs.setdefault("config_path", config_path)
-        runner(*args, **runner_kwargs)
+        result = runner(*args, **runner_kwargs)
+        return result if isinstance(result, PersistResult) else None
     except UserCancelledError:
         config_arg = _config_cli_arg(config_path)
         console.print(
@@ -2760,10 +3003,12 @@ def _run_optional_section(
             f"  [dim]Resume later with[/dim] "
             f"[{ACCENT_SOFT}]opensquilla onboard configure {section}{config_arg}[/]"
         )
+        return None
     except KeyboardInterrupt:
         console.print(
             f"[yellow]{label} setup interrupted — skipping.[/yellow]"
         )
+        return None
 
 
 def _section_needs_action(status, section: str) -> bool:
@@ -2784,7 +3029,7 @@ def _run_action_required_optional_sections(
         "image_generation",
         "memory_embedding",
     ),
-) -> None:
+) -> PersistResult | None:
     actions = {
         "router": {
             "prompt": "Configure SquillaRouter now?",
@@ -2835,19 +3080,23 @@ def _run_action_required_optional_sections(
             "skip": False,
         },
     }
+    aggregated: PersistResult | None = None
     for name in sections:
         action = actions.get(name)
         if not action or action.get("skip") or not _section_needs_action(status, name):
             continue
         if not questionary.confirm(str(action["prompt"]), default=True).ask():
             continue
-        _run_optional_section(
+        result = _run_optional_section(
             section=str(action["section"]),
             label=str(action["label"]),
             runner=action["runner"],
             args=cast(tuple[Any, ...], action.get("args", ())),
             config_path=options.config_path,
         )
+        if result is not None:
+            aggregated = _merge_persist_results(aggregated, result)
+    return aggregated
 
 
 def run_interactive_channel_add(
@@ -2974,10 +3223,12 @@ def _run_configure_hub(
     """Menu loop over the configure sections: edit one, return to the menu.
 
     Each section persists as soon as it completes, so progress survives a
-    later cancel. Cancelling INSIDE a section returns to the menu (the
-    section is simply left unchanged); cancelling AT the menu raises
-    ``UserCancelledError`` like every other wizard prompt — "Done" is the
-    graceful exit.
+    later cancel. Cancelling INSIDE a section (Esc or Ctrl+C) returns to the
+    menu (the section is simply left unchanged). Cancelling AT the menu
+    raises ``UserCancelledError`` like every other wizard prompt — unless
+    sections were already persisted this sitting, in which case the cancel
+    exits like "Done": the saved changes (and their restart guidance) are
+    on disk and must not be reported as "Setup cancelled".
     """
     console.print(
         f"[{ACCENT_DIM}]Voice audio is configured from the Web UI setup page; "
@@ -2996,10 +3247,18 @@ def _run_configure_hub(
             choices.append(title)
         done_title = "Done" if aggregated is not None else "Exit (nothing changed)"
         choices.append(done_title)
-        picked = _ask_or_cancel(
-            questionary.select("Section", choices=choices),
-            section="configure",
-        )
+        try:
+            picked = _ask_or_cancel(
+                questionary.select("Section", choices=choices),
+                section="configure",
+            )
+        except (UserCancelledError, KeyboardInterrupt):
+            if aggregated is None:
+                raise
+            console.print(
+                "[dim]Exiting — the sections saved this sitting are kept.[/dim]"
+            )
+            return aggregated
         picked_slug = title_to_slug.get(picked)
         if picked_slug is None:
             return aggregated
@@ -3007,7 +3266,10 @@ def _run_configure_hub(
             result = _run_configure_section(
                 picked_slug, questionary, config_path=config_path
             )
-        except UserCancelledError:
+        except (UserCancelledError, KeyboardInterrupt):
+            # Ctrl+C inside a section is the same operator intent as Esc:
+            # leave the section unchanged and return to the menu instead of
+            # aborting the whole hub sitting.
             console.print(
                 f"[dim]{picked_slug} left unchanged — back to the section menu.[/dim]"
             )
@@ -3044,8 +3306,9 @@ def _run_configure_section(
 ) -> PersistResult | None:
     if section in {"provider", "providers"}:
         # A scoped provider re-run: swapping a key must not re-trigger the
-        # legacy-migration pre-step or the optional capability prompts the
-        # full first-run wizard walks through.
+        # legacy-migration pre-step, the first-run banner and "Press Enter"
+        # start gate, or the optional capability prompts the full first-run
+        # wizard walks through.
         return run_interactive_onboard(
             OnboardOptions(
                 skip_channels=True,
@@ -3053,6 +3316,7 @@ def _run_configure_section(
                 skip_image_generation=True,
                 skip_migration=True,
                 config_path=config_path,
+                scoped_section=True,
             )
         )
     if section == "router":
