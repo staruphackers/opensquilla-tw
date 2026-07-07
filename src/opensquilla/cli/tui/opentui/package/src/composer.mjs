@@ -71,6 +71,16 @@ export function formatRouterModelValue(model, baselineModel) {
   return modelShort || model;
 }
 
+// Status pill text: "<icon> <label>" plus a live " · Ns" elapsed counter once
+// a turn has been running a moment — the counter (advanced by the 180ms pulse
+// re-render) is what makes a long silent model-thinking stretch read as
+// working instead of stuck. Short turns skip it to avoid a flicker.
+export function statusPillText(icon, label, elapsedMs) {
+  const base = `${icon} ${label}`;
+  if (!Number.isFinite(elapsedMs) || elapsedMs < 2000) return base;
+  return `${base} · ${Math.floor(elapsedMs / 1000)}s`;
+}
+
 // Router strip value cell: whitespace collapsed and clipped to a fixed 18
 // cells so one long model id cannot push the other fields off the strip row.
 export function routerStripValue(value) {
@@ -496,6 +506,7 @@ export function createComposer(deps) {
     phase: "idle",
     label: "ready",
     active: false,
+    activeSince: null, // epoch ms when active flipped on (elapsed counter base)
   };
 
   const completionContext = {
@@ -1036,7 +1047,7 @@ export function createComposer(deps) {
       height: Math.max(1, effFooterHeight() - 1), // the router strip takes the top row
       borderStyle: "rounded",
       borderColor: composer.disabled ? THEME.composerDisabledBorder : THEME.composerBorder,
-      bottomTitle: ` ${statusIcon()} ${turnStatus.label} `,
+      bottomTitle: ` ${statusPillText(statusIcon(), turnStatus.label, turnStatus.activeSince === null ? null : Date.now() - turnStatus.activeSince)} `,
       bottomTitleAlignment: "left",
       paddingLeft: 1,
       paddingRight: 1,
@@ -1679,11 +1690,14 @@ export function createComposer(deps) {
   }
 
   function setTurnStatus(message) {
+    const wasActive = turnStatus.active;
     Object.assign(turnStatus, {
       phase: String(message.phase ?? turnStatus.phase),
       label: String(message.label ?? turnStatus.label),
       active: Boolean(message.active ?? turnStatus.active),
     });
+    if (turnStatus.active && !wasActive) turnStatus.activeSince = Date.now();
+    if (!turnStatus.active) turnStatus.activeSince = null;
     rerenderInputRegion();
   }
 

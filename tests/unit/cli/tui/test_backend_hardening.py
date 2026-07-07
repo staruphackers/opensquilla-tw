@@ -16,6 +16,7 @@ from opensquilla.cli.tui.backend.contracts import (
     TuiRuntimeConfig,
     TuiRuntimeHooks,
 )
+from opensquilla.cli.tui.backend.directives import StreamDirectiveFilter
 from opensquilla.cli.tui.backend.domain_events import TuiDomainEvent, now_ms
 from opensquilla.cli.tui.backend.events import (
     TUI_DOMAIN_EVENT_KINDS,
@@ -735,3 +736,39 @@ def test_transcript_store_uniquifies_repeated_tool_ids() -> None:
     store.clear()
     again = store.append(_tool_item("call-1", "running"))
     assert again.item_id == "tool-call-1"
+
+
+# ---------------------------------------------------------------------------
+# StreamDirectiveFilter (backend/directives.py)
+# ---------------------------------------------------------------------------
+
+
+def _filtered(deltas: list[str]) -> str:
+    stream_filter = StreamDirectiveFilter()
+    visible = "".join(stream_filter.feed(delta) for delta in deltas)
+    return visible + stream_filter.flush()
+
+
+def test_directive_filter_strips_whole_and_split_tags() -> None:
+    assert _filtered(["[[reply_to_current]]\nhello"]) == "hello"
+    assert _filtered(["[reply_to_current]\nhello"]) == "hello"
+    assert _filtered(["[[reply_to", "_current]]", " hi"]) == "hi"
+    assert _filtered(["[[reply_to_current]", "]", "answer"]) == "answer"
+    assert _filtered(["[[reply_to: chat-42]] body"]) == "body"
+    assert _filtered(["pre [[reply_to_current]] post"]) == "pre post"
+    assert _filtered(list("[[reply_to_current]] char by char")) == "char by char"
+
+
+def test_directive_filter_keeps_ordinary_bracketed_text() -> None:
+    assert _filtered(["a [link](url) stays"]) == "a [link](url) stays"
+    assert _filtered(["array[0] = 1"]) == "array[0] = 1"
+    assert _filtered(["[re", "gular text]"]) == "[regular text]"
+    assert _filtered(["[reply_to_curious]"]) == "[reply_to_curious]"
+    # An unbalanced close can no longer become a tag — rendered literally.
+    assert _filtered(["[[reply_to_current]x leak"]) == "[[reply_to_current]x leak"
+
+
+def test_directive_filter_flush_releases_unfinished_prefix() -> None:
+    stream_filter = StreamDirectiveFilter()
+    assert stream_filter.feed("ends with [[re") == "ends with "
+    assert stream_filter.flush() == "[[re"

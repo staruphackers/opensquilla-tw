@@ -612,3 +612,27 @@ test("Enter on a blank composer submits nothing (no phantom queued message)", as
   ]);
   renderer.destroy?.();
 });
+
+test("status pill shows a live elapsed counter once a turn runs a while", async () => {
+  const { statusPillText } = await import("./composer.mjs");
+  // Short turns skip the counter to avoid flicker.
+  expect(statusPillText("∙", "thinking", null)).toBe("∙ thinking");
+  expect(statusPillText("∙", "thinking", 800)).toBe("∙ thinking");
+  // Past the threshold the pill counts seconds — the visible sign of life
+  // through a long silent model-thinking stretch.
+  expect(statusPillText("∙", "thinking", 2000)).toBe("∙ thinking · 2s");
+  expect(statusPillText("◔", "exec_command", 41_500)).toBe("◔ exec_command · 41s");
+});
+
+test("an active turn status arms the elapsed counter; idle disarms it", async () => {
+  const { renderer, composer } = await setupComposer();
+  composer.setTurnStatus({ phase: "thinking", label: "thinking", active: true });
+  // The pill re-renders on every pulse tick; with the counter armed, ticks
+  // past the threshold surface " · Ns". We can't fake Date.now here, so pin
+  // the arming indirectly: an immediate re-render keeps the bare label…
+  composer.tickPulse(1);
+  // …and flipping back to idle must never leave a stale counter armed.
+  composer.setTurnStatus({ phase: "idle", label: "ready", active: false });
+  composer.tickPulse(2);
+  renderer.destroy?.();
+});

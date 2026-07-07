@@ -15,6 +15,7 @@ from dataclasses import asdict
 from itertools import count
 from typing import Any, Literal
 
+from opensquilla.cli.tui.backend.directives import StreamDirectiveFilter
 from opensquilla.cli.tui.backend.render_summary import summarize_args, summarize_result
 from opensquilla.cli.tui.opentui.messages import (
     BlockAppend,
@@ -52,6 +53,18 @@ class OpenTuiStreamRenderer:
         # Per-tool start times so atool_finished can surface a " · 0.2s" duration
         # like opencode/codex even when the caller does not pass `elapsed`.
         self._tool_start_times: dict[str, float] = {}
+        # Strips [[reply_to_current]]-style routing directives from streamed
+        # text; per open text block, reset on block close.
+        self._directive_filter = StreamDirectiveFilter()
+
+    async def aturn_started(self) -> None:
+        """Announce the turn before the first provider event.
+
+        The stream loop calls this right after the renderer is created, so the
+        pill flips to a pulsing "thinking" the moment the user submits instead
+        of the UI sitting visibly dead until the first token arrives.
+        """
+        await self._ensure_begin()
 
     async def _emit(self, message_type: str, payload: Any) -> None:
         await self._emit_raw(message_type, asdict(payload))
@@ -126,13 +139,18 @@ class OpenTuiStreamRenderer:
         if self._open_text_id is not None and self._open_text_presentation != kind:
             await self._close_text()
         self.buffer += delta
+        # Routing directives are for channel delivery, not the transcript; a
+        # tag-only delta opens no block at all (blocking an empty card).
+        visible = self._directive_filter.feed(delta)
+        if not visible:
+            return
         if self._open_text_id is None:
             self._open_text_id = self._next_block_id()
             self._open_text_presentation = kind
             await self._emit(
                 "block.begin", BlockBegin(id=self._open_text_id, kind=kind, meta={})
             )
-        await self._emit("block.append", BlockAppend(id=self._open_text_id, delta=delta))
+        await self._emit("block.append", BlockAppend(id=self._open_text_id, delta=visible))
 
     async def aappend_reasoning(self, delta: str) -> None:
         # Reasoning is the model's internal extended-thinking PROCESS, not a
@@ -152,9 +170,22 @@ class OpenTuiStreamRenderer:
             )
 
     async def _close_text(self) -> None:
+        # A held tail that never completed into a directive tag is ordinary
+        # text and belongs to this segment — even when the segment consisted
+        # of nothing else (no block opened yet).
+        tail = self._directive_filter.flush()
+        self._directive_filter = StreamDirectiveFilter()
+        if self._open_text_id is None and tail:
+            self._open_text_id = self._next_block_id()
+            await self._emit(
+                "block.begin",
+                BlockBegin(id=self._open_text_id, kind=self._open_text_presentation, meta={}),
+            )
         if self._open_text_id is None:
             return
         block_id = self._open_text_id
+        if tail:
+            await self._emit("block.append", BlockAppend(id=block_id, delta=tail))
         self._open_text_id = None
         await self._emit("block.end", BlockEnd(id=block_id))
 

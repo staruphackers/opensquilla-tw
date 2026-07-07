@@ -783,6 +783,12 @@ async def stream_response_gateway(
     )
 
     with stream_deps.renderer_factory(output_handle=tui_output) as renderer:
+        # Announce the turn before the first provider event: without this the
+        # UI sits visibly dead ("ready" pill, nothing pulsing) for the whole
+        # model-thinking window between submit and the first token.
+        _turn_started = getattr(renderer, "aturn_started", None)
+        if _turn_started is not None:
+            await _turn_started()
         streaming_plane = (
             StreamingPlane(
                 event_sink=stream_deps.tui_event_sink,
@@ -1133,6 +1139,12 @@ async def stream_response_turnrunner(
     )
 
     with stream_deps.renderer_factory(output_handle=tui_output) as renderer:
+        # Announce the turn before the first provider event: without this the
+        # UI sits visibly dead ("ready" pill, nothing pulsing) for the whole
+        # model-thinking window between submit and the first token.
+        _turn_started = getattr(renderer, "aturn_started", None)
+        if _turn_started is not None:
+            await _turn_started()
         streaming_plane = (
             StreamingPlane(
                 event_sink=stream_deps.tui_event_sink,
@@ -1469,6 +1481,12 @@ async def handle_image_command_turnrunner(
     usage: UsageSummary | None = None
     model_after: str | None = None
     with stream_deps.renderer_factory(output_handle=tui_output) as renderer:
+        # Announce the turn before the first provider event: without this the
+        # UI sits visibly dead ("ready" pill, nothing pulsing) for the whole
+        # model-thinking window between submit and the first token.
+        _turn_started = getattr(renderer, "aturn_started", None)
+        if _turn_started is not None:
+            await _turn_started()
         streaming_plane = (
             StreamingPlane(
                 event_sink=stream_deps.tui_event_sink,

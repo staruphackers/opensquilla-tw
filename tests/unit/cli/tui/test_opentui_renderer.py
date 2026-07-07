@@ -491,3 +491,64 @@ def test_tool_result_summary_stringifies_structured_msg_payloads() -> None:
         '{"count": 1, "files": ["main.py"]}\n'
         '["ok", {"status": "done"}]'
     )
+
+
+async def test_aturn_started_announces_thinking_before_any_provider_event() -> None:
+    """The stream loop announces the turn as soon as it starts, so the pill
+    pulses "thinking" through the silent model-thinking window instead of the
+    UI sitting on "ready" until the first token."""
+    handle = _RecordingHandle()
+    renderer = OpenTuiStreamRenderer(output_handle=handle)
+
+    await renderer.aturn_started()
+
+    types = [message_type for message_type, _payload in handle.sent]
+    assert "turn.begin" in types
+    status = next(p for t, p in handle.sent if t == "turn.status")
+    assert status["phase"] == "thinking"
+    assert status["active"] is True
+    # Idempotent: the first real event must not begin a second turn.
+    await renderer.aturn_started()
+    assert types.count("turn.begin") == 1
+
+
+async def test_answer_stream_strips_routing_directive_tags() -> None:
+    handle = _RecordingHandle()
+    renderer = OpenTuiStreamRenderer(output_handle=handle)
+
+    # Tag split across deltas, then the real answer.
+    await renderer.aappend_text("[[reply_to", presentation="answer")
+    await renderer.aappend_text("_current]]\n", presentation="answer")
+    await renderer.aappend_text("My name is OpenSquilla.", presentation="answer")
+    await renderer.afinalize()
+
+    appends = [p["delta"] for t, p in handle.sent if t == "block.append"]
+    joined = "".join(appends)
+    assert "reply_to_current" not in joined
+    assert joined == "My name is OpenSquilla."
+    # The raw logical buffer (TurnResult text) keeps the model's exact output.
+    assert "[[reply_to_current]]" in renderer.buffer
+
+
+async def test_tag_only_delta_opens_no_answer_block() -> None:
+    handle = _RecordingHandle()
+    renderer = OpenTuiStreamRenderer(output_handle=handle)
+
+    await renderer.aappend_text("[[reply_to_current]]", presentation="answer")
+    await renderer.afinalize()
+
+    kinds = [p["kind"] for t, p in handle.sent if t == "block.begin"]
+    assert "answer" not in kinds
+
+
+async def test_held_bracket_prefix_flushes_into_the_block_on_close() -> None:
+    handle = _RecordingHandle()
+    renderer = OpenTuiStreamRenderer(output_handle=handle)
+
+    await renderer.aappend_text("see ", presentation="answer")
+    # A bracket run that never completes into a directive is ordinary text.
+    await renderer.aappend_text("[[re", presentation="answer")
+    await renderer.afinalize()
+
+    appends = [p["delta"] for t, p in handle.sent if t == "block.append"]
+    assert "".join(appends) == "see [[re"

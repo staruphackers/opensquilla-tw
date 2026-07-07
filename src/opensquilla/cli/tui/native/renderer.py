@@ -15,6 +15,7 @@ from typing import Any, Literal
 
 from rich.markup import escape as _escape
 
+from opensquilla.cli.tui.backend.directives import StreamDirectiveFilter
 from opensquilla.ui import ACCENT
 
 # Map renderer-internal status styles onto Rich styles for the plain terminal.
@@ -51,6 +52,9 @@ class NativeStreamRenderer:
         # to a fresh line so a glyph never collides with preceding text.
         self._line_open = False
         self._tool_names: dict[str, str] = {}
+        # Strips [[reply_to_current]]-style routing directives from the
+        # streamed answer text before it reaches the terminal.
+        self._directive_filter = StreamDirectiveFilter()
 
     def __enter__(self) -> NativeStreamRenderer:
         return self
@@ -86,8 +90,20 @@ class NativeStreamRenderer:
         # ``buffer`` is the logical assistant text consumed by ``TurnResult``;
         # keep it raw and only escape what is sent to the markup-enabled console.
         self.buffer += delta
+        # Routing directives ([[reply_to_current]]-style) are for channel
+        # delivery, not the terminal transcript.
+        visible = self._directive_filter.feed(delta)
+        if not visible:
+            return
         self._saw_output = True
-        await self._write(_escape(delta))
+        await self._write(_escape(visible))
+
+    async def _flush_directive_tail(self) -> None:
+        """Print a held tail that never completed into a directive tag."""
+        tail = self._directive_filter.flush()
+        if tail:
+            self._saw_output = True
+            await self._write(_escape(tail))
 
     async def aappend_reasoning(self, delta: str) -> None:
         if not delta:
@@ -105,6 +121,7 @@ class NativeStreamRenderer:
         tool_use_id: str | None = None,
     ) -> None:
         del args
+        await self._flush_directive_tail()
         await self._close_reasoning()
         # Separate the tool row from any preceding answer prose that streamed
         # without a trailing newline ("I'll check…" + tool call), so the glyph
@@ -156,6 +173,7 @@ class NativeStreamRenderer:
 
     async def afinalize(self, usage: Any | None = None, *, cancelled: bool = False) -> None:
         del usage
+        await self._flush_directive_tail()
         await self._close_reasoning()
         if cancelled:
             await self._write("\n[yellow]✋ Cancelled[/yellow]\n")
