@@ -72,28 +72,36 @@ def test_flush_stdin_typeahead_uses_termios_on_unix_tty(monkeypatch):
 def test_interactive_provider_choice_offers_all_runtime_supported_providers():
     from opensquilla.onboarding.flow import OnboardOptions, _ask_provider_choice
 
-    captured: dict[str, list[str]] = {}
+    captured: dict[str, object] = {}
 
     class _Question:
         def ask(self) -> str:
             return "openrouter (OpenRouter)"
 
     class _Questionary:
-        def select(self, _message: str, *, choices: list[str], default: str) -> _Question:
+        def select(
+            self, _message: str, *, choices: list[str], default: str, **kwargs
+        ) -> _Question:
             captured["choices"] = choices
             captured["default"] = default
+            captured["kwargs"] = kwargs
             return _Question()
 
     _ask_provider_choice(_Questionary(), OnboardOptions())
 
-    assert captured["choices"][0] == "openrouter (OpenRouter)"
+    choices = captured["choices"]
+    assert choices[0] == "openrouter (OpenRouter)"
     assert captured["default"] == "openrouter (OpenRouter)"
-    offered = {choice.split(" ")[0] for choice in captured["choices"]}
+    offered = {choice.split(" ")[0] for choice in choices}
     from tests.test_onboarding.test_provider_specs import EXPECTED_SUPPORTED
 
     assert offered == EXPECTED_SUPPORTED
     # Experimental providers are offered, but with a visible caveat.
-    assert any("(experimental)" in choice for choice in captured["choices"])
+    assert any("(experimental)" in choice for choice in choices)
+    # ~30 entries: the select must let the operator type to filter.
+    kwargs = captured["kwargs"]
+    assert kwargs["use_search_filter"] is True
+    assert kwargs["use_jk_keys"] is False
 
 
 def test_interactive_router_supported_provider_does_not_prompt_for_model(monkeypatch):
@@ -1999,8 +2007,17 @@ def test_interactive_configure_memory_embedding_is_in_section_menu(
     class _Questionary(types.SimpleNamespace):
         def select(self, message: str, **kwargs):
             if message == "Section":
-                assert "memory-embedding" in kwargs["choices"]
-                return _Answer("memory-embedding")
+                titles = kwargs["choices"]
+                target_title = next(
+                    (t for t in titles if t.startswith("Memory embedding")), None
+                )
+                if target_title is not None and not getattr(self, "_dispatched", False):
+                    self._dispatched = True
+                    return _Answer(target_title)
+                done = next(
+                    t for t in titles if t in ("Done", "Exit (nothing changed)")
+                )
+                return _Answer(done)
             if message == "Memory embedding provider":
                 return _Answer("openai (OpenAI)")
             if message == "Memory API key source":

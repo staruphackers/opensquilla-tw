@@ -559,16 +559,16 @@ def test_wizard_probe_suppresses_provider_log_noise(monkeypatch, capsys):
 
     monkeypatch.setattr(probe_module, "probe_llm_provider", _noisy_probe)
 
+    config_before = dict(structlog.get_config())
     result = flow._run_provider_probe(provider_id="openrouter", model="dummy/model")
 
     captured = capsys.readouterr()
     assert result is sentinel
     assert "chat_http_error" not in captured.out + captured.err
     assert "synthetic-401-body" not in captured.out + captured.err
-
-    structlog.get_logger("opensquilla.provider").warning("post.probe.event")
-    captured = capsys.readouterr()
-    assert "post.probe.event" in captured.out + captured.err
+    # The suppression must be scoped to the probe: whatever structlog config
+    # was active before (test runs share the process) is restored verbatim.
+    assert dict(structlog.get_config()) == config_before
 
 
 def test_wizard_discovery_suppresses_provider_log_noise(monkeypatch, capsys):

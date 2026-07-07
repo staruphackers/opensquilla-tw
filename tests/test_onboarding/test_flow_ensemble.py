@@ -258,8 +258,14 @@ def test_interactive_configure_offers_and_dispatches_ensemble(
     class _Questionary(_BaseQuestionary):
         def select(self, message: str, **kwargs: Any) -> _Answer:
             assert message == "Section"
-            assert "ensemble" in kwargs["choices"]
-            return _Answer("ensemble")
+            titles = kwargs["choices"]
+            ensemble_title = next(
+                (t for t in titles if t.startswith("Ensemble")), None
+            )
+            if ensemble_title is not None and "config_path" not in seen:
+                return _Answer(ensemble_title)
+            done = next(t for t in titles if t in ("Done", "Exit (nothing changed)"))
+            return _Answer(done)
 
     monkeypatch.setitem(sys.modules, "questionary", _Questionary())
 

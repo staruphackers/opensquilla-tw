@@ -59,6 +59,7 @@ from opensquilla.onboarding.search_specs import (
     get_search_provider_setup_spec,
     list_search_provider_setup_specs,
 )
+from opensquilla.onboarding.section_status import SECTION_STATUS_DISPLAY
 from opensquilla.onboarding.setup_engine import (
     ENSEMBLE_SECTION_ALIASES,
     IMAGE_GENERATION_SECTION_ALIASES,
@@ -296,7 +297,15 @@ def _ask_provider_choice(questionary, options: OnboardOptions):
     choices = [f"{s.provider_id} ({s.label})" for s in supported]
     default = next((choice for choice in choices if choice.startswith("openrouter ")), None)
     pid = _ask_or_cancel(
-        questionary.select("LLM provider", choices=choices, default=default),
+        questionary.select(
+            "LLM provider",
+            choices=choices,
+            default=default,
+            # ~30 entries: let the operator type to filter instead of
+            # arrowing through the list (requires questionary >= 2.1).
+            use_search_filter=True,
+            use_jk_keys=False,
+        ),
         section="provider",
     )
     pid_clean = pid.split(" ")[0]
@@ -2427,6 +2436,106 @@ def _ensure_config_dir_writable(config_path: str | Path | None) -> None:
         raise SystemExit(2) from exc
 
 
+_ONBOARD_UPDATE_CHOICE = "Update settings (keep current values as defaults)"
+_ONBOARD_SECTIONS_CHOICE = "Change specific sections"
+_ONBOARD_RESET_CHOICE = "Start fresh (back up current config first)"
+
+
+def _is_full_interactive_rerun(options: OnboardOptions) -> bool:
+    """True only for a plain `opensquilla onboard` over a working install.
+
+    Scoped invocations (configure provider re-runs, --if-needed, --minimal,
+    any skip flag, or headless-shaped provider/model/key options) keep the
+    linear walk so their pinned prompt sequences stay unchanged.
+    """
+    return not (
+        options.if_needed
+        or options.minimal
+        or options.skip_migration
+        or options.skip_channels
+        or options.skip_search
+        or options.skip_image_generation
+        or options.provider_id
+        or options.model
+        or options.api_key
+        or options.api_key_env
+        or options.base_url
+        or options.proxy
+    )
+
+
+def _ask_existing_setup_action(
+    questionary,
+    cfg,
+    status,
+    options: OnboardOptions,
+) -> str | None:
+    """Re-run fork: 'update' (linear walk), 'sections' (hub), or 'reset'.
+
+    Returns ``None`` when the fork does not apply (fresh install, unfinished
+    setup, or a scoped run) — the caller then proceeds exactly as before.
+    Declining the reset confirmation falls back to 'update' rather than
+    aborting; Esc anywhere cancels the whole run like every wizard prompt.
+    """
+    if not status.has_config or not status.llm_configured:
+        return None
+    if not _is_full_interactive_rerun(options):
+        return None
+    resolved, _source = resolve_config_path(options.config_path)
+    provider = str(getattr(cfg.llm, "provider", "") or "")
+    model = str(getattr(cfg.llm, "model", "") or "")
+    router_word = "SquillaRouter" if cfg.squilla_router.enabled else "router disabled"
+    llm_part = f"{provider} / {model}".strip(" /")
+    summary = " · ".join(part for part in (llm_part, router_word) if part)
+    console.print(
+        f"[{ACCENT_DIM}]Existing setup detected:[/] [{ACCENT_SOFT}]{markup_escape(summary)}[/]"
+        f" [dim]({markup_escape(str(resolved))})[/dim]"
+    )
+    choice = _ask_or_cancel(
+        questionary.select(
+            "This install is already configured — what would you like to do?",
+            choices=[
+                _ONBOARD_UPDATE_CHOICE,
+                _ONBOARD_SECTIONS_CHOICE,
+                _ONBOARD_RESET_CHOICE,
+            ],
+            default=_ONBOARD_UPDATE_CHOICE,
+        ),
+        section="onboard",
+    )
+    if choice == _ONBOARD_SECTIONS_CHOICE:
+        return "sections"
+    if choice == _ONBOARD_RESET_CHOICE:
+        confirmed = _ask_or_cancel(
+            questionary.confirm(
+                f"Back up {resolved} and restart setup from defaults?",
+                default=False,
+            ),
+            section="onboard",
+        )
+        return "reset" if confirmed else "update"
+    return "update"
+
+
+def _backup_and_reset_config(config_path: str | Path | None) -> None:
+    """Move the existing config aside (never delete) before a fresh walk."""
+    import time as _time
+
+    resolved, _source = resolve_config_path(config_path)
+    if not resolved.exists():
+        return
+    stamp = _time.strftime("%Y%m%d-%H%M%S")
+    backup = resolved.with_name(f"{resolved.name}.bak-{stamp}")
+    counter = 0
+    while backup.exists():
+        counter += 1
+        backup = resolved.with_name(f"{resolved.name}.bak-{stamp}-{counter}")
+    os.replace(resolved, backup)
+    console.print(
+        f"[dim]Backed up existing config to {markup_escape(str(backup))}[/dim]"
+    )
+
+
 def run_interactive_onboard(options: OnboardOptions) -> PersistResult:
     cfg = load_config(options.config_path)
     status = get_onboarding_status(cfg)
@@ -2467,6 +2576,22 @@ def run_interactive_onboard(options: OnboardOptions) -> PersistResult:
         )
 
     config_path = _config_path_from_loaded_config(cfg)
+    rerun_action = _ask_existing_setup_action(questionary, cfg, status, options)
+    if rerun_action == "sections":
+        hub_result = _run_configure_hub(questionary, config_path=options.config_path)
+        if hub_result is not None:
+            return hub_result
+        return persist_config(
+            load_config(options.config_path),
+            path=options.config_path,
+            restart_required=False,
+            backup=False,
+        )
+    if rerun_action == "reset":
+        _backup_and_reset_config(options.config_path)
+        cfg = load_config(options.config_path)
+        status = get_onboarding_status(cfg)
+
     migration_result: Any | None = None
     if not options.skip_migration:
         migration_result = _run_onboard_migration_step(
@@ -2807,6 +2932,89 @@ def run_interactive_channel_edit(
     return persisted
 
 
+_CONFIGURE_MENU_SECTIONS: tuple[tuple[str, str, str], ...] = (
+    # (menu label, configure slug, key in OnboardingStatus.sections)
+    ("Provider", "provider", "llm"),
+    ("Router", "router", "router"),
+    ("Ensemble", "ensemble", "ensemble"),
+    ("Channels", "channels", "channels"),
+    ("Web search", "search", "search"),
+    ("Image generation", "image-generation", "image_generation"),
+    ("Memory embedding", "memory-embedding", "memory_embedding"),
+)
+
+
+def _merge_persist_results(
+    previous: PersistResult | None, latest: PersistResult
+) -> PersistResult:
+    """Fold one hub section's save into the running result.
+
+    The hub can persist several sections in one sitting; the CLI boundary
+    prints restart guidance from a single ``PersistResult``, so the flag must
+    stay sticky once any section required a restart.
+    """
+    if previous is None:
+        return latest
+    merged_warnings = list(previous.warnings)
+    merged_warnings.extend(w for w in latest.warnings if w not in merged_warnings)
+    return PersistResult(
+        path=latest.path,
+        backup_path=latest.backup_path or previous.backup_path,
+        restart_required=previous.restart_required or latest.restart_required,
+        warnings=merged_warnings,
+    )
+
+
+def _run_configure_hub(
+    questionary,
+    *,
+    config_path: str | Path | None = None,
+) -> PersistResult | None:
+    """Menu loop over the configure sections: edit one, return to the menu.
+
+    Each section persists as soon as it completes, so progress survives a
+    later cancel. Cancelling INSIDE a section returns to the menu (the
+    section is simply left unchanged); cancelling AT the menu raises
+    ``UserCancelledError`` like every other wizard prompt — "Done" is the
+    graceful exit.
+    """
+    console.print(
+        f"[{ACCENT_DIM}]Voice audio is configured from the Web UI setup page; "
+        "`opensquilla onboard catalog audio` lists the options.[/]"
+    )
+    aggregated: PersistResult | None = None
+    while True:
+        status = get_onboarding_status(load_config(config_path))
+        title_to_slug: dict[str, str] = {}
+        choices: list[str] = []
+        for label, slug, status_key in _CONFIGURE_MENU_SECTIONS:
+            state = status.sections.get(status_key)
+            word = SECTION_STATUS_DISPLAY.get(state, "") if state is not None else ""
+            title = f"{label} — {word}" if word else label
+            title_to_slug[title] = slug
+            choices.append(title)
+        done_title = "Done" if aggregated is not None else "Exit (nothing changed)"
+        choices.append(done_title)
+        picked = _ask_or_cancel(
+            questionary.select("Section", choices=choices),
+            section="configure",
+        )
+        picked_slug = title_to_slug.get(picked)
+        if picked_slug is None:
+            return aggregated
+        try:
+            result = _run_configure_section(
+                picked_slug, questionary, config_path=config_path
+            )
+        except UserCancelledError:
+            console.print(
+                f"[dim]{picked_slug} left unchanged — back to the section menu.[/dim]"
+            )
+            continue
+        if result is not None:
+            aggregated = _merge_persist_results(aggregated, result)
+
+
 def run_interactive_configure(
     section: str | None = None,
     *,
@@ -2820,21 +3028,19 @@ def run_interactive_configure(
     import questionary as _qmod
     questionary = _styled(_qmod)
 
-    section = section or _ask_or_cancel(
-        questionary.select(
-            "Section",
-            choices=[
-                "provider",
-                "router",
-                "ensemble",
-                "channels",
-                "search",
-                "image-generation",
-                "memory-embedding",
-            ],
-        ),
-        section="configure",
-    )
+    if section is not None:
+        # Explicit section: one-shot edit, exactly like `configure <section>`
+        # has always behaved.
+        return _run_configure_section(section, questionary, config_path=config_path)
+    return _run_configure_hub(questionary, config_path=config_path)
+
+
+def _run_configure_section(
+    section: str,
+    questionary,
+    *,
+    config_path: str | Path | None = None,
+) -> PersistResult | None:
     if section in {"provider", "providers"}:
         # A scoped provider re-run: swapping a key must not re-trigger the
         # legacy-migration pre-step or the optional capability prompts the

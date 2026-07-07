@@ -244,6 +244,37 @@ def _capabilities_summary(status: Any) -> str:
     return " | ".join(parts)
 
 
+def _capability_fix_lines(status: Any, config_arg: str) -> list[str]:
+    """One actionable line per capability that needs operator attention.
+
+    Deliberate opt-outs ("Later") are not nagged about; only blocking,
+    missing, degraded, or unverifiable capabilities get a line, and each
+    names the exact command that fixes it. Audio has no `configure audio`
+    path, so it points at the catalog instead of a command that exits 2.
+    """
+    fix_lines: list[str] = []
+    for name in _CAPABILITY_SECTIONS:
+        detail = status.section_details.get(name, {})
+        state = status.sections.get(name)
+        value = str(getattr(state, "value", detail.get("status") or ""))
+        needs_action = bool(detail.get("blocking") or detail.get("actionRequired"))
+        if not needs_action and value not in {"missing", "degraded", "unknown"}:
+            continue
+        label = str(detail.get("label") or name.replace("_", " ").title())
+        display = (
+            "Needs action"
+            if needs_action
+            else _CAPABILITY_STATUS_DISPLAY.get(value, value.replace("_", " ").title())
+        )
+        slug = _normalize_headless_section(name)
+        if slug == "audio":
+            command = f"opensquilla onboard catalog audio{config_arg}"
+        else:
+            command = f"opensquilla onboard configure {slug}{config_arg}"
+        fix_lines.append(f"  {label} ({display}): {command}")
+    return fix_lines
+
+
 def env_reference_warnings(config: Any) -> list[str]:
     """Return operator-facing warnings for saved env references not visible now."""
     warnings: list[str] = []
@@ -341,6 +372,7 @@ def format_next_steps(config: Any, *, config_path: str | Path | None = None) -> 
         f"  Run gateway now: opensquilla gateway run{config_arg}",
         f"  Start gateway in background: opensquilla gateway start --json{config_arg}",
         f"  Restart running gateway: opensquilla gateway restart --json{config_arg}",
+        f"  Change settings anytime: opensquilla onboard configure{config_arg}",
     ]
     if key_source == "missing_env" and env_key:
         lines.append(f"  Set key before starting gateway: {set_env_hint(env_key)}")
@@ -348,6 +380,10 @@ def format_next_steps(config: Any, *, config_path: str | Path | None = None) -> 
             f"  Persist key across restarts: add {env_key}=<your-key> to "
             f"{persistent_env_file()}"
         )
+    fix_lines = _capability_fix_lines(status, config_arg)
+    if fix_lines:
+        lines.extend(["", "Fix next:"])
+        lines.extend(fix_lines)
     lines.extend(["", "Reference:"])
     setup_url = web_setup_url(config)
     if setup_url:

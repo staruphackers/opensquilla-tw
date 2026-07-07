@@ -353,3 +353,61 @@ def test_missing_env_warning_mentions_persistent_env_file(tmp_path, monkeypatch)
         "DUMMY_UNSET_LLM_KEY=<your-key>" in warning and env_file in warning
         for warning in warnings
     )
+
+
+def test_next_steps_advertise_the_configure_hub(monkeypatch):
+    from opensquilla.gateway.config import GatewayConfig
+    from opensquilla.onboarding import next_steps
+
+    cfg = GatewayConfig()
+
+    text = next_steps.format_next_steps(cfg, config_path="/tmp/config.toml")
+
+    commands = text.split("Commands:", 1)[1].split("Reference:", 1)[0]
+    assert (
+        "Change settings anytime: opensquilla onboard configure --config /tmp/config.toml"
+        in commands
+    )
+
+
+def test_fix_next_names_the_exact_command_for_a_degraded_capability(monkeypatch):
+    from opensquilla.gateway.config import GatewayConfig
+    from opensquilla.onboarding import next_steps
+
+    cfg = GatewayConfig()
+    cfg.search_provider = "tavily"
+    cfg.search_api_key = ""
+    cfg.search_api_key_env = "DUMMY_UNSET_SEARCH_KEY"
+    monkeypatch.delenv("DUMMY_UNSET_SEARCH_KEY", raising=False)
+
+    text = next_steps.format_next_steps(cfg, config_path="/tmp/config.toml")
+
+    assert "Fix next:" in text
+    fix_block = text.split("Fix next:", 1)[1].split("Reference:", 1)[0]
+    assert "opensquilla onboard configure search --config /tmp/config.toml" in fix_block
+
+
+def test_fix_next_absent_when_nothing_needs_attention():
+    from opensquilla.gateway.config import GatewayConfig
+    from opensquilla.onboarding import next_steps
+
+    # Fresh defaults: every capability is either ready or a deliberate
+    # "Later" opt-out — nothing to nag about.
+    text = next_steps.format_next_steps(GatewayConfig(), config_path="/tmp/config.toml")
+
+    assert "Fix next:" not in text
+
+
+def test_fix_next_never_advertises_the_nonexistent_configure_audio(monkeypatch):
+    from opensquilla.gateway.config import GatewayConfig
+    from opensquilla.onboarding import next_steps
+
+    cfg = GatewayConfig()
+    cfg.audio.enabled = True  # enabled without any provider credential
+    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+
+    text = next_steps.format_next_steps(cfg, config_path="/tmp/config.toml")
+
+    assert "Fix next:" in text
+    assert "onboard configure audio" not in text
+    assert "opensquilla onboard catalog audio" in text
