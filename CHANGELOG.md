@@ -8,6 +8,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Added Tencent TokenHub providers for the Hunyuan hy3 family:
+  `tencent_tokenhub` (OpenAI-compatible mainland endpoint,
+  `TENCENT_TOKENHUB_API_KEY`), `tencent_tokenhub_anthropic` (the same
+  deployment's Anthropic Messages protocol with `x-api-key` auth), and
+  `tencent_tokenhub_intl` (the international deployment with its own
+  `TENCENT_TOKENHUB_INTL_API_KEY`). hy3/hy3-preview thinking maps onto the
+  documented `reasoning_effort` `low`/`high` values plus the thinking enable
+  object, and assistant `reasoning_content` is replayed across turns per the
+  hy3 interleaved-thinking contract. The Token Plan subscription is covered
+  too: `tencent_token_plan` (Chat Completions at
+  `api.lkeap.cloud.tencent.com/plan/v3`) and `tencent_token_plan_anthropic`
+  (Anthropic Messages at `/plan/anthropic`, bearer auth), both reading the
+  dedicated `TENCENT_TOKEN_PLAN_API_KEY` (`sk-tp-…`) plan credential.
 - Added Alibaba Cloud IQS (`iqs`) as a runtime-supported web search provider:
   unified-search endpoint with freshness, site include/exclude filters, inline
   main-text content, and rerank scores, configured via `IQS_SEARCH_API_KEY`.
@@ -26,6 +39,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Security:** the gateway no longer emits CORS headers by default —
+  `cors.allowed_origins` now defaults to `[]` instead of `"*"`. The Web UI
+  (served same-origin from the gateway), the CLI, curl, and the desktop app
+  are unaffected. Deployments that serve a separate frontend from another
+  origin must list that origin explicitly in `cors.allowed_origins` to
+  restore the previous behavior; configuring `"*"` together with
+  `cors.allow_credentials` now logs a boot-time warning.
+- **Security:** state-changing gateway HTTP routes (chat send, system
+  shutdown, approvals settings/resolve, elevated mode, channel logout, file
+  upload, audio transcription, artifact native open, diagnostics bundle) now
+  reject browser requests whose `Origin` is not the gateway itself with
+  `403 FORBIDDEN_ORIGIN`, extending the diagnostics-bundle same-origin guard
+  to the whole HTTP surface. Requests without an `Origin` header (curl, the
+  desktop client) and origins listed in `cors.allowed_origins` still pass.
 - `compose.yaml` now documents prebuilt-image selection, safe LAN exposure,
   and Web UI token auth, and the troubleshooting guide covers common Docker
   deployment failures.
