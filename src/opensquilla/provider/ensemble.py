@@ -185,6 +185,17 @@ class _SelectionResult:
     request_count: int = 0
 
 
+@dataclass(frozen=True)
+class _CandidateTaskMeta:
+    index: int
+    sample_index: int
+    member: EnsembleMemberConfig
+    started: float
+    messages: list[Message]
+    tools: list[ToolDefinition] | None
+    config: ChatConfig | None
+
+
 def _normalize_thinking(value: str | None) -> tuple[bool | None, Any | None]:
     if value is None:
         return None, None
@@ -394,6 +405,7 @@ def _summed_float(rows: Sequence[dict[str, Any]], key: str) -> float:
 def _candidate_has_usage(candidate: _CandidateResult) -> bool:
     return bool(
         candidate.ok
+        or candidate.error_code == "early_stopped"
         or candidate.input_tokens
         or candidate.output_tokens
         or candidate.reasoning_tokens
@@ -557,6 +569,8 @@ class EnsembleProvider:
         proposer_tools: bool = False,
         candidate_scorer: EnsembleMemberConfig | None = None,
         candidate_prefilter_top_k: int = 0,
+        proposer_early_stop_success_count: int = 0,
+        proposer_early_stop_after_seconds: float = 0.0,
         output_strategy: Literal["fusion", "select_best_candidate"] = "fusion",
         moa_layers: int = 1,
     ) -> None:
@@ -574,6 +588,12 @@ class EnsembleProvider:
         self.proposer_tools = bool(proposer_tools)
         self.candidate_scorer = candidate_scorer
         self.candidate_prefilter_top_k = max(0, int(candidate_prefilter_top_k or 0))
+        self.proposer_early_stop_success_count = max(
+            0, int(proposer_early_stop_success_count or 0)
+        )
+        self.proposer_early_stop_after_seconds = max(
+            0.0, float(proposer_early_stop_after_seconds or 0.0)
+        )
         strategy = str(output_strategy or "fusion").strip()
         self.output_strategy = (
             strategy if strategy in {"fusion", "select_best_candidate"} else "fusion"
@@ -1232,26 +1252,156 @@ class EnsembleProvider:
         config: ChatConfig | None,
     ) -> list[_CandidateResult]:
         tasks: list[asyncio.Task[_CandidateResult]] = []
+        task_meta: dict[asyncio.Task[_CandidateResult], _CandidateTaskMeta] = {}
         index = 0
         for member in self.proposers:
             k = max(1, int(member.k or 1))
             for sample_index in range(k):
-                tasks.append(
-                    asyncio.create_task(
-                        self._collect_candidate(
-                            index=index,
-                            sample_index=sample_index,
-                            member=member,
-                            messages=messages,
-                            tools=tools if self.proposer_tools else None,
-                            config=config,
-                        )
+                started = time.monotonic()
+                task = asyncio.create_task(
+                    self._collect_candidate(
+                        index=index,
+                        sample_index=sample_index,
+                        member=member,
+                        messages=messages,
+                        tools=tools if self.proposer_tools else None,
+                        config=config,
                     )
                 )
+                task_meta[task] = _CandidateTaskMeta(
+                    index=index,
+                    sample_index=sample_index,
+                    member=member,
+                    started=started,
+                    messages=messages,
+                    tools=tools if self.proposer_tools else None,
+                    config=config,
+                )
+                tasks.append(task)
                 index += 1
         if not tasks:
             return []
-        return [result for result in await asyncio.gather(*tasks)]
+        early_stop_target = self._proposer_early_stop_target(len(tasks))
+        if early_stop_target <= 0:
+            return [result for result in await asyncio.gather(*tasks)]
+
+        pending = set(tasks)
+        results: list[_CandidateResult] = []
+        successful_count = 0
+        started_all = time.monotonic()
+        while pending:
+            timeout: float | None = None
+            if successful_count >= early_stop_target:
+                remaining = self.proposer_early_stop_after_seconds - (
+                    time.monotonic() - started_all
+                )
+                if remaining <= 0:
+                    break
+                timeout = remaining
+            done, pending = await asyncio.wait(
+                pending,
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                break
+            for task in done:
+                result = self._candidate_result_from_task(task, task_meta[task])
+                results.append(result)
+                if result.ok:
+                    successful_count += 1
+            if (
+                successful_count >= early_stop_target
+                and time.monotonic() - started_all
+                >= self.proposer_early_stop_after_seconds
+            ):
+                break
+
+        if pending and successful_count >= early_stop_target:
+            stopped_at = time.monotonic()
+            for task in pending:
+                task.cancel()
+                results.append(
+                    self._early_stopped_candidate_result(
+                        task_meta[task],
+                        stopped_at=stopped_at,
+                        successful_count=successful_count,
+                    )
+                )
+            await asyncio.gather(*pending, return_exceptions=True)
+        elif pending:
+            results.extend(await asyncio.gather(*pending))
+        return sorted(results, key=lambda candidate: candidate.index)
+
+    def _proposer_early_stop_target(self, total_candidates: int) -> int:
+        if self.proposer_early_stop_success_count <= 0 or total_candidates <= 1:
+            return 0
+        target = max(
+            self.proposer_early_stop_success_count,
+            self.min_successful_proposers,
+        )
+        if self.candidate_prefilter_top_k > 0:
+            target = max(target, min(self.candidate_prefilter_top_k, total_candidates))
+        return target if target < total_candidates else 0
+
+    def _candidate_result_from_task(
+        self,
+        task: asyncio.Task[_CandidateResult],
+        meta: _CandidateTaskMeta,
+    ) -> _CandidateResult:
+        try:
+            return task.result()
+        except Exception as exc:  # noqa: BLE001 - defensive task wrapper
+            cfg = meta.member.provider_config
+            return _CandidateResult(
+                index=meta.index,
+                sample_index=meta.sample_index,
+                label=meta.member.label or f"proposer_{meta.index + 1}",
+                provider=cfg.provider,
+                model=cfg.model,
+                error=str(exc),
+                error_code=type(exc).__name__,
+                elapsed_ms=int((time.monotonic() - meta.started) * 1000),
+            )
+
+    def _early_stopped_candidate_result(
+        self,
+        meta: _CandidateTaskMeta,
+        *,
+        stopped_at: float,
+        successful_count: int,
+    ) -> _CandidateResult:
+        cfg = meta.member.provider_config
+        elapsed_s = max(0.0, stopped_at - meta.started)
+        result = _CandidateResult(
+            index=meta.index,
+            sample_index=meta.sample_index,
+            label=meta.member.label or f"proposer_{meta.index + 1}",
+            provider=cfg.provider,
+            model=cfg.model,
+            cost_source="unknown_canceled",
+            error=(
+                f"proposer early-stopped after {elapsed_s:.3g}s "
+                f"with {successful_count} successful candidate(s)"
+            ),
+            error_code="early_stopped",
+            elapsed_ms=int(elapsed_s * 1000),
+        )
+        chat_cfg = _member_chat_config(meta.config, meta.member)
+        if self.proposer_timeout_seconds > 0:
+            chat_cfg = chat_cfg.model_copy(update={"timeout": self.proposer_timeout_seconds})
+        result.request = _request_trace(
+            role="proposer",
+            profile=self.profile_name,
+            member=meta.member,
+            messages=meta.messages,
+            tools=meta.tools,
+            config=chat_cfg,
+            label=result.label,
+            sample_index=result.sample_index,
+        )
+        result.request["cancelled_before_done"] = True
+        return result
 
     async def _collect_candidate(
         self,
@@ -1621,6 +1771,18 @@ class EnsembleProvider:
                 for candidate in candidates
             ],
         }
+        if self.proposer_early_stop_success_count > 0:
+            early_stopped_count = sum(
+                1 for candidate in candidates if candidate.error_code == "early_stopped"
+            )
+            row["proposer_early_stop"] = {
+                "enabled": True,
+                "success_count": self.proposer_early_stop_success_count,
+                "after_seconds": self.proposer_early_stop_after_seconds,
+                "early_stopped_count": early_stopped_count,
+                "usage_unknown_count": early_stopped_count,
+                "cost_observed": early_stopped_count == 0,
+            }
         requests = [candidate.request for candidate in candidates if candidate.request]
         if prefilter_trace and prefilter_trace.get("request"):
             requests.append(prefilter_trace["request"])
@@ -1813,6 +1975,12 @@ def build_ensemble_provider_from_config(
         proposer_tools=bool(getattr(ensemble_cfg, "proposer_tools", False)),
         candidate_scorer=candidate_scorer,
         candidate_prefilter_top_k=int(getattr(profile, "candidate_prefilter_top_k", 0) or 0),
+        proposer_early_stop_success_count=int(
+            getattr(profile, "proposer_early_stop_success_count", 0) or 0
+        ),
+        proposer_early_stop_after_seconds=float(
+            getattr(profile, "proposer_early_stop_after_seconds", 0.0) or 0.0
+        ),
         output_strategy=getattr(profile, "output_strategy", "fusion"),
         moa_layers=int(getattr(profile, "moa_layers", 1) or 1),
     )

@@ -76,6 +76,14 @@ GROUP_SPECS: dict[str, dict[str, str]] = {
     },
     "B9": {"kind": "single", "model": "anthropic/claude-fable-5"},
     "B10": {"kind": "single", "model": "sakana/fugu-ultra"},
+    "B11": {
+        "kind": "single",
+        "model": "MoM",
+        "provider": "vllm",
+        "base_url": "http://127.0.0.1:8888/v1",
+        "api_key": "dummy",
+        "api_key_env": "OPENROUTER_API_KEY",
+    },
     "G1": {"kind": "profile", "profile": "g1_code"},
     "G2": {"kind": "profile", "profile": "g2_general"},
     "G3": {"kind": "profile", "profile": "g3_standard"},
@@ -99,6 +107,8 @@ GROUP_SPECS: dict[str, dict[str, str]] = {
     "G21": {"kind": "profile", "profile": "g21_g13_top3_prefilter"},
     "G22": {"kind": "profile", "profile": "g22_g12_glm_top3_prefilter"},
     "G23": {"kind": "profile", "profile": "g23_g12_plus_gemini_sampled_top3_prefilter"},
+    "G24": {"kind": "profile", "profile": "g24_g12_drop_k2_7_code"},
+    "G25": {"kind": "profile", "profile": "g25_g12_drop_qwen3_7"},
 }
 
 TOOL_MODE_PROVIDER_ONLY = "provider_only"
@@ -1257,6 +1267,9 @@ def profile_timeout_seconds(
     profile: Any,
     *,
     requested_timeout: float | None = None,
+    proposer_timeout_override: float | None = None,
+    aggregator_timeout_override: float | None = None,
+    expand_to_requested_timeout: bool = False,
 ) -> tuple[float, float]:
     moa_layers = max(1, int(getattr(profile, "moa_layers", 1) or 1))
     proposer_timeout = max(
@@ -1267,7 +1280,15 @@ def profile_timeout_seconds(
         DEFAULT_PROFILE_AGGREGATOR_TIMEOUT_SECONDS,
         float(getattr(profile, "aggregator_timeout_seconds", 0) or 0),
     )
-    if requested_timeout is None or requested_timeout <= 0:
+    if proposer_timeout_override is not None and proposer_timeout_override > 0:
+        proposer_timeout = float(proposer_timeout_override)
+    if aggregator_timeout_override is not None and aggregator_timeout_override > 0:
+        aggregator_timeout = float(aggregator_timeout_override)
+    if (
+        not expand_to_requested_timeout
+        or requested_timeout is None
+        or requested_timeout <= 0
+    ):
         return proposer_timeout, aggregator_timeout
     available = max(0.0, float(requested_timeout) - PROFILE_TIMEOUT_MARGIN_SECONDS)
     base_budget = proposer_timeout + aggregator_timeout * moa_layers
@@ -1284,10 +1305,14 @@ def profile_aggregator_timeout_seconds(
     profile: Any,
     *,
     requested_timeout: float | None = None,
+    aggregator_timeout_override: float | None = None,
+    expand_to_requested_timeout: bool = False,
 ) -> float:
     return profile_timeout_seconds(
         profile,
         requested_timeout=requested_timeout,
+        aggregator_timeout_override=aggregator_timeout_override,
+        expand_to_requested_timeout=expand_to_requested_timeout,
     )[1]
 
 
@@ -1447,16 +1472,23 @@ def build_single_provider(
     group: str,
     model: str,
     dry_run: bool,
+    provider: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    api_key_env: str | None = None,
 ):
     if dry_run:
         return DryProvider(model=model, group=group)
+    resolved_api_key = api_key if api_key is not None else inherited.api_key
+    if api_key_env:
+        resolved_api_key = os.environ.get(api_key_env, resolved_api_key)
     cfg = ProviderConfig(
-        provider=inherited.provider,
+        provider=provider or inherited.provider,
         model=model,
-        api_key=inherited.api_key,
-        base_url=inherited.base_url,
+        api_key=resolved_api_key,
+        base_url=base_url or inherited.base_url,
         proxy=inherited.proxy,
-        provider_routing=inherited.provider_routing,
+        provider_routing=inherited.provider_routing if provider is None else {},
     )
     return ModelSelector(SelectorConfig(primary=cfg)).resolve()
 
@@ -1471,6 +1503,11 @@ def build_profile_provider(
     generation_policy: dict[str, Any] | None = None,
     requested_timeout: float | None = None,
     enable_proposer_tools: bool = False,
+    ensemble_proposer_timeout: float | None = None,
+    ensemble_aggregator_timeout: float | None = None,
+    ensemble_proposer_early_stop_success_count: int | None = None,
+    ensemble_proposer_early_stop_after: float | None = None,
+    expand_ensemble_timeouts_to_task_timeout: bool = False,
 ):
     if dry_run:
         return DryEnsembleProvider(group=group, profile=profile)
@@ -1488,14 +1525,28 @@ def build_profile_provider(
     proposer_timeout_s, aggregator_timeout_s = profile_timeout_seconds(
         profile_config,
         requested_timeout=requested_timeout,
+        proposer_timeout_override=ensemble_proposer_timeout,
+        aggregator_timeout_override=ensemble_aggregator_timeout,
+        expand_to_requested_timeout=expand_ensemble_timeouts_to_task_timeout,
     )
+    profile_updates: dict[str, Any] = {
+        "record_candidates": True,
+        "shuffle_candidates": False,
+        "proposer_timeout_seconds": proposer_timeout_s,
+        "aggregator_timeout_seconds": aggregator_timeout_s,
+    }
+    if ensemble_proposer_early_stop_success_count is not None:
+        profile_updates["proposer_early_stop_success_count"] = max(
+            0,
+            int(ensemble_proposer_early_stop_success_count or 0),
+        )
+    if ensemble_proposer_early_stop_after is not None:
+        profile_updates["proposer_early_stop_after_seconds"] = max(
+            0.0,
+            float(ensemble_proposer_early_stop_after or 0.0),
+        )
     config.llm_ensemble.profiles[profile] = profile_config.model_copy(
-        update={
-            "record_candidates": True,
-            "shuffle_candidates": False,
-            "proposer_timeout_seconds": proposer_timeout_s,
-            "aggregator_timeout_seconds": aggregator_timeout_s,
-        }
+        update=profile_updates
     )
     fallback = build_single_provider(
         inherited=inherited,
@@ -1779,7 +1830,13 @@ def aggregate_agent_ensemble_trace(records: list[dict[str, Any]]) -> dict[str, A
             continue
         enriched = dict(trace)
         enriched["agent_call_index"] = call_index
+        if payload.get("call_id") is not None:
+            enriched["agent_call_id"] = str(payload.get("call_id"))
         enriched["agent_iteration"] = coerce_metric_int(payload.get("iteration"))
+        enriched["agent_call_attempt"] = coerce_metric_int(payload.get("attempt"))
+        enriched["agent_call_duration_ms"] = coerce_metric_int(
+            payload.get("duration_ms")
+        )
         traces.append(enriched)
         total_llm_requests += coerce_metric_int(trace.get("llm_request_count"))
     if not traces:
@@ -2162,15 +2219,23 @@ def run_result_summary(result: RunResult) -> dict[str, Any]:
     server_tool_call_count = coerce_metric_int(usage.get("server_tool_call_count"))
     total_tool_call_count = result.tool_call_count + server_tool_call_count
     llm_request_count = 0
+    usage_unknown_count = 0
     if result.done is not None:
         if isinstance(result.done.ensemble_trace, dict):
             llm_request_count = coerce_metric_int(
                 result.done.ensemble_trace.get("llm_request_count")
             )
+            usage_unknown_count = ensemble_usage_unknown_count(
+                result.done.ensemble_trace
+            )
         if not llm_request_count and result.done.model_usage_breakdown:
             llm_request_count = len(result.done.model_usage_breakdown)
         if not llm_request_count:
             llm_request_count = 1
+        usage_unknown_count = max(
+            usage_unknown_count,
+            usage_unknown_count_from_usage_payload(usage),
+        )
     elif result.error or result.final_text:
         llm_request_count = 1
     return {
@@ -2183,6 +2248,7 @@ def run_result_summary(result: RunResult) -> dict[str, Any]:
         "total_tool_call_count": total_tool_call_count,
         "trajectory_steps": total_tool_call_count + llm_request_count,
         "llm_request_count": llm_request_count,
+        "usage_unknown_count": usage_unknown_count,
         "error": result.error,
         "final_text_chars": len(result.final_text),
         "final_text_sha256": text_sha256(result.final_text),
@@ -2761,6 +2827,11 @@ async def run_one(
     judge_concurrency: int,
     judge_max_attempts: int,
     timeout: float,
+    ensemble_proposer_timeout: float | None,
+    ensemble_aggregator_timeout: float | None,
+    ensemble_proposer_early_stop_success_count: int | None,
+    ensemble_proposer_early_stop_after: float | None,
+    expand_ensemble_timeouts_to_task_timeout: bool,
     tool_policy: dict[str, Any],
     generation_policy: dict[str, Any],
     runner_mode: str = RUNNER_MODE_PROVIDER,
@@ -2782,6 +2853,8 @@ async def run_one(
         requested_timeout=timeout,
         config=config,
         group=group,
+        ensemble_proposer_timeout=ensemble_proposer_timeout,
+        ensemble_aggregator_timeout=ensemble_aggregator_timeout,
     )
     generation_config = generation_chat_config(
         generation_policy,
@@ -2795,6 +2868,10 @@ async def run_one(
                 group=group,
                 model=spec["model"],
                 dry_run=dry_run,
+                provider=spec.get("provider"),
+                base_url=spec.get("base_url"),
+                api_key=spec.get("api_key"),
+                api_key_env=spec.get("api_key_env"),
             )
         else:
             provider = build_profile_provider(
@@ -2808,6 +2885,15 @@ async def run_one(
                 enable_proposer_tools=bool(
                     tool_policy.get("tools_enabled")
                     and tool_policy.get("tool_mode") != TOOL_MODE_LOCAL_WEB_TOOLS
+                ),
+                ensemble_proposer_timeout=ensemble_proposer_timeout,
+                ensemble_aggregator_timeout=ensemble_aggregator_timeout,
+                ensemble_proposer_early_stop_success_count=(
+                    ensemble_proposer_early_stop_success_count
+                ),
+                ensemble_proposer_early_stop_after=ensemble_proposer_early_stop_after,
+                expand_ensemble_timeouts_to_task_timeout=(
+                    expand_ensemble_timeouts_to_task_timeout
                 ),
             )
     except Exception as exc:  # noqa: BLE001 - report config errors per row
@@ -2838,6 +2924,16 @@ async def run_one(
     mark_retryable_generation_error(run, terminal_generation_reason)
     profile_proposer_timeout_s = getattr(provider, "proposer_timeout_seconds", None)
     profile_aggregator_timeout_s = getattr(provider, "aggregator_timeout_seconds", None)
+    profile_proposer_early_stop_success_count = getattr(
+        provider,
+        "proposer_early_stop_success_count",
+        None,
+    )
+    profile_proposer_early_stop_after_s = getattr(
+        provider,
+        "proposer_early_stop_after_seconds",
+        None,
+    )
     should_judge = not terminal_generation_reason and run.done is not None
     judge = (
         await judge_text(
@@ -2899,6 +2995,9 @@ async def run_one(
     attempt_llm_request_count = sum_generation_attempt_metric(
         generation_attempts, "llm_request_count"
     )
+    attempt_usage_unknown_count = sum_generation_attempt_metric(
+        generation_attempts, "usage_unknown_count"
+    )
     attempt_trajectory_steps = sum_generation_attempt_metric(
         generation_attempts, "trajectory_steps"
     )
@@ -2924,6 +3023,13 @@ async def run_one(
     trajectory_steps = total_tool_call_count + llm_request_count
     if attempt_trajectory_steps:
         trajectory_steps = attempt_trajectory_steps
+    ensemble_trace = run.done.ensemble_trace if run.done is not None else {}
+    usage_unknown_count = max(
+        ensemble_usage_unknown_count(ensemble_trace),
+        usage_unknown_count_from_usage_payload(usage_payload),
+    )
+    if attempt_usage_unknown_count:
+        usage_unknown_count = attempt_usage_unknown_count
     return {
         "task_id": task["id"],
         "group": group,
@@ -2952,6 +3058,7 @@ async def run_one(
         "total_tool_call_count": total_tool_call_count,
         "trajectory_steps": trajectory_steps,
         "llm_request_count": llm_request_count,
+        "usage_unknown_count": usage_unknown_count,
         "generation_attempt_count": len(generation_attempts),
         "generation_max_attempts": generation_attempt_limit,
         "generation_retry_backoff_s": generation_retry_backoff_s,
@@ -2969,6 +3076,10 @@ async def run_one(
             "effective_timeout_s": effective_timeout,
             "profile_proposer_timeout_s": profile_proposer_timeout_s,
             "profile_aggregator_timeout_s": profile_aggregator_timeout_s,
+            "profile_proposer_early_stop_success_count": (
+                profile_proposer_early_stop_success_count
+            ),
+            "profile_proposer_early_stop_after_s": profile_proposer_early_stop_after_s,
             "runner_mode": runner_mode,
             "agent_max_iterations": agent_max_iterations,
             "latency_ms": latency_ms,
@@ -2982,6 +3093,7 @@ async def run_one(
             "total_tool_call_count": total_tool_call_count,
             "trajectory_steps": trajectory_steps,
             "llm_request_count": llm_request_count,
+            "usage_unknown_count": usage_unknown_count,
             "generation_attempt_count": len(generation_attempts),
             "generation_max_attempts": generation_attempt_limit,
             "generation_retry_backoff_s": generation_retry_backoff_s,
@@ -2995,7 +3107,7 @@ async def run_one(
             "events": run.trace_events,
         },
         "usage": usage_payload,
-        "ensemble_trace": (run.done.ensemble_trace if run.done is not None else {}),
+        "ensemble_trace": ensemble_trace,
         "judge": judge,
         "candidate_judges": candidate_judges,
         "quality_total": fused_total,
@@ -3012,6 +3124,8 @@ def group_timeout_seconds(
     requested_timeout: float,
     config: GatewayConfig,
     group: str,
+    ensemble_proposer_timeout: float | None = None,
+    ensemble_aggregator_timeout: float | None = None,
 ) -> float:
     if requested_timeout <= 0:
         return requested_timeout
@@ -3023,11 +3137,13 @@ def group_timeout_seconds(
         return requested_timeout
     proposer_timeout_s, aggregator_timeout_s = profile_timeout_seconds(
         profile,
-        requested_timeout=requested_timeout,
+        proposer_timeout_override=ensemble_proposer_timeout,
+        aggregator_timeout_override=ensemble_aggregator_timeout,
     )
+    moa_layers = max(1, int(getattr(profile, "moa_layers", 1) or 1))
     profile_budget = (
         proposer_timeout_s
-        + aggregator_timeout_s
+        + aggregator_timeout_s * moa_layers
         + PROFILE_TIMEOUT_MARGIN_SECONDS
     )
     return max(float(requested_timeout), profile_budget)
@@ -3195,6 +3311,80 @@ def row_llm_request_count(row: dict[str, Any]) -> int:
     return 0
 
 
+def ensemble_usage_unknown_count(trace: Any) -> int:
+    if not isinstance(trace, dict):
+        return 0
+    calls = trace.get("calls")
+    if isinstance(calls, list):
+        return sum(ensemble_usage_unknown_count(call) for call in calls)
+    early_stop = trace.get("proposer_early_stop")
+    if isinstance(early_stop, dict):
+        value = coerce_metric_int(early_stop.get("usage_unknown_count"))
+        if value:
+            return value
+    candidates = trace.get("candidates")
+    if isinstance(candidates, list):
+        return sum(
+            1
+            for candidate in candidates
+            if isinstance(candidate, dict)
+            and candidate.get("error_code") == "early_stopped"
+        )
+    return 0
+
+
+def usage_unknown_count_from_usage_payload(usage: Any) -> int:
+    if not isinstance(usage, dict):
+        return 0
+    breakdown = usage.get("model_usage_breakdown")
+    if not isinstance(breakdown, list):
+        return 0
+    return sum(
+        1
+        for item in breakdown
+        if isinstance(item, dict)
+        and (
+            item.get("cost_source") == "unknown_canceled"
+            or item.get("error_code") == "early_stopped"
+        )
+    )
+
+
+def row_generation_attempt_usage_unknown_count(row: dict[str, Any]) -> int:
+    execution = row.get("execution") or {}
+    attempts = execution.get("generation_attempts") if isinstance(execution, dict) else None
+    if not isinstance(attempts, list):
+        return 0
+    total = 0
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            continue
+        run = attempt.get("run")
+        if not isinstance(run, dict):
+            continue
+        total += max(
+            coerce_metric_int(run.get("usage_unknown_count")),
+            usage_unknown_count_from_usage_payload(run.get("usage")),
+            ensemble_usage_unknown_count(run.get("ensemble_trace")),
+        )
+    return total
+
+
+def row_usage_unknown_count(row: dict[str, Any]) -> int:
+    direct = row_metric_int(row, "usage_unknown_count")
+    execution = row.get("execution") or {}
+    execution_value = 0
+    if isinstance(execution, dict):
+        execution_value = coerce_metric_int(execution.get("usage_unknown_count"))
+    return max(
+        direct,
+        execution_value,
+        row_generation_attempt_usage_unknown_count(row),
+        usage_unknown_count_from_usage_payload(row.get("usage")),
+        ensemble_usage_unknown_count(row.get("ensemble_trace")),
+    )
+
+
 def row_trajectory_steps(row: dict[str, Any]) -> int:
     llm_requests = row_llm_request_count(row)
     tool_calls = row_total_tool_call_count(row)
@@ -3268,6 +3458,7 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
             for row in group_rows
         ]
         llm_requests = [row_llm_request_count(row) for row in group_rows]
+        usage_unknown = [row_usage_unknown_count(row) for row in group_rows]
         summary["groups"][group] = {
             "rows": len(group_rows),
             "completed": len(completed_rows),
@@ -3321,6 +3512,10 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 statistics.mean(llm_requests) if llm_requests else 0.0
             ),
             "total_llm_requests": sum(llm_requests),
+            "avg_usage_unknown": (
+                statistics.mean(usage_unknown) if usage_unknown else 0.0
+            ),
+            "total_usage_unknown": sum(usage_unknown),
             "latency_p50_ms": percentile(latencies, 50),
             "latency_p95_ms": percentile(latencies, 95),
         }
@@ -3365,7 +3560,8 @@ def render_markdown(
             tool_line = f"{tool_line}."
     if not policy.get("tools_enabled"):
         tool_line = (
-            f"Runner mode: `{runner_mode}`; tool mode: `{policy.get('tool_mode') or RUNNER_MODE}`; "
+            f"Runner mode: `{runner_mode}`; tool mode: "
+            f"`{policy.get('tool_mode') or RUNNER_MODE}`; "
             "external research tools are not attached."
         )
     group_tool_policies = policy.get("group_tool_policies") or {}
@@ -3378,7 +3574,8 @@ def render_markdown(
     if fusion_groups:
         if not policy.get("tools_enabled"):
             tool_line = (
-                f"Runner mode: `{runner_mode}`; tool mode: `{policy.get('tool_mode') or RUNNER_MODE}`; "
+                f"Runner mode: `{runner_mode}`; tool mode: "
+                f"`{policy.get('tool_mode') or RUNNER_MODE}`; "
                 "no global external research tools are attached."
             )
         fusion_line = (
@@ -3417,11 +3614,11 @@ def render_markdown(
         "",
         "| Group | Rows | Done | Avg Quality | AvgQ Scored | Avg Pass | "
         "Judge Err | Avg $ | Avg $ Done | Avg Visible | Avg Reason | Avg Tokens | "
-        "Avg Tools | Tool % | Avg Steps | Avg LLM Req | p50 ms | p95 ms | "
+        "Avg Tools | Tool % | Avg Steps | Avg LLM Req | Usage Unknown | p50 ms | p95 ms | "
         "AvgQ % vs B0 | Avg$ % vs B0 | "
         "AvgQ % vs B1 | Avg$ % vs B1 |",
         "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | "
-        "---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | "
+        "---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | "
         "---: | ---: | ---: | ---: |",
     ]
     for group, item in sorted(summary["groups"].items()):
@@ -3430,7 +3627,8 @@ def render_markdown(
             "{pass_rate} | {judge_errors} | {cost:.6f} | "
             "{cost_done} | {visible_tokens:.1f} | {reasoning_tokens:.1f} | "
             "{tokens:.1f} | {tool_calls:.1f} | {tool_rate:.1f}% | "
-            "{steps:.1f} | {llm_requests:.1f} | {p50:.0f} | {p95:.0f} | "
+            "{steps:.1f} | {llm_requests:.1f} | {usage_unknown:.1f} | "
+            "{p50:.0f} | {p95:.0f} | "
             "{q_b0} | {cost_b0} | {q_b1} | {cost_b1} |".format(
                 group=group,
                 rows=item["rows"],
@@ -3462,6 +3660,7 @@ def render_markdown(
                 tool_rate=item["tool_call_rate_pct"],
                 steps=item["avg_trajectory_steps"],
                 llm_requests=item["avg_llm_requests"],
+                usage_unknown=item["avg_usage_unknown"],
                 p50=item["latency_p50_ms"],
                 p95=item["latency_p95_ms"],
                 q_b0=_signed_pct(item.get("avg_quality_pct_delta_vs_b0")),
@@ -3482,6 +3681,11 @@ def manifest_args(args: argparse.Namespace) -> dict[str, Any]:
         "max_tasks",
         "concurrency",
         "timeout",
+        "ensemble_proposer_timeout",
+        "ensemble_aggregator_timeout",
+        "ensemble_proposer_early_stop_success_count",
+        "ensemble_proposer_early_stop_after",
+        "expand_ensemble_timeouts_to_task_timeout",
         "runner_mode",
         "agent_max_iterations",
         "dry_run",
@@ -3710,7 +3914,9 @@ async def amain(args: argparse.Namespace) -> int:
         and inherited.provider != "openrouter"
         and not getattr(args, "dry_run", False)
     ):
-        raise ValueError("OpenRouter Fusion experiment groups require an OpenRouter runtime provider")
+        raise ValueError(
+            "OpenRouter Fusion experiment groups require an OpenRouter runtime provider"
+        )
     judge_provider = None
     if args.judge_model:
         judge_provider = build_single_provider(
@@ -3768,6 +3974,27 @@ async def amain(args: argparse.Namespace) -> int:
                 judge_concurrency=getattr(args, "judge_concurrency", 1),
                 judge_max_attempts=getattr(args, "judge_max_attempts", JUDGE_MAX_ATTEMPTS),
                 timeout=args.timeout,
+                ensemble_proposer_timeout=getattr(
+                    args, "ensemble_proposer_timeout", None
+                ),
+                ensemble_aggregator_timeout=getattr(
+                    args, "ensemble_aggregator_timeout", None
+                ),
+                ensemble_proposer_early_stop_success_count=getattr(
+                    args,
+                    "ensemble_proposer_early_stop_success_count",
+                    None,
+                ),
+                ensemble_proposer_early_stop_after=getattr(
+                    args,
+                    "ensemble_proposer_early_stop_after",
+                    None,
+                ),
+                expand_ensemble_timeouts_to_task_timeout=getattr(
+                    args,
+                    "expand_ensemble_timeouts_to_task_timeout",
+                    False,
+                ),
                 tool_policy=group_tool_policy,
                 generation_policy=generation_policy,
                 runner_mode=args.runner_mode,
@@ -3851,6 +4078,54 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-tasks", type=int, default=0)
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--timeout", type=float, default=180.0)
+    parser.add_argument(
+        "--ensemble-proposer-timeout",
+        type=float,
+        default=None,
+        help=(
+            "Per proposer request timeout in seconds for ensemble profile groups. "
+            "By default the profile/default proposer timeout is used and is not "
+            "expanded to match --timeout."
+        ),
+    )
+    parser.add_argument(
+        "--ensemble-aggregator-timeout",
+        type=float,
+        default=None,
+        help=(
+            "Per aggregator/scorer request timeout in seconds for ensemble profile "
+            "groups. By default the profile/default aggregator timeout is used and "
+            "is not expanded to match --timeout."
+        ),
+    )
+    parser.add_argument(
+        "--ensemble-proposer-early-stop-success-count",
+        type=int,
+        default=None,
+        help=(
+            "For ensemble profile groups, stop waiting for remaining proposers once "
+            "this many successful candidate responses are available. Omit to use "
+            "the profile default; pass 0 to disable."
+        ),
+    )
+    parser.add_argument(
+        "--ensemble-proposer-early-stop-after",
+        type=float,
+        default=None,
+        help=(
+            "Minimum seconds to wait before applying proposer early-stop. Omit to "
+            "use the profile default; pass 0 to stop as soon as the success quorum "
+            "is reached."
+        ),
+    )
+    parser.add_argument(
+        "--expand-ensemble-timeouts-to-task-timeout",
+        action="store_true",
+        help=(
+            "Legacy behavior: distribute spare --timeout budget into per-member "
+            "ensemble proposer/aggregator timeouts. Leave off for lower tail latency."
+        ),
+    )
     parser.add_argument(
         "--runner-mode",
         choices=SUPPORTED_RUNNER_MODES,

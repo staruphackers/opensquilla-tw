@@ -297,6 +297,8 @@ def _ensemble_profile(
     moa_layers: int = 1,
     proposer_timeout_seconds: float | None = None,
     aggregator_timeout_seconds: float | None = None,
+    proposer_early_stop_success_count: int = 0,
+    proposer_early_stop_after_seconds: float = 0.0,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "proposers": proposers,
@@ -316,6 +318,10 @@ def _ensemble_profile(
         payload["proposer_timeout_seconds"] = proposer_timeout_seconds
     if aggregator_timeout_seconds is not None:
         payload["aggregator_timeout_seconds"] = aggregator_timeout_seconds
+    if proposer_early_stop_success_count > 0:
+        payload["proposer_early_stop_success_count"] = proposer_early_stop_success_count
+    if proposer_early_stop_after_seconds > 0:
+        payload["proposer_early_stop_after_seconds"] = proposer_early_stop_after_seconds
     return payload
 
 
@@ -337,6 +343,12 @@ def _default_llm_ensemble_profiles() -> dict[str, dict[str, Any]]:
         _ensemble_ref("z-ai/glm-5.2", thinking="high"),
         _ensemble_ref("moonshotai/kimi-k2.7-code", thinking="high"),
         _ensemble_ref("qwen/qwen3.7-max", thinking="high"),
+    ]
+    g12_without_k2_7_code_proposers = [
+        ref for ref in g12_proposers if ref["model"] != "moonshotai/kimi-k2.7-code"
+    ]
+    g12_without_qwen3_7_proposers = [
+        ref for ref in g12_proposers if ref["model"] != "qwen/qwen3.7-max"
     ]
     g13_proposers = [
         *list(g8_proposers),
@@ -406,6 +418,9 @@ def _default_llm_ensemble_profiles() -> dict[str, dict[str, Any]]:
         "g12_k2_replace_gemini": _ensemble_profile(
             list(g12_proposers),
             _ensemble_ref("z-ai/glm-5.2", thinking="high"),
+            proposer_timeout_seconds=240.0,
+            proposer_early_stop_success_count=3,
+            proposer_early_stop_after_seconds=150.0,
         ),
         "g13_five_proposers": _ensemble_profile(
             list(g13_proposers),
@@ -527,6 +542,20 @@ def _default_llm_ensemble_profiles() -> dict[str, dict[str, Any]]:
             candidate_prefilter_top_k=3,
             preserve_member_temperature=True,
         ),
+        "g24_g12_drop_k2_7_code": _ensemble_profile(
+            list(g12_without_k2_7_code_proposers),
+            _ensemble_ref("z-ai/glm-5.2", thinking="high"),
+            proposer_timeout_seconds=240.0,
+            proposer_early_stop_success_count=3,
+            proposer_early_stop_after_seconds=150.0,
+        ),
+        "g25_g12_drop_qwen3_7": _ensemble_profile(
+            list(g12_without_qwen3_7_proposers),
+            _ensemble_ref("z-ai/glm-5.2", thinking="high"),
+            proposer_timeout_seconds=240.0,
+            proposer_early_stop_success_count=3,
+            proposer_early_stop_after_seconds=150.0,
+        ),
     }
 
 
@@ -561,6 +590,8 @@ class EnsembleProfile(BaseModel):
     candidate_max_chars: int = Field(default=24_000, ge=0)
     proposer_timeout_seconds: float = Field(default=120.0, gt=0.0)
     aggregator_timeout_seconds: float = Field(default=120.0, gt=0.0)
+    proposer_early_stop_success_count: int = Field(default=0, ge=0)
+    proposer_early_stop_after_seconds: float = Field(default=0.0, ge=0.0)
     shuffle_candidates: bool = True
     record_candidates: bool = False
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import time
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
@@ -61,6 +63,42 @@ class _FallbackProvider:
     ) -> AsyncIterator[Any]:
         yield TextDeltaEvent(text="fallback answer")
         yield DoneEvent(input_tokens=3, output_tokens=2, model="fallback-model")
+
+    async def list_models(self) -> list[Any]:
+        return []
+
+
+class _DelayedProvider:
+    def __init__(
+        self,
+        cfg: ProviderConfig,
+        calls: list[dict[str, Any]],
+        delays: dict[str, float],
+    ) -> None:
+        self.provider_name = cfg.provider
+        self.model = cfg.model
+        self._calls = calls
+        self._delays = delays
+
+    async def chat(
+        self,
+        messages: list[Message],
+        tools: Any = None,
+        config: Any = None,
+    ) -> AsyncIterator[Any]:
+        self._calls.append(
+            {
+                "model": self.model,
+                "tools": tools,
+                "messages": messages,
+                "config": config,
+            }
+        )
+        delay = self._delays.get(self.model, 0.0)
+        if delay > 0:
+            await asyncio.sleep(delay)
+        yield TextDeltaEvent(text=f"draft from {self.model}")
+        yield DoneEvent(input_tokens=1, output_tokens=1, model=self.model)
 
     async def list_models(self) -> list[Any]:
         return []
@@ -211,6 +249,66 @@ async def test_ensemble_expands_proposer_k_into_multiple_samples(
         0,
     ]
     assert [call["model"] for call in calls].count("p1") == 2
+
+
+@pytest.mark.asyncio
+async def test_ensemble_can_early_stop_slow_proposers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    delays = {
+        "fast": 0.0,
+        "slow": 1.0,
+        "agg": 0.0,
+    }
+
+    def fake_build_provider(cfg: ProviderConfig) -> _DelayedProvider:
+        return _DelayedProvider(cfg, calls, delays)
+
+    monkeypatch.setattr("opensquilla.provider.selector._build_provider", fake_build_provider)
+    provider = EnsembleProvider(
+        profile_name="test",
+        proposers=[_member("fast"), _member("slow")],
+        aggregator=_member("agg"),
+        record_candidates=True,
+        shuffle_candidates=False,
+        proposer_early_stop_success_count=1,
+        proposer_early_stop_after_seconds=0.02,
+    )
+
+    started = time.monotonic()
+    events = [event async for event in provider.chat([Message(role="user", content="solve")])]
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.5
+    done = events[-1]
+    assert isinstance(done, DoneEvent)
+    trace = done.ensemble_trace
+    assert trace["successful_proposers"] == 1
+    assert trace["proposer_early_stop"] == {
+        "enabled": True,
+        "success_count": 1,
+        "after_seconds": 0.02,
+        "early_stopped_count": 1,
+        "usage_unknown_count": 1,
+        "cost_observed": False,
+    }
+    failed_candidate_codes = [
+        candidate["error_code"]
+        for candidate in trace["candidates"]
+        if not candidate["ok"]
+    ]
+    assert failed_candidate_codes == ["early_stopped"]
+    assert [row["model"] for row in done.model_usage_breakdown] == ["fast", "slow", "agg"]
+    assert done.model_usage_breakdown[1]["cost_source"] == "unknown_canceled"
+    assert done.cost_source == "unknown_canceled"
+    proposer_requests = [
+        request for request in trace["requests"] if request["role"] == "proposer"
+    ]
+    assert len(proposer_requests) == 2
+    assert proposer_requests[1]["cancelled_before_done"] is True
+    assert {call["model"] for call in calls[:2]} == {"fast", "slow"}
+    assert calls[-1]["model"] == "agg"
 
 
 @pytest.mark.asyncio

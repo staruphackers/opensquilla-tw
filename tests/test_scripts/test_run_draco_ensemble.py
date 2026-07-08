@@ -33,7 +33,9 @@ from scripts.run_draco_ensemble import (
     build_benchmark_tool_context,
     build_local_web_tool_registry,
     build_profile_provider,
+    build_single_provider,
     candidate_texts,
+    command_payload,
     compact_chat_config,
     configure_local_web_search_runtime,
     collect_agent_run,
@@ -380,6 +382,40 @@ def test_draco_runner_requires_explicit_groups() -> None:
     assert exc.value.code == 2
 
 
+def test_draco_command_payload_does_not_include_secret_env_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "OPENROUTER_SECRET_PROBE_DO_NOT_LEAK"
+    monkeypatch.setenv("OPENROUTER_API_KEY", secret)
+    args = build_parser().parse_args(
+        [
+            "--input",
+            "data/draco/mini.jsonl",
+            "--config",
+            ".local-state/config.toml",
+            "--output-dir",
+            "reports/draco/test",
+            "--groups",
+            "G12",
+            "--local-web-search-api-key-env",
+            "OPENROUTER_API_KEY",
+            "--dry-run",
+        ]
+    )
+    args.command_argv = [
+        ".venv/bin/python",
+        "scripts/run_draco_ensemble.py",
+        "--groups",
+        "G12",
+    ]
+
+    payload = command_payload(args)
+    encoded = json.dumps(payload, sort_keys=True)
+
+    assert secret not in encoded
+    assert "OPENROUTER_API_KEY" in encoded
+
+
 def test_draco_runner_explicit_groups_preserve_runtime_defaults() -> None:
     args = build_parser().parse_args([
         "--input",
@@ -475,6 +511,39 @@ def test_draco_runner_single_model_baselines_cover_extra_frontiers() -> None:
     for group, model in expected.items():
         assert group in requested_groups
         assert GROUP_SPECS[group] == {"kind": "single", "model": model}
+
+
+def test_draco_runner_b11_uses_vllm_semantic_router_endpoint() -> None:
+    spec = GROUP_SPECS["B11"]
+    assert spec == {
+        "kind": "single",
+        "model": "MoM",
+        "provider": "vllm",
+        "base_url": "http://127.0.0.1:8888/v1",
+        "api_key": "dummy",
+        "api_key_env": "OPENROUTER_API_KEY",
+    }
+    inherited = ProviderConfig(
+        provider="openrouter",
+        model="z-ai/glm-5.2",
+        api_key="sk-test",
+        base_url="https://openrouter.ai/api",
+    )
+
+    provider = build_single_provider(
+        inherited=inherited,
+        group="B11",
+        model=spec["model"],
+        dry_run=False,
+        provider=spec["provider"],
+        base_url=spec["base_url"],
+        api_key=spec["api_key"],
+    )
+
+    metadata = provider.provider_metadata()
+    assert metadata.model == "MoM"
+    assert metadata.provider_kind == "openai"
+    assert metadata.base_url == "http://127.0.0.1:8888/v1"
 
 
 def test_draco_runner_contamination_domains_normalize_and_dedupe() -> None:
@@ -992,7 +1061,10 @@ def test_draco_runner_agent_trace_preserves_moa_layer_metrics() -> None:
             {
                 "kind": "llm_response",
                 "payload": {
+                    "call_id": "1.0",
                     "iteration": 1,
+                    "attempt": 2,
+                    "duration_ms": 1234,
                     "ensemble_trace": {
                         "profile": "g17_two_layer_moa",
                         "llm_request_count": 6,
@@ -1010,6 +1082,10 @@ def test_draco_runner_agent_trace_preserves_moa_layer_metrics() -> None:
     assert trace["moa_layers"] == 2
     assert trace["moa_refine_count"] == 1
     assert trace["moa_intermediate_layers"] == 1
+    assert trace["calls"][0]["agent_call_id"] == "1.0"
+    assert trace["calls"][0]["agent_iteration"] == 1
+    assert trace["calls"][0]["agent_call_attempt"] == 2
+    assert trace["calls"][0]["agent_call_duration_ms"] == 1234
 
 
 def test_draco_runner_agent_trace_preserves_select_best_strategy_metrics() -> None:
@@ -1157,7 +1233,7 @@ def test_draco_runner_generation_thinking_policy_uses_model_specific_max_members
     assert provider.aggregator.thinking == "xhigh"
 
 
-def test_draco_runner_profile_timeouts_expand_with_requested_timeout() -> None:
+def test_draco_runner_profile_timeouts_do_not_expand_with_requested_timeout_by_default() -> None:
     cfg = GatewayConfig()
     inherited = ProviderConfig(
         provider="openrouter",
@@ -1175,8 +1251,65 @@ def test_draco_runner_profile_timeouts_expand_with_requested_timeout() -> None:
         requested_timeout=900.0,
     )
 
+    assert provider.proposer_timeout_seconds == 120.0
+    assert provider.aggregator_timeout_seconds == 300.0
+
+
+def test_draco_runner_profile_timeouts_expand_with_legacy_flag() -> None:
+    cfg = GatewayConfig()
+    inherited = ProviderConfig(
+        provider="openrouter",
+        model="z-ai/glm-5.2",
+        api_key="sk-test",
+        base_url="https://openrouter.ai/api",
+    )
+
+    provider = build_profile_provider(
+        config=cfg,
+        inherited=inherited,
+        group="G3",
+        profile="g3_standard",
+        dry_run=False,
+        requested_timeout=900.0,
+        expand_ensemble_timeouts_to_task_timeout=True,
+    )
+
     assert provider.proposer_timeout_seconds == pytest.approx(232.5)
     assert provider.aggregator_timeout_seconds == pytest.approx(637.5)
+
+
+def test_draco_runner_profile_early_stop_defaults_and_overrides() -> None:
+    cfg = GatewayConfig()
+    inherited = ProviderConfig(
+        provider="openrouter",
+        model="z-ai/glm-5.2",
+        api_key="sk-test",
+        base_url="https://openrouter.ai/api",
+    )
+
+    provider = build_profile_provider(
+        config=cfg,
+        inherited=inherited,
+        group="G12",
+        profile="g12_k2_replace_gemini",
+        dry_run=False,
+    )
+
+    assert provider.proposer_early_stop_success_count == 3
+    assert provider.proposer_early_stop_after_seconds == 150.0
+
+    overridden = build_profile_provider(
+        config=GatewayConfig(),
+        inherited=inherited,
+        group="G12",
+        profile="g12_k2_replace_gemini",
+        dry_run=False,
+        ensemble_proposer_early_stop_success_count=0,
+        ensemble_proposer_early_stop_after=0,
+    )
+
+    assert overridden.proposer_early_stop_success_count == 0
+    assert overridden.proposer_early_stop_after_seconds == 0.0
 
 
 def test_draco_runner_g17_timeouts_split_aggregator_budget_by_moa_layer() -> None:
@@ -1195,6 +1328,7 @@ def test_draco_runner_g17_timeouts_split_aggregator_budget_by_moa_layer() -> Non
         profile="g17_two_layer_moa",
         dry_run=False,
         requested_timeout=900.0,
+        expand_ensemble_timeouts_to_task_timeout=True,
     )
 
     assert provider.moa_layers == 2
@@ -1487,7 +1621,9 @@ def test_draco_runner_g19_g23_configure_prefilter_profiles(
     assert provider.candidate_scorer.provider_config.model == scorer_model
     assert provider.candidate_scorer.thinking == generation_thinking_for_model(scorer_model)
     assert provider.candidate_scorer.temperature == 0.0
-    assert [member.provider_config.model for member in provider.proposers] == proposer_models
+    assert [
+        member.provider_config.model for member in provider.proposers
+    ] == proposer_models
     assert [member.thinking for member in provider.proposers] == [
         generation_thinking_for_model(model) for model in proposer_models
     ]
@@ -1495,6 +1631,66 @@ def test_draco_runner_g19_g23_configure_prefilter_profiles(
     assert provider.aggregator.provider_config.model == "z-ai/glm-5.2"
     assert provider.aggregator.thinking == generation_thinking_for_model("z-ai/glm-5.2")
     assert provider.aggregator.temperature == 0.0
+
+
+@pytest.mark.parametrize(
+    ("group", "profile", "proposer_models"),
+    [
+        (
+            "G24",
+            "g24_g12_drop_k2_7_code",
+            [
+                "deepseek/deepseek-v4-pro",
+                "z-ai/glm-5.2",
+                "qwen/qwen3.7-max",
+            ],
+        ),
+        (
+            "G25",
+            "g25_g12_drop_qwen3_7",
+            [
+                "deepseek/deepseek-v4-pro",
+                "z-ai/glm-5.2",
+                "moonshotai/kimi-k2.7-code",
+            ],
+        ),
+    ],
+)
+def test_draco_runner_g24_g25_drop_g12_proposers(
+    group: str,
+    profile: str,
+    proposer_models: list[str],
+) -> None:
+    cfg = GatewayConfig()
+    inherited = ProviderConfig(
+        provider="openrouter",
+        model="z-ai/glm-5.2",
+        api_key="sk-test",
+        base_url="https://openrouter.ai/api",
+    )
+
+    provider = build_profile_provider(
+        config=cfg,
+        inherited=inherited,
+        group=group,
+        profile=profile,
+        dry_run=False,
+        generation_policy=generation_thinking_policy(),
+    )
+
+    assert GROUP_SPECS[group] == {"kind": "profile", "profile": profile}
+    assert [
+        member.provider_config.model for member in provider.proposers
+    ] == proposer_models
+    assert [member.thinking for member in provider.proposers] == [
+        generation_thinking_for_model(model) for model in proposer_models
+    ]
+    assert provider.aggregator.provider_config.model == "z-ai/glm-5.2"
+    assert provider.output_strategy == "fusion"
+    assert provider.candidate_prefilter_top_k == 0
+    assert provider.proposer_timeout_seconds == 240.0
+    assert provider.proposer_early_stop_success_count == 3
+    assert provider.proposer_early_stop_after_seconds == 150.0
 
 
 @pytest.mark.asyncio
@@ -1547,7 +1743,8 @@ async def test_draco_runner_b8_provider_mode_forces_fusion_tool() -> None:
     assert tools is not None
     assert provider.seen_tools == tools
     assert [tool.name for tool in provider.seen_tools] == ["openrouter:fusion"]
-    assert provider.seen_tools[0].provider_tool["type"] == "openrouter:fusion"  # type: ignore[index]
+    fusion_tool = provider.seen_tools[0]
+    assert fusion_tool.provider_tool["type"] == "openrouter:fusion"  # type: ignore[index]
     assert provider.seen_config.tool_choice == "required"
 
 
@@ -1636,6 +1833,7 @@ def test_draco_runner_expands_outer_timeout_for_profile_budget() -> None:
 
     assert group_timeout_seconds(requested_timeout=360.0, config=cfg, group="G3") == 450.0
     assert group_timeout_seconds(requested_timeout=360.0, config=cfg, group="G6") == 450.0
+    assert group_timeout_seconds(requested_timeout=360.0, config=cfg, group="G17") == 750.0
     assert group_timeout_seconds(requested_timeout=600.0, config=cfg, group="G6") == 600.0
     assert group_timeout_seconds(requested_timeout=900.0, config=cfg, group="G3") == 900.0
     assert group_timeout_seconds(requested_timeout=360.0, config=cfg, group="B2") == 360.0
@@ -1720,6 +1918,8 @@ def test_draco_summary_compares_avg_quality_and_cost_pct_against_baselines() -> 
     assert g2["avg_trajectory_steps"] == pytest.approx(8.0)
     assert g2["avg_llm_requests"] == pytest.approx(4.0)
     assert g2["total_llm_requests"] == 4
+    assert g2["avg_usage_unknown"] == pytest.approx(0.0)
+    assert g2["total_usage_unknown"] == 0
     markdown = render_markdown(summary, Path("reports/draco/draco_ensemble_test.jsonl"))
     assert "Win vs" not in markdown
     assert "AvgQ % vs B0" in markdown
@@ -1728,6 +1928,7 @@ def test_draco_summary_compares_avg_quality_and_cost_pct_against_baselines() -> 
     assert "Avg Reason" in markdown
     assert "Avg Tools" in markdown
     assert "Avg LLM Req" in markdown
+    assert "Usage Unknown" in markdown
     assert "+12.50%" in markdown
     assert "-50.00%" in markdown
 
@@ -1782,6 +1983,135 @@ def test_draco_summary_uses_generation_attempt_cost_and_tokens() -> None:
     assert group["avg_visible_tokens"] == pytest.approx(45.0)
     assert group["avg_reasoning_tokens"] == pytest.approx(3.0)
     assert group["avg_total_tokens"] == pytest.approx(48.0)
+
+
+def test_draco_summary_counts_unknown_usage_from_early_stopped_candidates() -> None:
+    rows = [
+        {
+            "task_id": "task-1",
+            "group": "G12",
+            "latency_ms": 100,
+            "quality_total": None,
+            "judge": None,
+            "usage": {
+                "billed_cost": 0.10,
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "reasoning_tokens": 0,
+            },
+            "ensemble_trace": {
+                "proposer_early_stop": {
+                    "usage_unknown_count": 2,
+                }
+            },
+            "total_tool_call_count": 0,
+            "llm_request_count": 5,
+            "error": "",
+        }
+    ]
+
+    group = summarize(rows)["groups"]["G12"]
+
+    assert group["avg_usage_unknown"] == pytest.approx(2.0)
+    assert group["total_usage_unknown"] == 2
+
+
+def test_draco_summary_counts_unknown_usage_from_agent_loop_calls() -> None:
+    rows = [
+        {
+            "task_id": "task-1",
+            "group": "G12",
+            "latency_ms": 100,
+            "quality_total": None,
+            "judge": None,
+            "usage": {
+                "billed_cost": 0.10,
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "reasoning_tokens": 0,
+                "model_usage_breakdown": [
+                    {"cost_source": "provider_billed"},
+                    {"cost_source": "unknown_canceled"},
+                ],
+            },
+            # Older result rows may contain a stale direct zero written before the
+            # agent-loop aggregate trace counted early-stopped proposer calls.
+            "usage_unknown_count": 0,
+            "ensemble_trace": {
+                "calls": [
+                    {
+                        "proposer_early_stop": {
+                            "usage_unknown_count": 1,
+                        },
+                        "candidates": [
+                            {
+                                "label": "proposer_1",
+                                "error_code": "early_stopped",
+                                "cost_source": "unknown_canceled",
+                            }
+                        ],
+                    },
+                    {
+                        "proposer_early_stop": {
+                            "usage_unknown_count": 0,
+                        },
+                        "candidates": [],
+                    },
+                ]
+            },
+            "total_tool_call_count": 0,
+            "llm_request_count": 5,
+            "error": "",
+        }
+    ]
+
+    group = summarize(rows)["groups"]["G12"]
+
+    assert group["avg_usage_unknown"] == pytest.approx(1.0)
+    assert group["total_usage_unknown"] == 1
+
+
+def test_draco_summary_counts_unknown_usage_across_generation_attempts() -> None:
+    rows = [
+        {
+            "task_id": "task-1",
+            "group": "G12",
+            "latency_ms": 100,
+            "quality_total": None,
+            "judge": None,
+            "usage": {
+                "billed_cost": 0.10,
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "reasoning_tokens": 0,
+            },
+            "usage_unknown_count": 0,
+            "execution": {
+                "generation_attempts": [
+                    {"attempt": 1, "run": {"usage_unknown_count": 1}},
+                    {
+                        "attempt": 2,
+                        "run": {
+                            "usage": {
+                                "model_usage_breakdown": [
+                                    {"cost_source": "unknown_canceled"},
+                                    {"error_code": "early_stopped"},
+                                ]
+                            }
+                        },
+                    },
+                ]
+            },
+            "total_tool_call_count": 0,
+            "llm_request_count": 5,
+            "error": "",
+        }
+    ]
+
+    group = summarize(rows)["groups"]["G12"]
+
+    assert group["avg_usage_unknown"] == pytest.approx(3.0)
+    assert group["total_usage_unknown"] == 3
 
 
 def test_draco_summary_counts_unscored_rows_as_zero_quality() -> None:
@@ -2082,6 +2412,11 @@ async def test_run_one_skips_judge_when_generation_is_not_done(monkeypatch) -> N
         judge_concurrency=1,
         judge_max_attempts=3,
         timeout=10.0,
+        ensemble_proposer_timeout=None,
+        ensemble_aggregator_timeout=None,
+        ensemble_proposer_early_stop_success_count=None,
+        ensemble_proposer_early_stop_after=None,
+        expand_ensemble_timeouts_to_task_timeout=False,
         tool_policy={"tool_mode": "provider_only", "tools_enabled": False},
         generation_policy=generation_thinking_policy(),
         generation_max_attempts=1,
@@ -2094,6 +2429,76 @@ async def test_run_one_skips_judge_when_generation_is_not_done(monkeypatch) -> N
     assert row["candidate_judges"] == []
     assert row["quality_total"] is None
     assert row["execution"]["judge_skipped_reason"] == "run_not_done"
+
+
+@pytest.mark.asyncio
+async def test_run_one_counts_unknown_usage_from_usage_breakdown(
+    monkeypatch,
+) -> None:  # noqa: ANN001
+    async def _generation_with_unknown_usage(*args, **kwargs):  # noqa: ANN002, ANN003
+        done = DoneEvent(
+            model="ensemble/test",
+            input_tokens=1,
+            output_tokens=1,
+            billed_cost=0.01,
+            model_usage_breakdown=[
+                {"role": "proposer", "model": "fast", "cost_source": "provider_billed"},
+                {
+                    "role": "proposer",
+                    "model": "slow",
+                    "cost_source": "unknown_canceled",
+                },
+            ],
+            ensemble_trace={},
+        )
+        return (
+            RunResult(final_text="answer", done=done, error="", latency_ms=1),
+            [
+                {
+                    "attempt": 1,
+                    "run": run_result_summary(
+                        RunResult(final_text="answer", done=done)
+                    ),
+                }
+            ],
+            1,
+        )
+
+    monkeypatch.setattr(
+        "scripts.run_draco_ensemble.collect_generation_with_retries",
+        _generation_with_unknown_usage,
+    )
+
+    row = await run_one(
+        task={"id": "task-1", "prompt": "Research this."},
+        group="B0",
+        config=GatewayConfig(),
+        inherited=ProviderConfig(
+            provider="openrouter",
+            model="anthropic/claude-opus-4.8",
+            api_key="sk-test",
+            base_url="https://openrouter.ai/api",
+        ),
+        dry_run=False,
+        judge_provider=None,
+        judge_candidates=False,
+        judge_repeats=1,
+        judge_concurrency=1,
+        judge_max_attempts=3,
+        timeout=10.0,
+        ensemble_proposer_timeout=None,
+        ensemble_aggregator_timeout=None,
+        ensemble_proposer_early_stop_success_count=None,
+        ensemble_proposer_early_stop_after=None,
+        expand_ensemble_timeouts_to_task_timeout=False,
+        tool_policy={"tool_mode": "provider_only", "tools_enabled": False},
+        generation_policy=generation_thinking_policy(),
+        generation_max_attempts=1,
+        generation_retry_backoff=0.0,
+    )
+
+    assert row["usage_unknown_count"] == 1
+    assert row["execution"]["usage_unknown_count"] == 1
 
 
 @pytest.mark.asyncio
