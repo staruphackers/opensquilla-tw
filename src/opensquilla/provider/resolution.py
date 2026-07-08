@@ -35,6 +35,9 @@ Honesty notes (documented limitations, by design):
   ``resolve_max_tokens`` / ``resolve_context_window`` — attribution
   therefore cannot drift from the real resolvers. Context-window clamping
   may adjust the max_tokens number without changing its attribution.
+  ``llm.context_window`` additionally applies the global
+  ``llm.context_window_tokens`` config value below the per-model
+  ``[models.*]`` override, mirroring the engine budgeting precedence.
 
 Secrets never appear here by construction: the emitted paths form a literal
 allowlist of non-secret field names (the only dynamic path segment is the
@@ -169,9 +172,20 @@ def resolve_effective_llm(config: Any, catalog: ModelCatalog) -> dict[str, Resol
         context_window, context_window_source = catalog.resolve_context_window_with_source(
             model, provider
         )
-        fields["llm.context_window"] = ResolvedField(
-            context_window, _CATALOG_SOURCE_MAP[context_window_source]
-        )
+        # Precedence: per-model [models.*] override > global config window >
+        # catalog > default. The catalog resolver only knows the per-model
+        # layer, so the global llm.context_window_tokens value is applied
+        # here, mirroring the harness budgeting path.
+        try:
+            global_context_window = int(getattr(llm, "context_window_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            global_context_window = 0
+        if context_window_source != "override" and global_context_window > 0:
+            fields["llm.context_window"] = ResolvedField(global_context_window, "config")
+        else:
+            fields["llm.context_window"] = ResolvedField(
+                context_window, _CATALOG_SOURCE_MAP[context_window_source]
+            )
 
     router_cfg = getattr(config, "squilla_router", None)
     tiers = getattr(router_cfg, "tiers", None)

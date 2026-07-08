@@ -403,6 +403,23 @@ def _positive_int_or_zero(value: Any) -> int:
     return coerced if coerced > 0 else 0
 
 
+def _catalog_context_window_with_source(
+    catalog: Any, model_id: str, provider: str
+) -> tuple[int, str]:
+    """Resolve ``(window, source)`` tolerating duck-typed catalogs.
+
+    ``TurnRunner`` accepts any catalog-shaped object; ones without
+    ``resolve_context_window_with_source`` fall back to the plain resolver
+    attributed as "catalog" — never "override", so the global
+    llm.context_window_tokens config still applies over them.
+    """
+    with_source = getattr(catalog, "resolve_context_window_with_source", None)
+    if callable(with_source):
+        window, source = with_source(model_id, provider=provider)
+        return window, str(source)
+    return catalog.resolve_context_window(model_id, provider=provider), "catalog"
+
+
 class _TurnRunnerModelCatalogAdapter(ModelCatalogPort):
     """Bind ``TurnRunner._model_catalog`` lookups with a None-fallback.
 
@@ -437,8 +454,8 @@ class _TurnRunnerModelCatalogAdapter(ModelCatalogPort):
             max_tokens = runner._model_catalog.resolve_max_tokens(
                 model_id, user_override=user_max_tokens, provider=provider_name
             )
-            context_window = runner._model_catalog.resolve_context_window(
-                model_id, provider=provider_name
+            context_window, context_window_source = _catalog_context_window_with_source(
+                runner._model_catalog, model_id, provider_name
             )
             capabilities = runner._model_catalog.get_capabilities(
                 model_id, provider_name=provider_name, base_url=base_url
@@ -446,8 +463,11 @@ class _TurnRunnerModelCatalogAdapter(ModelCatalogPort):
         else:
             max_tokens = user_max_tokens if user_max_tokens > 0 else 16384
             context_window = 200_000
+            context_window_source = "default"
             capabilities = None
-        if user_context_window > 0:
+        # Per-model [models.*] context_window overrides beat the global
+        # llm.context_window_tokens value; the global still beats the catalog.
+        if user_context_window > 0 and context_window_source != "override":
             context_window = user_context_window
         return _ResolvedCatalog(
             max_tokens=max_tokens,

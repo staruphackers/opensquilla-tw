@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 from opensquilla.gateway.rpc import RpcContext, get_dispatcher
@@ -105,6 +106,42 @@ def _provider_key_configured(provider_id: str, env_key: str, ctx: RpcContext) ->
     return bool(env_key and os.environ.get(env_key))
 
 
+_URL_SHAPED_KEY_RE = re.compile(r"^https?://")
+_ENV_NAME_SHAPED_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]{2,}$")
+
+
+def _api_key_shape(key_value: str) -> str:
+    """Classify obviously-misconfigured key material without emitting it.
+
+    Only the classification label ever leaves this function; the key value
+    itself is never logged or included in any payload.
+    """
+    value = key_value.strip()
+    if not value:
+        return "ok"
+    if _URL_SHAPED_KEY_RE.match(value):
+        return "looks_like_url"
+    if _ENV_NAME_SHAPED_KEY_RE.match(value):
+        return "looks_like_env_name"
+    return "ok"
+
+
+def _provider_api_key_shape(provider_id: str, env_key: str, ctx: RpcContext) -> str:
+    """Resolve the configured key material for a row and return its shape.
+
+    Mirrors the resolution order of ``_provider_key_configured``: the active
+    provider's config-held key wins, then the row's env var.
+    """
+    active = provider_id == _active_llm_provider(ctx)
+    llm_cfg = getattr(getattr(ctx, "config", None), "llm", None)
+    key_value = ""
+    if active:
+        key_value = str(getattr(llm_cfg, "api_key", "") or "")
+    if not key_value and env_key:
+        key_value = os.environ.get(env_key, "") or ""
+    return _api_key_shape(key_value)
+
+
 def _provider_base_url(provider_id: str, default_base_url: str, ctx: RpcContext) -> str:
     active = provider_id == _active_llm_provider(ctx)
     llm_cfg = getattr(getattr(ctx, "config", None), "llm", None)
@@ -160,6 +197,7 @@ async def _handle_providers_status(params: dict | None, ctx: RpcContext) -> dict
         is_active = spec.provider_id == active
         api_key_env = _provider_api_key_env(spec.provider_id, spec.env_key, ctx)
         api_key_configured = _provider_key_configured(spec.provider_id, api_key_env, ctx)
+        api_key_shape = _provider_api_key_shape(spec.provider_id, api_key_env, ctx)
         base_url = _provider_base_url(spec.provider_id, spec.default_base_url, ctx)
         base_url_configured = bool(base_url)
         configured = (
@@ -200,9 +238,15 @@ async def _handle_providers_status(params: dict | None, ctx: RpcContext) -> dict
                 "requiresApiKey": spec.requires_api_key,
                 "apiKeyEnv": api_key_env,
                 "apiKeyConfigured": api_key_configured,
+                "apiKeyShape": api_key_shape,
                 "baseUrlConfigured": base_url_configured,
                 "error": error,
                 "modelProbe": probe,
+                "latency": (
+                    ctx.provider_stats.snapshot(spec.provider_id)
+                    if getattr(ctx, "provider_stats", None)
+                    else None
+                ),
             }
         )
     return {"activeProvider": active, "providers": rows, "count": len(rows)}

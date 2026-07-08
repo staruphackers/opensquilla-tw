@@ -473,6 +473,40 @@ def test_explicit_false_and_zero_overrides_win() -> None:
     assert entry.max_output_tokens == 0
 
 
+def test_context_window_override_governs_legacy_resolver_with_source() -> None:
+    # The [models.*] user-override layer is the top layer of the legacy
+    # resolve_context_window chain too, attributed as "override"; models
+    # without an override keep resolving through live/snapshot/corrections
+    # exactly as the parity net below pins.
+    catalog = _populated_catalog()
+    catalog.set_user_overrides({"openrouter/vendor/model-x": {"context_window": 111}})
+
+    assert catalog.resolve_context_window_with_source(
+        "vendor/model-x", "openrouter"
+    ) == (111, "override")
+    assert catalog.resolve_context_window("vendor/model-x", "openrouter") == 111
+    assert catalog.user_context_window_override("vendor/model-x", "openrouter") == 111
+    # Other models are untouched by the installed override.
+    assert catalog.resolve_context_window_with_source("gpt-5.5", "openai") == (
+        1_050_000,
+        "catalog",
+    )
+    assert catalog.user_context_window_override("gpt-5.5", "openai") is None
+
+
+def test_context_window_override_zero_is_not_a_budgeting_window() -> None:
+    # A 0 override wins per-field in resolve_entry (presence = knowledge) but
+    # cannot serve as a budgeting window, so the legacy chain resolves past it.
+    catalog = _populated_catalog()
+    catalog.set_user_overrides({"openrouter/vendor/model-x": {"context_window": 0}})
+
+    assert catalog.user_context_window_override("vendor/model-x", "openrouter") is None
+    assert catalog.resolve_context_window_with_source("vendor/model-x", "openrouter") == (
+        200_000,
+        "catalog",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Snapshot-layer cost emission (compact in/out/cr/cw_mtok keys → per-Mtok
 # fields). The committed snapshot carries no cost keys yet, so these drive

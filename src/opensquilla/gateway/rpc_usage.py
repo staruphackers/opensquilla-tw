@@ -60,15 +60,26 @@ def _transcript_entry_tokens(entry: Any) -> int:
 
 def _resolve_context_window(model: str | None, ctx: RpcContext) -> tuple[int | None, str]:
     config = ctx.config
+    provider = str(getattr(getattr(config, "llm", None), "provider", "") or "")
+    runtime_catalog = getattr(getattr(ctx, "turn_runner", None), "_model_catalog", None)
+    if model:
+        # A per-model [models.*] context_window override outranks the global
+        # config window (same precedence as the engine budgeting path).
+        for catalog in (runtime_catalog, shared_catalog()):
+            if catalog is None or not hasattr(catalog, "resolve_context_window_with_source"):
+                continue
+            window, source = catalog.resolve_context_window_with_source(model, provider)
+            if source == "override":
+                override = _positive_int(window)
+                if override is not None:
+                    return override, "model_override"
     for owner in (config, getattr(config, "llm", None)):
         window = _positive_int(getattr(owner, "context_window_tokens", None))
         if window is not None:
             return window, "config"
     if model:
-        provider = str(getattr(getattr(config, "llm", None), "provider", "") or "")
-        catalog = getattr(getattr(ctx, "turn_runner", None), "_model_catalog", None)
-        if catalog is not None and hasattr(catalog, "resolve_context_window"):
-            window = _positive_int(catalog.resolve_context_window(model, provider))
+        if runtime_catalog is not None and hasattr(runtime_catalog, "resolve_context_window"):
+            window = _positive_int(runtime_catalog.resolve_context_window(model, provider))
             if window is not None:
                 return window, "runtime_model_catalog"
         window = _positive_int(shared_catalog().resolve_context_window(model, provider))
