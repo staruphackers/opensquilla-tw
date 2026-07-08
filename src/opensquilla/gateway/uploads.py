@@ -39,6 +39,7 @@ from opensquilla.contracts.attachments import (
     normalize_attachment_mime,
 )
 from opensquilla.gateway.config import GatewayConfig
+from opensquilla.gateway.origin_guard import forbidden_origin_response, request_origin_allowed
 
 log = logging.getLogger(__name__)
 
@@ -310,6 +311,8 @@ def register_upload_routes(
     """Register POST /api/v1/files/upload on the given Starlette app."""
 
     async def upload_handler(request: Request) -> JSONResponse:
+        if not request_origin_allowed(request, config):
+            return forbidden_origin_response()
         if config.auth.mode == "token":
             if config.auth.token and _extract_authorization_token(request) != config.auth.token:
                 return JSONResponse(

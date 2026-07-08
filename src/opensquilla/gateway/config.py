@@ -71,9 +71,18 @@ class AuthConfig(BaseSettings):
 
 
 class CorsConfig(BaseSettings):
+    """Cross-origin resource sharing headers for the gateway's HTTP surface.
+
+    ``allowed_origins`` defaults to empty — no CORS headers are emitted, so
+    browsers refuse cross-origin reads. The Web UI is served same-origin from
+    the gateway itself and non-browser clients (CLI, desktop app, curl) are
+    unaffected, so nothing needs CORS out of the box. Operators hosting a
+    separate frontend opt in by listing its exact origins here.
+    """
+
     model_config = SettingsConfigDict(env_prefix="OPENSQUILLA_CORS_")
 
-    allowed_origins: list[str] = Field(default_factory=lambda: ["*"])
+    allowed_origins: list[str] = Field(default_factory=list)
     allow_credentials: bool = True
     allowed_methods: list[str] = Field(default_factory=lambda: ["*"])
     allowed_headers: list[str] = Field(default_factory=lambda: ["*"])
