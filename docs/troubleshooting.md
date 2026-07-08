@@ -78,6 +78,36 @@ finish starting or stop the process cleanly. Do not remove `yoyo_lock` rows or
 run yoyo break-lock unless you have verified the recorded process is no longer
 running.
 
+## Collecting Diagnostics for a Bug Report
+
+One action collects everything a maintainer needs:
+
+- **CLI:** `opensquilla bundle` — works even when the gateway will not start.
+- **Web UI:** Logs page → **Diagnostic bundle** button.
+- **Desktop app:** application menu → **Download Diagnostics…** (if the app
+  cannot reach its gateway, this opens the logs folder instead).
+
+The bundle is a single zip containing gateway logs, recent error records,
+router decision and trace slices, an offline health report, and your
+configuration with all secrets redacted. Local paths are normalized to `~` and
+conversation content is **excluded** unless you explicitly opt in
+(`--include-content` or the dialog checkbox). Attach the zip to your GitHub
+issue.
+
+When a turn fails, the error message ends with a reference code like
+`(ref: a1b2c3d4)`. Quote that code in your report — it joins your description
+directly to the recorded error inside the bundle.
+
+### Where logs live
+
+- CLI/gateway installs: `~/.opensquilla/logs/` (`debug.log` is the rotating
+  gateway log; `gateway.log` captures daemonized stdout).
+- Desktop app (macOS): `~/Library/Application Support/OpenSquilla/logs/`
+  (packaged builds) or `~/Library/Application Support/@opensquilla/desktop-electron/logs/`
+  (development builds) — `desktop.log` is the app lifecycle log and
+  `gateway.log` the embedded gateway's output. The gateway's own state lives
+  under `opensquilla/state/` next to them.
+
 ## Port Already In Use
 
 Use another port:
@@ -156,12 +186,15 @@ export BRAVE_SEARCH_API_KEY="..."
 opensquilla configure search --search-provider brave --api-key-env BRAVE_SEARCH_API_KEY
 ```
 
-Use Bocha, Tavily, or Exa when your workflow needs freshness or richer source
-content:
+Use Bocha, IQS, Tavily, or Exa when your workflow needs freshness or richer
+source content:
 
 ```sh
 export BOCHA_SEARCH_API_KEY="..."
 opensquilla configure search --search-provider bocha --api-key-env BOCHA_SEARCH_API_KEY
+
+export IQS_SEARCH_API_KEY="..."
+opensquilla configure search --search-provider iqs --api-key-env IQS_SEARCH_API_KEY
 
 export TAVILY_API_KEY="..."
 opensquilla configure search --search-provider tavily --api-key-env TAVILY_API_KEY
@@ -235,6 +268,76 @@ opensquilla agent --max-iterations 20 --timeout 600 -m "Bounded task"
 
 For large tool outputs, see
 [`features/tool-compression.md`](features/tool-compression.md).
+
+## Docker: Web UI Is Unreachable from Another Machine
+
+The default compose port publish is loopback-only
+(`127.0.0.1:18791:18791`), so other devices cannot reach the gateway.
+Publish on all interfaces instead — and configure token auth first:
+
+```yaml
+ports:
+  - "18791:18791"
+```
+
+Keep `OPENSQUILLA_LISTEN` at `0.0.0.0`; exposure is controlled by the
+`ports` mapping, not by the bind address. If the host runs a firewall,
+allow inbound TCP 18791 from your LAN. Full flow:
+[`docker.md`](docker.md).
+
+## Docker: Web UI Connects but Configuration Changes Are Rejected
+
+A containerized gateway binds a wildcard address, so every browser —
+including one on the same host — is treated as a remote operator.
+Remote operators without a token can chat but cannot administer
+configuration or onboarding. Enable token auth:
+
+```yaml
+environment:
+  OPENSQUILLA_AUTH_MODE: token
+  OPENSQUILLA_AUTH_TOKEN: ${OPENSQUILLA_AUTH_TOKEN:?generate one with openssl rand -hex 32}
+```
+
+Put the token value in a git-ignored `.env` next to `compose.yaml`, then log
+in with the token in the URL:
+
+```text
+http://<server-address>:18791/control/?token=<value>
+```
+
+Use `token` mode specifically — `password` and `trusted-proxy` modes do
+not support the Web UI connection. If the variables have no effect, the
+state volume's `config.toml` may already contain an `[auth]` table —
+TOML values take precedence over `OPENSQUILLA_AUTH_*` at boot; edit the
+token there (or in the Web UI) and restart.
+
+## Docker: Gateway Fails at Boot on a Bind-Mounted State Directory
+
+The container runs as non-root UID 10001. A bind mount owned by another
+user is unwritable, and the gateway fails while creating its databases.
+Give the directory to the container user and restart:
+
+```sh
+sudo chown -R 10001:10001 /srv/opensquilla
+docker compose up -d
+```
+
+The named-volume default (`opensquilla-state`) does not have this
+problem — the image pre-creates the state root with the right owner.
+
+## Docker: Build Fails with "model assets are unavailable"
+
+`docker build` validates the bundled router models and refuses to bake
+Git LFS pointer files into the image. Hydrate them before building
+(`git-lfs` is a separate package from `git` on Debian):
+
+```sh
+sudo apt install -y git git-lfs
+git lfs pull --include="src/opensquilla/squilla_router/models/**"
+docker build -t opensquilla:local .
+```
+
+Prebuilt images avoid this entirely — see [`docker.md`](docker.md).
 
 ---
 

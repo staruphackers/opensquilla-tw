@@ -215,8 +215,10 @@ modify the code.
    The script installs `.[recommended]` (SquillaRouter + memory + local
    models) into a dedicated user environment via `uv tool install`,
    falling back to `python -m pip install --user` when `uv` is
-   unavailable. Open a new terminal if `opensquilla` is not on `PATH`
-   after install.
+   unavailable. If `opensquilla` is not on `PATH` after install (common
+   on a fresh host where `~/.local/bin` is not yet on `PATH`), run
+   `uv tool update-shell` and open a new terminal; see
+   [Troubleshooting](#troubleshooting) for details.
 
 3. **(optional) Install advanced extras.** Most channels — Feishu,
    Telegram, DingTalk, QQ, WeCom, Slack, and Discord — work from the
@@ -567,8 +569,18 @@ to allow inbound TCP on that port. Do not expose the gateway with
 
 **Docker**
 
-The compose path runs an `opensquilla:local` image you build yourself.
-Build it from a source checkout with the Git LFS router assets pulled
+Prebuilt multi-arch images (`amd64`/`arm64`) are published to
+`ghcr.io/opensquilla/opensquilla` on release tags —
+[`docs/docker.md`](docs/docker.md) is the full container guide
+(home servers and NAS, LAN exposure with token auth, upgrades):
+
+```sh
+OPENSQUILLA_GATEWAY_IMAGE=ghcr.io/opensquilla/opensquilla:latest docker compose up -d
+```
+
+Without `OPENSQUILLA_GATEWAY_IMAGE`, the compose path runs an
+`opensquilla:local` image you build yourself. Build it from a source
+checkout with the Git LFS router assets pulled
 (see [Install from source](#install-from-source) for the clone and
 `git lfs pull`):
 
@@ -670,7 +682,7 @@ Full notes: [`CHANGELOG.md`](CHANGELOG.md) ·
 | **On-demand skills and MCP** | 15 bundled skills (coding, GitHub, cron, pptx/docx/xlsx/pdf, summarization, tmux, weather, and more) load only when the task needs them. OpenSquilla is an MCP client, and can also run as an MCP server — `opensquilla mcp-server run` needs the `mcp` extra (install `opensquilla[recommended,mcp]`). Skills can be authored, installed, and published from the CLI. |
 | **Persistent local memory** | A curated `MEMORY.md` plus dated Markdown notes, searched with SQLite full-text keyword search and `sqlite-vec` semantic recall. Embeddings run on-device via bundled ONNX, or swap to OpenAI/Ollama. Optional exponential decay and opt-in "dream" consolidation are available. |
 | **Layered security sandbox** | Three policy tiers (Standard / Strict / Locked) on a permission matrix. Bubblewrap isolates code execution on Linux; macOS runs commands through Seatbelt (`sandbox-exec`) with generated SBPL profiles; Windows uses the native `windows_default` backend after setup readiness checks. A denial ledger auto-pauses autonomous runs after repeated denials, rejected outputs are purged, and skill metadata and tool results are XML-escaped against prompt injection. |
-| **Built-in tools** | File read/write/edit, shell and background processes, git, web search (DuckDuckGo, Bocha, Brave, Tavily, or Exa) and fetch behind an SSRF guard, spreadsheet/PPTX/PDF authoring, image generation, and text-to-speech. |
+| **Built-in tools** | File read/write/edit, shell and background processes, git, web search (DuckDuckGo, Bocha, Brave, IQS, Tavily, or Exa) and fetch behind an SSRF guard, spreadsheet/PPTX/PDF authoring, image generation, and text-to-speech. |
 | **Unified gateway** | A Starlette ASGI server on `127.0.0.1:18791` with WebSocket RPC and an embedded control console (`/control/`). Web UI, CLI, and channels for Terminal, WebSocket, Slack, Telegram, Discord, Feishu, DingTalk, WeCom, Matrix, and QQ all share one `TurnRunner`. |
 | **Durable sessions, subagents, and scheduling** | SQLite-backed session, transcript, and replay storage with per-agent workspaces. Agents spawn depth-bounded subagents, and a `SchedulerEngine` with an in-tree cron parser runs recurring jobs via `opensquilla cron`. |
 | **Operator controls** | Human-in-the-loop approvals can pause sensitive tool calls for a decision; per-turn and per-session token and cost rollups (`opensquilla cost`) and diagnostics are available from the CLI and Web UI. |

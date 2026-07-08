@@ -11,7 +11,7 @@ from opensquilla.onboarding.search_specs import (
 
 def test_search_catalog_includes_known_providers():
     ids = {s.provider_id for s in list_search_provider_setup_specs()}
-    assert {"bocha", "brave", "duckduckgo", "tavily", "exa", "perplexity"} <= ids
+    assert {"bocha", "brave", "duckduckgo", "iqs", "tavily", "exa", "perplexity"} <= ids
 
 
 def test_search_catalog_marks_runtime_providers_supported():
@@ -19,6 +19,7 @@ def test_search_catalog_marks_runtime_providers_supported():
     assert specs["bocha"].runtime_supported is True
     assert specs["brave"].runtime_supported is True
     assert specs["duckduckgo"].runtime_supported is True
+    assert specs["iqs"].runtime_supported is True
     assert specs["tavily"].runtime_supported is True
     assert specs["exa"].runtime_supported is True
     assert specs["perplexity"].runtime_supported is False
@@ -36,6 +37,16 @@ def test_brave_search_spec_requires_api_key():
     spec = get_search_provider_setup_spec("brave")
     assert spec.requires_api_key is True
     assert spec.env_key == "BRAVE_SEARCH_API_KEY"
+
+
+def test_iqs_search_spec_requires_api_key():
+    spec = get_search_provider_setup_spec("iqs")
+    assert spec.requires_api_key is True
+    assert spec.env_key == "IQS_SEARCH_API_KEY"
+    assert spec.label == "Alibaba Cloud IQS"
+    assert "content" in spec.capabilities
+    assert "freshness" in spec.capabilities
+    assert "domain_filter" in spec.capabilities
 
 
 def test_tavily_search_spec_requires_api_key():
@@ -73,3 +84,23 @@ def test_search_payload_marks_search_as_optional_capability():
     assert all(row["blocking"] is False for row in payload)
     assert all(row["canProbe"] is False for row in payload)
     assert all(row["readmeScenarios"] for row in payload)
+
+
+def test_search_api_key_description_states_plaintext_storage_and_env_fallback():
+    """The api_key hint must describe where the key actually goes: pasted
+    keys persist as plaintext ``search_api_key`` in the config file (taking
+    precedence over the env var); blank reads the env var instead. The old
+    "Stored under env key X." wording claimed the opposite."""
+    spec = get_search_provider_setup_spec("brave")
+    api_field = next(f for f in spec.fields if f.name == "api_key")
+
+    assert "Stored under env key" not in api_field.description
+    assert "plaintext search_api_key" in api_field.description
+    assert spec.env_key in api_field.description
+    assert "Leave blank" in api_field.description
+
+
+def test_search_api_key_description_empty_without_env_key():
+    spec = get_search_provider_setup_spec("duckduckgo")
+    api_field = next(f for f in spec.fields if f.name == "api_key")
+    assert api_field.description == ""

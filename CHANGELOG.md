@@ -8,9 +8,62 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Added Alibaba Cloud IQS (`iqs`) as a runtime-supported web search provider:
+  unified-search endpoint with freshness, site include/exclude filters, inline
+  main-text content, and rerank scores, configured via `IQS_SEARCH_API_KEY`.
+- Added a runtime development branch sync: request-proof budgeting with
+  deterministic compaction, DashScope provider profile with prompt-cache
+  markers and thinking-mode plumbing, an optional LLM trace recorder,
+  tool-result store compression, sandbox-descriptor integration for
+  filesystem tools, and a family of default-off, env-lever-controlled
+  runtime recovery modules.
+- Prebuilt multi-arch (`linux/amd64` + `linux/arm64`) container images are
+  published to GHCR (`ghcr.io/opensquilla/opensquilla`) on release tags,
+  with a manual dispatch mode that validates the build without publishing.
+- `docs/docker.md`: a container deployment guide for home servers and NAS
+  (Debian 12 walkthrough, prebuilt images, LAN exposure with token auth,
+  bind-mount ownership, upgrades and rollback).
+
 ### Changed
 
+- `compose.yaml` now documents prebuilt-image selection, safe LAN exposure,
+  and Web UI token auth, and the troubleshooting guide covers common Docker
+  deployment failures.
+- Provider retry handling: responses that stop at the length limit without
+  visible text or tool calls now enter the reasoning-only retry path instead
+  of the length-capped continuation path, and a thinking-related provider
+  stream error now disables thinking for the next call only (one-shot)
+  instead of the rest of the turn.
+- Context compaction: `read_file` and `git_diff` results are preserved
+  verbatim (exempt from semantic projection and aggregate compaction), tool
+  results already shown in full are no longer retroactively compacted under
+  context pressure, and compaction placeholders gained `preview_complete`
+  plus retrieval hints.
+- Tool dispatch: a preflight validation pipeline now rejects malformed tool
+  calls before execution and reports invalid tool arguments as retryable;
+  `write_file` refuses destructive overwrites that would shrink an existing
+  large workspace file by more than half; `grep_search` output gained a
+  header, offset paging, VCS-directory exclusion, and binary-file skipping;
+  `edit_file` accepts single-edit shorthand and recovers from near-miss
+  matches by default; `apply_patch` accepts `@@` hunks with optional counts.
+- The `coding` tool profile now enforces fresh workspace reads before edits.
+- `match_workspace_write_deny` deny patterns now apply only to
+  workspace-contained paths (previously they could match paths outside the
+  workspace).
+- Request-proof compaction marks compacted tool arguments with inline
+  `[provider_request_tool_input_compacted: ...]` markers instead of a JSON
+  envelope.
+
 ### Fixed
+
+- Fixed managed-network sandbox domain grants missing the Bocha, Tavily, and
+  Exa search API hosts: `web_search` runs with those providers active were
+  blocked under the managed-network sandbox. All runtime search providers now
+  have system domain grants and default search-allowlist entries, enforced by
+  a contract test.
+- Fixed secret redaction missing assignment values that start with a quote
+  (for example `password: "..."`); quoted values are now masked in memory
+  persistence and trace capture paths.
 
 ## [0.5.0rc2] - 2026-07-06
 
