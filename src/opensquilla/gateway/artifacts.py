@@ -24,6 +24,13 @@ from opensquilla.artifacts import (
     ArtifactStore,
 )
 from opensquilla.gateway.config import GatewayConfig
+from opensquilla.gateway.origin_guard import (
+    forbidden_origin_response,
+    request_origin_allowed,
+)
+from opensquilla.gateway.origin_guard import (
+    request_principal_is_owner as _request_principal_is_owner,
+)
 from opensquilla.paths import media_root_from_config
 
 _OPENABLE_HTML_MIMES = frozenset({"text/html", "application/xhtml+xml"})
@@ -54,28 +61,6 @@ async def _session_id_for_download(session_manager: Any, session_key: str) -> st
 
 def _media_root_from_config(config: GatewayConfig) -> Path:
     return media_root_from_config(config)
-
-
-def _extract_http_token(request: Request) -> str | None:
-    auth_header = request.headers.get("authorization", "")
-    if auth_header.startswith("Bearer "):
-        return auth_header[7:]
-    token_header = request.headers.get("x-opensquilla-token")
-    if token_header:
-        return token_header
-    return request.query_params.get("token")
-
-
-def _request_principal_is_owner(config: GatewayConfig, request: Request) -> bool:
-    from opensquilla.gateway.auth import resolve_auth
-
-    auth_params: dict[str, str] = {}
-    token = _extract_http_token(request)
-    if token:
-        auth_params["token"] = token
-    peer_ip = request.client.host if request.client is not None else None
-    principal = resolve_auth(config, auth_params, "operator", peer_ip=peer_ip)
-    return bool(principal and principal.is_owner)
 
 
 def _normalized_mime(value: str) -> str:
@@ -214,6 +199,8 @@ def register_artifact_routes(
         return FileResponse(path, media_type=ref.mime, filename=ref.name)
 
     async def open_handler(request: Request) -> JSONResponse:
+        if not request_origin_allowed(request, config):
+            return forbidden_origin_response()
         if not _request_principal_is_owner(config, request):
             return JSONResponse(
                 {"error": "Owner privileges required", "code": "OWNER_REQUIRED"},

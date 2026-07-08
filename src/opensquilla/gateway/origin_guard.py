@@ -1,0 +1,105 @@
+"""Same-origin guard and HTTP auth helpers shared by gateway HTTP routes.
+
+A hostile web page can make a loopback victim's browser fire state-changing
+requests at the gateway (classic cross-site request forgery): simple POSTs
+execute server-side even when the browser withholds the response from the
+page. The diagnostics-bundle route shipped the first same-origin check; this
+module is the single shared implementation for every state-changing or
+sensitive owner route.
+
+Policy (matches the bundle-route precedent):
+
+* Requests without an ``Origin`` header pass — curl, the CLI, and the desktop
+  client's Node fetch are not browser-mediated and never send one.
+* Same-origin requests pass — the gateway serves the Web UI itself, so its
+  ``Origin`` always matches the request's own scheme/host/port.
+* Origins explicitly listed in ``cors.allowed_origins`` pass — an operator who
+  deliberately configured a separate frontend keeps a working deployment. The
+  ``"*"`` wildcard never bypasses the guard; it would reopen the exact
+  drive-by exposure this module exists to close.
+* Everything else — including the opaque ``"null"`` origin and unparsable
+  values — is rejected with 403 ``FORBIDDEN_ORIGIN``.
+"""
+
+from __future__ import annotations
+
+from urllib.parse import urlsplit
+
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
+from opensquilla.gateway.config import GatewayConfig
+
+_DEFAULT_SCHEME_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
+
+
+def extract_http_token(request: Request | None) -> str | None:
+    """Pull the gateway token from an HTTP request (header or query string)."""
+    if request is None:
+        return None
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        return auth_header[7:]
+    token_header = request.headers.get("x-opensquilla-token")
+    if token_header:
+        return token_header
+    return request.query_params.get("token")
+
+
+def request_principal_is_owner(config: GatewayConfig, request: Request) -> bool:
+    """Resolve the request's principal and report whether it is the owner."""
+    from opensquilla.gateway.auth import resolve_auth
+
+    auth_params: dict[str, str] = {}
+    token = extract_http_token(request)
+    if token:
+        auth_params["token"] = token
+    peer_ip = request.client.host if request.client is not None else None
+    principal = resolve_auth(config, auth_params, "operator", peer_ip=peer_ip)
+    return bool(principal and principal.is_owner)
+
+
+def _effective_port(scheme: str, port: int | None) -> int | None:
+    if port is not None:
+        return port
+    return _DEFAULT_SCHEME_PORTS.get(scheme)
+
+
+def request_origin_allowed(request: Request, config: GatewayConfig | None = None) -> bool:
+    """Reject browser requests whose Origin is not the gateway itself.
+
+    Browsers always attach ``Origin`` to cross-origin fetches and to
+    same-origin POSTs; the gateway-served Web UI is same-origin so its
+    ``Origin`` matches the request's own host. Requests without an ``Origin``
+    header (curl, the desktop node client) are not browser-mediated and pass.
+    Origins the operator explicitly listed in ``cors.allowed_origins`` pass
+    too, except the ``"*"`` wildcard, which never bypasses the guard.
+    """
+    origin = request.headers.get("origin")
+    if origin is None:
+        return True
+    if config is not None and any(
+        allowed == origin for allowed in config.cors.allowed_origins if allowed != "*"
+    ):
+        return True
+    try:
+        parsed = urlsplit(origin)
+    except ValueError:
+        return False
+    request_url = request.url
+    if not parsed.scheme or parsed.hostname is None or request_url.hostname is None:
+        return False  # includes the opaque "null" origin
+    return (
+        parsed.scheme == request_url.scheme
+        and parsed.hostname == request_url.hostname
+        and _effective_port(parsed.scheme, parsed.port)
+        == _effective_port(request_url.scheme, request_url.port)
+    )
+
+
+def forbidden_origin_response() -> JSONResponse:
+    """The uniform 403 payload for a rejected cross-origin request."""
+    return JSONResponse(
+        {"error": "cross-origin requests are not allowed", "code": "FORBIDDEN_ORIGIN"},
+        status_code=403,
+    )
