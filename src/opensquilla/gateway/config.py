@@ -200,6 +200,20 @@ class PermissionsConfig(BaseModel):
     default_mode: Literal["off", "on", "bypass", "full"] = "off"
 
 
+class KnowledgeConfig(BaseModel):
+    """OpenSquilla integration settings for an external knowledge backend."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+    backend: Literal["local", "http"] = "local"
+    endpoint: str = "http://127.0.0.1:18765"
+    timeout_seconds: float = Field(default=30.0, gt=0.0)
+    api_key: str | None = None
+    api_key_env: str | None = None
+    local_root_dir: str | None = None
+
+
 class TaskRuntimeConfig(BaseModel):
     """Server-side task-runtime queue settings."""
 
@@ -1779,6 +1793,7 @@ class GatewayConfig(BaseSettings):
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     prompt: PromptConfig = Field(default_factory=PromptConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    knowledge: KnowledgeConfig = Field(default_factory=KnowledgeConfig)
     squilla_router: SquillaRouterConfig = Field(default_factory=SquillaRouterConfig)
     agent_token_saving: AgentTokenSavingConfig = Field(default_factory=AgentTokenSavingConfig)
     compaction: CompactionLlmConfig = Field(default_factory=CompactionLlmConfig)

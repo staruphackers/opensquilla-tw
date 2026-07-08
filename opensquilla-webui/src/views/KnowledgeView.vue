@@ -420,7 +420,7 @@ interface KnowledgeDetail {
 
 const rpc = useRpcStore()
 const sourceRoot = ref('/mnt/data/datasets')
-const collectionName = ref('default')
+const collectionName = ref('datasets')
 const retrievalProfile = ref('sqlite_fts5_default')
 const sampleLimit = ref(30)
 const topK = ref(8)
@@ -547,11 +547,12 @@ async function prepareSample(): Promise<void> {
   judgmentPath.value = ''
   try {
     await rpc.waitForConnection()
+    const collectionId = collectionName.value.trim() || 'datasets'
     await rpc.call('knowledge.ingest', {
       sourceRoot: sourceRoot.value,
       limit: Number(sampleLimit.value || 30),
-      collectionName: collectionName.value || 'default',
-      collectionId: 'default',
+      collectionName: collectionId,
+      collectionId,
       indexProfiles: [retrievalProfile.value],
     })
     await refreshAll()
@@ -579,7 +580,7 @@ async function runSearch(): Promise<void> {
     const payload = await rpc.call<{ results: KnowledgeResult[] }>('knowledge.search', {
       query: cleanQuery,
       topK: Number(topK.value || 8),
-      collectionId: 'default',
+      collectionId: collectionName.value.trim() || 'datasets',
       retrievalProfile: retrievalProfile.value,
     })
     results.value = payload.results || []
@@ -630,6 +631,7 @@ async function saveJudgment(): Promise<void> {
       hallucination: judgment.hallucination,
       notes: judgment.notes,
       selectedChunkId: selectedDetail.value?.chunkId || null,
+      collectionId: collectionName.value.trim() || 'datasets',
       results: results.value.slice(0, 5),
     })
     judgmentPath.value = payload.path

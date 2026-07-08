@@ -8,6 +8,7 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+from opensquilla.knowledge.backend import DisabledKnowledgeBackend, KnowledgeBackend
 from opensquilla.knowledge.chunking import chunk_text, detect_language_bucket
 from opensquilla.knowledge.index import KnowledgeIndex
 from opensquilla.knowledge.models import (
@@ -580,7 +581,25 @@ class KnowledgeManager:
                 handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def manager_from_config(config: Any | None) -> KnowledgeManager:
+def manager_from_config(config: Any | None) -> KnowledgeBackend:
+    knowledge_config = getattr(config, "knowledge", None)
+    if knowledge_config is not None and not bool(getattr(knowledge_config, "enabled", True)):
+        return DisabledKnowledgeBackend()
+
+    backend = str(getattr(knowledge_config, "backend", "local") or "local").strip().lower()
+    if backend == "http":
+        from opensquilla.knowledge.http_backend import HttpKnowledgeBackend
+
+        return HttpKnowledgeBackend(
+            str(getattr(knowledge_config, "endpoint", "") or "http://127.0.0.1:18765"),
+            api_key=getattr(knowledge_config, "api_key", None),
+            api_key_env=getattr(knowledge_config, "api_key_env", None),
+            timeout_seconds=float(getattr(knowledge_config, "timeout_seconds", 30.0) or 30.0),
+        )
+
+    local_root_dir = getattr(knowledge_config, "local_root_dir", None)
+    if local_root_dir:
+        return KnowledgeManager(Path(str(local_root_dir)))
     state_dir = Path(str(getattr(config, "state_dir", "") or ".opensquilla"))
     return KnowledgeManager(state_dir / "knowledge")
 

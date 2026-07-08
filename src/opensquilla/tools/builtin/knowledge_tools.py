@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from opensquilla.knowledge.manager import KnowledgeManager, manager_from_config
+from opensquilla.knowledge.backend import KnowledgeBackend
+from opensquilla.knowledge.manager import manager_from_config
 from opensquilla.tools.registry import tool
 from opensquilla.tools.types import ToolError
 
@@ -13,7 +14,7 @@ if TYPE_CHECKING:
 
 def create_knowledge_tools(
     *,
-    manager: KnowledgeManager | None = None,
+    manager: KnowledgeBackend | None = None,
     registry: ToolRegistry | None = None,
     config: Any | None = None,
 ) -> None:
