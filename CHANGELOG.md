@@ -26,6 +26,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
+- **Security:** the gateway no longer emits CORS headers by default —
+  `cors.allowed_origins` now defaults to `[]` instead of `"*"`. The Web UI
+  (served same-origin from the gateway), the CLI, curl, and the desktop app
+  are unaffected. Deployments that serve a separate frontend from another
+  origin must list that origin explicitly in `cors.allowed_origins` to
+  restore the previous behavior; configuring `"*"` together with
+  `cors.allow_credentials` now logs a boot-time warning.
+- **Security:** state-changing gateway HTTP routes (chat send, system
+  shutdown, approvals settings/resolve, elevated mode, channel logout, file
+  upload, audio transcription, artifact native open, diagnostics bundle) now
+  reject browser requests whose `Origin` is not the gateway itself with
+  `403 FORBIDDEN_ORIGIN`, extending the diagnostics-bundle same-origin guard
+  to the whole HTTP surface. Requests without an `Origin` header (curl, the
+  desktop client) and origins listed in `cors.allowed_origins` still pass.
 - `compose.yaml` now documents prebuilt-image selection, safe LAN exposure,
   and Web UI token auth, and the troubleshooting guide covers common Docker
   deployment failures.

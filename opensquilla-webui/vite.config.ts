@@ -23,7 +23,17 @@ export default defineConfig({
   server: {
     proxy: {
       // REST endpoints (approvals, artifacts under /api/v1, file upload, audio, …).
-      '/api': { target: gatewayTarget, changeOrigin: true },
+      // Strip the browser's Origin header on the way through: the gateway's
+      // same-origin guard on state-changing routes would otherwise reject
+      // proxied POSTs (Origin says localhost:5173, Host says the gateway).
+      // Requests through this proxy are developer-initiated, not drive-by.
+      '/api': {
+        target: gatewayTarget,
+        changeOrigin: true,
+        configure: (proxy) => {
+          proxy.on('proxyReq', (proxyReq) => proxyReq.removeHeader('origin'))
+        },
+      },
       // RpcClient connects to ws://<host>/ws for the live chat/event stream.
       '/ws': { target: gatewayTarget, ws: true, changeOrigin: true },
       // Backend-owned static assets (brand mark, share-export images, …) that the

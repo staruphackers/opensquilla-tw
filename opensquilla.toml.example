@@ -453,6 +453,15 @@ default_mode = "bypass"                 # off | on | bypass | full
 # mode = "none"         # none | token | password
 # token = ""
 
+# [cors]
+# Cross-origin browser access to the gateway HTTP API. Off by default: the
+# Web UI is served same-origin from the gateway itself and non-browser
+# clients (CLI, desktop app, curl) never need CORS. Only list origins here
+# if you host a separate frontend on another origin; avoid "*", especially
+# together with allow_credentials.
+# allowed_origins = []
+# allow_credentials = true
+
 # [channels]
 # [[channels.channels]]
 # name = "my-slack"
