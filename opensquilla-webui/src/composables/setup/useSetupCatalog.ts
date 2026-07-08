@@ -66,6 +66,7 @@ interface ProviderSpec {
   requiresApiKey?: boolean
   defaultBaseUrl?: string
   defaultModel?: string
+  deployment?: string
   presets?: ProviderPresetSpec[]
 }
 
@@ -175,6 +176,9 @@ interface ConfigData {
     [key: string]: unknown
   }
   llm_request_timeout_seconds?: number
+  // Per-provider/per-model overrides (deep-merge subtree; model ids carry
+  // dots/colons so dot-path patches cannot address it).
+  models?: Record<string, Record<string, { context_window?: number }>>
   squilla_router?: {
     enabled?: boolean
     default_tier?: string
@@ -346,6 +350,18 @@ const providerFields = computed(() => providerSpec.value?.fields || [])
 const providerCoreFields = computed(() => providerFields.value.filter(f => !isProviderCredentialField(f) && !isProviderAdvancedField(f)))
 const providerAdvancedFields = computed(() => providerFields.value.filter(f => !isProviderCredentialField(f) && isProviderAdvancedField(f)))
 
+// Providers that run on the user's own hardware, where the runtime frequently
+// defaults to a much smaller context window than the model supports. Prefer the
+// catalog spec's deployment field when present; fall back to known local ids.
+const LOCAL_PROVIDER_IDS = new Set(['ollama', 'vllm', 'lm_studio', 'ovms', 'local', 'custom'])
+const providerIsLocal = computed(() => {
+  const spec = providerSpec.value
+  if (!spec) return false
+  const deployment = String(spec.deployment || '').trim().toLowerCase()
+  if (deployment) return deployment === 'local'
+  return LOCAL_PROVIDER_IDS.has(spec.providerId)
+})
+
 const providerSummary = computed(() => {
   if (!hasSavedProvider.value) return t('setup.summary.notConfigured')
   const spec = runtimeProviders.value.find(p => p.providerId === currentProvider.value)
@@ -382,6 +398,7 @@ const providerNeeds = computed(() => {
 
 const providerAdvancedOpen = computed(() => {
   if (promotedForm.llmTimeoutSeconds.value !== DEFAULT_LLM_TIMEOUT_SECONDS) return true
+  if (promotedForm.contextWindowTokens.value.trim() !== '') return true
   return providerAdvancedFields.value.some(f => {
     if (f.required) return true
     const val = providerForm.fieldValue(f, config.value.llm || {}).trim()
@@ -531,6 +548,8 @@ const providerPanel = providerForm.createPanel({
   providerEnvKey,
   providerEnvCommand,
   llmTimeoutSeconds: promotedForm.llmTimeoutSeconds,
+  contextWindowTokens: promotedForm.contextWindowTokens,
+  providerIsLocal,
 })
 
 const behaviorPanel = behaviorForm.createPanel({
@@ -892,7 +911,11 @@ function sectionForDetailName(name: string): SettingsSectionId | null {
 // Dirty state
 // ---------------------------------------------------------------------------
 
-const providerDirty = computed(() => providerForm.isDirty.value || promotedForm.timeoutDirty.value)
+const providerDirty = computed(() => (
+  providerForm.isDirty.value
+  || promotedForm.timeoutDirty.value
+  || promotedForm.contextWindowDirty.value
+))
 const behaviorDirty = computed(() => behaviorForm.isDirty.value)
 const privacySectionDirty = computed(() => privacyDirty.value)
 const modelStrategyDirty = computed(() => modelStrategyForm.isDirty.value)
@@ -1008,6 +1031,10 @@ function probeProviderConnection() {
 
 function updateLlmTimeout(value: number) {
   promotedForm.setLlmTimeoutSeconds(value)
+}
+
+function updateContextWindow(value: string) {
+  promotedForm.setContextWindowTokens(value)
 }
 
 function envRecoveryCommand(section: string): string {
@@ -1254,14 +1281,31 @@ async function safePatchConfig(patches: Record<string, unknown>): Promise<boolea
   return res?.restartRequired === true
 }
 
+// Deep-merge form of config.patch: `patch` is a nested object merged into the
+// config tree (null deletes a key). Required for the models.<provider>.<model>
+// subtree, whose model-id keys contain dots/colons that dot-path patches would
+// misparse as path separators.
+async function deepPatchConfig(patch: Record<string, unknown>): Promise<boolean> {
+  if (!Object.keys(patch).length) return false
+  const res = await rpc.call<{ restartRequired?: boolean }>('config.patch', { patch })
+  return res?.restartRequired === true
+}
+
 async function saveProvider() {
   if (!providerForm.selectedProvider.value) {
     pushToast(t('setup.toast.chooseProvider'), { tone: 'danger' })
     return
   }
   try {
-    await rpc.call('onboarding.provider.configure', providerForm.payload())
+    const payload = providerForm.payload()
+    await rpc.call('onboarding.provider.configure', payload)
     const restart = await patchConfig(promotedForm.providerPatches())
+    // The per-model context-window override rides the deep-merge patch form.
+    const contextPatch = promotedForm.contextWindowPatch(
+      providerForm.selectedProvider.value,
+      String(payload.model ?? config.value.llm?.model ?? ''),
+    )
+    if (contextPatch) await deepPatchConfig(contextPatch)
     await loadData()
     if (providerEnvMissing.value) {
       pushToast(t('setup.toast.envNotVisibleGateway', { envKey: providerEnvKey.value }), { tone: 'danger' })
@@ -1617,6 +1661,7 @@ async function copyConfigPath() {
     selectChannelType,
     updateProviderField,
     updateLlmTimeout,
+    updateContextWindow,
     probeProviderConnection,
     revealProviderCredential,
     updateTierField,

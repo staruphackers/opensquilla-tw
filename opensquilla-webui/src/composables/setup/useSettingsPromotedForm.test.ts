@@ -45,3 +45,79 @@ describe('useSettingsPromotedForm — audio TTS fields', () => {
     expect('ttsModel' in f.audioPayload()).toBe(false)
   })
 })
+
+// The per-model context-window override persists through config.patch's
+// deep-merge `patch` envelope because model ids ("qwen3:8b",
+// "deepseek/deepseek-v4-pro") contain separators that break dot-path patches.
+describe('useSettingsPromotedForm — context-window override', () => {
+  it('seeds from the saved provider+model override and stays pristine', () => {
+    const f = useSettingsPromotedForm()
+    f.initFromConfig({
+      llm: { provider: 'ollama', model: 'qwen3:8b' },
+      models: { ollama: { 'qwen3:8b': { context_window: 16384 } } },
+    })
+    expect(f.contextWindowTokens.value).toBe('16384')
+    expect(f.contextWindowDirty.value).toBe(false)
+    expect(f.contextWindowPatch('ollama', 'qwen3:8b')).toBeNull() // pristine → nothing to send
+  })
+
+  it('leaves the field blank when no override is saved for the model', () => {
+    const f = useSettingsPromotedForm()
+    f.initFromConfig({
+      llm: { provider: 'openrouter', model: 'deepseek/deepseek-v4-pro' },
+      models: { ollama: { 'qwen3:8b': { context_window: 16384 } } },
+    })
+    expect(f.contextWindowTokens.value).toBe('')
+    expect(f.contextWindowDirty.value).toBe(false)
+  })
+
+  it('builds a deep-merge patch keyed by the raw model id when edited', () => {
+    const f = useSettingsPromotedForm()
+    f.initFromConfig({ llm: { provider: 'ollama', model: 'qwen3:8b' } })
+    f.setContextWindowTokens('32768')
+    expect(f.contextWindowDirty.value).toBe(true)
+    expect(f.contextWindowPatch('ollama', 'qwen3:8b')).toEqual({
+      models: { ollama: { 'qwen3:8b': { context_window: 32768 } } },
+    })
+  })
+
+  it('clearing the field deletes the override with a null leaf', () => {
+    const f = useSettingsPromotedForm()
+    f.initFromConfig({
+      llm: { provider: 'ollama', model: 'qwen3:8b' },
+      models: { ollama: { 'qwen3:8b': { context_window: 16384 } } },
+    })
+    f.setContextWindowTokens('')
+    expect(f.contextWindowDirty.value).toBe(true)
+    expect(f.contextWindowPatch('ollama', 'qwen3:8b')).toEqual({
+      models: { ollama: { 'qwen3:8b': { context_window: null } } },
+    })
+  })
+
+  it('treats zero as clear and skips the patch without a provider or model id', () => {
+    const f = useSettingsPromotedForm()
+    f.initFromConfig({
+      llm: { provider: 'ollama', model: 'qwen3:8b' },
+      models: { ollama: { 'qwen3:8b': { context_window: 16384 } } },
+    })
+    f.setContextWindowTokens('0')
+    expect(f.contextWindowPatch('ollama', 'qwen3:8b')).toEqual({
+      models: { ollama: { 'qwen3:8b': { context_window: null } } },
+    })
+    expect(f.contextWindowPatch('ollama', '')).toBeNull()
+    expect(f.contextWindowPatch('', 'qwen3:8b')).toBeNull()
+  })
+
+  it('reloading config rebaselines the field so a saved value is no longer dirty', () => {
+    const f = useSettingsPromotedForm()
+    f.initFromConfig({ llm: { provider: 'ollama', model: 'qwen3:8b' } })
+    f.setContextWindowTokens('32768')
+    expect(f.contextWindowDirty.value).toBe(true)
+    f.initFromConfig({
+      llm: { provider: 'ollama', model: 'qwen3:8b' },
+      models: { ollama: { 'qwen3:8b': { context_window: 32768 } } },
+    })
+    expect(f.contextWindowTokens.value).toBe('32768')
+    expect(f.contextWindowDirty.value).toBe(false)
+  })
+})

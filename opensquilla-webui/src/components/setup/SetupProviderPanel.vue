@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import SetupField from '@/components/SetupField.vue'
 import SetupNeedList from '@/components/SetupNeedList.vue'
@@ -39,6 +40,8 @@ interface ProviderPanelContract {
   providerEnvKey: string
   providerEnvCommand: string
   llmTimeoutSeconds: number
+  contextWindowTokens: string
+  providerIsLocal: boolean
   connection: ConnectionState
   providerFieldValue: (field: FieldSpec) => string
 }
@@ -66,6 +69,7 @@ const emit = defineEmits<{
   providerChange: []
   updateProviderField: [name: string, value: unknown]
   updateLlmTimeout: [value: number]
+  updateContextWindow: [value: string]
   probeConnection: []
   applyPreset: []
   copy: [command: string]
@@ -83,6 +87,54 @@ function useCombobox(field: FieldSpec): boolean {
   // field renders untouched (free text always works).
   return field.name === 'model' && props.panel.connection.models.length > 0
 }
+
+// ---------------------------------------------------------------------------
+// Context-window override (advanced)
+// ---------------------------------------------------------------------------
+
+// Local runtimes commonly truncate silently below this window; warn when the
+// effective budget lands at or under it.
+const LOCAL_CONTEXT_WINDOW_WARN_TOKENS = 8192
+
+const currentModelId = computed(() => {
+  const fields = [...props.panel.providerCoreFields, ...props.panel.providerAdvancedFields]
+  const modelField = fields.find(f => f.name === 'model') || { name: 'model', label: 'model' }
+  return String(props.panel.providerFieldValue(modelField) || '').trim()
+})
+
+// Auto-detected window: the discovery row for the model currently in the form.
+const contextWindowAuto = computed<number | null>(() => {
+  if (!currentModelId.value) return null
+  const row = props.panel.connection.models.find(m => m.id === currentModelId.value)
+  return typeof row?.contextWindow === 'number' ? row.contextWindow : null
+})
+
+const contextWindowOverride = computed<number | null>(() => {
+  const parsed = Number(props.panel.contextWindowTokens)
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : null
+})
+
+const contextWindowEffective = computed<number | null>(() => (
+  contextWindowOverride.value ?? contextWindowAuto.value
+))
+
+const contextWindowReadout = computed(() => t('setup.provider.contextWindowReadout', {
+  auto: contextWindowAuto.value != null
+    ? String(contextWindowAuto.value)
+    : t('setup.provider.contextWindowUnknown'),
+  override: contextWindowOverride.value != null
+    ? String(contextWindowOverride.value)
+    : t('setup.provider.contextWindowNone'),
+  effective: contextWindowEffective.value != null
+    ? String(contextWindowEffective.value)
+    : t('setup.provider.contextWindowUnknown'),
+}))
+
+const showContextWindowWarning = computed(() => (
+  props.panel.providerIsLocal
+  && contextWindowEffective.value != null
+  && contextWindowEffective.value <= LOCAL_CONTEXT_WINDOW_WARN_TOKENS
+))
 </script>
 
 <template>
@@ -178,6 +230,30 @@ function useCombobox(field: FieldSpec): boolean {
           >
         </div>
       </label>
+      <label class="control-row">
+        <div class="control-row__label-block">
+          <span class="control-row__label">{{ t('setup.provider.contextWindowLabel') }}</span>
+          <span class="control-row__desc">{{ t('setup.provider.contextWindowDesc') }}</span>
+        </div>
+        <div class="control-row__control setup-context-window">
+          <input
+            class="control-input control-input--narrow"
+            :value="panel.contextWindowTokens"
+            name="setup_provider_context_window"
+            type="number"
+            min="0"
+            step="1024"
+            inputmode="numeric"
+            :placeholder="t('setup.provider.contextWindowAuto')"
+            :disabled="!currentModelId"
+            @input="emit('updateContextWindow', ($event.target as HTMLInputElement).value)"
+          >
+          <span class="setup-context-window__readout" aria-live="polite">{{ contextWindowReadout }}</span>
+        </div>
+      </label>
+      <div v-if="showContextWindowWarning" class="setup-warning">
+        {{ t('setup.provider.contextWindowLocalWarning', { tokens: contextWindowEffective }) }}
+      </div>
     </details>
     <div v-if="panel.providerEnvMissing" class="setup-warning">
       <div>{{ t('setup.provider.envMissing', { envKey: panel.providerEnvKey }) }}</div>
@@ -248,5 +324,21 @@ function useCombobox(field: FieldSpec): boolean {
 .setup-connection__hint {
   color: var(--text-muted);
   font-size: var(--fs-xs);
+}
+
+/* Context-window override: number input with an auto/override/effective
+   readout underneath. Tabular numerals keep the readout steady as it updates. */
+.setup-context-window {
+  align-items: flex-end;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.setup-context-window__readout {
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 </style>

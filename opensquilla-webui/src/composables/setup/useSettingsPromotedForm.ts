@@ -8,6 +8,10 @@ export const DEFAULT_LLM_TIMEOUT_SECONDS = 120
 
 interface PromotedConfigData {
   llm_request_timeout_seconds?: number
+  llm?: { provider?: string; model?: string }
+  // Per-provider/per-model overrides. Model ids contain dots and colons, so
+  // this subtree is written with deep-merge patches, never dot-path patches.
+  models?: Record<string, Record<string, { context_window?: number }>>
   memory?: { auto_capture_enabled?: boolean }
   audio?: {
     enabled?: boolean
@@ -18,6 +22,8 @@ interface PromotedConfigData {
 
 export function useSettingsPromotedForm() {
   const llmTimeoutSeconds = ref(DEFAULT_LLM_TIMEOUT_SECONDS)
+  // Per-model context-window override, kept as the raw input string ('' = auto).
+  const contextWindowTokens = ref('')
   const memoryAutoCapture = ref(true)
   const audioEnabled = ref(false)
   const audioApiKey = ref('')
@@ -40,16 +46,25 @@ export function useSettingsPromotedForm() {
 
   // Seed from the initial state so the pristine form is never dirty while config loads.
   const timeoutBaseline = ref(llmTimeoutSeconds.value)
+  const contextWindowBaseline = ref(contextWindowTokens.value)
   const captureBaseline = ref(memoryAutoCapture.value)
   const audioBaseline = ref(audioSerialized.value)
 
   const timeoutDirty = computed(() => llmTimeoutSeconds.value !== timeoutBaseline.value)
+  const contextWindowDirty = computed(() => contextWindowTokens.value !== contextWindowBaseline.value)
   const captureDirty = computed(() => memoryAutoCapture.value !== captureBaseline.value)
   const audioDirty = computed(() => audioSerialized.value !== audioBaseline.value)
 
   function initFromConfig(config: PromotedConfigData) {
     const timeout = Number(config.llm_request_timeout_seconds)
     llmTimeoutSeconds.value = Number.isFinite(timeout) && timeout >= 1 ? timeout : DEFAULT_LLM_TIMEOUT_SECONDS
+    // Seed the context-window field from the saved provider+model override.
+    const provider = String(config.llm?.provider || '')
+    const model = String(config.llm?.model || '')
+    const override = provider && model ? config.models?.[provider]?.[model]?.context_window : undefined
+    contextWindowTokens.value = typeof override === 'number' && Number.isFinite(override) && override > 0
+      ? String(Math.floor(override))
+      : ''
     memoryAutoCapture.value = config.memory?.auto_capture_enabled !== false
     audioEnabled.value = config.audio?.enabled === true
     const audioProvider = config.audio?.providers?.[audioProviderId] || {}
@@ -64,12 +79,17 @@ export function useSettingsPromotedForm() {
     audioApiKey.value = ''
 
     timeoutBaseline.value = llmTimeoutSeconds.value
+    contextWindowBaseline.value = contextWindowTokens.value
     captureBaseline.value = memoryAutoCapture.value
     audioBaseline.value = audioSerialized.value
   }
 
   function setLlmTimeoutSeconds(value: number) {
     llmTimeoutSeconds.value = Number.isFinite(value) && value >= 1 ? value : DEFAULT_LLM_TIMEOUT_SECONDS
+  }
+
+  function setContextWindowTokens(value: string) {
+    contextWindowTokens.value = String(value ?? '').trim()
   }
 
   function setMemoryAutoCapture(value: boolean) {
@@ -89,6 +109,21 @@ export function useSettingsPromotedForm() {
   function providerPatches(): Record<string, unknown> {
     if (!timeoutDirty.value) return {}
     return { llm_request_timeout_seconds: llmTimeoutSeconds.value }
+  }
+
+  // Deep-merge patch for the per-model context-window override. Model ids
+  // contain dots and colons (e.g. "qwen3:8b", "deepseek/deepseek-v4-pro"), so
+  // this CANNOT ride the dot-path `patches` form — the caller must send it via
+  // config.patch's deep-merge `patch` envelope. Clearing the field (empty or 0)
+  // writes null, which deletes the key on the gateway side.
+  function contextWindowPatch(providerId: string, modelId: string): Record<string, unknown> | null {
+    if (!contextWindowDirty.value) return null
+    const provider = String(providerId || '').trim()
+    const model = String(modelId || '').trim()
+    if (!provider || !model) return null
+    const parsed = Number(contextWindowTokens.value)
+    const tokens = Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : null
+    return { models: { [provider]: { [model]: { context_window: tokens } } } }
   }
 
   function memoryPatches(): Record<string, unknown> {
@@ -111,6 +146,7 @@ export function useSettingsPromotedForm() {
 
   return {
     llmTimeoutSeconds,
+    contextWindowTokens,
     memoryAutoCapture,
     audioEnabled,
     audioApiKey,
@@ -121,13 +157,16 @@ export function useSettingsPromotedForm() {
     audioLanguageCode,
     audioKeyConfigured,
     timeoutDirty,
+    contextWindowDirty,
     captureDirty,
     audioDirty,
     initFromConfig,
     setLlmTimeoutSeconds,
+    setContextWindowTokens,
     setMemoryAutoCapture,
     updateAudioField,
     providerPatches,
+    contextWindowPatch,
     memoryPatches,
     audioPayload,
   }
