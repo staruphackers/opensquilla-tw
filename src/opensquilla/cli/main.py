@@ -82,6 +82,7 @@ warn_if_proxy_ignored()
 
 from opensquilla.cli.agent_cmd import run_agent_command  # noqa: E402
 from opensquilla.cli.agents_cmd import agents_app  # noqa: E402
+from opensquilla.cli.bundle_cmd import bundle_command  # noqa: E402
 from opensquilla.cli.channels_cmd import channels_app  # noqa: E402
 from opensquilla.cli.codetask_cmd import codetask_app  # noqa: E402
 from opensquilla.cli.config_cmd import app as config_app  # noqa: E402
@@ -106,6 +107,7 @@ from opensquilla.cli.sessions_cmd import app as sessions_app  # noqa: E402
 from opensquilla.cli.skills_cmd import skills_app  # noqa: E402
 from opensquilla.cli.swebench_cmd import swebench_app  # noqa: E402
 from opensquilla.cli.uninstall_cmd import uninstall_command  # noqa: E402
+from opensquilla.observability.cli_logging import configure_cli_structlog  # noqa: E402
 
 app = typer.Typer(
     name="opensquilla",
@@ -124,6 +126,10 @@ def _main_callback(
         help="Use a named OpenSquilla profile home.",
     ),
 ) -> None:
+    # Route structlog output on CLI paths to stderr (WARNING+) so command
+    # stdout stays clean; the gateway bridge and interactive TUI install
+    # their own richer configurations over this default when they run.
+    configure_cli_structlog()
     _activate_profile(profile)
     _load_env_for_active_home()
     warn_if_proxy_ignored()
@@ -152,6 +158,7 @@ app.add_typer(codetask_app, name="code-task")
 
 app.command("init")(init_command)
 app.command("doctor")(doctor_command)
+app.command("bundle")(bundle_command)
 app.command("uninstall")(uninstall_command)
 app.add_typer(onboard_app, name="onboard")
 app.command("configure")(configure_command)

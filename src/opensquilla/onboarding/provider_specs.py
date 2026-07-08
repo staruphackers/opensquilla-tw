@@ -74,13 +74,20 @@ _PROVIDER_LABELS: dict[str, str] = {
     "aihubmix": "AIHubMix",
     "volcengine": "Volcengine Ark",
     "byteplus": "BytePlus Ark",
+    "tencent_tokenhub": "Tencent TokenHub",
+    "tencent_tokenhub_anthropic": "Tencent TokenHub (Anthropic)",
+    "tencent_tokenhub_intl": "Tencent TokenHub International",
+    "tencent_token_plan": "Tencent Token Plan",
+    "tencent_token_plan_anthropic": "Tencent Token Plan (Anthropic)",
     "vllm": "vLLM (self-hosted)",
     "custom": "Custom OpenAI-compatible endpoint",
     "litellm_proxy": "LiteLLM Proxy",
     "lm_studio": "LM Studio (local)",
     "ovms": "OpenVINO Model Server",
-    "volcengine_coding_plan": "Volcengine Coding Plan",
-    "byteplus_coding_plan": "BytePlus Coding Plan",
+    "volcengine_coding_plan": "Volcengine Coding Plan (OpenAI Responses)",
+    "volcengine_coding_plan_anthropic": "Volcengine Coding Plan (Anthropic)",
+    "byteplus_coding_plan": "BytePlus Coding Plan (OpenAI Responses)",
+    "byteplus_coding_plan_anthropic": "BytePlus Coding Plan (Anthropic)",
     "openai_codex": "OpenAI Codex (OAuth)",
     "github_copilot": "GitHub Copilot (OAuth)",
     "openai_responses": "OpenAI (Responses API)",
@@ -178,7 +185,13 @@ def _fields_for(spec: ProviderSpec) -> tuple[ProviderSetupField, ...]:
             required=spec.requires_api_key(),
             default="",
             description=(
-                f"Stored under env key {spec.env_key}." if spec.env_key else ""
+                (
+                    "Saved as plaintext api_key in the config file and used "
+                    f"ahead of {spec.env_key}. Leave blank to read "
+                    f"{spec.env_key} from the environment instead."
+                )
+                if spec.env_key
+                else "Saved as plaintext api_key in the config file."
             ),
             secret=True,
         ),

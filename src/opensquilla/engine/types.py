@@ -151,6 +151,10 @@ class ErrorEvent:
     kind: Literal["error"] = field(default="error", init=False)
     message: str = ""
     code: str = ""
+    # Short reference id joining this error to its durable turn_errors row.
+    # Appended last with a default: positional construction elsewhere must not
+    # shift (same hazard the DoneEvent comment in this file documents).
+    error_id: str = ""
 
 
 @dataclass
@@ -215,9 +219,10 @@ class RouterDecisionEvent:
     pre-turn pipeline resolves the tier/model. Frontend uses this to drive
     the router HUD (tier pill, tier-shift highlight, scanner popover).
 
-    Routing fires exactly once per user-message; the tier sticks across
-    the entire agent loop. Subsequent events in the same turn carry no
-    routing information.
+    Routing fires once per user-message and the tier sticks across the
+    agent loop; consumers must treat the event as last-writer-wins state,
+    because a mid-turn selector failover re-emits it once before the
+    DoneEvent with ``source="fallback"`` and the model that actually ran.
     """
 
     kind: Literal["router_decision"] = field(default="router_decision", init=False)

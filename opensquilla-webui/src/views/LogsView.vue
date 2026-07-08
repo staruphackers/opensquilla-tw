@@ -5,67 +5,56 @@
         <span class="control-panel__eyebrow">{{ t('usageLogs.logs.eyebrow') }}</span>
         <h1 class="control-stage__title">{{ t('usageLogs.logs.title') }}</h1>
         <p class="control-stage__subtitle">{{ t('usageLogs.logs.subtitle') }}</p>
+        <p v-if="status" class="lg-status-line">
+          <span
+            class="lg-status-line__seg"
+            :class="{ 'lg-status-line__seg--warn': !fileLogEnabled }"
+            :title="fileLogTitleText"
+            :aria-label="`${fileLogLabel}. ${fileLogTitleText}`"
+          >{{ fileLogLabel }}</span>
+          <span class="lg-status-line__sep" aria-hidden="true">·</span>
+          <span
+            class="lg-status-line__seg"
+            :class="{ 'lg-status-line__seg--warn': rawLogEnabled }"
+            :title="rawTitleText"
+            :aria-label="`${rawLabel}. ${rawTitleText}`"
+          >{{ rawLabel }}</span>
+        </p>
       </div>
       <div class="control-stage__actions">
-        <div class="lg-status-pills">
-          <span
-            v-if="!status"
-            class="control-pill control-pill--warn"
-            :aria-label="t('usageLogs.logs.statusUnavailableAria')"
-            :title="t('usageLogs.logs.statusUnavailableTitle')"
-          >{{ t('usageLogs.logs.statusUnavailable') }}</span>
-          <template v-else>
-            <span
-              :class="['control-pill', fileLogEnabled ? '' : 'control-pill--warn']"
-              :aria-label="fileLogEnabled
-                ? t('usageLogs.logs.fileLogAriaOn', { path: filePath })
-                : t('usageLogs.logs.fileLogAriaOff', { path: filePath })"
-              :title="t('usageLogs.logs.fileLogTitle', { path: filePath })"
-            >{{ fileLogEnabled ? t('usageLogs.logs.fileLogOn') : t('usageLogs.logs.fileLogOff') }}</span>
-            <span
-              :class="['control-pill', rawLogEnabled ? '' : 'control-pill--warn']"
-              :aria-label="rawLogEnabled
-                ? t('usageLogs.logs.rawAriaOn', { source: rawSource, path: rawPath })
-                : t('usageLogs.logs.rawAriaOff', { source: rawSource, path: rawPath })"
-              :title="t('usageLogs.logs.rawTitle', { source: rawSource, path: rawPath })"
-            >{{ rawLogEnabled ? t('usageLogs.logs.rawOn') : t('usageLogs.logs.rawOff') }}</span>
-            <span
-              class="control-pill control-pill--warn"
-              :aria-label="`${diagnosticsLabel}. ${diagnosticsCopy}`"
-              :title="diagnosticsCopy"
-            >{{ diagnosticsLabel }}</span>
-          </template>
-        </div>
-        <button class="btn btn--ghost" :title="t('usageLogs.logs.exportTitle')" @click="exportLogs">
+        <span
+          v-if="!status"
+          class="control-pill control-pill--warn"
+          :aria-label="t('usageLogs.logs.statusUnavailableAria')"
+          :title="t('usageLogs.logs.statusUnavailableTitle')"
+        >{{ t('usageLogs.logs.statusUnavailable') }}</span>
+        <span
+          v-else-if="rawLogEnabled"
+          class="control-pill control-pill--warn"
+          role="status"
+          :aria-label="`${t('usageLogs.logs.rawRecordingPill')}. ${rawTitleText}`"
+          :title="rawTitleText"
+        ><span class="dot" aria-hidden="true"></span>{{ t('usageLogs.logs.rawRecordingPill') }}</span>
+        <span
+          v-else-if="!fileLogEnabled"
+          class="control-pill control-pill--warn"
+          :aria-label="`${t('usageLogs.logs.fileLogOff')}. ${fileLogTitleText}`"
+          :title="fileLogTitleText"
+        >{{ t('usageLogs.logs.fileLogOff') }}</span>
+        <button
+          class="btn btn--ghost"
+          :title="t('usageLogs.logs.bundleButtonTitle')"
+          @click="bundleDialogOpen = true"
+        >
           <Icon name="download" :size="16" />
-          <span>{{ t('usageLogs.usage.export') }}</span>
+          <span>{{ t('usageLogs.logs.bundleButton') }}</span>
         </button>
       </div>
     </header>
 
-    <section class="stat-row">
-      <div class="stat stat--hero">
-        <div class="stat-label">{{ t('usageLogs.logs.inView') }}</div>
-        <div class="stat-value">{{ visibleCount.toLocaleString() }}</div>
-        <div class="stat-hint">{{ t('usageLogs.logs.ofLoaded', { total: totalCount.toLocaleString() }) }}</div>
-      </div>
-      <div class="stat">
-        <div class="stat-label">{{ t('usageLogs.logs.errors') }}</div>
-        <div class="stat-value">{{ errorCount }}</div>
-        <div class="stat-hint">{{ errorCount > 0 ? t('usageLogs.logs.reviewNeeded') : t('usageLogs.logs.allClear') }}</div>
-      </div>
-      <div class="stat">
-        <div class="stat-label">{{ t('usageLogs.logs.warnings') }}</div>
-        <div class="stat-value">{{ warnCount }}</div>
-        <div class="stat-hint">{{ warnCount > 0 ? t('usageLogs.logs.recentAdvisories') : t('usageLogs.logs.none') }}</div>
-      </div>
-      <div class="stat">
-        <div class="stat-label">{{ t('usageLogs.logs.infoDebug') }}</div>
-        <div class="stat-value mono">{{ infoCount }}<span>/</span>{{ debugCount }}</div>
-        <div class="stat-hint">{{ t('usageLogs.logs.routineOutput') }}</div>
-      </div>
-    </section>
-
+    <!-- One toolbar row carries both filter and count: each level chip shows
+         its live count, so the former four near-empty count tiles are gone.
+         The in-view/loaded figure moves to the stream footer readout. -->
     <section class="lg-toolbar">
       <div class="lg-levels">
         <span class="lg-toolbar__label">{{ t('usageLogs.logs.levels') }}</span>
@@ -79,6 +68,7 @@
           >
             <span class="lg-level-btn__dot"></span>
             <span class="lg-level-btn__label">{{ level }}</span>
+            <span class="lg-level-btn__count">{{ levelChipCount(level) }}</span>
           </button>
         </div>
       </div>
@@ -137,6 +127,9 @@
           </div>
         </div>
       </div>
+      <footer class="lg-stream__foot" aria-live="polite">
+        {{ t('usageLogs.logs.ofLoadedFoot', { visible: visibleCount.toLocaleString(), total: totalCount.toLocaleString() }) }}
+      </footer>
     </section>
 
     <Transition name="lg-detail">
@@ -181,6 +174,12 @@
       </aside>
     </div>
     </Transition>
+
+    <DiagnosticsBundleDialog
+      :open="bundleDialogOpen"
+      @close="bundleDialogOpen = false"
+      @confirm="downloadBundle"
+    />
   </div>
 </template>
 
@@ -189,9 +188,11 @@ import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated, watc
 import { useI18n } from 'vue-i18n'
 import { useRpcStore } from '@/stores/rpc'
 import { useFixedWindow } from '@/composables/useFixedWindow'
-import { downloadText } from '@/utils/browser'
+import { useToasts } from '@/composables/useToasts'
+import { downloadBlob, filenameFromContentDisposition } from '@/utils/browser'
 import Icon from '@/components/Icon.vue'
 import ControlSwitch from '@/components/ControlSwitch.vue'
+import DiagnosticsBundleDialog from '@/components/DiagnosticsBundleDialog.vue'
 import RunTrace from '@/components/run/RunTrace.vue'
 import { useRunTrace } from '@/composables/run/useRunTrace'
 import { nodeStepsFromHistoryMessage } from '@/components/run/runTrace'
@@ -263,6 +264,9 @@ const WINDOW_MIN_WIDTH = '(min-width: 481px)'
 
 const { t } = useI18n()
 const rpc = useRpcStore()
+const { pushToast } = useToasts()
+const bundleDialogOpen = ref(false)
+const bundleInFlight = ref(false)
 const allLines = ref<LogLine[]>([])
 const cursor = ref(0)
 const searchText = ref('')
@@ -291,21 +295,19 @@ let pollErrorShown = false
 // ---------------------------------------------------------------------------
 
 const totalCount = computed(() => allLines.value.length)
-// One pass over the buffer instead of four separate full scans per change.
+// One pass over the buffer instead of one full scan per level per change.
 const levelCounts = computed(() => {
-  let error = 0, warn = 0, info = 0, debug = 0
+  const counts: Record<string, number> = { TRACE: 0, DEBUG: 0, INFO: 0, WARN: 0, ERROR: 0 }
   for (const l of allLines.value) {
-    if (l.level === 'ERROR') error++
-    else if (l.level === 'WARN') warn++
-    else if (l.level === 'INFO') info++
-    else if (l.level === 'DEBUG' || l.level === 'TRACE') debug++
+    if (l.level in counts) counts[l.level]++
   }
-  return { error, warn, info, debug }
+  return counts
 })
-const errorCount = computed(() => levelCounts.value.error)
-const warnCount = computed(() => levelCounts.value.warn)
-const infoCount = computed(() => levelCounts.value.info)
-const debugCount = computed(() => levelCounts.value.debug)
+
+// Live count rendered inside each level-filter chip (the former count tiles).
+function levelChipCount(level: string): string {
+  return (levelCounts.value[level] ?? 0).toLocaleString()
+}
 
 const filteredLines = computed(() => {
   const term = debouncedSearch.value.toLowerCase()
@@ -340,20 +342,19 @@ const rawLogEnabled = computed(() => status.value?.raw_turn_call_log?.enabled ??
 const rawSource = computed(() => status.value?.raw_turn_call_log?.source || 'off')
 const rawPath = computed(() => status.value?.raw_turn_call_log?.directory?.path || '~/.opensquilla/logs')
 
-const diagnosticsCopy = computed(() => {
-  const detail = status.value?.diagnostics_enabled?.detail
-  if (detail === 'raw') {
-    return t('usageLogs.logs.diagnosticsCopyRaw', { source: rawSource.value })
-  }
-  return t('usageLogs.logs.diagnosticsCopyStandard')
-})
+const fileLogLabel = computed(() =>
+  fileLogEnabled.value ? t('usageLogs.logs.fileLogOn') : t('usageLogs.logs.fileLogOff'))
 
-const diagnosticsLabel = computed(() => {
-  const detail = status.value?.diagnostics_enabled?.detail
-  if (detail === 'raw') return t('usageLogs.logs.diagnosticsRaw')
-  if (status.value?.diagnostics_enabled?.effective) return t('usageLogs.logs.diagnosticsStandard')
-  return t('usageLogs.logs.diagnosticsOff')
-})
+const fileLogTitleText = computed(() =>
+  fileLogEnabled.value
+    ? t('usageLogs.logs.fileLogTitle', { path: filePath.value })
+    : t('usageLogs.logs.fileLogOffTitle', { path: filePath.value }))
+
+const rawLabel = computed(() =>
+  rawLogEnabled.value ? t('usageLogs.logs.rawOn') : t('usageLogs.logs.rawOff'))
+
+const rawTitleText = computed(() =>
+  t('usageLogs.logs.rawTitle', { source: rawSource.value, path: rawPath.value }))
 
 // A run-bearing line carries structured tool_calls in its raw JSON payload; the
 // drawer renders those as a trace, falling back to the raw text otherwise.
@@ -537,12 +538,39 @@ function toggleLevel(level: string) {
   activeLevels.value = next
 }
 
-function exportLogs() {
-  const text = filteredLines.value.map(line => {
-    const ts = line.ts ? String(line.ts).slice(0, 23) + ' ' : ''
-    return `${ts}[${line.level}] ${line.message}`
-  }).join('\n')
-  downloadText('opensquilla-logs.txt', 'text/plain', text)
+async function downloadBundle(options: { includeContent: boolean }) {
+  bundleDialogOpen.value = false
+  if (bundleInFlight.value) return
+  bundleInFlight.value = true
+  try {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    // Same-key Bearer auth as the approvals REST calls; sessionStorage access
+    // can throw in hardened/embedded contexts, so it is guarded.
+    let token = ''
+    try { token = sessionStorage.getItem('opensquilla.wsToken') || '' } catch {}
+    if (token) headers['Authorization'] = `Bearer ${token}`
+    const response = await fetch('/api/v1/diagnostics/bundle', {
+      method: 'POST',
+      headers,
+      credentials: 'same-origin',
+      // The gateway strict-checks `include_content is True`, so this must be a
+      // real JSON boolean — never a string.
+      body: JSON.stringify({ include_content: options.includeContent }),
+    })
+    if (!response.ok) {
+      pushToast(t('usageLogs.logs.bundleFailed'), { tone: 'danger' })
+      return
+    }
+    const blob = await response.blob()
+    const disposition = response.headers.get('content-disposition')
+    const filename = filenameFromContentDisposition(disposition) || 'opensquilla-bundle.zip'
+    downloadBlob(blob, filename)
+    pushToast(t('usageLogs.logs.bundleReady'), { tone: 'ok' })
+  } catch {
+    pushToast(t('usageLogs.logs.bundleFailed'), { tone: 'danger' })
+  } finally {
+    bundleInFlight.value = false
+  }
 }
 
 function openDetail(line: LogLine) {
@@ -646,68 +674,39 @@ function escRegex(s: string): string {
 </script>
 
 <style scoped>
-/* Header uses the shared .control-stage primitive; only the status-pill cluster
-   is Logs-specific. */
-.lg-status-pills {
+/* Header uses the shared .control-stage primitive; only the quiet status line
+   (and the single abnormal-state warn pill in the actions) is Logs-specific. */
+.lg-status-line {
+  align-items: center;
+  color: var(--text-muted);
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  font-size: var(--fs-xs);
+  gap: var(--sp-2);
+  margin: var(--sp-2) 0 0;
 }
 
-.stat-row {
-  display: grid;
-  gap: var(--sp-3);
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+.lg-status-line__seg {
+  cursor: help;
 }
 
-.stat {
-  background: var(--bg-surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  color: var(--text);
-  overflow: hidden;
-  padding: var(--sp-4);
-  position: relative;
+.lg-status-line__seg--warn {
+  color: var(--warn);
 }
 
-.stat--hero {
-  min-height: 116px;
-}
-
-.stat-label {
+.lg-status-line__sep {
   color: var(--text-dim);
-  display: block;
-  font-size: 12px;
-  font-weight: 750;
-  letter-spacing: 0.08em;
-  line-height: 1.25;
-  text-transform: uppercase;
 }
 
-.stat-value {
-  align-items: center;
-  display: flex;
-  font-size: 2rem;
-  font-variant-numeric: tabular-nums;
-  gap: 8px;
-  letter-spacing: 0;
-  line-height: 1.12;
-  margin-top: var(--sp-4);
-}
-
-.stat-value.mono {
-  font-family: var(--font-mono);
-}
-
-.stat-value span {
-  color: var(--text-dim);
-  font-size: 1.4rem;
-}
-
-.stat-hint {
-  color: var(--text-muted);
-  font-size: var(--fs-sm);
-  margin-top: var(--sp-2);
+/* Recording indicator inside the raw-capture warn pill; inherits the pill's
+   warn text color. */
+.control-pill .dot {
+  background: currentColor;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+  height: 6px;
+  width: 6px;
 }
 
 .lg-toolbar {
@@ -779,6 +778,26 @@ function escRegex(s: string): string {
 .lg-level-btn--info  .lg-level-btn__dot { background: var(--ok); }
 .lg-level-btn--warn  .lg-level-btn__dot { background: var(--warn-fill); }
 .lg-level-btn--error .lg-level-btn__dot { background: var(--danger); }
+
+/* Live count inside each level chip (replaces the former count-tile band). */
+.lg-level-btn__count {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+.lg-level-btn.is-active .lg-level-btn__count {
+  color: var(--text-muted);
+}
+
+/* Stream footer readout: in-view / buffered counts, quiet mono. */
+.lg-stream__foot {
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: var(--sp-2) var(--sp-4);
+  text-align: right;
+}
 
 .lg-search-wrap {
   align-items: center;
@@ -914,10 +933,11 @@ function escRegex(s: string): string {
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.06em;
+  min-width: 52px;
   padding: 1px 6px;
   text-align: center;
   text-transform: uppercase;
-  width: 44px;
+  white-space: nowrap;
 }
 
 .lg-line__lvl--trace { background: color-mix(in srgb, var(--text-dim) 15%, transparent); color: var(--text-dim); }

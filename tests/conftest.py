@@ -20,6 +20,7 @@ os.environ.setdefault("OPENSQUILLA_TURN_CALL_LOG", "0")
 _PROVIDER_ENV_KEYS = (
     "ANTHROPIC_API_KEY",
     "ARK_API_KEY",
+    "BOCHA_SEARCH_API_KEY",
     "BRAVE_API_KEY",
     "BRAVE_SEARCH_API_KEY",
     "BYTEPLUS_API_KEY",
@@ -28,10 +29,14 @@ _PROVIDER_ENV_KEYS = (
     "FIRECRAWL_API_KEY",
     "GEMINI_API_KEY",
     "GOOGLE_API_KEY",
+    "IQS_SEARCH_API_KEY",
     "MOONSHOT_API_KEY",
     "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
     "TAVILY_API_KEY",
+    "TENCENT_TOKEN_PLAN_API_KEY",
+    "TENCENT_TOKENHUB_API_KEY",
+    "TENCENT_TOKENHUB_INTL_API_KEY",
     "VOLCENGINE_API_KEY",
     "VOLC_ARK_API_KEY",
 )
@@ -61,3 +66,29 @@ def _isolate_provider_credentials(
         return
     for env_key in _PROVIDER_ENV_KEYS:
         monkeypatch.delenv(env_key, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _undo_leaked_cli_structlog_default():
+    """Revert the CLI structlog default when a test leaves it behind.
+
+    The CLI entry callback installs a process-wide structlog default (stderr
+    output, WARNING+ filter; ``observability/cli_logging.py``). Tests that
+    invoke the Typer app would otherwise leak that filter into later tests
+    that capture info-level structlog events. Only the CLI default is
+    reverted; any other configuration a test installs is left for that test's
+    own teardown.
+    """
+    import structlog
+
+    from opensquilla.observability.cli_logging import is_cli_default_active
+
+    was_configured = structlog.is_configured()
+    old_config = structlog.get_config()
+    was_cli_default = is_cli_default_active()
+    yield
+    if is_cli_default_active() and not was_cli_default:
+        if was_configured:
+            structlog.configure(**old_config)
+        else:
+            structlog.reset_defaults()

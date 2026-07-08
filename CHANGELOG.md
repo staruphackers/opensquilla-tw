@@ -8,15 +8,54 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- Added Tencent TokenHub providers for the Hunyuan hy3 family:
+  `tencent_tokenhub` (OpenAI-compatible mainland endpoint,
+  `TENCENT_TOKENHUB_API_KEY`), `tencent_tokenhub_anthropic` (the same
+  deployment's Anthropic Messages protocol with `x-api-key` auth), and
+  `tencent_tokenhub_intl` (the international deployment with its own
+  `TENCENT_TOKENHUB_INTL_API_KEY`). hy3/hy3-preview thinking maps onto the
+  documented `reasoning_effort` `low`/`high` values plus the thinking enable
+  object, and assistant `reasoning_content` is replayed across turns per the
+  hy3 interleaved-thinking contract. The Token Plan subscription is covered
+  too: `tencent_token_plan` (Chat Completions at
+  `api.lkeap.cloud.tencent.com/plan/v3`) and `tencent_token_plan_anthropic`
+  (Anthropic Messages at `/plan/anthropic`, bearer auth), both reading the
+  dedicated `TENCENT_TOKEN_PLAN_API_KEY` (`sk-tp-…`) plan credential.
+- Added Alibaba Cloud IQS (`iqs`) as a runtime-supported web search provider:
+  unified-search endpoint with freshness, site include/exclude filters, inline
+  main-text content, and rerank scores, configured via `IQS_SEARCH_API_KEY`.
 - Added a runtime development branch sync: request-proof budgeting with
   deterministic compaction, DashScope provider profile with prompt-cache
   markers and thinking-mode plumbing, an optional LLM trace recorder,
   tool-result store compression, sandbox-descriptor integration for
   filesystem tools, and a family of default-off, env-lever-controlled
   runtime recovery modules.
+- Prebuilt multi-arch (`linux/amd64` + `linux/arm64`) container images are
+  published to GHCR (`ghcr.io/opensquilla/opensquilla`) on release tags,
+  with a manual dispatch mode that validates the build without publishing.
+- `docs/docker.md`: a container deployment guide for home servers and NAS
+  (Debian 12 walkthrough, prebuilt images, LAN exposure with token auth,
+  bind-mount ownership, upgrades and rollback).
 
 ### Changed
 
+- **Security:** the gateway no longer emits CORS headers by default —
+  `cors.allowed_origins` now defaults to `[]` instead of `"*"`. The Web UI
+  (served same-origin from the gateway), the CLI, curl, and the desktop app
+  are unaffected. Deployments that serve a separate frontend from another
+  origin must list that origin explicitly in `cors.allowed_origins` to
+  restore the previous behavior; configuring `"*"` together with
+  `cors.allow_credentials` now logs a boot-time warning.
+- **Security:** state-changing gateway HTTP routes (chat send, system
+  shutdown, approvals settings/resolve, elevated mode, channel logout, file
+  upload, audio transcription, artifact native open, diagnostics bundle) now
+  reject browser requests whose `Origin` is not the gateway itself with
+  `403 FORBIDDEN_ORIGIN`, extending the diagnostics-bundle same-origin guard
+  to the whole HTTP surface. Requests without an `Origin` header (curl, the
+  desktop client) and origins listed in `cors.allowed_origins` still pass.
+- `compose.yaml` now documents prebuilt-image selection, safe LAN exposure,
+  and Web UI token auth, and the troubleshooting guide covers common Docker
+  deployment failures.
 - Provider retry handling: responses that stop at the length limit without
   visible text or tool calls now enter the reasoning-only retry path instead
   of the length-capped continuation path, and a thinking-related provider
@@ -44,6 +83,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- Fixed managed-network sandbox domain grants missing the Bocha, Tavily, and
+  Exa search API hosts: `web_search` runs with those providers active were
+  blocked under the managed-network sandbox. All runtime search providers now
+  have system domain grants and default search-allowlist entries, enforced by
+  a contract test.
 - Fixed secret redaction missing assignment values that start with a quote
   (for example `password: "..."`); quoted values are now masked in memory
   persistence and trace capture paths.

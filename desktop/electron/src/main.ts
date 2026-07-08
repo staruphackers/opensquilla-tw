@@ -150,6 +150,26 @@ const repoRoot = process.env.OPENSQUILLA_DESKTOP_REPO_ROOT
 
 let mainWindow: BrowserWindow | null = null
 let onboardingWindow: BrowserWindow | null = null
+
+type DesktopNativeThemeSource = 'light' | 'dark' | 'system'
+
+function normalizeDesktopNativeThemeSource(payload: unknown): DesktopNativeThemeSource {
+  const source = typeof payload === 'string'
+    ? payload
+    : payload && typeof payload === 'object' && 'source' in payload
+      ? (payload as { source?: unknown }).source
+      : undefined
+  return source === 'light' || source === 'dark' || source === 'system' ? source : 'system'
+}
+
+function applyDesktopNativeTheme(source: DesktopNativeThemeSource): { source: DesktopNativeThemeSource; shouldUseDarkColors: boolean } {
+  nativeTheme.themeSource = source
+  const backgroundColor = nativeTheme.shouldUseDarkColors ? '#08080A' : '#F7F6F3'
+  for (const window of [mainWindow, onboardingWindow]) {
+    if (window && !window.isDestroyed()) window.setBackgroundColor(backgroundColor)
+  }
+  return { source, shouldUseDarkColors: nativeTheme.shouldUseDarkColors }
+}
 let gatewayProcess: ChildProcessWithoutNullStreams | null = null
 let isQuitting = false
 // Opt stopGateway into the Windows HTTP graceful-drain path even while isQuitting
@@ -494,6 +514,14 @@ const SEARCH_PROVIDER_CATALOG: SearchProviderCatalogEntry[] = [
     requiresApiKey: true,
     note: 'Semantic and content-oriented search for research workflows.',
     keyPlaceholder: 'EXA_API_KEY',
+  },
+  {
+    providerId: 'iqs',
+    label: 'Alibaba Cloud IQS',
+    envKey: 'IQS_SEARCH_API_KEY',
+    requiresApiKey: true,
+    note: 'Alibaba Cloud web search tuned for agents, with strong Chinese-web coverage.',
+    keyPlaceholder: 'IQS_SEARCH_API_KEY',
   },
 ]
 
@@ -1328,6 +1356,7 @@ const SEARCH_PROVIDER_NOTE_MESSAGES: Record<DesktopLocale, Record<string, string
     brave: 'Managed search access with freshness support.',
     tavily: 'Freshness-oriented web search for current research.',
     exa: 'Semantic and content-oriented search for research workflows.',
+    iqs: 'Alibaba Cloud web search tuned for agents, with strong Chinese-web coverage.',
   },
   'zh-Hans': {
     duckduckgo: '无需密钥。适合入门的默认选项。',
@@ -1335,6 +1364,7 @@ const SEARCH_PROVIDER_NOTE_MESSAGES: Record<DesktopLocale, Record<string, string
     brave: '带时效性支持的托管搜索访问。',
     tavily: '面向时效性的网络搜索，适合最新研究。',
     exa: '面向语义和内容的搜索，适合研究工作流。',
+    iqs: '阿里云面向智能体的联网搜索，中文网页覆盖广。',
   },
   ja: {
     duckduckgo: 'キー不要。始めるのに適したデフォルトです。',
@@ -1342,6 +1372,7 @@ const SEARCH_PROVIDER_NOTE_MESSAGES: Record<DesktopLocale, Record<string, string
     brave: '鮮度対応を備えたマネージド検索アクセスです。',
     tavily: '最新の調査向けの、鮮度重視のウェブ検索です。',
     exa: '調査ワークフロー向けのセマンティック／コンテンツ指向検索です。',
+    iqs: 'エージェント向けに調整された Alibaba Cloud のウェブ検索。中国語ウェブのカバレッジに優れています。',
   },
   fr: {
     duckduckgo: 'Aucune clé requise. Bon choix par défaut pour démarrer.',
@@ -1349,6 +1380,7 @@ const SEARCH_PROVIDER_NOTE_MESSAGES: Record<DesktopLocale, Record<string, string
     brave: 'Accès de recherche géré avec prise en charge de la fraîcheur.',
     tavily: 'Recherche web axée sur la fraîcheur pour la recherche actuelle.',
     exa: 'Recherche sémantique et orientée contenu pour les flux de recherche.',
+    iqs: 'Recherche web Alibaba Cloud conçue pour les agents, avec une forte couverture du web chinois.',
   },
   de: {
     duckduckgo: 'Kein Schlüssel erforderlich. Gute Voreinstellung für den Einstieg.',
@@ -1356,6 +1388,7 @@ const SEARCH_PROVIDER_NOTE_MESSAGES: Record<DesktopLocale, Record<string, string
     brave: 'Verwalteter Suchzugriff mit Aktualitätsunterstützung.',
     tavily: 'Aktualitätsorientierte Websuche für aktuelle Recherche.',
     exa: 'Semantische und inhaltsorientierte Suche für Recherche-Workflows.',
+    iqs: 'Alibaba-Cloud-Websuche für Agenten, mit starker Abdeckung des chinesischen Webs.',
   },
   es: {
     duckduckgo: 'No se requiere clave. Buena opción predeterminada para empezar.',
@@ -1363,6 +1396,7 @@ const SEARCH_PROVIDER_NOTE_MESSAGES: Record<DesktopLocale, Record<string, string
     brave: 'Acceso de búsqueda gestionado con soporte de actualidad.',
     tavily: 'Búsqueda web orientada a la actualidad para investigación actual.',
     exa: 'Búsqueda semántica y orientada a contenido para flujos de investigación.',
+    iqs: 'Búsqueda web de Alibaba Cloud orientada a agentes, con amplia cobertura de la web china.',
   },
 }
 
@@ -1429,6 +1463,7 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'menu.window': 'Window',
     'menu.checkForUpdates': 'Check for Updates…',
     'menu.relaunchToUpdate': 'Relaunch to Update',
+    'menu.downloadDiagnostics': 'Download Diagnostics…',
     'update.newVersionTitle': 'A new version is available',
     'update.newVersionDetail': 'OpenSquilla {version} is available. Download it now?',
     'update.download': 'Download',
@@ -1520,6 +1555,7 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'menu.window': '窗口',
     'menu.checkForUpdates': '检查更新…',
     'menu.relaunchToUpdate': '重启以更新',
+    'menu.downloadDiagnostics': '下载诊断信息…',
     'update.newVersionTitle': '有新版本可用',
     'update.newVersionDetail': 'OpenSquilla {version} 已发布，现在下载吗？',
     'update.download': '下载',
@@ -1611,6 +1647,7 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'menu.window': 'ウインドウ',
     'menu.checkForUpdates': 'アップデートを確認…',
     'menu.relaunchToUpdate': '再起動してアップデート',
+    'menu.downloadDiagnostics': '診断情報をダウンロード…',
     'update.newVersionTitle': '新しいバージョンが利用可能です',
     'update.newVersionDetail': 'OpenSquilla {version} が利用可能です。今すぐダウンロードしますか？',
     'update.download': 'ダウンロード',
@@ -1700,6 +1737,7 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'menu.window': 'Fenêtre',
     'menu.checkForUpdates': 'Rechercher les mises à jour…',
     'menu.relaunchToUpdate': 'Relancer pour mettre à jour',
+    'menu.downloadDiagnostics': 'Télécharger le diagnostic…',
     'update.newVersionTitle': 'Une nouvelle version est disponible',
     'update.newVersionDetail': 'OpenSquilla {version} est disponible. Télécharger maintenant ?',
     'update.download': 'Télécharger',
@@ -1789,6 +1827,7 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'menu.window': 'Fenster',
     'menu.checkForUpdates': 'Nach Updates suchen…',
     'menu.relaunchToUpdate': 'Zum Aktualisieren neu starten',
+    'menu.downloadDiagnostics': 'Diagnose herunterladen…',
     'update.newVersionTitle': 'Eine neue Version ist verfügbar',
     'update.newVersionDetail': 'OpenSquilla {version} ist verfügbar. Jetzt herunterladen?',
     'update.download': 'Herunterladen',
@@ -1878,6 +1917,7 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'menu.window': 'Ventana',
     'menu.checkForUpdates': 'Buscar actualizaciones…',
     'menu.relaunchToUpdate': 'Reiniciar para actualizar',
+    'menu.downloadDiagnostics': 'Descargar diagnóstico…',
     'update.newVersionTitle': 'Hay una nueva versión disponible',
     'update.newVersionDetail': 'OpenSquilla {version} está disponible. ¿Descargar ahora?',
     'update.download': 'Descargar',
@@ -2171,6 +2211,15 @@ function createApplicationMenu(): void {
       },
     })
   }
+  appSubmenu.push(
+    { type: 'separator' },
+    {
+      label: desktopT('menu.downloadDiagnostics'),
+      click: () => {
+        void downloadDiagnostics()
+      },
+    },
+  )
   appSubmenu.push({ type: 'separator' }, { role: 'quit' })
 
   const template: Electron.MenuItemConstructorOptions[] = [
@@ -4230,6 +4279,55 @@ async function requestGatewayShutdown(url: string): Promise<boolean> {
   }
 }
 
+// Fetch a diagnostics bundle from the child gateway (loopback owner, no token
+// needed — same auth posture as requestGatewayShutdown) and save it where the
+// user chooses. Falls back to opening the logs folder when no gateway is up.
+async function downloadDiagnostics(): Promise<void> {
+  desktopLog('diagnostics_download_requested')
+  const url = gatewayState.url
+  if (!url) {
+    await shell.openPath(join(app.getPath('userData'), 'logs')).catch(() => null)
+    return
+  }
+  try {
+    const response = await fetch(`${url}/api/v1/diagnostics/bundle`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+      signal: AbortSignal.timeout(60000),
+    })
+    if (!response.ok) {
+      desktopLog('diagnostics_download_failed', { status: response.status })
+      await shell.openPath(join(app.getPath('userData'), 'logs')).catch(() => null)
+      return
+    }
+    // Read the body before showing the modal save dialog: the 60s abort signal
+    // keeps counting while the dialog is open, and a slow deliberation would
+    // otherwise abort the already-successful response.
+    const bytes = Buffer.from(await response.arrayBuffer())
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+    const win = currentMainWindow()
+    const defaultPath = join(
+      app.getPath('downloads'),
+      `opensquilla-bundle-${stamp}.zip`,
+    )
+    const saveOptions: Electron.SaveDialogOptions = {
+      defaultPath,
+      filters: [{ name: 'Zip archive', extensions: ['zip'] }],
+    }
+    const result = win
+      ? await dialog.showSaveDialog(win, saveOptions)
+      : await dialog.showSaveDialog(saveOptions)
+    if (result.canceled || !result.filePath) return
+    await writeFile(result.filePath, bytes)
+    desktopLog('diagnostics_download_saved', { bytes: bytes.length })
+    await shell.showItemInFolder(result.filePath)
+  } catch (err) {
+    desktopLog('diagnostics_download_failed', { error: String(err) })
+    await shell.openPath(join(app.getPath('userData'), 'logs')).catch(() => null)
+  }
+}
+
 async function clearKnownOwnedGatewayPidFile(): Promise<void> {
   // Leave gateway.pid.lock in place. The persistent lock path is the authority
   // shared by all contenders; deleting it can create split-brain locks.
@@ -5080,6 +5178,9 @@ ipcMain.handle('desktop:update:relaunch', async () => {
 })
 ipcMain.handle('desktop:update:dismiss', async () => dismissDesktopUpdate())
 ipcMain.handle('desktop:os-locale', () => desktopLocale)
+ipcMain.handle('desktop:theme:set', (_event, payload: unknown) => (
+  applyDesktopNativeTheme(normalizeDesktopNativeThemeSource(payload))
+))
 ipcMain.handle('gateway:status', () => ({ ...gatewayState }))
 ipcMain.handle('gateway:reveal-log', async () => {
   if (gatewayState.logPath) {
