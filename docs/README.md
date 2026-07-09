@@ -47,8 +47,6 @@ root release README with task-oriented guides.
 - [`channels.md`](channels.md) - supported messaging channels and setup flow.
 - [`providers-and-models.md`](providers-and-models.md) - LLM provider catalog,
   model selection, and runtime-backed model inspection.
-- [`router-provider-model-matrix.md`](router-provider-model-matrix.md) -
-  built-in Squilla Router provider tier model matrix and tool inventory.
 - [`search.md`](search.md) - web search providers and query workflow.
 - [`artifacts-and-media.md`](artifacts-and-media.md) - artifacts, generated
   files, images, PDF, and TTS.
