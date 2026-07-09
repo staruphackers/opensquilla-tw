@@ -165,5 +165,24 @@ describe('knowledge retrieval helpers', () => {
         'vector_bge_m3_1024',
       ),
     ).toBe('Embedding retrieval')
+
+    expect(
+      searchProgressLabel(
+        {
+          retrievalProfiles: [
+            {
+              id: 'hybrid_rrf_bge_m3_fts5',
+              label: 'Hybrid RRF',
+              kind: 'hybrid',
+              available: true,
+              reason: null,
+              model: 'baai/bge-m3',
+              dimensions: 1024,
+            },
+          ],
+        },
+        'hybrid_rrf_bge_m3_fts5',
+      ),
+    ).toBe('Embedding retrieval')
   })
 })
