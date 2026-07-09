@@ -90,8 +90,9 @@ def test_interactive_provider_choice_offers_all_runtime_supported_providers():
     _ask_provider_choice(_Questionary(), OnboardOptions())
 
     choices = captured["choices"]
-    assert choices[0] == "openrouter (OpenRouter)"
-    assert captured["default"] == "openrouter (OpenRouter)"
+    assert choices[0] == "tokenrhythm (TokenRhythm)"
+    assert choices[1] == "openrouter (OpenRouter)"
+    assert captured["default"] == "tokenrhythm (TokenRhythm)"
     offered = {choice.split(" ")[0] for choice in choices}
     from tests.test_onboarding.test_provider_specs import EXPECTED_SUPPORTED
 
@@ -2274,7 +2275,13 @@ def test_scoped_section_run_skips_banner_start_gate_and_trailing_prompts(
 
     class _Questionary(types.SimpleNamespace):
         def select(self, message: str, **kwargs):
-            if message in {"LLM provider", "Router mode", "Default text model"}:
+            if message == "LLM provider":
+                # Pin OpenRouter explicitly: this test exercises scoped-section
+                # mechanics, not the provider choice, and the picker default is
+                # TokenRhythm (whose offline probe would add a "Save anyway?"
+                # prompt this walkthrough does not expect).
+                return _Answer("openrouter (OpenRouter)")
+            if message in {"Router mode", "Default text model"}:
                 choices = list(kwargs.get("choices") or [])
                 return _Answer(kwargs.get("default") or choices[0])
             if message == "LLM API key source":
@@ -2357,7 +2364,13 @@ def test_full_walk_folds_optional_section_restart_flag_into_result(
 
     class _Questionary(types.SimpleNamespace):
         def select(self, message: str, **kwargs):
-            if message in {"LLM provider", "Router mode", "Default text model"}:
+            if message == "LLM provider":
+                # Pin OpenRouter explicitly: this test exercises scoped-section
+                # mechanics, not the provider choice, and the picker default is
+                # TokenRhythm (whose offline probe would add a "Save anyway?"
+                # prompt this walkthrough does not expect).
+                return _Answer("openrouter (OpenRouter)")
+            if message in {"Router mode", "Default text model"}:
                 choices = list(kwargs.get("choices") or [])
                 return _Answer(kwargs.get("default") or choices[0])
             if message == "LLM API key source":

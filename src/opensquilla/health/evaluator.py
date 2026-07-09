@@ -34,9 +34,10 @@ def _replacement_provider(active: str, known_provider_ids: list[str]) -> str:
     replacement = _LEGACY_PROVIDER_REPLACEMENTS.get(active)
     if replacement in known_provider_ids:
         return replacement
-    if "openrouter" in known_provider_ids:
-        return "openrouter"
-    return known_provider_ids[0] if known_provider_ids else "openrouter"
+    for preferred in ("tokenrhythm", "openrouter"):
+        if preferred in known_provider_ids:
+            return preferred
+    return known_provider_ids[0] if known_provider_ids else "tokenrhythm"
 
 
 def _int_from_payload(payload: dict[str, Any], *keys: str) -> int:
