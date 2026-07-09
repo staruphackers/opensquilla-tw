@@ -60,6 +60,10 @@ def test_live_smoke_env_maps_cover_openai_zhipu_kimi_and_minimax() -> None:
     assert smoke._BASE_ENV["tencent_token_plan"] == "TENCENT_TOKEN_PLAN_BASE_URL"
     assert smoke._DEFAULT_MODELS["tencent_token_plan"] == "hy3"
 
+    assert smoke._MODEL_ENV["tokenrhythm"] == "TOKENRHYTHM_MODEL"
+    assert smoke._BASE_ENV["tokenrhythm"] == "TOKENRHYTHM_BASE_URL"
+    assert smoke._DEFAULT_MODELS["tokenrhythm"] == "deepseek-v4-flash"
+
 
 def test_live_smoke_uses_moonshot_temperature_required_by_kimi_k2_6() -> None:
     assert smoke._direct_openai_temperature("moonshot", "kimi-k2.6") == 1

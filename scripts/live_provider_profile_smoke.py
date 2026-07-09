@@ -57,6 +57,7 @@ _MODEL_ENV = {
     "tencent_tokenhub_intl": "TENCENT_TOKENHUB_INTL_MODEL",
     "tencent_token_plan": "TENCENT_TOKEN_PLAN_MODEL",
     "tencent_token_plan_anthropic": "TENCENT_TOKEN_PLAN_MODEL",
+    "tokenrhythm": "TOKENRHYTHM_MODEL",
 }
 
 _BASE_ENV = {
@@ -79,6 +80,7 @@ _BASE_ENV = {
     "tencent_tokenhub_intl": "TENCENT_TOKENHUB_INTL_BASE_URL",
     "tencent_token_plan": "TENCENT_TOKEN_PLAN_BASE_URL",
     "tencent_token_plan_anthropic": "TENCENT_TOKEN_PLAN_ANTHROPIC_BASE_URL",
+    "tokenrhythm": "TOKENRHYTHM_BASE_URL",
 }
 
 _DEFAULT_MODELS = {
@@ -101,6 +103,7 @@ _DEFAULT_MODELS = {
     "tencent_tokenhub_intl": "deepseek-v3.2",
     "tencent_token_plan": "hy3",
     "tencent_token_plan_anthropic": "hy3",
+    "tokenrhythm": "deepseek-v4-flash",
 }
 
 

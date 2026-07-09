@@ -13,6 +13,7 @@ FAKE_KEY = "sk-FAKE1234567890abcdef"
 FAKE_OPENAI = "sk-FAKEabc123def456ghi789"
 FAKE_OPENAI_PROJ = "sk-proj-FAKEabc123def456ghi789"
 FAKE_OPENAI_ANT = "sk-ant-api03-FAKEabc123def456ghi789"
+FAKE_TOKENRHYTHM = "sk_tr_FAKEabc123def456ghi789"
 FAKE_SLACK_BOT = "xoxb-FAKE1234567890-abcdefghij"
 FAKE_SLACK_WEBHOOK = "https://hooks.slack.com/services/T0FAKE123/B0FAKE456/FAKEabcdefFAKE"
 # Assembled at runtime so the tracked source never contains a GitHub-token-
@@ -27,6 +28,7 @@ BARE_TOKENS = [
     FAKE_OPENAI,
     FAKE_OPENAI_PROJ,
     FAKE_OPENAI_ANT,
+    FAKE_TOKENRHYTHM,
     FAKE_SLACK_BOT,
     FAKE_GITHUB_PAT,
     FAKE_GITHUB_FINE_PAT,

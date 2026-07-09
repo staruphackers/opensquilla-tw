@@ -20,6 +20,18 @@ def test_redact_secret_text_masks_env_assignments_and_provider_keys() -> None:
     assert "Authorization: Bearer [REDACTED]" in redacted
 
 
+def test_redact_secret_text_masks_bare_tokenrhythm_keys() -> None:
+    # Provider errors echo credentials verbatim with no key=value structure
+    # ("Incorrect API key sk_tr_... provided"); the underscore prefix is
+    # invisible to the hyphen-anchored sk- patterns.
+    text = "Incorrect API key sk_tr_FAKEabc123def456ghi789 provided"
+
+    redacted = redact_secret_text(text)
+
+    assert "sk_tr_FAKEabc123def456ghi789" not in redacted
+    assert "[REDACTED]" in redacted
+
+
 def test_redact_secret_text_masks_quoted_assignment_values() -> None:
     text = (
         'password: "hunter2hunter2" '
