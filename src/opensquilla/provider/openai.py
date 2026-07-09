@@ -2390,15 +2390,21 @@ class OpenAIProvider:
                             # Reasoning content (always parsed, not gated on thinking).
                             # Streamed in real time as ReasoningDeltaEvent; the
                             # accumulator also retains the joined text for DoneEvent.
+                            # Counts as an emitted stream event: once the caller
+                            # has received reasoning deltas, an empty-stream or
+                            # timeout fallback retry would deliver (and bill)
+                            # the turn twice.
                             reasoning_details = delta.get("reasoning_details")
                             if reasoning_details:
                                 for detail in reasoning_details:
                                     if isinstance(detail, dict):
                                         reasoning_event = reasoning.emit(detail.get("text", ""))
                                         if reasoning_event is not None:
+                                            emitted_stream_event = True
                                             yield reasoning_event
                             reasoning_event = reasoning.emit(delta.get("reasoning_content"))
                             if reasoning_event is not None:
+                                emitted_stream_event = True
                                 yield reasoning_event
 
                             # Gemini thought_signature on non-FC deltas
