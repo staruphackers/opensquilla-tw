@@ -144,6 +144,29 @@ describe('knowledge retrieval helpers', () => {
         'sqlite_fts5_default',
       ),
     ).toEqual(['BM25 -12.346', 'Vector #4', 'Vector score 0.789'])
+
+    expect(
+      formatResultScorePrimary(
+        {
+          score: 0.5,
+          vectorScore: 0.81234,
+          retrievalProfile: 'vector_bge_m3_1024',
+        },
+        'sqlite_fts5_default',
+      ),
+    ).toBe('vector 0.812')
+    expect(
+      formatResultScoreMeta(
+        {
+          score: 0.5,
+          bm25Rank: 7,
+          vectorRank: 2,
+          vectorScore: 0.81234,
+          retrievalProfile: 'vector_bge_m3_1024',
+        },
+        'sqlite_fts5_default',
+      ),
+    ).toEqual(['Vector #2', 'Vector score 0.812'])
   })
 
   it('uses embedding retrieval label for vector and hybrid searches', () => {
