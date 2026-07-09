@@ -109,6 +109,10 @@ jobs:
         working-directory: opensquilla-webui
         run: npm ci
 
+      - name: Run frontend unit tests
+        working-directory: opensquilla-webui
+        run: npm run test:unit
+
       - name: Build frontend
         working-directory: opensquilla-webui
         run: npm run build
@@ -202,6 +206,7 @@ jobs:
         run: |
           node scripts/test-secret-storage-policy.mjs
           node scripts/test-update-resolver.mjs
+          node scripts/test-desktop-locale.mjs
 
   ubuntu-quality:
     name: Lint, test, and build (ubuntu-latest, 3.12)

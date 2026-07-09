@@ -8,6 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- The Web UI gains an opt-in background-music player. Enabling it (Settings →
+  Appearance, or the command palette action) reveals a topbar control that
+  loops tracks from a user-supplied library: `public/music/playlist.local.json`
+  lists bundled filenames or HTTPS URLs, and a session-only "Choose local
+  file…" picker plays ad-hoc audio. Track choice, volume, and play state
+  persist per browser; the feature is off by default and no audio files ship
+  with the repository (see `opensquilla-webui/public/music/README.md`).
 - Attachment resource ceilings: the in-memory staged-upload store now has an
   aggregate RAM cap (`attachments.upload_store_max_total_bytes`, default
   300 MiB) — when reached, new uploads are rejected with the additive HTTP
@@ -172,6 +179,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Fixed
 
+- The desktop shell resolves the UI language from the OS preference list
+  correctly: English tags now match in place instead of falling through (a
+  Hong Kong list like `en-HK, zh-Hans-HK, …, fr-HK` previously landed on
+  French), and an explicit `Hans` script subtag wins over a
+  Traditional-default region, so `zh-Hans-HK`/`zh-Hans-TW` readers get
+  Simplified Chinese instead of the English fallback. The resolver is
+  extracted to `desktop/electron/src/desktop-locale.ts` with a regression
+  suite (`npm run test:desktop-locale`).
 - Dream (memory consolidation) now resolves its provider credentials through
   the shared explicit-config-first resolver: previously `OPENROUTER_API_KEY` /
   `OPENROUTER_BASE_URL` in the gateway environment unconditionally overrode
