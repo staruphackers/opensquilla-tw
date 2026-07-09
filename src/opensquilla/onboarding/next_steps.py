@@ -19,6 +19,7 @@ from opensquilla.onboarding.status import get_onboarding_status
 from opensquilla.paths import default_opensquilla_home
 
 _KEY_URLS = {
+    "tokenrhythm": "https://tokenrhythm.studio/account/keys",
     "openrouter": "https://openrouter.ai/keys",
     "openai": "https://platform.openai.com/api-keys",
     "anthropic": "https://console.anthropic.com/settings/keys",

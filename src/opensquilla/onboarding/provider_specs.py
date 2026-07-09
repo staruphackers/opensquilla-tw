@@ -79,6 +79,7 @@ _PROVIDER_LABELS: dict[str, str] = {
     "tencent_tokenhub_intl": "Tencent TokenHub International",
     "tencent_token_plan": "Tencent Token Plan",
     "tencent_token_plan_anthropic": "Tencent Token Plan (Anthropic)",
+    "tokenrhythm": "TokenRhythm",
     "vllm": "vLLM (self-hosted)",
     "custom": "Custom OpenAI-compatible endpoint",
     "litellm_proxy": "LiteLLM Proxy",
@@ -91,6 +92,15 @@ _PROVIDER_LABELS: dict[str, str] = {
     "openai_codex": "OpenAI Codex (OAuth)",
     "github_copilot": "GitHub Copilot (OAuth)",
     "openai_responses": "OpenAI (Responses API)",
+}
+
+# Catalog display order: TokenRhythm is the recommended first pick, then
+# OpenRouter; everything else sorts by label. This one map orders the Web UI
+# dropdown, CLI ``providers list``, and the interactive onboarding picker —
+# every surface renders the server order.
+_CATALOG_RANK = {
+    "tokenrhythm": 0,
+    "openrouter": 1,
 }
 
 _ONBOARDING_VERIFIED_PROVIDER_IDS = frozenset(
@@ -108,6 +118,7 @@ _ONBOARDING_VERIFIED_PROVIDER_IDS = frozenset(
         "qianfan",
         "volcengine",
         "byteplus",
+        "tokenrhythm",
     }
 )
 
@@ -148,12 +159,20 @@ def _what_you_need(spec: ProviderSpec) -> tuple[str, ...]:
     return tuple(needs)
 
 
+# Direct-model defaults for providers without a packaged tier profile: the
+# model field stays required, but setup surfaces prefill this id so a fresh
+# user is not staring at an empty required field.
+_DIRECT_MODEL_DEFAULTS = {
+    "tokenrhythm": "deepseek-v4-pro",
+}
+
+
 def _default_direct_model(provider_id: str) -> str:
     if provider_id in ROUTER_TIER_PROFILE_IDS:
         tiers = _router_tier_profile_defaults(provider_id)
         tier = tiers.get("c1") or tiers.get("c0") or {}
         return str(tier.get("model") or "")
-    return ""
+    return _DIRECT_MODEL_DEFAULTS.get(provider_id, "")
 
 
 def _model_description(spec: ProviderSpec, *, router_supported: bool) -> str:
@@ -275,7 +294,7 @@ def list_provider_setup_specs() -> list[ProviderSetupSpec]:
     return sorted(
         specs,
         key=lambda s: (
-            0 if s.provider_id == "openrouter" else 1,
+            _CATALOG_RANK.get(s.provider_id, len(_CATALOG_RANK)),
             s.label.lower(),
             s.provider_id,
         ),
