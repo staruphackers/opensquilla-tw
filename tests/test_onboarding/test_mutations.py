@@ -193,7 +193,7 @@ def test_volcengine_coding_plan_provider_configurable():
     assert res.config.llm.provider == "volcengine_coding_plan"
     assert res.config.llm.model == "doubao-seed-2-0-pro-260215"
     assert res.config.llm.api_key == "k"
-    assert res.config.llm.base_url == "https://ark.cn-beijing.volces.com/api/plan/v3"
+    assert res.config.llm.base_url == "https://ark.cn-beijing.volces.com/api/coding/v3"
     assert res.config.squilla_router.tiers["c0"]["model"] == "doubao-seed-2-0-lite-260215"
     assert res.config.squilla_router.tiers["c3"]["model"] == "doubao-seed-2-0-code-preview-260215"
 

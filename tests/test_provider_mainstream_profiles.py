@@ -81,8 +81,8 @@ def test_new_openai_compatible_profiles_have_vendor_provider_kind(
         ("volcengine", "VOLCENGINE_API_KEY", "https://ark.cn-beijing.volces.com/api/v3"),
         (
             "volcengine_coding_plan",
-            "VOLCENGINE_CODING_API_KEY",
-            "https://ark.cn-beijing.volces.com/api/plan/v3",
+            "VOLCENGINE_API_KEY",
+            "https://ark.cn-beijing.volces.com/api/coding/v3",
         ),
         ("byteplus", "BYTEPLUS_API_KEY", "https://ark.ap-southeast.bytepluses.com/api/v3"),
         ("tencent_tokenhub", "TENCENT_TOKENHUB_API_KEY", "https://tokenhub.tencentmaas.com/v1"),

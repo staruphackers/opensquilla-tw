@@ -152,7 +152,7 @@ def test_coding_plan_specs_expose_protocol_specific_runtime_surfaces() -> None:
     expected = {
         "volcengine_coding_plan": (
             "openai_compat",
-            "https://ark.cn-beijing.volces.com/api/plan/v3",
+            "https://ark.cn-beijing.volces.com/api/coding/v3",
             frozenset({"chat", "coding_plan"}),
         ),
         "volcengine_coding_plan_anthropic": (
