@@ -2410,7 +2410,7 @@ class OpenAIProvider:
                                 streamed_thought_signature = ts_delta
 
                             # Tool calls (may stream over multiple chunks)
-                            for tc in delta.get("tool_calls", []):
+                            for tc in delta.get("tool_calls") or []:
                                 if (
                                     self._provider_kind == "dashscope"
                                     and isinstance(tc, Mapping)
@@ -2517,6 +2517,37 @@ class OpenAIProvider:
                     )
                     if gemini_thought_sig is None:
                         gemini_thought_sig = streamed_thought_signature
+
+                    if (
+                        self._compat.empty_stream_fallback
+                        and not emitted_stream_event
+                        and not assistant_text_parts
+                        and not tools_acc.has_calls
+                        and input_tokens == 0
+                        and output_tokens == 0
+                    ):
+                        log.warning(
+                            "openai.empty_stream_fallback_started",
+                            provider=self._provider_kind,
+                            model=self._model,
+                        )
+                        yield ProviderHeartbeatEvent(
+                            phase="llm_fallback",
+                            message=(
+                                "Provider returned an empty stream; retrying "
+                                "without streaming."
+                            ),
+                        )
+                        empty_stream_exc = httpx.ReadTimeout("empty stream")
+                        async for fallback_event in self._complete_non_stream(
+                            payload=payload,
+                            headers=headers,
+                            cfg=cfg,
+                            tools=tools,
+                            timeout_exc=empty_stream_exc,
+                        ):
+                            yield fallback_event
+                        return
 
                     trace.record_response(
                         usage={
