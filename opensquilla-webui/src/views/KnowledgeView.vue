@@ -500,19 +500,26 @@ const hasEmbeddingStatus = computed(() => (
   || hasStatusField('embeddingDimensions')
   || hasStatusField('embeddingWarnings')
 ))
+const hasIndexedEmbeddings = computed(() => {
+  if (!hasEmbeddingStatus.value) return false
+  if (!hasVectorStatus.value) return Boolean(status.value?.embeddingModel)
+  return Number(status.value?.vectorChunksIndexed || 0) > 0
+    || Number(status.value?.vectorCoveragePct || 0) > 0
+})
 const embeddingHint = computed(() => {
   if (!hasEmbeddingStatus.value) return 'not reported'
   const model = status.value?.embeddingModel
   const dimensions = status.value?.embeddingDimensions
+  if (!hasIndexedEmbeddings.value) return 'not indexed'
   return model && dimensions ? `${model} · ${dimensions}d` : 'not indexed'
 })
 const embeddingStatusLabel = computed(() => {
   if (!hasEmbeddingStatus.value) return 'Unknown'
-  return status.value?.embeddingModel ? 'Ready' : 'Missing'
+  return hasIndexedEmbeddings.value ? 'Ready' : 'Missing'
 })
 const embeddingStatusClass = computed(() => {
   if (!hasEmbeddingStatus.value) return ''
-  return status.value?.embeddingModel ? 'control-stat--accent' : 'control-stat--warn'
+  return hasIndexedEmbeddings.value ? 'control-stat--accent' : 'control-stat--warn'
 })
 const vectorCoverageLabel = computed(() => {
   if (!hasVectorStatus.value) return 'N/A'

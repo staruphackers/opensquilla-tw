@@ -82,10 +82,14 @@ async def test_knowledge_search_tool_merges_collection_and_retrieval_filters() -
             collection="legacy",
             collection_id="datasets",
             retrieval_profile="hybrid_rrf_bge_m3_fts5",
+            embedding_model="baai/bge-m3",
+            embedding_dimensions=1024,
             filters={
                 "source": "goldman",
                 "collectionId": "old",
                 "retrievalProfile": "sqlite_fts5_default",
+                "embeddingModel": "old-model",
+                "embeddingDimensions": 768,
             },
         )
     )
@@ -99,6 +103,8 @@ async def test_knowledge_search_tool_merges_collection_and_retrieval_filters() -
                 "source": "goldman",
                 "collectionId": "datasets",
                 "retrievalProfile": "hybrid_rrf_bge_m3_fts5",
+                "embeddingModel": "baai/bge-m3",
+                "embeddingDimensions": 1024,
             },
         }
     ]

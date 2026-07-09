@@ -719,6 +719,25 @@ describe('KnowledgeView retrieval UI wiring', () => {
     expect(el.textContent).toContain('No retrieval profile available')
   })
 
+  it('does not mark embedding ready when no vectors are indexed', async () => {
+    const { el } = await mountKnowledgeView({
+      status: {
+        vectorChunksIndexed: 0,
+        vectorCoveragePct: 0,
+        embeddingModel: 'baai/bge-m3',
+        embeddingDimensions: 1024,
+      },
+    })
+
+    const embeddingCard = Array.from(el.querySelectorAll<HTMLElement>('.control-stat'))
+      .find((card) => card.querySelector('.control-stat__label')?.textContent?.trim() === 'Embedding')
+    if (!embeddingCard) throw new Error('embedding metric not found')
+
+    expect(embeddingCard.textContent).toContain('Missing')
+    expect(embeddingCard.textContent).not.toContain('Ready')
+    expect(embeddingCard.classList.contains('control-stat--warn')).toBe(true)
+  })
+
   it('shows unknown embedding status without warning class for legacy status payloads', async () => {
     const { el } = await mountKnowledgeView({
       rawStatus: {

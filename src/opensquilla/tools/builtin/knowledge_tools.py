@@ -18,6 +18,8 @@ def _merged_search_filters(
     collection: str | None,
     collection_id: str | None,
     retrieval_profile: str | None,
+    embedding_model: str | None,
+    embedding_dimensions: int | None,
 ) -> dict[str, Any] | None:
     merged: dict[str, Any] = dict(filters or {})
     resolved_collection = str(collection_id or collection or "").strip()
@@ -26,6 +28,11 @@ def _merged_search_filters(
     resolved_profile = str(retrieval_profile or "").strip()
     if resolved_profile:
         merged["retrievalProfile"] = resolved_profile
+    resolved_model = str(embedding_model or "").strip()
+    if resolved_model:
+        merged["embeddingModel"] = resolved_model
+    if embedding_dimensions is not None:
+        merged["embeddingDimensions"] = int(embedding_dimensions)
     return merged or None
 
 
@@ -102,6 +109,20 @@ def create_knowledge_tools(
                     "sqlite_fts5_default, vector_bge_m3_1024, and hybrid_rrf_bge_m3_fts5."
                 ),
             },
+            "embedding_model": {
+                "type": "string",
+                "description": (
+                    "Optional embedding model for vector or hybrid retrieval. Use the model "
+                    "reported by the selected status.retrievalProfiles item."
+                ),
+            },
+            "embedding_dimensions": {
+                "type": "integer",
+                "description": (
+                    "Optional embedding dimensions for vector or hybrid retrieval. Use the "
+                    "dimensions reported by the selected status.retrievalProfiles item."
+                ),
+            },
             "filters": {
                 "type": "object",
                 "description": (
@@ -125,6 +146,8 @@ def create_knowledge_tools(
         collection: str | None = None,
         collection_id: str | None = None,
         retrieval_profile: str | None = None,
+        embedding_model: str | None = None,
+        embedding_dimensions: int | None = None,
         filters: dict[str, Any] | None = None,
         top_k: int = 8,
     ) -> str:
@@ -136,6 +159,8 @@ def create_knowledge_tools(
             collection=collection,
             collection_id=collection_id,
             retrieval_profile=retrieval_profile,
+            embedding_model=embedding_model,
+            embedding_dimensions=embedding_dimensions,
         )
         payload = resolved_manager.search(clean_query, top_k=top_k, filters=merged_filters)
         if collection:
