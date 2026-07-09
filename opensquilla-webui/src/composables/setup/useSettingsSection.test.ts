@@ -13,6 +13,13 @@ describe('settings section IA', () => {
     expect(ids.indexOf('modelStrategy')).toBeLessThan(ids.indexOf('capabilities'))
   })
 
+  it('retires the obsolete approval-policy Safety section', () => {
+    const ids = SETTINGS_SECTIONS.map(s => s.id)
+    expect(ids).not.toContain('safety')
+    expect(sectionFromRouteParam('safety')).toBe('provider')
+    expect(isKnownSectionParam('safety')).toBe(false)
+  })
+
   it('passes through every canonical section id unchanged', () => {
     for (const s of SETTINGS_SECTIONS) {
       expect(sectionFromRouteParam(s.id)).toBe(s.id)
