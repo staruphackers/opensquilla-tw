@@ -264,4 +264,3 @@ gh pr create --base main --head fix/remove-obsolete-approval-policy-ui \
 ```
 
 Expected: GitHub returns a PR URL targeting `main`.
-
