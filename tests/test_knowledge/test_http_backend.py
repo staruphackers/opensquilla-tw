@@ -42,7 +42,19 @@ def test_http_knowledge_backend_calls_standalone_api() -> None:
     assert backend.status()["ok"] is True
     ingest = backend.ingest_collection(source_root="/tmp/source", collection_id="research")
     assert ingest["collectionId"] == "research"
-    assert backend.search("AI 光模块", top_k=3)["query"] == "AI 光模块"
+    assert (
+        backend.search(
+            "AI 光模块",
+            top_k=3,
+            filters={
+                "collectionId": "datasets",
+                "retrievalProfile": "hybrid_rrf_bge_m3_fts5",
+                "embeddingModel": "baai/bge-m3",
+                "embeddingDimensions": 1024,
+            },
+        )["query"]
+        == "AI 光模块"
+    )
     assert backend.get(chunk_id="missing") is None
     assert requests == [
         ("GET", "/v1/status", None, "Bearer test-key"),
@@ -61,7 +73,16 @@ def test_http_knowledge_backend_calls_standalone_api() -> None:
         (
             "POST",
             "/v1/search",
-            {"query": "AI 光模块", "topK": 3, "filters": {}},
+            {
+                "query": "AI 光模块",
+                "topK": 3,
+                "filters": {
+                    "collectionId": "datasets",
+                    "retrievalProfile": "hybrid_rrf_bge_m3_fts5",
+                    "embeddingModel": "baai/bge-m3",
+                    "embeddingDimensions": 1024,
+                },
+            },
             "Bearer test-key",
         ),
         ("GET", "/v1/chunks/missing", None, "Bearer test-key"),

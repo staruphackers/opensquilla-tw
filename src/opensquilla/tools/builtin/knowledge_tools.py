@@ -12,6 +12,23 @@ if TYPE_CHECKING:
     from opensquilla.tools.registry import ToolRegistry
 
 
+def _merged_search_filters(
+    *,
+    filters: dict[str, Any] | None,
+    collection: str | None,
+    collection_id: str | None,
+    retrieval_profile: str | None,
+) -> dict[str, Any] | None:
+    merged: dict[str, Any] = dict(filters or {})
+    resolved_collection = str(collection_id or collection or "").strip()
+    if resolved_collection:
+        merged["collectionId"] = resolved_collection
+    resolved_profile = str(retrieval_profile or "").strip()
+    if resolved_profile:
+        merged["retrievalProfile"] = resolved_profile
+    return merged or None
+
+
 def create_knowledge_tools(
     *,
     manager: KnowledgeBackend | None = None,
@@ -29,8 +46,9 @@ def create_knowledge_tools(
     @tool(
         name="knowledge_status",
         description=(
-            "Check the local document knowledge base status. Use this before "
-            "knowledge_search when you need to know whether local documents are indexed."
+            "Check the local document knowledge base status, including available "
+            "retrievalProfiles when the backend exposes them. Use this before "
+            "knowledge_search when selecting lexical, vector, or hybrid retrieval."
         ),
         params={
             "collection": {
@@ -69,9 +87,27 @@ def create_knowledge_tools(
                     "Optional collection name. Defaults to the Phase 1 local collection."
                 ),
             },
+            "collection_id": {
+                "type": "string",
+                "description": (
+                    "Optional collection id to filter search results. Overrides collection "
+                    "when both are provided."
+                ),
+            },
+            "retrieval_profile": {
+                "type": "string",
+                "description": (
+                    "Optional retrieval profile id. Call knowledge_status first and use one "
+                    "of status.retrievalProfiles where available=true. Common ids include "
+                    "sqlite_fts5_default, vector_bge_m3_1024, and hybrid_rrf_bge_m3_fts5."
+                ),
+            },
             "filters": {
                 "type": "object",
-                "description": "Optional metadata filters such as source or contentKind.",
+                "description": (
+                    "Optional metadata filters such as source or contentKind. collection_id "
+                    "and retrieval_profile are merged into this object when provided."
+                ),
             },
             "top_k": {
                 "type": "integer",
@@ -87,13 +123,21 @@ def create_knowledge_tools(
     async def knowledge_search(
         query: str,
         collection: str | None = None,
+        collection_id: str | None = None,
+        retrieval_profile: str | None = None,
         filters: dict[str, Any] | None = None,
         top_k: int = 8,
     ) -> str:
         clean_query = str(query or "").strip()
         if not clean_query:
             raise ToolError("query is required")
-        payload = resolved_manager.search(clean_query, top_k=top_k, filters=filters)
+        merged_filters = _merged_search_filters(
+            filters=filters,
+            collection=collection,
+            collection_id=collection_id,
+            retrieval_profile=retrieval_profile,
+        )
+        payload = resolved_manager.search(clean_query, top_k=top_k, filters=merged_filters)
         if collection:
             payload["collection"] = collection
         return json.dumps(payload, ensure_ascii=False)

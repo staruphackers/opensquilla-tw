@@ -26,6 +26,25 @@ def _top_k(params: dict[str, Any], *, default: int = 8) -> int:
     return top_k
 
 
+def _search_filters(params: dict[str, Any]) -> dict[str, Any] | None:
+    filters = params.get("filters")
+    if filters is not None and not isinstance(filters, dict):
+        raise ValueError("params.filters must be an object")
+    merged: dict[str, Any] = dict(filters or {})
+    for key in (
+        "collectionId",
+        "retrievalProfile",
+        "embeddingModel",
+        "model",
+        "embeddingDimensions",
+        "dimensions",
+    ):
+        value = params.get(key)
+        if value is not None and value != "":
+            merged[key] = value
+    return merged or None
+
+
 @_d.method("knowledge.status", scope="operator.read")
 async def _handle_knowledge_status(params: dict | None, ctx: RpcContext) -> dict[str, Any]:
     if params is not None and not isinstance(params, dict):
@@ -89,17 +108,7 @@ async def _handle_knowledge_search(params: dict | None, ctx: RpcContext) -> dict
     query = str(params.get("query") or "").strip()
     if not query:
         raise ValueError("params.query is required")
-    filters = params.get("filters")
-    if filters is not None and not isinstance(filters, dict):
-        raise ValueError("params.filters must be an object")
-    if params.get("collectionId") and isinstance(filters, dict):
-        filters = {**filters, "collectionId": params.get("collectionId")}
-    elif params.get("collectionId"):
-        filters = {"collectionId": params.get("collectionId")}
-    if params.get("retrievalProfile") and isinstance(filters, dict):
-        filters = {**filters, "retrievalProfile": params.get("retrievalProfile")}
-    elif params.get("retrievalProfile"):
-        filters = {"retrievalProfile": params.get("retrievalProfile")}
+    filters = _search_filters(params)
     return _manager(ctx).search(query, top_k=_top_k(params), filters=filters)
 
 

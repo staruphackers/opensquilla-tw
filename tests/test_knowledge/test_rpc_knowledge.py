@@ -66,3 +66,73 @@ async def test_knowledge_rpc_prepare_search_and_judgment(tmp_path: Path) -> None
     assert judgment.ok is True
     path = tmp_path / "state" / "knowledge" / "data" / "eval" / "judgments.jsonl"
     assert json.loads(path.read_text(encoding="utf-8").splitlines()[0])["rating"] == "correct"
+
+
+@pytest.mark.asyncio
+async def test_knowledge_rpc_search_merges_retrieval_and_embedding_filters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from opensquilla.gateway import rpc_knowledge as rpc_knowledge_module
+
+    class RecordingKnowledgeBackend:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def search(
+            self,
+            query: str,
+            *,
+            top_k: int = 8,
+            filters: dict[str, object] | None = None,
+        ) -> dict[str, object]:
+            self.calls.append(
+                {
+                    "query": query,
+                    "top_k": top_k,
+                    "filters": dict(filters or {}),
+                }
+            )
+            return {"query": query, "results": [], "count": 0}
+
+    backend = RecordingKnowledgeBackend()
+    monkeypatch.setattr(
+        rpc_knowledge_module,
+        "manager_from_config",
+        lambda _config: backend,
+    )
+    ctx = RpcContext(conn_id="test", config=SimpleNamespace())
+    dispatcher = get_dispatcher()
+
+    result = await dispatcher.dispatch(
+        "search-profile",
+        "knowledge.search",
+        {
+            "query": "苹果收入",
+            "topK": 4,
+            "filters": {
+                "source": "goldman",
+                "retrievalProfile": "sqlite_fts5_default",
+                "embeddingDimensions": 768,
+            },
+            "collectionId": "datasets",
+            "retrievalProfile": "hybrid_rrf_bge_m3_fts5",
+            "embeddingModel": "baai/bge-m3",
+            "embeddingDimensions": 1024,
+        },
+        ctx,
+    )
+
+    assert result.ok is True
+    assert backend.calls == [
+        {
+            "query": "苹果收入",
+            "top_k": 4,
+            "filters": {
+                "source": "goldman",
+                "collectionId": "datasets",
+                "retrievalProfile": "hybrid_rrf_bge_m3_fts5",
+                "embeddingModel": "baai/bge-m3",
+                "embeddingDimensions": 1024,
+            },
+        }
+    ]
