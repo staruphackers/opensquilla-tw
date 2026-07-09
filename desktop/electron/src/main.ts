@@ -340,6 +340,17 @@ const ROUTER_PROFILE_IDS = new Set(['openrouter', 'dashscope', 'deepseek', 'gemi
 
 const PROVIDER_CATALOG: ProviderCatalogEntry[] = [
   {
+    id: 'tokenrhythm',
+    label: 'TokenRhythm',
+    model: 'deepseek-v4-pro',
+    baseUrl: 'https://tokenrhythm.studio/v1',
+    apiKeyEnv: 'TOKENRHYTHM_API_KEY',
+    requiresApiKey: true,
+    routerSupported: false,
+    deployment: 'cloud',
+    note: 'DeepSeek, GLM, MiniMax and Kimi model families on one key.',
+  },
+  {
     id: 'openrouter',
     label: 'OpenRouter',
     model: 'deepseek/deepseek-v4-pro',
@@ -1261,6 +1272,7 @@ let desktopLocale: DesktopLocale = 'en'
 
 const PROVIDER_NOTE_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
   en: {
+    tokenrhythm: 'DeepSeek, GLM, MiniMax and Kimi model families on one key.',
     openrouter: 'Best default for mixed model routing.',
     openai: 'OpenAI-only tier profile.',
     openai_responses: 'OpenAI Responses-API shape (chat + responses).',
@@ -1275,6 +1287,7 @@ const PROVIDER_NOTE_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     zhipu: 'GLM tier profile.',
   },
   'zh-Hans': {
+    tokenrhythm: '一把密钥即可使用 DeepSeek、GLM、MiniMax、Kimi 全系模型。',
     openrouter: '适合混合模型路由的初始默认选项。',
     openai: '仅使用 OpenAI 的层级配置。',
     openai_responses: 'OpenAI Responses API 格式（chat + responses）。',
@@ -1289,6 +1302,7 @@ const PROVIDER_NOTE_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     zhipu: 'GLM 层级配置。',
   },
   ja: {
+    tokenrhythm: 'DeepSeek・GLM・MiniMax・Kimi の各モデルを 1 つのキーで利用できます。',
     openrouter: '混合モデルルーティングに適した初期デフォルトです。',
     openai: 'OpenAI のみを使うティアプロファイルです。',
     openai_responses: 'OpenAI Responses API 形式（chat + responses）です。',
@@ -1303,6 +1317,7 @@ const PROVIDER_NOTE_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     zhipu: 'GLM ティアプロファイルです。',
   },
   fr: {
+    tokenrhythm: 'Les familles DeepSeek, GLM, MiniMax et Kimi avec une seule clé.',
     openrouter: 'Bon choix initial par défaut pour le routage de modèles mixtes.',
     openai: 'Profil de niveaux limité à OpenAI.',
     openai_responses: 'Format OpenAI Responses API (chat + responses).',
@@ -1317,6 +1332,7 @@ const PROVIDER_NOTE_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     zhipu: 'Profil de niveaux GLM.',
   },
   de: {
+    tokenrhythm: 'DeepSeek-, GLM-, MiniMax- und Kimi-Modelle mit einem einzigen Schlüssel.',
     openrouter: 'Gute anfängliche Voreinstellung für gemischtes Modellrouting.',
     openai: 'Nur-OpenAI-Stufenprofil.',
     openai_responses: 'OpenAI Responses-API-Format (chat + responses).',
@@ -1331,6 +1347,7 @@ const PROVIDER_NOTE_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     zhipu: 'GLM-Stufenprofil.',
   },
   es: {
+    tokenrhythm: 'Las familias DeepSeek, GLM, MiniMax y Kimi con una sola clave.',
     openrouter: 'Buena opción inicial para el enrutamiento mixto de modelos.',
     openai: 'Perfil de niveles solo con OpenAI.',
     openai_responses: 'Formato OpenAI Responses API (chat + responses).',

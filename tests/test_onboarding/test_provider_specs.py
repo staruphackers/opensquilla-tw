@@ -102,11 +102,12 @@ def test_catalog_marks_unsupported_providers_disabled():
         assert specs[pid].runtime_supported is False
 
 
-def test_catalog_prioritizes_openrouter_then_sorts_remaining_providers():
+def test_catalog_prioritizes_tokenrhythm_then_openrouter_then_sorts_remaining():
     specs = list_provider_setup_specs()
-    assert specs[0].provider_id == "openrouter"
-    assert [(s.label.lower(), s.provider_id) for s in specs[1:]] == sorted(
-        (s.label.lower(), s.provider_id) for s in specs[1:]
+    assert specs[0].provider_id == "tokenrhythm"
+    assert specs[1].provider_id == "openrouter"
+    assert [(s.label.lower(), s.provider_id) for s in specs[2:]] == sorted(
+        (s.label.lower(), s.provider_id) for s in specs[2:]
     )
 
 
