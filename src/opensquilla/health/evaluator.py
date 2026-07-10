@@ -34,9 +34,10 @@ def _replacement_provider(active: str, known_provider_ids: list[str]) -> str:
     replacement = _LEGACY_PROVIDER_REPLACEMENTS.get(active)
     if replacement in known_provider_ids:
         return replacement
-    if "openrouter" in known_provider_ids:
-        return "openrouter"
-    return known_provider_ids[0] if known_provider_ids else "openrouter"
+    for preferred in ("tokenrhythm", "openrouter"):
+        if preferred in known_provider_ids:
+            return preferred
+    return known_provider_ids[0] if known_provider_ids else "tokenrhythm"
 
 
 def _int_from_payload(payload: dict[str, Any], *keys: str) -> int:
@@ -283,16 +284,62 @@ def evaluate_provider(payload: dict[str, Any]) -> list[HealthFinding]:
             )
         )
     else:
-        findings.append(
-            HealthFinding(
-                id="provider.active.ready",
-                severity="ok",
-                surface="provider",
-                title="Active provider ready",
-                detail=f"{provider_id} is configured and buildable.",
-                evidence={"providerId": provider_id, "model": active_row.get("model")},
+        # Rows from older gateways / offline doctor payloads carry no
+        # apiKeyShape; default to "ok" so they behave exactly as before.
+        api_key_shape = active_row.get("apiKeyShape", "ok")
+        if api_key_shape not in ("ok", "", None):
+            shape = str(api_key_shape)
+            if shape == "looks_like_url":
+                problem = (
+                    "the configured API key looks like a URL. The key is sent "
+                    "verbatim as the request credential, so the upstream "
+                    "provider rejects it with 401."
+                )
+            elif shape == "looks_like_env_name":
+                problem = (
+                    "the configured API key looks like an environment variable "
+                    "NAME, not its value. Requests authenticate with the "
+                    "literal name and are rejected."
+                )
+            else:
+                problem = f"the configured API key has a suspicious shape ({shape})."
+            findings.append(
+                HealthFinding(
+                    id="provider.active.api_key_shape",
+                    severity="warn",
+                    surface="provider",
+                    title="Active provider API key looks misconfigured",
+                    detail=f"{provider_id} is configured and buildable, but {problem}",
+                    evidence={"providerId": provider_id, "shape": shape},
+                    fix_steps=[
+                        FixStep(
+                            label="Reconfigure provider key",
+                            command=(
+                                "opensquilla providers configure "
+                                f"{provider_id} --api-key {_API_KEY_PLACEHOLDER}"
+                            ),
+                        ),
+                        FixStep(
+                            label="Update the key in the console",
+                            detail=(
+                                "Open Settings → Chat Model and paste the "
+                                "provider's real API key value."
+                            ),
+                        ),
+                    ],
+                )
             )
-        )
+        else:
+            findings.append(
+                HealthFinding(
+                    id="provider.active.ready",
+                    severity="ok",
+                    surface="provider",
+                    title="Active provider ready",
+                    detail=f"{provider_id} is configured and buildable.",
+                    evidence={"providerId": provider_id, "model": active_row.get("model")},
+                )
+            )
     return findings
 
 
@@ -1501,12 +1548,24 @@ def evaluate_sandbox(payload: dict[str, Any]) -> list[HealthFinding]:
     ]
 
 
+# selection_mode → (member-provider label, env-key fallback) for the static
+# B5 profiles. Payload-driven mirror of the gateway's static-B5 mode table.
+_STATIC_B5_MODE_DETAILS = {
+    "static_openrouter_b5": ("OpenRouter", "OPENROUTER_API_KEY"),
+    "static_tokenrhythm_b5": ("TokenRhythm", "TOKENRHYTHM_API_KEY"),
+}
+
+
 def evaluate_llm_ensemble(payload: dict[str, Any]) -> list[HealthFinding]:
     enabled = bool(payload.get("enabled"))
     selection_mode = str(payload.get("selectionMode") or "")
-    if not enabled or selection_mode != "static_openrouter_b5":
+    if enabled and selection_mode == "custom_b5":
+        return _evaluate_custom_b5_ensemble(payload)
+    mode_details = _STATIC_B5_MODE_DETAILS.get(selection_mode)
+    if not enabled or mode_details is None:
         return []
-    api_key_env = str(payload.get("apiKeyEnv") or "OPENROUTER_API_KEY")
+    provider_label, env_key_fallback = mode_details
+    api_key_env = str(payload.get("apiKeyEnv") or env_key_fallback)
     credential_available = bool(payload.get("credentialAvailable"))
     evidence = {
         "enabled": enabled,
@@ -1518,33 +1577,34 @@ def evaluate_llm_ensemble(payload: dict[str, Any]) -> list[HealthFinding]:
     if credential_available:
         return [
             HealthFinding(
-                id="llm_ensemble.static_openrouter_b5.ready",
+                id=f"llm_ensemble.{selection_mode}.ready",
                 severity="ok",
                 surface="llm_ensemble",
                 title="LLM ensemble ready",
                 detail=(
-                    "The static OpenRouter B5 ensemble resolves an OpenRouter "
-                    "credential and is active for turns."
+                    f"The static {provider_label} B5 ensemble resolves a "
+                    f"{provider_label} credential and is active for turns."
                 ),
                 evidence=evidence,
             )
         ]
     return [
         HealthFinding(
-            id="llm_ensemble.static_openrouter_b5.credentials.missing",
+            id=f"llm_ensemble.{selection_mode}.credentials.missing",
             severity="warn",
             surface="llm_ensemble",
             title="LLM ensemble is enabled but cannot run",
             detail=(
-                "LLM ensemble (static OpenRouter B5) is enabled but no OpenRouter "
-                "credential resolves — the ensemble is inactive and every turn falls "
-                f"back to the single configured provider. Set {api_key_env}, switch "
-                "llm_ensemble.selection_mode, or disable the ensemble."
+                f"LLM ensemble (static {provider_label} B5) is enabled but no "
+                f"{provider_label} credential resolves — the ensemble is inactive and "
+                f"every turn falls back to the single configured provider. Set "
+                f"{api_key_env}, switch llm_ensemble.selection_mode, or disable the "
+                "ensemble."
             ),
             evidence=evidence,
             fix_steps=[
                 FixStep(
-                    label="Set OpenRouter API key",
+                    label=f"Set {provider_label} API key",
                     detail=(
                         f"Set {api_key_env} in the gateway environment, then restart "
                         "the gateway."
@@ -1557,6 +1617,83 @@ def evaluate_llm_ensemble(payload: dict[str, Any]) -> list[HealthFinding]:
                 FixStep(label="Restart gateway", command="opensquilla gateway restart"),
             ],
             restart_required=True,
+        )
+    ]
+
+
+def _evaluate_custom_b5_ensemble(payload: dict[str, Any]) -> list[HealthFinding]:
+    """Readiness finding for the explicit custom lineup.
+
+    ``lineupReady``/``lineupBlockedReason`` come from the doctor collector
+    (``custom_b5_lineup_ready``): False means the turn-time wrap is being
+    skipped — either the lineup has no enabled proposers or a member's
+    provider resolves no API key.
+    """
+    ready = bool(payload.get("lineupReady"))
+    reason = str(payload.get("lineupBlockedReason") or "")
+    evidence = {
+        "enabled": True,
+        "selectionMode": "custom_b5",
+        "activeProvider": payload.get("activeProvider"),
+        "lineupReady": ready,
+        "lineupBlockedReason": reason,
+    }
+    if ready:
+        return [
+            HealthFinding(
+                id="llm_ensemble.custom_b5.ready",
+                severity="ok",
+                surface="llm_ensemble",
+                title="LLM ensemble ready",
+                detail=(
+                    "The custom ensemble lineup resolves credentials for every "
+                    "member and is active for turns."
+                ),
+                evidence=evidence,
+            )
+        ]
+    if reason.startswith("missing_credential:"):
+        provider_id = reason.split(":", 1)[1]
+        detail = (
+            "LLM ensemble (custom lineup) is enabled but the "
+            f"{provider_id} member resolves no API key — the ensemble is "
+            "inactive and every turn falls back to the single configured "
+            "provider. Set the provider key, remove the member, or disable "
+            "the ensemble."
+        )
+    elif reason == "no_proposers":
+        detail = (
+            "LLM ensemble (custom lineup) is enabled but has no enabled "
+            "proposer candidates — add candidates or disable the ensemble."
+        )
+    else:
+        detail = (
+            "LLM ensemble (custom lineup) is enabled but cannot run "
+            f"({reason or 'unknown reason'}) — every turn falls back to the "
+            "single configured provider."
+        )
+    return [
+        HealthFinding(
+            id="llm_ensemble.custom_b5.not_ready",
+            severity="warn",
+            surface="llm_ensemble",
+            title="LLM ensemble is enabled but cannot run",
+            detail=detail,
+            evidence=evidence,
+            fix_steps=[
+                FixStep(
+                    label="Review the ensemble lineup",
+                    detail=(
+                        "Open Settings → Model routing and fix the flagged "
+                        "member, or remove it from the lineup."
+                    ),
+                ),
+                FixStep(
+                    label="Disable the ensemble",
+                    command="opensquilla config set llm_ensemble.enabled false",
+                ),
+            ],
+            restart_required=False,
         )
     ]
 
@@ -1631,5 +1768,58 @@ def evaluate_squilla_router_runtime(payload: dict[str, Any]) -> list[HealthFindi
             evidence=evidence,
             fix_steps=fix_steps,
             restart_required=True,
+        )
+    ]
+
+
+def evaluate_legacy_home(payload: dict[str, Any]) -> list[HealthFinding]:
+    """Advisory finding when importable legacy OpenSquilla data is detected.
+
+    Detection is a read-only path scan and safe under a running gateway; the
+    import itself needs a quiesced gateway, so the fix steps hand the operator
+    the exact CLI invocations instead of offering any in-gateway action. No
+    candidate detected → no findings, matching how the other advisory
+    surfaces (``evaluate_llm_ensemble``, ``evaluate_squilla_router_runtime``)
+    express absence: they stay silent when there is nothing to report.
+    """
+    if not bool(payload.get("detected")):
+        return []
+    path = str(payload.get("path") or "")
+    if not path:
+        return []
+    kind = str(payload.get("kind") or "cli-home")
+    target_fresh = bool(payload.get("targetFresh"))
+    # The collector supplies the ready-quoted command so this package never
+    # imports the migration machinery (health stays cycle-free in the package
+    # import graph); the inline form is a display-only fallback.
+    preview_command = str(
+        payload.get("command") or f"opensquilla migrate opensquilla --kind {kind} --source {path}"
+    )
+    if target_fresh:
+        detail = (
+            f"A legacy OpenSquilla home ({kind}) was found at {path}, and this "
+            "install holds no session data yet. Stop the gateway and run the "
+            "migrate command to import it; the preview is a dry run that "
+            "changes nothing."
+        )
+    else:
+        detail = (
+            f"A legacy OpenSquilla home ({kind}) was found at {path}. Stop the "
+            "gateway and run the migrate command to import it; the preview is "
+            "a dry run that changes nothing."
+        )
+    return [
+        HealthFinding(
+            id="migration.legacy_home_detected",
+            severity="warn",
+            surface="migration",
+            title=f"Legacy OpenSquilla data found at {path}",
+            detail=detail,
+            evidence={"path": path, "kind": kind, "target_fresh": target_fresh},
+            fix_steps=[
+                FixStep(label="Preview the import", command=preview_command),
+                FixStep(label="Apply the import", command=f"{preview_command} --apply"),
+            ],
+            restart_required=False,
         )
     ]

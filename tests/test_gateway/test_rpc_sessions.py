@@ -61,6 +61,7 @@ class FakeSession:
     origin: dict | None = None
     model: str | None = None
     model_override: str | None = None
+    epoch: int = 0
 
 
 class FakeStorage:
@@ -88,6 +89,11 @@ class FakeStorage:
 
     async def delete_transcript(self, session_id: str) -> None:
         self._transcripts.pop(session_id, None)
+
+    async def increment_epoch(self, key: str) -> int:
+        session = self._sessions[key]
+        session.epoch += 1
+        return session.epoch
 
     async def get_transcript(
         self, session_id: str, limit: int | None = None, offset: int = 0
@@ -300,6 +306,7 @@ class FakeSessionManager:
         if str(intent) != "reset_same_key":
             raise KeyError(f"Session not found: {session_key}")
         old_id = session.session_id
+        session.epoch = await self._storage.increment_epoch(session_key)
         await self._storage.delete_transcript(old_id)
         session.session_id = f"{old_id}-rotated"
         return session, True
@@ -2676,11 +2683,38 @@ class TestSessionsSend:
         assert (tmp_path / "transcripts" / session.session_id / sha).read_bytes() == payload
 
     @pytest.mark.asyncio
-    async def test_send_rejects_invalid_attachment_media_type(
+    async def test_send_admits_opaque_attachment_by_default(
         self, dispatcher, ctx_with_sessions, session
     ):
-        # text/plain is in the allow-list. Use a MIME that is genuinely
-        # outside the allow-list to keep this regression honest.
+        # Default config: an unrendered binary attachment is admitted as an
+        # opaque item instead of failing the send with INVALID_REQUEST.
+        res = await dispatcher.dispatch(
+            "r1",
+            "sessions.send",
+            {
+                "key": session.session_key,
+                "message": "hi",
+                "attachments": [
+                    {"type": "application/x-shellscript", "data": "AA==", "name": "x.sh"}
+                ],
+            },
+            ctx_with_sessions,
+        )
+        assert res.ok is True
+
+    @pytest.mark.asyncio
+    async def test_send_rejects_opaque_attachment_when_admission_disabled(
+        self, dispatcher, session
+    ):
+        # attachments.accept_opaque=false restores the legacy fail-closed
+        # admission gate for unrendered media types end-to-end.
+        ctx = make_ctx(
+            session_manager=FakeSessionManager([session]),
+            config=GatewayConfig(
+                memory={"flush_enabled": False},
+                attachments={"accept_opaque": False},
+            ),
+        )
         res = await dispatcher.dispatch(
             "r1",
             "sessions.send",
@@ -2691,7 +2725,7 @@ class TestSessionsSend:
                     {"type": "application/x-shellscript", "data": "AA=="}
                 ],
             },
-            ctx_with_sessions,
+            ctx,
         )
         assert res.ok is False
         assert res.error.code == "INVALID_REQUEST"
@@ -2989,6 +3023,7 @@ class TestSessionsReset:
         assert res.ok is True
         assert res.payload["session_id"] != before
         assert res.payload["previous_session_id"] == before
+        assert res.payload["epoch"] == 1
 
     @pytest.mark.asyncio
     async def test_reset_allowed_for_operator_write_scope(self, dispatcher, session):

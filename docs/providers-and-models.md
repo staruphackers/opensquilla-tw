@@ -52,10 +52,32 @@ opensquilla configure provider --provider ollama --model llama3.1
 Prefer environment-variable references for API keys so secrets are not written
 directly into configuration files.
 
+### Endpoint (base URL) resolution
+
+`llm.base_url` resolves **explicit config → derived env var → provider
+default**:
+
+- A custom endpoint you saved (Web UI advanced options, `config.set`, or a
+  hand-written `base_url` in the TOML) always wins.
+- If the config never chose an endpoint — no `base_url`, or the field still
+  holds the provider's own default URL — the derived environment variable
+  (`OPENAI_BASE_URL`, `OPENROUTER_BASE_URL`, `<PROVIDER>_BASE_URL`) applies.
+  This is the lever for pointing a whole fleet at a corporate proxy without
+  touching each config file.
+- `OPENSQUILLA_LLM_BASE_URL` enters at config-model construction (the
+  `OPENSQUILLA_LLM_*` settings layer): it fills `base_url` whenever the TOML
+  does not set one, and the resolver then treats it as an explicit value —
+  so it beats the provider-derived vars above, while a `base_url` written in
+  the TOML still beats it.
+
+API keys follow the same explicit-config-first rule via `api_key` /
+`api_key_env`.
+
 ## Onboarding-Verified Providers
 
 This build exposes onboarding support for:
 
+- TokenRhythm
 - OpenRouter
 - OpenAI
 - Anthropic
@@ -86,6 +108,84 @@ base URL (`https://api.openai.com/v1`):
 Both read the same key and base URL, so switching between them needs only a
 `provider` change.
 
+### Volcengine Ark: regular vs coding-plan endpoints
+
+Use `volcengine` for regular Ark chat/completions models. Its default base URL
+is the OpenAI-compatible endpoint `https://ark.cn-beijing.volces.com/api/v3`.
+
+Use `volcengine_coding_plan` for Volcengine's OpenAI Responses-compatible coding-plan
+subscription surface. Its default base URL is
+`https://ark.cn-beijing.volces.com/api/coding/v3`; OpenSquilla appends
+`/responses` when it sends the request.
+
+```sh
+export VOLCENGINE_API_KEY="..."
+opensquilla configure provider --provider volcengine_coding_plan --model <model> --api-key-env VOLCENGINE_API_KEY
+```
+
+Use `volcengine_coding_plan_anthropic` for tools or deployments that expect the
+Anthropic Messages protocol. Its default base URL is
+`https://ark.cn-beijing.volces.com/api/coding`; OpenSquilla appends
+`/v1/messages`.
+
+```sh
+export VOLCENGINE_API_KEY="..."
+opensquilla configure provider --provider volcengine_coding_plan_anthropic --model <model> --api-key-env VOLCENGINE_API_KEY
+```
+
+Do not point either coding-plan provider at the regular `/api/v3` URL. That
+regular Ark URL does not consume Coding Plan quota.
+
+### Tencent TokenHub: CN, Anthropic-protocol, and international endpoints
+
+Tencent's Hunyuan `hy3` / `hy3-preview` models are served on the TokenHub
+platform (the legacy `api.hunyuan.cloud.tencent.com` platform is being
+retired and never received `hy3`). Three experimental provider ids map the
+documented endpoints:
+
+- `tencent_tokenhub` — OpenAI-compatible chat/completions at
+  `https://tokenhub.tencentmaas.com/v1` (mainland; keys from the CN TokenHub
+  console, `TENCENT_TOKENHUB_API_KEY`). `hy3` thinking uses
+  `reasoning_effort` `low`/`high`, and assistant `reasoning_content` is
+  replayed across turns as the hy3 interleaved-thinking contract requires.
+- `tencent_tokenhub_anthropic` — the same deployment's Anthropic Messages
+  protocol (`https://tokenhub.tencentmaas.com` + `/v1/messages`,
+  `x-api-key` auth, same key).
+- `tencent_tokenhub_intl` — the international deployment at
+  `https://tokenhub-intl.tencentcloudmaas.com/v1`
+  (`TENCENT_TOKENHUB_INTL_API_KEY`). It is a separate Tencent Cloud account
+  and key system, and its model list currently carries third-party models
+  (DeepSeek, GLM, Kimi, MiniMax) but not `hy3`.
+
+```sh
+export TENCENT_TOKENHUB_API_KEY="..."
+opensquilla configure provider --provider tencent_tokenhub --model hy3 --api-key-env TENCENT_TOKENHUB_API_KEY
+```
+
+TokenHub also hosts third-party models behind the same endpoints; OpenSquilla
+does not inject thinking payloads for those ids because TokenHub does not
+document their dialects on this gateway.
+
+Tencent's Token Plan subscription (the Hy Token Plan carries `hy3` /
+`hy3-preview`; the General plan adds `tc-code-latest`, DeepSeek V4, GLM-5.x,
+Kimi and MiniMax ids on the same key) is exposed as two more provider ids on
+the plan host:
+
+- `tencent_token_plan` — Chat Completions at
+  `https://api.lkeap.cloud.tencent.com/plan/v3` (the plan endpoints do not
+  offer the Responses API).
+- `tencent_token_plan_anthropic` — Anthropic Messages at
+  `https://api.lkeap.cloud.tencent.com/plan/anthropic` (+ `/v1/messages`),
+  bearer auth.
+
+Both read `TENCENT_TOKEN_PLAN_API_KEY`. Plan keys are dedicated `sk-tp-…`
+credentials created on the TokenHub Token Plan console page — they are not
+interchangeable with pay-as-you-go TokenHub keys. Note Tencent's plan terms
+restrict these keys to interactive AI-tool use and prohibit non-interactive
+batch/automation calling; unattended pipelines should use the pay-as-you-go
+`tencent_tokenhub` provider instead. The plans are mainland-only products —
+the international site offers pay-as-you-go TokenHub only.
+
 ## Model Inspection
 
 List models:
@@ -105,6 +205,29 @@ For provider metadata that does not require the gateway, use:
 ```sh
 opensquilla providers list
 ```
+
+### Context-Window Resolution Order
+
+Context budgeting, compaction thresholds, usage pressure reporting, and the
+router's capability facts all resolve a model's context window through the
+same layers, first match wins:
+
+1. **Per-model override** — `[models.<provider_id>."<model_id>"]`
+   `context_window` in your config. Set this for models the catalog does not
+   know (direct DashScope/TokenHub ids, self-hosted vLLM declaring its real
+   window) or to correct a wrong catalog value. Reported as source
+   `override` (`config` in `config.effective`, `model_override` in usage
+   context status).
+2. **Global override** — `llm.context_window_tokens` (0 = auto). A blunt
+   instrument that applies to whatever model is active; the per-model
+   override always beats it.
+3. **Model catalog** — live OpenRouter data, the vendored models.dev
+   snapshot, then packaged corrections.
+4. **Default** — a conservative 8,192 for local runtimes (match your actual
+   `num_ctx`/server window with an override), 200,000 otherwise.
+
+The Web UI exposes the per-model override under Settings → Chat Model →
+Advanced, with an auto-detected / override / effective readout.
 
 ## Direct Model vs Router
 
@@ -128,6 +251,124 @@ opensquilla configure router --router recommended
 
 For routing details, see
 [`features/squilla-router.md`](features/squilla-router.md).
+
+## Pricing and Cost Estimation
+
+OpenSquilla reports real provider-billed cost when a provider returns it, and
+estimates cost locally from token usage everywhere else. Every usage row and
+by-model breakdown item is labeled so you can tell which kind of number you
+are looking at.
+
+### How a Cost Is Estimated
+
+Each priced call is split into four token buckets — fresh input, cache read,
+cache write, output — and each bucket is priced at its own rate. The result
+carries a `basis` label:
+
+| Basis | Meaning |
+| --- | --- |
+| `cache_aware` | All buckets present in the call have a known rate; the four-bucket math ran. |
+| `cache_blind` | The call used cache tokens but a needed cache rate is unknown, so OpenSquilla fell back to pricing every input token (cache or fresh) at the plain input rate. This is a conservative upper bound, not the real charge — expect it to overstate cost on cache-heavy sessions. |
+| `free` | The model or runtime is zero-priced (see local runtimes below). |
+
+### Price Resolution Order
+
+For a given `(model, provider)` pair, OpenSquilla resolves a price through
+these layers, first match wins:
+
+1. **Local runtime** — `ollama`, `lm_studio`, `ovms`, `vllm`, and `local` are
+   always free, regardless of model id.
+2. **User override** — `[models.<provider_id>."<model_id>"]` in your config
+   (see [`configuration.md`](configuration.md) and `opensquilla.toml.example`).
+3. **Model catalog** — the vendored models.dev snapshot, including per-model
+   cache-read/cache-write rates where upstream publishes them.
+4. **Live OpenRouter endpoint price** — looked up only when the provider is
+   `openrouter` or unset (first-party provider ids never query the OpenRouter
+   marketplace); falls back to the static table if OpenRouter is unreachable.
+5. **Static table** — a built-in pricing table bundled with OpenSquilla.
+6. **Default** — `$3` / `$15` per million input/output tokens when nothing
+   else matched.
+
+If OpenSquilla is estimating a model at the wrong price, add an override
+instead of waiting for a catalog refresh:
+
+```toml
+[models.openrouter."z-ai/glm-5.2"]
+input_cost_per_mtok = 0.5        # USD per million input tokens
+output_cost_per_mtok = 2.0       # USD per million output tokens
+cache_read_cost_per_mtok = 0.05  # USD per million cached-prompt-read tokens
+cache_write_cost_per_mtok = 0.6  # USD per million cached-prompt-write tokens
+```
+
+Quote model ids that contain dots or slashes. All four fields are optional —
+set only the ones you need to correct. `config.set`/`patch`/`apply` and
+`opensquilla gateway reload` hot-apply these overrides; see
+`opensquilla.toml.example` for more examples including self-hosted `vllm` and
+`custom` endpoints.
+
+### Cost Provenance (`costSource`)
+
+Every usage row and by-model breakdown item carries a `costSource` (also
+exposed dual-cased as `cost_source`):
+
+| `costSource` | Meaning |
+| --- | --- |
+| `provider_billed` | The full cost came from a real provider-reported bill. |
+| `opensquilla_estimate` | No billed cost was available; the figure is a local estimate. |
+| `mixed` | The same model had both billed and unbilled calls in the aggregated row — the total is billed cost plus an estimate for the rest, not a pure bill. |
+| `unavailable` | No pricing table entry and no billed cost, so no dollar figure could be produced. |
+
+Rows also carry two additive fields: `estimateBasis` (the `cache_aware` /
+`cache_blind` / `free` label above, present only when part of the row was
+estimated) and `priceSource` (which resolver layer priced it — `user_override`,
+`catalog`, `live_openrouter`, `static_table`, `default`, or `local_free`). The
+Web UI's by-model usage cards show a small source chip for `costSource` and,
+when the underlying basis is `cache_blind`, a hint that the figure is an
+upper bound rather than the real cache-discounted cost.
+
+### Which Providers Yield Billed vs. Estimated Cost
+
+| Capability | Providers |
+| --- | --- |
+| Provider-billed cost | `openrouter` only |
+| Cache-aware estimate possible | `anthropic`, `deepseek`, `minimax` (Anthropic-shaped), ensemble members |
+| Cache-read-aware estimate only (no cache-write rate) | `openai`, `openai_responses`, `azure`, `gemini`, `openai_codex` |
+| Cache-blind estimate (falls back to plain input-rate pricing when cache tokens appear) | other OpenAI-compatible provider kinds |
+| Free | local runtimes (`ollama`, `lm_studio`, `ovms`, `vllm`, `local`) |
+| Subscription (no invoice to compare against) | coding-plan/subscription provider kinds — treat any reported figure as an estimate, not a bill |
+
+Use `opensquilla providers status --probe-models` and `opensquilla cost
+--by-model` to see which class your configured provider/model falls into for
+a given session.
+
+### Turn and Router Budget Gates
+
+Two per-turn agent budgets exist and behave differently:
+
+- `max_turn_billed_cost_usd` gates only on real provider-billed cost. It is
+  inert (never trips) on providers or paths that never report billed cost —
+  do not rely on it alone outside `openrouter`.
+- `max_turn_cost_usd` gates on the same accumulator used everywhere else in
+  this section: billed cost when the provider reports it, otherwise the
+  cache-aware/cache-blind estimate. It works on every provider. When it trips,
+  the error (`turn_cost_budget_exceeded`) states whether the total was billed,
+  estimated, or mixed.
+
+SquillaRouter's session budget gate (`[squilla_router.budget]`, see
+[`features/squilla-router.md`](features/squilla-router.md)) logs a
+`spend_source` alongside each `router_budget.warn`/`router_budget.cap` event
+and in the routing trail:
+
+| `spend_source` | Meaning |
+| --- | --- |
+| `billed` | Accumulated spend is real provider-billed cost. |
+| `estimate` | Accumulated spend is a local estimate for the whole session. |
+| `estimate_mixed` | The session mixes billed and estimated cost. |
+| `none` | No spend has been recorded yet. |
+| `unknown` | Spend could not be determined; the gate suspends rather than acting on a guess. |
+
+Read next: [`usage-and-cost.md`](usage-and-cost.md) for the `opensquilla cost`
+CLI and how to read a session's usage rows.
 
 ## Provider Troubleshooting
 

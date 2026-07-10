@@ -8,6 +8,10 @@ DeprecationWarning is emitted per process.
 from __future__ import annotations
 
 import json
+import logging
+import os
+import stat
+import warnings
 from pathlib import Path
 
 import pytest
@@ -63,6 +67,26 @@ def _build_toml_with_deprecated(tmp_path: Path) -> Path:
     toml_path = tmp_path / "config.toml"
     toml_path.write_text("".join(lines) + "\n" + "".join(cost_lines))
     return toml_path
+
+
+def test_prompt_mode_defaults_to_auto() -> None:
+    cfg = GatewayConfig()
+
+    assert cfg.prompt.mode == "auto"
+
+
+def test_prompt_mode_accepts_headless_source_edit() -> None:
+    cfg = GatewayConfig.model_validate({"prompt": {"mode": "headless_source_edit"}})
+
+    assert cfg.prompt.mode == "headless_source_edit"
+
+
+def test_prompt_mode_accepts_headless_repo_coding_scaffold() -> None:
+    cfg = GatewayConfig.model_validate(
+        {"prompt": {"mode": "headless_repo_coding_scaffold"}}
+    )
+
+    assert cfg.prompt.mode == "headless_repo_coding_scaffold"
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +369,6 @@ def test_log_file_written_with_per_field_detail(
 
     toml_path = _build_toml_with_deprecated(tmp_path)
 
-    import warnings
     with warnings.catch_warnings():
         warnings.simplefilter("always")
         GatewayConfig.load(toml_path)
@@ -357,15 +380,146 @@ def test_log_file_written_with_per_field_detail(
     assert len(log_files) >= 1, f"No legacy_config_*.log found in {logs_dir}"
 
     log_file = log_files[-1]
-    lines = [ln for ln in log_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    log_text = log_file.read_text(encoding="utf-8")
+    lines = [ln for ln in log_text.splitlines() if ln.strip()]
     expected_count = len(_ALL_DEPRECATED_MEMORY_FIELDS)
     assert len(lines) == expected_count, f"Expected {expected_count} log lines, got {len(lines)}"
 
+    entries_by_field: dict[str, dict[str, object]] = {}
     for line in lines:
         entry = json.loads(line)
         assert "field" in entry
         assert "timestamp" in entry
         assert "source" in entry
+        assert "value_repr" not in entry
+        entries_by_field[str(entry["field"])] = entry
+
+    profile_entry = entries_by_field["memory.profile"]
+    assert profile_entry["value_type"] == "string"
+    assert profile_entry["value_shape"] == {"length": len("legacy_profile_value")}
+    assert "legacy_profile_value" not in log_text
+    if os.name != "nt":
+        assert stat.S_IMODE(log_file.stat().st_mode) == 0o600
+
+
+def test_legacy_log_falls_back_when_fchmod_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Platforms without ``os.fchmod`` still write a redacted private log."""
+    monkeypatch.setattr(migration_module, "default_opensquilla_home", lambda: tmp_path)
+    monkeypatch.delattr(migration_module.os, "fchmod", raising=False)
+    real_chmod = migration_module.os.chmod
+    chmod_calls: list[tuple[Path, int]] = []
+
+    def recording_chmod(path: str | Path, mode: int) -> None:
+        chmod_calls.append((Path(path), mode))
+        real_chmod(path, mode)
+
+    monkeypatch.setattr(migration_module.os, "chmod", recording_chmod)
+
+    migration_module._write_legacy_field_log(
+        {"memory.profile": "synthetic-private-value"},
+        "config_migration",
+    )
+
+    [log_file] = list((tmp_path / "logs").glob("legacy_config_*.log"))
+    log_text = log_file.read_text(encoding="utf-8")
+    assert "synthetic-private-value" not in log_text
+    assert chmod_calls == [(log_file, 0o600)]
+
+
+def test_migrate_config_payload_can_disable_process_diagnostics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A dry-run can migrate without logs, warnings, or sentinel mutation."""
+    memory_seen = {"memory.preexisting"}
+    token_saving_seen = {"agent_token_saving.preexisting"}
+    monkeypatch.setattr(migration_module, "_LEGACY_MEMORY_FIELDS_WARNED", False)
+    monkeypatch.setattr(migration_module, "_LEGACY_MEMORY_FIELDS_SEEN", memory_seen)
+    monkeypatch.setattr(
+        migration_module,
+        "_LEGACY_AGENT_TOKEN_SAVING_FIELDS_WARNED",
+        False,
+    )
+    monkeypatch.setattr(
+        migration_module,
+        "_LEGACY_AGENT_TOKEN_SAVING_FIELDS_SEEN",
+        token_saving_seen,
+    )
+    monkeypatch.setattr(migration_module, "default_opensquilla_home", lambda: tmp_path)
+    caplog.set_level(logging.WARNING, logger=migration_module.__name__)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        result = migration_module.migrate_config_payload(
+            {
+                "memory": {"profile": "synthetic-private-memory-setting"},
+                "agent_token_saving": {
+                    "tool_result_compression_enabled": False,
+                },
+                "channels": {
+                    "channels": [
+                        {
+                            "type": "synthetic-removed-channel",
+                            "name": "synthetic-private-channel-name",
+                        }
+                    ]
+                },
+            },
+            emit_diagnostics=False,
+        )
+
+    assert result.changed is True
+    assert "memory.profile" in result.removed_fields
+    assert (
+        "agent_token_saving.tool_result_compression_enabled"
+        in result.removed_fields
+    )
+    assert caught == []
+    assert not [record for record in caplog.records if record.name == migration_module.__name__]
+    assert migration_module._LEGACY_MEMORY_FIELDS_WARNED is False
+    assert migration_module._LEGACY_MEMORY_FIELDS_SEEN == {"memory.preexisting"}
+    assert migration_module._LEGACY_AGENT_TOKEN_SAVING_FIELDS_WARNED is False
+    assert migration_module._LEGACY_AGENT_TOKEN_SAVING_FIELDS_SEEN == {
+        "agent_token_saving.preexisting"
+    }
+    assert not (tmp_path / "logs").exists()
+
+
+def test_legacy_log_redacts_parked_channel_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Field detail for nested values uses an index and shape, never contents."""
+    monkeypatch.setattr(migration_module, "default_opensquilla_home", lambda: tmp_path)
+
+    result = migration_module.migrate_config_payload(
+        {
+            "channels": {
+                "channels": [
+                    {
+                        "type": "synthetic-private-channel-type",
+                        "name": "synthetic-private-channel-name",
+                        "token": "synthetic-private-channel-token",
+                    }
+                ]
+            }
+        }
+    )
+
+    assert result.changed is True
+    [log_file] = list((tmp_path / "logs").glob("legacy_config_*.log"))
+    log_text = log_file.read_text(encoding="utf-8")
+    entry = json.loads(log_text)
+    assert entry["field"] == "channels.channels[0]"
+    assert entry["value_type"] == "mapping"
+    assert entry["value_shape"] == {"entries": 3}
+    assert "synthetic-private-channel-type" not in log_text
+    assert "synthetic-private-channel-name" not in log_text
+    assert "synthetic-private-channel-token" not in log_text
 
 
 # ---------------------------------------------------------------------------
@@ -435,3 +589,86 @@ class TestMetaSkillConfig:
 
         # No exceptions during validation
         GatewayConfig(**data)
+
+
+def test_gateway_config_accepts_repo_coding_source_edit_tool_profile() -> None:
+    cfg = GatewayConfig.model_validate(
+        {"tools": {"profile": "repo_coding_source_edit"}}
+    )
+
+    assert cfg.tools.profile == "repo_coding_source_edit"
+
+
+def test_gateway_config_accepts_repo_coding_source_edit_strict_tool_profile() -> None:
+    cfg = GatewayConfig.model_validate(
+        {"tools": {"profile": "repo_coding_source_edit_strict"}}
+    )
+
+    assert cfg.tools.profile == "repo_coding_source_edit_strict"
+
+
+def test_gateway_config_accepts_repo_coding_source_edit_v2_tool_profile() -> None:
+    cfg = GatewayConfig.model_validate(
+        {"tools": {"profile": "repo_coding_source_edit_v2"}}
+    )
+
+    assert cfg.tools.profile == "repo_coding_source_edit_v2"
+
+
+def test_gateway_config_accepts_repo_coding_source_edit_balanced_tool_profile() -> None:
+    cfg = GatewayConfig.model_validate(
+        {"tools": {"profile": "repo_coding_source_edit_balanced"}}
+    )
+
+    assert cfg.tools.profile == "repo_coding_source_edit_balanced"
+
+
+def test_gateway_config_accepts_repo_coding_source_edit_patch_fallback_tool_profile() -> None:
+    cfg = GatewayConfig.model_validate(
+        {"tools": {"profile": "repo_coding_source_edit_patch_fallback"}}
+    )
+
+    assert cfg.tools.profile == "repo_coding_source_edit_patch_fallback"
+
+
+def test_gateway_config_accepts_repo_coding_scaffold_tool_profiles() -> None:
+    edit_cfg = GatewayConfig.model_validate(
+        {"tools": {"profile": "repo_coding_scaffold_edit"}}
+    )
+    patch_cfg = GatewayConfig.model_validate(
+        {"tools": {"profile": "repo_coding_scaffold_patch"}}
+    )
+
+    assert edit_cfg.tools.profile == "repo_coding_scaffold_edit"
+    assert patch_cfg.tools.profile == "repo_coding_scaffold_patch"
+
+
+def test_gateway_config_accepts_llm_sampling_controls() -> None:
+    cfg = GatewayConfig.model_validate({"llm": {"temperature": 1.0, "top_p": 0.95}})
+
+    assert cfg.llm.temperature == 1.0
+    assert cfg.llm.top_p == 0.95
+
+
+def test_gateway_config_accepts_source_diff_preservation_mode() -> None:
+    cfg = GatewayConfig.model_validate({"source_diff_preservation_mode": "block"})
+
+    assert cfg.source_diff_preservation_mode == "block"
+
+
+def test_gateway_config_accepts_source_diff_candidate_mode() -> None:
+    cfg = GatewayConfig.model_validate({"source_diff_candidate_mode": "warn_model"})
+
+    assert cfg.source_diff_candidate_mode == "warn_model"
+
+
+def test_gateway_config_accepts_runtime_state_capsule_mode() -> None:
+    cfg = GatewayConfig.model_validate({"runtime_state_capsule_mode": "inject"})
+
+    assert cfg.runtime_state_capsule_mode == "inject"
+
+
+def test_gateway_config_accepts_text_only_tool_recovery_mode() -> None:
+    cfg = GatewayConfig.model_validate({"text_only_tool_recovery_mode": "warn_model"})
+
+    assert cfg.text_only_tool_recovery_mode == "warn_model"

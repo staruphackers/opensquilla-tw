@@ -7,8 +7,9 @@ import inspect
 import logging
 import os
 import secrets
+import sys
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, MutableMapping
 from dataclasses import dataclass, field
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -55,7 +56,11 @@ from opensquilla.gateway.session_streams import get_session_streams
 from opensquilla.gateway.websocket import get_registry
 from opensquilla.paths import default_opensquilla_home
 from opensquilla.permissions import configured_default_elevated
-from opensquilla.session.terminal_reply import build_terminal_reply, sanitize_agent_error
+from opensquilla.session.terminal_reply import (
+    append_error_ref,
+    build_terminal_reply,
+    sanitize_agent_error,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -118,6 +123,7 @@ _AUTO_PROPOSE_TOOL_ALLOWLIST = frozenset(
     }
 )
 _DEBUG_FILE_HANDLER_ATTR = "_opensquilla_debug_file_handler"
+_CONSOLE_HANDLER_ATTR = "_opensquilla_console_log_handler"
 _ENABLED_VALUES = {"1", "true", "yes", "on"}
 _DISABLED_VALUES = {"0", "false", "no", "off"}
 _LOG_LEVELS = {
@@ -197,6 +203,17 @@ def _resolve_migrations_dir() -> Path:
         candidate = Path(env_dir)
         if any(candidate.glob("V*.py")):
             return candidate
+        # A pinned-but-unusable override silently falling through to a
+        # different migration set is a misconfiguration operators must see.
+        log.warning(
+            "resolve_migrations_dir.env_override_ignored",
+            path=str(candidate),
+            reason=(
+                "directory does not exist"
+                if not candidate.is_dir()
+                else "no V*.py migration files found"
+            ),
+        )
 
     try:
         from importlib import resources as importlib_resources
@@ -283,6 +300,41 @@ async def _list_scheduler_jobs(scheduler: Any) -> list[Any]:
     return result if isinstance(result, list) else []
 
 
+def _warn_if_self_learning_unreachable(config: Any) -> None:
+    """Warn when self-learning is on but its training trigger can never fire.
+
+    The retrain rides the post-dream hook, so with dream disabled (or its cron
+    unscheduled) capture accumulates samples while training silently never
+    runs. Config carries no cross-section validation for this, and the CLI is
+    often the only surface an operator watches — one explicit boot line turns
+    the silent gap into a diagnosable one. Mirrored by the
+    ``router.selflearning.status`` RPC's ``trainingReachable`` field.
+    """
+
+    sl_cfg = getattr(getattr(config, "squilla_router", None), "self_learning", None)
+    if sl_cfg is None or not bool(getattr(sl_cfg, "enabled", False)):
+        return
+    if os.getenv("OPENSQUILLA_ROUTER_SELFLEARN_DISABLED") == "1":
+        return  # the whole loop is deliberately off; unreachable-trigger noise helps no one
+    dream_cfg = getattr(getattr(config, "memory", None), "dream", None)
+    dream_on = bool(getattr(dream_cfg, "enabled", False))
+    dream_scheduled = dream_on and bool(getattr(dream_cfg, "auto_schedule", False))
+    if dream_scheduled and os.getenv("OPENSQUILLA_MEMORY_DREAM_DISABLED") != "1":
+        return
+    log.warning(
+        "router_self_learning.trigger_unreachable",
+        dream_enabled=dream_on,
+        dream_auto_schedule=bool(getattr(dream_cfg, "auto_schedule", False)),
+        hint=(
+            "squilla_router.self_learning.enabled is true but the post-dream "
+            "training trigger cannot fire; capture will accumulate samples "
+            "without ever training. Set memory.dream.enabled=true and "
+            "memory.dream.auto_schedule=true (and clear "
+            "OPENSQUILLA_MEMORY_DREAM_DISABLED) to activate training."
+        ),
+    )
+
+
 async def _register_dream_crons(
     *,
     scheduler: Any,
@@ -346,6 +398,18 @@ async def _register_dream_crons(
                 result = update_job(getattr(existing, "id"), **patch)
                 if inspect.isawaitable(result):
                     await result
+            # A previous disabled-config pass (or boot) may have left the row
+            # paused; with dream now enabled the job must actually fire again.
+            # Matters for live re-reconciliation after a config RPC edit.
+            status = getattr(
+                getattr(existing, "status", None), "value", getattr(existing, "status", "")
+            )
+            resume_job = getattr(scheduler, "resume_job", None)
+            if status == "paused" and callable(resume_job):
+                result = resume_job(getattr(existing, "id"))
+                if inspect.isawaitable(result):
+                    await result
+                log.info("boot.dream.resumed", agent_id=agent_id)
             log.info(
                 "boot.dream.already_registered",
                 agent_id=agent_id,
@@ -538,7 +602,9 @@ class ServiceContainer:
     memory_repair_service: Any = None
     meta_run_writer: Any = None
     router_decision_writer: Any = None
+    turn_error_writer: Any = None
     router_calibration_service: Any = None
+    provider_stats: Any = None  # ProviderStatsStore | None (rolling call latency samples)
     task_runtime: Any = None
     heartbeat_loop: Any = None
     heartbeat_watcher: Any = None
@@ -640,14 +706,24 @@ class ServiceContainer:
             # closed connection (same pattern as set_shared_catalog below).
             try:
                 from opensquilla.engine.steps.router_decision_record import (
+                    drain_pending_flushes,
                     set_decision_writer,
                 )
 
                 set_decision_writer(None)
+                # Turns finishing near shutdown may still hold in-flight
+                # fire-and-forget flush tasks; give them a moment to land
+                # before the connection goes away.
+                await drain_pending_flushes()
             except Exception:
                 pass
             try:
                 self.router_decision_writer.close()
+            except Exception:
+                pass
+        if self.turn_error_writer is not None:
+            try:
+                self.turn_error_writer.close()
             except Exception:
                 pass
         try:
@@ -785,6 +861,35 @@ def _warn_workspace_state_mismatch(config: GatewayConfig) -> None:
         state_dir=getattr(config, "state_dir", None),
         config_path=getattr(config, "config_path", None),
         expected_roots=mismatches,
+    )
+
+
+def _warn_legacy_home_detected(config: GatewayConfig) -> None:
+    """One advisory warning when a fresh home boots beside importable legacy data.
+
+    Fires only when this home holds no ``sessions.db`` yet (the same freshness
+    expression the schema-migration block uses), so established installs never
+    see it — and the detection import stays behind that check, keeping the
+    established-install boot path free of it. Detection is read-only; the
+    import itself stays at the CLI layer (``opensquilla migrate opensquilla``).
+    """
+    try:
+        if _state_path(config, "sessions.db").exists():
+            return
+    except OSError:  # pragma: no cover - unreadable state dir; stay silent.
+        return
+    import importlib
+
+    legacy_detect = importlib.import_module("opensquilla.migration.legacy_detect")
+
+    candidate = legacy_detect.detect_legacy_home(_gateway_home(config))
+    if candidate is None:
+        return
+    log.warning(
+        "build_services.legacy_home_detected",
+        legacy_home=str(candidate.path),
+        kind=candidate.kind,
+        migrate_command=legacy_detect.suggested_migrate_command(candidate),
     )
 
 
@@ -1235,6 +1340,11 @@ async def _emit_task_runtime_stream_events(
                 terminal_payload["error_class"] = safe_error_code
                 terminal_payload["error_message"] = safe_error_message
             terminal_message = build_terminal_reply(terminal_payload)
+            # Additive ref suffix joining the reply to its durable turn_errors
+            # row; absent when no record was written (error_id empty).
+            event_error_id = event_dict.get("error_id")
+            if isinstance(event_error_id, str) and event_error_id:
+                terminal_message = append_error_ref(terminal_message, event_error_id)
             event_dict["message"] = terminal_message
             event_dict["terminal_message"] = terminal_message
             event_dict["terminal_reason"] = terminal_payload["terminal_reason"]
@@ -1285,20 +1395,112 @@ def _remove_debug_file_handlers(root: logging.Logger) -> None:
                 opensquilla_logger.setLevel(previous_level)
 
 
+def _render_structlog_event_for_stdlib(
+    logger: Any, method_name: str, event_dict: MutableMapping[str, Any]
+) -> tuple[tuple[str], dict[str, Any]]:
+    """Final structlog processor: render ``event key=value ...`` for stdlib.
+
+    Returns ``(args, kwargs)`` so ``exc_info``/``stack_info`` pass through to
+    ``logging`` natively and the Formatter renders tracebacks into every
+    attached handler (file and console).
+    """
+    kwargs: dict[str, Any] = {}
+    exc_info = event_dict.pop("exc_info", None)
+    if exc_info:
+        kwargs["exc_info"] = exc_info
+    stack_info = event_dict.pop("stack_info", None)
+    if stack_info:
+        kwargs["stack_info"] = stack_info
+    event = str(event_dict.pop("event", ""))
+    parts = [event] + [f"{key}={event_dict[key]!r}" for key in event_dict]
+    return (" ".join(part for part in parts if part),), kwargs
+
+
+def _structlog_explicitly_configured() -> bool:
+    """True when structlog carries an explicit configuration the bridge must respect.
+
+    The CLI entry callback installs a stderr/WARNING structlog default for
+    every command (``observability/cli_logging.py``) — including ``gateway
+    run``, which reaches this bridge afterwards. That default is overridable:
+    treating it as explicit would permanently disable the debug.log bridge for
+    foreground gateway runs. Any *other* configuration (e.g. the interactive
+    TUI's) is left untouched, matching the previous ``is_configured`` guard.
+    """
+    if not structlog.is_configured():
+        return False
+    try:
+        from opensquilla.observability.cli_logging import is_cli_default_active
+    except Exception:  # noqa: BLE001 - fall back to the historical guard
+        return True
+    return not is_cli_default_active()
+
+
+def _bridge_structlog_to_stdlib() -> None:
+    """Route structlog events through stdlib logging so they reach debug.log.
+
+    Level filtering is delegated to stdlib (the ``opensquilla`` logger level is
+    managed by ``_setup_file_logging``); the explicit-configuration guard
+    leaves any prior non-CLI-default configuration (e.g. the interactive
+    TUI's) untouched while overriding the CLI's stderr/WARNING default.
+    """
+    if _structlog_explicitly_configured():
+        return
+    structlog.configure(
+        processors=[
+            structlog.contextvars.merge_contextvars,
+            structlog.processors.StackInfoRenderer(),
+            structlog.dev.set_exc_info,
+            _render_structlog_event_for_stdlib,
+        ],
+        wrapper_class=structlog.make_filtering_bound_logger(logging.NOTSET),
+        logger_factory=structlog.stdlib.LoggerFactory(),
+        cache_logger_on_first_use=False,
+    )
+
+
+def _remove_console_handlers(root: logging.Logger) -> None:
+    for handler in list(root.handlers):
+        if getattr(handler, _CONSOLE_HANDLER_ATTR, False):
+            root.removeHandler(handler)
+            handler.close()
+
+
 def _setup_file_logging(config: GatewayConfig | None = None) -> None:
     """Configure structlog + stdlib logging to write to a debug.log file."""
     config = config or GatewayConfig()
     root = logging.getLogger()
     _remove_debug_file_handlers(root)
+    _remove_console_handlers(root)
+
+    # Bridge structlog through stdlib and keep console output for foreground
+    # runs. Wrapped so a logging misconfiguration can never block gateway boot.
+    bridge_error: Exception | None = None
+    log_level = _resolve_log_level(config)
+    try:
+        _bridge_structlog_to_stdlib()
+        console_handler = logging.StreamHandler(sys.stdout)
+        setattr(console_handler, _CONSOLE_HANDLER_ATTR, True)
+        console_handler.setLevel(log_level)
+        console_handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+        )
+        root.addHandler(console_handler)
+    except Exception as exc:  # noqa: BLE001 - logging must never block boot
+        bridge_error = exc
+        logging.getLogger(__name__).warning("structlog bridge disabled: %s", exc)
 
     enabled = _env_bool("OPENSQUILLA_LOG_FILE_ENABLED")
     if enabled is None:
         enabled = config.log_file_enabled
+    opensquilla_logger = logging.getLogger("opensquilla")
     if not enabled:
+        # No file handler will manage the level, but bridged console output
+        # still depends on it: left NOTSET, the "opensquilla" logger is
+        # effectively WARNING and INFO/DEBUG never reach the console handler.
+        opensquilla_logger.setLevel(log_level)
         return
 
     log_dir = Path(os.environ.get("OPENSQUILLA_LOG_DIR", str(default_opensquilla_home() / "logs")))
-    log_level = _resolve_log_level(config)
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = log_dir / "debug.log"
@@ -1310,9 +1512,9 @@ def _setup_file_logging(config: GatewayConfig | None = None) -> None:
         )
     except OSError as exc:
         logging.getLogger(__name__).warning("file logging disabled: %s", exc)
+        opensquilla_logger.setLevel(log_level)
         return
     setattr(file_handler, _DEBUG_FILE_HANDLER_ATTR, True)
-    opensquilla_logger = logging.getLogger("opensquilla")
     setattr(file_handler, "_opensquilla_previous_logger_level", opensquilla_logger.level)
     file_handler.setLevel(log_level)
     file_handler.setFormatter(
@@ -1321,6 +1523,10 @@ def _setup_file_logging(config: GatewayConfig | None = None) -> None:
 
     root.addHandler(file_handler)
     opensquilla_logger.setLevel(log_level)
+    if bridge_error is not None:
+        # The first warning fired before the file handler existed, so it only
+        # reached the console; re-emit it so debug.log records it too.
+        logging.getLogger(__name__).warning("structlog bridge disabled: %s", bridge_error)
 
 
 @dataclass
@@ -1746,6 +1952,41 @@ async def preload_squilla_router_runtime(config: GatewayConfig) -> None:
         )
 
 
+def model_override_entries(config: GatewayConfig) -> dict[str, dict[str, Any]]:
+    """Flatten ``[models.<provider>."<model>"]`` overrides for the catalog.
+
+    Produces the ``ModelCatalog.set_user_overrides`` key shape: lowercased
+    ``"provider/model"`` keys mapping to only the fields the operator
+    actually set (``None`` fields are "no override" and must not flow
+    through). ``thinking_level_map`` is config-only metadata, not a catalog
+    entry field, so it is dropped here rather than rejected downstream.
+    """
+    entries: dict[str, dict[str, Any]] = {}
+    for provider_id, models in (config.models or {}).items():
+        for model_id, override in models.items():
+            fields = override.model_dump(exclude_none=True)
+            fields.pop("thinking_level_map", None)  # not a catalog entry field
+            if fields:
+                entries[f"{provider_id}/{model_id}".lower()] = fields
+    return entries
+
+
+def apply_model_catalog_overrides(catalog: ModelCatalog, config: GatewayConfig) -> None:
+    """Apply ``[models.*]`` cost/metadata overrides onto ``catalog``.
+
+    Overrides are operator-authored TOML; a malformed value must not crash
+    boot or a live config hot-apply (``config.set``/``patch``/``apply``/
+    ``reload`` — see ``rpc_config._sync_model_catalog_overrides``). On
+    rejection ``ModelCatalog.set_user_overrides`` leaves the previously
+    installed overrides in place, and this logs a warning naming the bad
+    value rather than dropping it silently.
+    """
+    try:
+        catalog.set_user_overrides(model_override_entries(config))
+    except ValueError as exc:
+        log.warning("model_catalog.user_override_rejected", error=str(exc))
+
+
 async def build_services(
     config: GatewayConfig | None = None,
     session_manager: Any = None,
@@ -1780,6 +2021,7 @@ async def build_services(
             log.info("build_services.config_loaded", path=config.config_path)
     deferred_warmups: list[Callable[[], Any]] = []
     _warn_workspace_state_mismatch(config)
+    _warn_legacy_home_detected(config)
 
     # Register session-material filesystem cleanup so deleting a session also
     # removes its transcript media + workspace attachment copies (they are
@@ -1839,7 +2081,12 @@ async def build_services(
         from opensquilla.persistence.migrator import apply_pending
 
         if "://" not in session_db_path:
-            Path(session_db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
+            # 0o700: session transcripts are sensitive — keep a freshly created
+            # state directory owner-only (umask-masked; no-op on Windows and on
+            # pre-existing directories).
+            Path(session_db_path).expanduser().parent.mkdir(
+                mode=0o700, parents=True, exist_ok=True
+            )
         migrations_dir = _resolve_migrations_dir()
         applied = apply_pending(session_db_path, migrations_dir)
         if applied:
@@ -1856,7 +2103,7 @@ async def build_services(
         from opensquilla.session.manager import SessionManager
         from opensquilla.session.storage import SessionStorage
 
-        Path(session_db_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(session_db_path).parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         storage = SessionStorage(session_db_path)
         await storage.connect()
         session_manager = SessionManager(
@@ -1887,43 +2134,44 @@ async def build_services(
     resolved_base = llm_runtime.base_url
     proxy = llm_runtime.proxy
     if provider_selector is None:
-        # Local providers (Ollama, LM Studio, …) need no API key, so gating
-        # provider setup on a key would leave the gateway with "no provider".
-        provider_requires_key = True
-        if llm_runtime.provider:
-            try:
-                from opensquilla.provider.registry import get_provider_spec
+        # Always build the selector, even before an API key exists: every
+        # service (TurnRunner, RPC contexts, flush, auto-propose) captures
+        # this one object at boot, and config hot-apply mutates it in place
+        # via sync_primary. Booting without a selector would strand the
+        # gateway on "No provider available" until a restart even after the
+        # operator configures a key in the Web UI. An unconfigured selector
+        # refuses resolve() cleanly (ProviderNotConfiguredError) instead.
+        from opensquilla.provider.selector import (
+            ModelSelector,
+            ProviderConfig,
+            SelectorConfig,
+        )
 
-                provider_requires_key = get_provider_spec(
-                    llm_runtime.provider
-                ).requires_api_key()
-            except Exception:
-                provider_requires_key = True
-        if llm_runtime.provider and (api_key or not provider_requires_key):
-            from opensquilla.provider.selector import (
-                ModelSelector,
-                ProviderConfig,
-                SelectorConfig,
-            )
-
-            if resolved_base.endswith("/v1"):
-                resolved_base = resolved_base[:-3]
-            provider_selector = ModelSelector(
-                SelectorConfig(
-                    primary=ProviderConfig(
-                        provider=llm_runtime.provider,
-                        model=llm_runtime.model,
-                        api_key=api_key,
-                        base_url=resolved_base,
-                        proxy=proxy,
-                        provider_routing=llm_runtime.provider_routing,
-                    )
+        if resolved_base.endswith("/v1"):
+            resolved_base = resolved_base[:-3]
+        provider_selector = ModelSelector(
+            SelectorConfig(
+                primary=ProviderConfig(
+                    provider=llm_runtime.provider,
+                    model=llm_runtime.model,
+                    api_key=api_key,
+                    base_url=resolved_base,
+                    proxy=proxy,
+                    provider_routing=llm_runtime.provider_routing,
                 )
             )
+        )
+        if provider_selector.is_configured:
             log.info(
                 "build_services.provider_ready",
                 provider=llm_runtime.provider,
                 model=llm_runtime.model,
+            )
+        else:
+            log.info(
+                "build_services.provider_pending_configuration",
+                provider=llm_runtime.provider or "",
+                hint="configure an API key via the Web UI or config.toml [llm]; applies live",
             )
 
     # ── Model catalog (boot order: after provider selector) ──────────
@@ -1938,8 +2186,38 @@ async def build_services(
     # usage RPC context windows, ensemble member wiring) resolve against
     # live data instead of cold snapshot/static-only copies.
     set_shared_catalog(model_catalog)
+    # [models.*] cost/metadata overrides (schema: ModelOverrideConfig) become
+    # the catalog's highest-authority resolution layer as soon as the shared
+    # instance exists, so resolve_model_price/get_capabilities honor them
+    # from the first turn onward.
+    apply_model_catalog_overrides(model_catalog, config)
 
     async def _warm_model_catalog_and_pricing() -> None:
+        # Registry-driven live listing first: when the primary provider's
+        # spec names a keyless public model listing (live_catalog_url),
+        # ingest its platform-published windows/limits into the shared
+        # catalog's provider-scoped live layer so request budgeting tracks
+        # the platform instead of the packaged fallback rows. Gated on the
+        # resolved credential like the OpenRouter fetch below — an
+        # unconfigured provider cannot serve turns, so warming it would
+        # only add network I/O to keyless boots (and to the offline default
+        # test suite, which relies on credential stripping for isolation).
+        # Warmed once per process with a hard deadline; provider hot-apply
+        # keeps the packaged rows until the next restart, matching the
+        # OpenRouter warm.
+        if api_key:
+            try:
+                from opensquilla.provider.live_catalog import warm_live_provider_catalogs
+
+                await asyncio.wait_for(
+                    warm_live_provider_catalogs(
+                        model_catalog, [config.llm.provider], proxy=proxy
+                    ),
+                    timeout=5.0,
+                )
+            except Exception as e:  # noqa: BLE001 - live metadata must never block boot
+                log.warning("build_services.live_catalog_warm_failed", error=str(e))
+
         if not (api_key and config.llm.provider == "openrouter"):
             return
         try:
@@ -2149,9 +2427,11 @@ async def build_services(
     # ── Search provider runtime ────────────────────────────────────
     async def _configure_search_provider() -> None:
         try:
+            import opensquilla.search.providers.bocha  # noqa: F401 — registers provider
             import opensquilla.search.providers.brave  # noqa: F401 — registers provider
             import opensquilla.search.providers.duckduckgo  # noqa: F401 — registers provider
             import opensquilla.search.providers.exa  # noqa: F401 — registers provider
+            import opensquilla.search.providers.iqs  # noqa: F401 — registers provider
             import opensquilla.search.providers.tavily  # noqa: F401 — registers provider
             from opensquilla.tools.builtin.web import configure_search
 
@@ -2276,8 +2556,12 @@ async def build_services(
                 meta_run_writer = open_meta_run_writer(db_path)
                 if meta_storage is not None and hasattr(meta_storage, "_meta_run_writer"):
                     meta_storage._meta_run_writer = meta_run_writer
-                meta_run_writer.mark_orphans_failed(
-                    age_ms=int(getattr(persistence_cfg, "orphan_cleanup_age_seconds", 3600)) * 1000,
+                # Synchronous SQLite commit — run off the loop even at boot so a
+                # contended WAL write cannot stall service startup wiring.
+                await asyncio.to_thread(
+                    meta_run_writer.mark_orphans_failed,
+                    age_ms=int(getattr(persistence_cfg, "orphan_cleanup_age_seconds", 3600))
+                    * 1000,
                 )
     except Exception as e:  # noqa: BLE001 - meta traces must not block boot.
         log.warning("build_services.meta_run_writer_failed", error=str(e))
@@ -2334,6 +2618,32 @@ async def build_services(
             pass
         router_decision_writer = None
 
+    # ── Turn error records (V019 turn_errors) ──────────────────────────
+    # Same yoyo-only-table pattern as router_decision_writer: the writer
+    # exists only when the session DB is real (not :memory:).
+    turn_error_writer = None
+    try:
+        errors_storage = get_session_storage(session_manager)
+        errors_db_path = (
+            getattr(errors_storage, "_db_path", None)
+            if errors_storage is not None
+            else None
+        )
+        if errors_db_path and errors_db_path != ":memory:":
+            from opensquilla.persistence.turn_error_writer import (
+                open_turn_error_writer,
+            )
+
+            turn_error_writer = open_turn_error_writer(errors_db_path)
+    except Exception as e:  # noqa: BLE001 - error records must not block boot.
+        log.warning("build_services.turn_error_writer_failed", error=str(e))
+        try:
+            if turn_error_writer is not None:
+                turn_error_writer.close()
+        except Exception:
+            pass
+        turn_error_writer = None
+
     # ── Router calibration (opt-in 24h in-process job) ──────────────
     # Only when squilla_router.calibration_enabled is true AND a real decision
     # writer exists. Default-off: no service is constructed, so gateway boot is
@@ -2357,6 +2667,11 @@ async def build_services(
         log.warning("build_services.router_calibration_service_failed", error=str(e))
         router_calibration_service = None
 
+    # ── Provider call stats (rolling latency/health samples) ────────
+    from opensquilla.gateway.provider_stats import ProviderStatsStore
+
+    provider_stats = ProviderStatsStore()
+
     svc = ServiceContainer(
         config=config,
         provider_selector=provider_selector,
@@ -2377,12 +2692,45 @@ async def build_services(
         memory_repair_service=memory_repair_service,
         meta_run_writer=meta_run_writer,
         router_decision_writer=router_decision_writer,
+        turn_error_writer=turn_error_writer,
         router_calibration_service=router_calibration_service,
+        provider_stats=provider_stats,
         deferred_warmups=deferred_warmups,
     )
     # Attach deferred callback ref so start_gateway_server can wire TurnRunner
     svc._turn_runner_ref = _turn_runner_ref  # type: ignore[attr-defined]
     return svc
+
+
+def build_provider_call_observer(provider_stats: Any) -> Callable[..., None] | None:
+    """Adapt a ``ProviderStatsStore`` to the engine's provider-call observer seam.
+
+    Returns ``None`` when no store is available so the TurnRunner/Agent path
+    stays observer-free. Module-level so boot-wiring tests can drive the
+    adapter with a fake store without booting a gateway.
+    """
+    if provider_stats is None:
+        return None
+
+    def _observe_provider_call(
+        *,
+        provider_id: str,
+        model: str,
+        ttft_ms: int | None,
+        duration_ms: int,
+        ok: bool,
+        failure_kind: str = "",
+    ) -> None:
+        provider_stats.record(
+            provider_id=provider_id,
+            model=model,
+            ttft_ms=ttft_ms,
+            duration_ms=duration_ms,
+            ok=ok,
+            failure_kind=failure_kind,
+        )
+
+    return _observe_provider_call
 
 
 def build_turn_runner_from_services(
@@ -2433,6 +2781,10 @@ def build_turn_runner_from_services(
         turn_hooks=getattr(svc, "turn_hooks", None),
         compaction_hooks=getattr(svc, "compaction_hooks", None),
         meta_run_writer=getattr(svc, "meta_run_writer", None),
+        turn_error_writer=getattr(svc, "turn_error_writer", None),
+        provider_call_observer=build_provider_call_observer(
+            getattr(svc, "provider_stats", None)
+        ),
     )
 
 
@@ -2907,7 +3259,9 @@ async def start_gateway_server(
             *,
             triggered_by: str,
         ) -> MetaOrchestrator:
-            if svc.provider_selector is None:
+            if svc.provider_selector is None or not getattr(
+                svc.provider_selector, "is_configured", True
+            ):
                 raise RuntimeError("auto_propose provider not configured")
             provider_selector = svc.provider_selector
             router_cfg = getattr(config, "squilla_router", None)
@@ -2978,6 +3332,7 @@ async def start_gateway_server(
 
             base_config = AgentConfig(
                 model_id=auto_model_id,
+                provider_id=getattr(provider_selector, "active_provider_id", ""),
                 workspace_dir=workspace_str,
                 metadata=auto_metadata,
             )
@@ -3055,10 +3410,46 @@ async def start_gateway_server(
                 agent_ids=auto_agent_ids,
             )
 
+        async def _maybe_run_router_self_learning(agent_id: str) -> None:
+            """Opportunistic router retrain, piggybacking on the dream cadence.
+
+            Gated (off by default) and run in a worker thread so the
+            subprocess-bounded LightGBM fit never blocks the event loop. Never
+            raises onto the dream hook.
+            """
+            router_cfg = getattr(config, "squilla_router", None)
+            sl_cfg = getattr(router_cfg, "self_learning", None)
+            if sl_cfg is None or not bool(getattr(sl_cfg, "enabled", False)):
+                return
+            try:
+                import anyio
+
+                from opensquilla.squilla_router.self_learning.orchestrator import (
+                    maybe_run_update_router,
+                )
+
+                result = await anyio.to_thread.run_sync(
+                    lambda: maybe_run_update_router(agent_id, router_cfg=router_cfg)
+                )
+                log.info(
+                    "router_self_learning.post_dream",
+                    agent_id=agent_id,
+                    ran=result.ran,
+                    reason=result.reason,
+                    version=result.version,
+                )
+            except Exception as exc:  # never poison the dream hook
+                log.warning(
+                    "router_self_learning.post_dream_error",
+                    agent_id=agent_id,
+                    error=str(exc),
+                )
+
         async def _post_dream_auto_propose(
             agent_id: str,
             dream_summary: str = "",
         ) -> None:
+            await _maybe_run_router_self_learning(agent_id)
             if not bool(getattr(auto_cfg, "on_dream_complete", False)):
                 return
             result = await auto_propose(
@@ -3152,6 +3543,22 @@ async def start_gateway_server(
             memory_config=config.memory,
             agent_ids=_configured_agent_ids(config),
         )
+        _warn_if_self_learning_unreachable(config)
+
+        async def _reconcile_dream_runtime_crons() -> None:
+            # Re-run the idempotent registrar against the LIVE config object:
+            # a config RPC edit (e.g. the self-learning -> dream linkage) has
+            # already mutated it in place by the time this fires, so jobs are
+            # created/resumed/paused to match without a gateway restart.
+            await _register_dream_crons(
+                scheduler=svc.cron_scheduler,
+                memory_config=config.memory,
+                agent_ids=_configured_agent_ids(config),
+            )
+
+        from opensquilla.gateway.dream_bridge import register_dream_reconciler
+
+        register_dream_reconciler(_reconcile_dream_runtime_crons)
         if bool(getattr(auto_cfg, "enabled", False)):
             await _register_auto_propose_runtime_crons()
         else:
@@ -3218,6 +3625,7 @@ async def start_gateway_server(
         heartbeat_loop=heartbeat_loop,
         agent_registry=svc.agent_registry,
         diagnostics_state=diagnostics_state,
+        provider_stats=getattr(svc, "provider_stats", None),
         memory_managers=svc.memory_managers,
         memory_stores=svc.memory_stores,
         memory_retrievers=svc.memory_retrievers,

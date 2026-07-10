@@ -50,15 +50,17 @@
   "nav": {
     "chat": "Chat",
     "sessions": "Sessions",
-    "approvals": "Approvals",
     "agents": "Agents",
     "channels": "Channels",
     "cron": "Cron",
     "skills": "Skills",
+    "rag": "RAG",
     "overview": "Overview",
     "usage": "Usage",
     "logs": "Logs",
-    "settings": "Settings"
+    "settings": "Settings",
+    "groupBuild": "Build",
+    "groupMonitor": "Monitor"
   },
   "chrome": {
     "settings": "Settings",
@@ -77,10 +79,20 @@
       "connecting": "Connecting",
       "disconnected": "Disconnected"
     },
+    "bgm": {
+      "label": "Background music",
+      "play": "Play background music",
+      "pause": "Pause background music",
+      "volume": "Volume",
+      "chooseLocalFile": "Choose local file…",
+      "noTracks": "No tracks bundled — add files to music/ or pick a local file"
+    },
     "brandHome": "OpenSquilla home",
     "controlNav": "Control navigation",
     "primaryNav": "Primary",
     "primaryMobile": "Primary mobile",
+    "moreThemes": "More themes…",
+    "moreThemesHint": "Additional themes are available in Appearance settings",
     "themeMode": {
       "light": "Light",
       "dark": "Dark",
@@ -94,7 +106,9 @@
       "themeLabel": "Theme",
       "themeDesc": "Follow your system, or force light or dark. The sidebar toggle is a shortcut to this same setting.",
       "languageLabel": "Language",
-      "languageDesc": "Display language for the interface. Applies instantly to this browser."
+      "languageDesc": "Display language for the interface. Applies instantly to this browser.",
+      "bgmLabel": "Background music",
+      "bgmDesc": "Show the background-music control in the top bar. Off by default; also toggleable from the command palette."
     },
     "dialog": {
       "title": "Settings",
@@ -115,7 +129,7 @@
     "rail": {
       "connection": "Connection",
       "runtime": "Runtime",
-      "provider": "Chat Model",
+      "provider": "Model Service",
       "modelStrategy": "Model Routing",
       "behavior": "Behavior",
       "privacy": "Privacy",
@@ -153,6 +167,12 @@
     }
   },
   "setup": {
+    "cli": {
+      "advancedTitle": "Advanced · built-in CLI",
+      "hintBundled": "These commands use the CLI bundled with the app; paste into a terminal to run.",
+      "hintDev": "Dev mode: commands run from the source checkout via uv.",
+      "restartHint": "Use the app's Settings → Runtime → Restart to apply."
+    },
     "common": {
       "apiKey": "API key",
       "apiKeyEnv": "API key env",
@@ -213,9 +233,29 @@
       "routerReady": "SquillaRouter ready",
       "directOnly": "Direct only",
       "chooseToSeeFields": "Choose a provider to see required fields.",
+      "recommendation": {
+        "title": "Recommended: TokenRhythm",
+        "value": "TokenRhythm API calls are free for a limited time.",
+        "registration": "During the promotion, register and get an API key to call DeepSeek, GLM, MiniMax, Kimi, and other leading models for free.",
+        "cta": "Register and get an API key",
+        "externalLabel": "Register and get an API key — TokenRhythm (opens in a new tab)",
+        "stepsLabel": "How to connect TokenRhythm",
+        "stepRegister": "Create a TokenRhythm account",
+        "stepCopy": "Copy your API key",
+        "stepPaste": "Paste it into the API key field below",
+        "stepSelectAndPaste": "Select TokenRhythm above, then paste your API key",
+        "stepReplaceAndPaste": "Choose Replace key below, then paste your API key"
+      },
       "advanced": "Advanced provider options",
       "timeoutLabel": "Request timeout (seconds)",
       "timeoutDesc": "How long to wait for a single model response before timing out — raise this for slow local models (Ollama, vLLM, LM Studio).",
+      "contextWindowLabel": "Context window override (tokens)",
+      "contextWindowDesc": "Cap the prompt-assembly budget for this model. Leave blank to use the auto-detected window.",
+      "contextWindowAuto": "auto",
+      "contextWindowUnknown": "unknown",
+      "contextWindowNone": "none",
+      "contextWindowReadout": "auto-detected {auto} · override {override} · effective {effective}",
+      "contextWindowLocalWarning": "Effective context window is {tokens} tokens. Local runtimes often default to a small window — raise the override if your model supports more.",
       "envMissing": "{envKey} is not visible to this gateway process. Set it before starting or restarting the gateway, or paste an API key instead.",
       "envKeyFallback": "the selected API key environment variable",
       "copyKeyCommand": "Copy set provider key command",
@@ -234,6 +274,7 @@
       "viewCredential": "View",
       "replaceCredential": "Replace key",
       "credentialReplacePlaceholder": "Paste a replacement API key",
+      "credentialEnterPlaceholder": "Paste your API key",
       "showApiKey": "Show API key",
       "hideApiKey": "Hide API key",
       "credentialAdvanced": "Advanced",
@@ -246,6 +287,8 @@
       "keyRejected": "✗ Key rejected — {reason}",
       "notReachable": "✗ Couldn't connect — {reason}",
       "discoverFailed": "Couldn't list models — type a model id.",
+      "verdictModels": "{count} models · e.g. {samples}",
+      "verdictSampleJoiner": ", ",
       "failureAuth": "The provider rejected this API key.",
       "failureCredits": "This account has no credits left.",
       "failureRateLimited": "The provider is rate-limiting requests — try again in a moment.",
@@ -278,14 +321,16 @@
     "modelStrategy": {
       "title": "Model routing",
       "desc": "Choose how Squilla uses the current model for each new request.",
-      "providerFirst": "Choose a Chat Model first, then choose how routing should work.",
-      "providerAction": "Go to Chat Model →",
+      "providerFirst": "Choose a Model Service first, then choose how routing should work.",
+      "providerAction": "Go to Model Service →",
       "routerTitle": "AI single-model routing",
+      "visualModeLabel": "Routing panel style",
+      "visualModeDesc": "How the routing decision panel renders in chat replies.",
       "routerDependency": "Uses {provider} credentials; default model is {model}.",
       "ensembleTitle": "AI ensemble routing",
       "ensembleDependency": "Uses {provider} credentials; default model is {model}.",
       "ensembleMinimum": "Add at least one more candidate to benefit from ensemble routing.",
-      "ensembleFailure": "If every candidate fails, fall back to the current model: {provider} · {model}.",
+      "ensembleFailure": "When fusion cannot proceed, fall back to the current model: {provider} · {model}.",
       "singleTitle": "Off",
       "singleDependency": "Every turn goes to the current model: {provider} · {model}.",
       "singleDesc": "AI routing and ensemble routing are off for new requests.",
@@ -304,33 +349,57 @@
           "desc": "Send every turn to the current selected model."
         }
       },
-      "candidatesLabel": "Candidate models",
-      "candidatesDesc": "Model tiers are included automatically. Add custom candidates for broader coverage.",
-      "candidateSourceTier": "From model tiers",
-      "candidateSourceCustom": "Custom",
-      "candidateSourceLegacy": "From old config",
-      "candidateSourceOpenRouterFixed": "OpenRouter fixed ensemble",
-      "customCandidatesLabel": "Custom cross-provider candidates",
-      "openrouterFixedTitle": "OpenRouter fixed ensemble",
-      "openrouterFixedDesc": "When Chat Model uses OpenRouter, ensemble routing uses four proposer models and one aggregator.",
-      "customizeOpenRouterLabel": "Customize ensemble",
-      "customizeOpenRouterDesc": "Switch to router-based ensemble routing with the legacy OpenRouter candidate template.",
+      "openrouterFixedTitle": "{provider} fixed ensemble",
+      "openrouterFixedDesc": "When your Model Service uses {provider}, ensemble routing uses four proposer models and one aggregator.",
       "openrouterFixedProposer": "Proposer model",
       "openrouterFixedAggregator": "Aggregator",
       "credentialReady": "Connected",
       "credentialNeeded": "{provider} credentials needed",
       "credentialMissingEnv": "Needs {envKey}",
       "credentialUnknown": "Credentials not checked",
-      "addCandidatePlaceholder": "provider/model-id",
       "addCandidateProviderLabel": "Candidate provider",
       "addCandidateProviderPlaceholder": "provider",
       "addCandidateModelLabel": "Candidate model",
       "addCandidateModelPlaceholder": "model-id",
       "addCandidate": "Add candidate",
-      "resetCandidates": "Reset to current tier candidates",
       "removeCandidateAria": "Remove {model}",
-      "ensembleEmpty": "No candidate models yet. Save your Chat Model to seed model tiers, or add candidates manually.",
-      "ensembleFailureLabel": "If every candidate fails"
+      "ensembleEmpty": "No candidate models yet. Save your Model Service settings to seed model tiers, or add candidates manually.",
+      "ensemblePipeline": "How it works: proposer models draft in parallel, then the aggregator fuses the drafts into the final reply. Only the aggregator can call tools.",
+      "legacyDynamicNotice": "This configuration uses the retired automatic ensemble mode. Convert it to a custom lineup to keep editing it here.",
+      "legacyDynamicMigrate": "Convert to custom lineup",
+      "schemeLabel": "Ensemble scheme",
+      "schemePresetTitle": "Preset ensemble",
+      "schemePresetBadge": "Recommended",
+      "schemePresetDesc": "The provider's tuned lineup: four proposers plus one aggregator, ready to use.",
+      "schemeCustomTitle": "Custom ensemble",
+      "schemeCustomBadge": "Advanced",
+      "schemeCustomDesc": "Build your own lineup with roles; mix providers when needed.",
+      "presetNoteDeepseek": "Reasoning anchor — baseline drafts for complex tasks",
+      "presetNoteGlm": "Long-form and structured output — contrasts the DeepSeek family",
+      "presetNoteKimi": "Code and tool intent — covers programming requests",
+      "presetNoteQwen": "Knowledge and multilingual coverage",
+      "presetNoteGeneric": "Proposer draft",
+      "aggregatorNote": "Fuses every draft into the final answer; the only member that can call tools",
+      "aggregatorSectionLabel": "Aggregator",
+      "aggregatorSectionDesc": "Exactly one aggregator produces the final answer. Pick the strongest model in your lineup.",
+      "aggregatorInheritedNote": "No aggregator assigned — the current chat model fuses the drafts",
+      "proposerSectionLabel": "Proposer models",
+      "proposerSectionDesc": "Proposers draft in parallel; wall-clock time follows the slowest one.",
+      "proposerCount": "{count} / {max} · {recommendedMin}–{recommendedMax} recommended",
+      "importTierCandidates": "Import from model tiers",
+      "roleSelectAria": "Role for {model}",
+      "roleUnassigned": "No role",
+      "role_primary": "Primary",
+      "role_contrast": "Contrast",
+      "role_fast_check": "Fast check",
+      "role_critic": "Critic",
+      "role_aggregator": "Aggregator",
+      "addCandidateRoleLabel": "Candidate role",
+      "capacityWarn": "{calls} model calls per turn — cost grows linearly and fusion gains taper past 4 proposers.",
+      "capacityFull": "Limit of {max} proposers reached — more drafts stop improving fusion; remove one before adding another.",
+      "diversityHint": "Several proposers share a model family — adding a different vendor usually improves fusion.",
+      "effectiveFacts": "Per turn: {calls} model calls · fuses once {quorum}/{proposers} proposers succeed · proposer timeout {proposerTimeout}s · aggregator timeout {aggregatorTimeout}s · {grace}s grace after quorum",
+      "quorumFailureLabel": "If fewer than {quorum} proposers succeed"
     },
     "behavior": {
       "title": "Session behavior",
@@ -382,27 +451,8 @@
       }
     },
     "ensemble": {
-      "title": "AI ensemble routing",
       "statusOn": "AI ensemble routing is on — several models answer and one model synthesizes the final reply.",
       "statusOff": "AI ensemble routing is off.",
-      "enabledLabel": "Use AI ensemble routing",
-      "enabledDesc": "Ask several models at once and synthesize one final reply.",
-      "selectionLabel": "Model selection",
-      "selectionDesc": "How the ensemble picks which models to ask.",
-      "selectionStatic": "Legacy built-in model set",
-      "selectionDynamic": "Dynamic (follows model tiers)",
-      "rawValueTooltip": "Config value: {value}",
-      "modelsLabel": "Candidate models",
-      "modelsDesc": "Models the dynamic selection may ask.",
-      "modelsStaticHint": "The legacy built-in selection uses its internal model set — the candidate list only applies to Dynamic.",
-      "addModelPlaceholder": "provider/model-id",
-      "addModel": "Add",
-      "removeModelAria": "Remove {model}",
-      "openrouterKeyHint": "The legacy OpenRouter selection needs an OpenRouter key (or OPENROUTER_API_KEY) — otherwise it stays inactive.",
-      "advanced": "Advanced ensemble options",
-      "minSuccessfulLabel": "Minimum successful answers",
-      "minSuccessfulDesc": "How many models must answer before the ensemble keeps a result.",
-      "allFailedLabel": "If every model fails",
       "allFailedFallback": "Fall back to a single model",
       "allFailedError": "Stop and report an error"
     },
@@ -559,7 +609,30 @@
       "uninstallPurgePrimary": "Delete data",
       "uninstallDone": "Desktop cleanup complete. The app will now close; remove OpenSquilla through your OS if you want to uninstall the app itself.",
       "uninstallFailed": "Cleanup failed: {detail}",
-      "uninstallCheckLog": "check the gateway log."
+      "uninstallCheckLog": "check the gateway log.",
+      "migrationLabel": "Import legacy data",
+      "migrationDesc": "Find an older OpenSquilla home on this machine and import it into this runtime.",
+      "migrationButton": "Import legacy data",
+      "migrationNone": "No legacy data found.",
+      "migrationSummaryFailed": "Could not check for legacy data: {detail}",
+      "migrationSummaryTitle": "Legacy data found",
+      "migrationCountPlanned": "{n} planned",
+      "migrationCountMigrated": "{n} migrated",
+      "migrationCountSkipped": "{n} skipped",
+      "migrationCountError": "{n} with errors",
+      "migrationCountNone": "No items to import.",
+      "migrationPausedJobs": "Scheduler jobs (imported paused): {n}",
+      "migrationDisk": "Disk: {required} required, {free} free",
+      "migrationOverwrite": "Overwrite existing data (timestamped backups are taken)",
+      "migrationImport": "Import",
+      "migrationCancel": "Cancel",
+      "migrationConfirmTitle": "Import legacy data?",
+      "migrationConfirmBody": "The local runtime stops while the import runs and restarts when it finishes. This page will briefly lose its connection.",
+      "migrationConfirmPrimary": "Import",
+      "migrationStarted": "Import started — the local runtime is restarting and this page will reconnect shortly.",
+      "migrationDone": "Legacy data imported. The local runtime is restarting.",
+      "migrationFailed": "Import failed: {detail}",
+      "migrationPhase": "Progress: {phase}"
     },
     "keyboard": {
       "title": "Keyboard",
@@ -651,6 +724,35 @@
       "offSurfacesError": "off surfaces the original provider error.",
       "audioEnvVar": "Environment variable to read for audio provider access.",
       "remoteEmbeddingKey": "Remote embedding API key or env reference."
+    },
+    "memoryLearning": {
+      "groupTitle": "Memory & self-learning",
+      "dreamLabel": "Memory consolidation (dream)",
+      "tokenBadge": "token usage",
+      "dreamDesc": "Periodically runs a model pass to consolidate session memory (every 24h). Model-routing self-learning relies on it for idle training windows.",
+      "selfLearningLabel": "Model-routing self-learning",
+      "selfLearningDesc": "Learns routing preferences from your corrections. Fully on-device — stores feature vectors, never raw conversation text.",
+      "depDefault": "Depends on memory consolidation above: turning this on enables it too; turning consolidation off alone keeps sampling but pauses automatic training.",
+      "depLinked": "Memory consolidation was enabled together with this. You can switch it off independently — self-learning keeps sampling, only automatic training pauses.",
+      "depPaused": "Memory consolidation is off — samples are still collected, but no automatic training runs. Re-enable it to resume.",
+      "restartRequired": "A gateway restart is needed for the schedule change to take effect.",
+      "statusModel": "Routing model",
+      "statusSamples": "Corrections",
+      "statusLastAction": "Last action",
+      "modelBaseline": "Factory baseline",
+      "modelLearned": "Learned v{version}",
+      "samplesTotal": "{total} collected in total",
+      "gatePausedDream": "Training paused — waiting for memory consolidation to be re-enabled",
+      "gateReason": {
+        "ready": "Ready — will train at the next window",
+        "disabled": "Disabled",
+        "no_data": "No samples collected yet",
+        "agent_active": "Waiting for an idle window",
+        "cooldown": "Cooling down after a recent training run",
+        "insufficient_data": "Not trained yet — not enough corrections",
+        "insufficient_class_diversity": "Not trained yet — corrections cover too few routing tiers"
+      },
+      "detachedNote": "The base routing weights were upgraded. Learning built on the old weights was archived; your corrections are unaffected and will retrain automatically on the new weights. No action needed."
     }
   },
   "sessions": {
@@ -697,6 +799,8 @@
       "timeout": "Timed out",
       "interrupted": "Interrupted",
       "cancelled": "Cancelled",
+      "outputInterrupted": "Output interrupted",
+      "stoppedAfterSeconds": "Stopped after {seconds}s",
       "idle": "Idle"
     },
     "relTime": {
@@ -779,6 +883,7 @@
       "abortFailed": "Abort failed."
     },
     "overview": {
+      "title": "Overview",
       "subtitle": "Live status, recent sessions, and the event stream.",
       "openChat": "Open chat",
       "totalTokens": "Total tokens",
@@ -805,6 +910,7 @@
       "loadingHealth": "Loading health report",
       "noFindings": "No findings returned.",
       "recoveryRestart": "Recovery requires restart",
+      "openSettings": "Open settings",
       "findingFallback": "Finding {n}",
       "copyCommand": "Copy command",
       "step": "Step",
@@ -891,7 +997,15 @@
         "runLocalDoctorDetail": "Checks local config and onboarding before restarting the gateway.",
         "startLocal": "Start local gateway",
         "inspectLocal": "Inspect local gateway"
-      }
+      },
+      "checkedAgo": "Checked {time}",
+      "rerunChecks": "Re-run checks",
+      "copyDiagnostics": "Copy diagnostics JSON",
+      "copiedDiagnostics": "Diagnostics JSON copied",
+      "diagnoseWithAgent": "Diagnose with agent",
+      "diagnosePrompt": "Please troubleshoot this OpenSquilla configuration using the doctor report below; propose the root cause and minimal fix steps; do not run destructive commands.",
+      "environment": "Environment",
+      "latency": "Latency"
     }
   },
   "console": {
@@ -905,7 +1019,7 @@
       "title": "Agents",
       "subtitle": "Custom personalities and skill sets you can chat with.",
       "settingsHint": "Provider and model defaults live in Settings",
-      "openSettings": "open settings",
+      "openSettings": "Open settings",
       "totalAgents": "Total agents",
       "builtinCount": "{n} built-in",
       "customCount": "{n} custom",
@@ -971,7 +1085,7 @@
       "title": "Channels",
       "subtitle": "Runtime status for configured channels. Add or change channel configuration in Settings or the CLI.",
       "settingsHint": "Channel configuration lives in Settings",
-      "openSettings": "open settings",
+      "openSettings": "Open settings",
       "totalChannels": "Total channels",
       "typeCount": "{n} types",
       "connected": "Connected",
@@ -998,40 +1112,6 @@
       "hintRestarting": "Adapter is restarting after dispatch errors.",
       "hintExhausted": "Adapter exhausted its retry budget. Try `{cmd}`.",
       "hintConfiguredInactive": "Configured on disk but not active in this gateway process — restart the gateway to load it."
-    },
-    "approvals": {
-      "eyebrow": "Control · Approvals",
-      "title": "Approvals",
-      "subtitle": "Tool execution gate — keep risky actions paused until you say go.",
-      "pending": "Pending",
-      "awaitingDecision": "awaiting decision",
-      "allClear": "all clear",
-      "strategy": "Strategy",
-      "strategyTitle": "How approvals are handled",
-      "strategyAriaLabel": "Approval strategy",
-      "modePromptLabel": "Ask every time",
-      "modePromptDesc": "Every risky tool execution opens an approval prompt.",
-      "modeAutoApproveLabel": "Auto approve",
-      "modeAutoApproveDesc": "All tool executions are automatically approved.",
-      "modeAutoDenyLabel": "Auto deny",
-      "modeAutoDenyDesc": "All tool executions are automatically denied.",
-      "emptyTitle": "No pending approvals.",
-      "emptyText": "When an agent reaches a risky tool call, it will appear here for your sign-off.",
-      "pendingRequests": "Pending requests",
-      "agent": "Agent",
-      "session": "Session",
-      "command": "Command",
-      "details": "Details",
-      "unknownTool": "Unknown",
-      "approveOnce": "Approve once",
-      "allowSameType": "Allow same type",
-      "deny": "Deny",
-      "loadFailed": "Failed to load approvals: {msg}",
-      "approved": "Approved",
-      "denied": "Denied",
-      "toastFailed": "Failed: {msg}",
-      "toastStrategy": "Approval strategy: {mode}",
-      "toastStrategyFailed": "Failed to save strategy: {msg}"
     }
   },
   "cronSkills": {
@@ -1379,6 +1459,8 @@
       "installVia": "Install via {kind}",
       "installing": "Installing...",
       "homepage": "Homepage",
+      "loadingContent": "Loading SKILL.md...",
+      "emptyContent": "No SKILL.md content available.",
       "removing": "Removing...",
       "remove": "Remove"
     },
@@ -1561,7 +1643,8 @@
         "label": "Ephemeral",
         "tooltip": "Ephemeral session — cost not yet persisted",
         "short": "ephemeral"
-      }
+      },
+      "cacheBlindHint": "Includes estimates that price cached tokens at the full input rate — treat as an upper bound."
     },
     "relTime": {
       "justNow": "just now",
@@ -1576,26 +1659,27 @@
     "logs": {
       "eyebrow": "Control · Logs",
       "title": "Logs",
-      "subtitle": "Live gateway log stream — filter, follow, and export.",
+      "subtitle": "Live gateway log stream — filter and follow.",
       "statusUnavailable": "Log status unavailable",
       "statusUnavailableAria": "Log status unavailable; log tailing can still work.",
       "statusUnavailableTitle": "logs.status is unavailable; log tailing can still work.",
       "fileLogOn": "File log on",
       "fileLogOff": "File log off",
-      "fileLogAriaOn": "File log on. Path: {path}. Configurable via log_file_enabled, log_level, rotation, and OPENSQUILLA_LOG_DIR.",
-      "fileLogAriaOff": "File log off. Path: {path}. Configurable via log_file_enabled, log_level, rotation, and OPENSQUILLA_LOG_DIR.",
       "fileLogTitle": "Gateway file logging is configurable via log_file_enabled, log_level, rotation settings, and OPENSQUILLA_LOG_DIR. Path: {path}.",
-      "rawOn": "Raw turn-call on",
-      "rawOff": "Raw turn-call off",
-      "rawAriaOn": "Raw turn-call on. Source: {source}. Directory: {path}. Enable with OPENSQUILLA_TURN_CALL_LOG=1.",
-      "rawAriaOff": "Raw turn-call off. Source: {source}. Directory: {path}. Enable with OPENSQUILLA_TURN_CALL_LOG=1.",
-      "rawTitle": "Raw turn-call capture is enabled by OPENSQUILLA_TURN_CALL_LOG=1 or opensquilla diagnostics on --raw. Source: {source}. Directory: {path}.",
-      "diagnosticsCopyRaw": "Diagnostics raw mode is active for future turns. Raw source: {source}.",
-      "diagnosticsCopyStandard": "Standard diagnostics and raw capture are separate levels. Use opensquilla diagnostics on --raw for raw turn-call capture.",
-      "diagnosticsRaw": "Diagnostics raw",
-      "diagnosticsStandard": "Diagnostics standard",
-      "diagnosticsOff": "Diagnostics off",
-      "exportTitle": "Download filtered log lines",
+      "fileLogOffTitle": "Logs are not written to disk; diagnostic bundles will lack history. Enable log_file_enabled in config. Path: {path}.",
+      "rawOn": "Raw capture on",
+      "rawOff": "Raw capture off",
+      "rawRecordingPill": "Raw capture recording",
+      "rawTitle": "Raw capture records full model requests and responses, including conversation content. Enable with OPENSQUILLA_TURN_CALL_LOG=1 or opensquilla diagnostics on --raw; turn off with opensquilla diagnostics off. Source: {source}. Directory: {path}.",
+      "bundleButton": "Diagnostic bundle",
+      "bundleButtonTitle": "Download a redacted diagnostics bundle",
+      "bundleTitle": "Download diagnostics bundle",
+      "bundleBody": "Collects gateway logs, error records, and redacted configuration into one zip you can attach to a bug report. Secrets and API keys are removed; conversation content is excluded unless you opt in below.",
+      "bundleIncludeContent": "Include conversation content (prompts and responses)",
+      "bundleConfirm": "Download",
+      "bundleCancel": "Cancel",
+      "bundleFailed": "Diagnostics download failed",
+      "bundleReady": "Diagnostics bundle downloaded",
       "inView": "In view",
       "ofLoaded": "of {total} loaded",
       "errors": "Errors",
@@ -1611,7 +1695,8 @@
       "autoFollow": "Auto-follow",
       "loading": "Loading logs…",
       "noMatch": "No lines match the current filter.",
-      "lineDetail": "Log line detail"
+      "lineDetail": "Log line detail",
+      "ofLoadedFoot": "{visible} in view · {total} buffered"
     }
   },
   "chat": {
@@ -1628,7 +1713,7 @@
     "removeAttachment": "Remove attachment",
     "remove": "Remove",
     "attachFiles": "Attach files",
-    "attachFilesTitle": "Attach files: PNG, JPEG, GIF, WEBP, PDF, TXT, MD, HTML, CSV, JSON",
+    "attachFilesTitle": "Attach files: any file type (images, PDF, Office, and text are read directly; other files go to the agent workspace)",
     "dropOverlayTitle": "Drop to attach",
     "dropOverlayHint": "Files will be added to the composer",
     "composerSettings": "Composer settings",
@@ -1918,6 +2003,12 @@
       "stillWaiting": "Still waiting for model",
       "stillWorking": "Still working — last signal {seconds}s ago"
     },
+    "stall": {
+      "title": "Response may be stalled",
+      "detail": "No new output for {seconds}s — the model may be stuck.",
+      "keepWaiting": "Keep waiting",
+      "interrupt": "Interrupt turn"
+    },
     "msgMeta": {
       "ensembleModels": "Ensemble · {count} models",
       "tokens": "tokens",
@@ -1932,6 +2023,14 @@
     },
     "modelRouting": {
       "updateFailed": "Couldn't switch model routing — reverted. Check the gateway connection and try again."
+    },
+    "routeFeedback": {
+      "up": "Right model choice for this turn",
+      "down": "Wrong model choice for this turn",
+      "upEnsemble": "Satisfied with this aggregated answer",
+      "downEnsemble": "Unsatisfied with this aggregated answer",
+      "expired": "This message’s routing record has expired",
+      "failed": "Could not record your rating"
     }
   },
   "shared": {
@@ -1951,7 +2050,9 @@
       "groupMessages": "Messages",
       "actionNewChat": "New chat",
       "actionOpenSettings": "Open Settings",
-      "actionToggleTheme": "Toggle theme"
+      "actionToggleTheme": "Toggle theme",
+      "actionBgmEnable": "Enable background music",
+      "actionBgmDisable": "Disable background music"
     },
     "toast": {
       "dismiss": "Dismiss notification"
@@ -2009,6 +2110,16 @@
       "hint": "The gateway isn't ready to run yet.",
       "finishSetup": "Finish setup",
       "viewReadiness": "View readiness"
+    },
+    "legacyDataBanner": {
+      "ariaLabel": "Legacy OpenSquilla data found",
+      "title": "Legacy OpenSquilla data found",
+      "dismiss": "Dismiss",
+      "dismissNotice": "Dismiss legacy data notice",
+      "hintWeb": "Stop the gateway, then run this command to import it:",
+      "hintDesktop": "Import it from Settings → Runtime with the “Import legacy data” action.",
+      "openSettings": "Open runtime settings",
+      "copyCommand": "Copy migrate command"
     },
     "shortcuts": {
       "commandPalette": {

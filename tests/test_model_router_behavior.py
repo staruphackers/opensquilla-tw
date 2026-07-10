@@ -98,7 +98,10 @@ def make_context(
     raw_message: str | None = None,
     attachments: list[dict] | None = None,
 ) -> TurnContext:
-    config = GatewayConfig()
+    # Pin the packaged openrouter ladder: these tests assert tier moves by
+    # their distinct per-tier models, which the tokenrhythm default's uniform
+    # synthesized ladder cannot express.
+    config = GatewayConfig(llm={"provider": "openrouter"})
     config.squilla_router.rollout_phase = rollout_phase
     return TurnContext(
         message=message,
@@ -325,7 +328,7 @@ async def test_p2_prompt_hint_is_recorded_but_not_injected(
 
     routed = await apply_squilla_router(ctx)
 
-    assert routed.model == "z-ai/glm-5.2"
+    assert routed.model == "anthropic/claude-opus-4.8"
     assert routed.metadata["routed_tier"] == "c3"
     assert routed.metadata["thinking_level"] == "high"
     assert routed.metadata["prompt_policy"] == "P2"
@@ -630,7 +633,7 @@ async def test_anti_downgrade_keeps_previous_high_tier_without_margin_gate(
     extra = routed2.metadata["routing_extra"]
 
     assert routed2.metadata["routed_tier"] == "c3"
-    assert routed2.model == "z-ai/glm-5.2"
+    assert routed2.model == "anthropic/claude-opus-4.8"
     assert extra["anti_downgrade_applied"] is True
     assert extra["previous_tier"] == "c3"
     assert extra["kv_cache_window_seconds"] == 600
@@ -699,7 +702,7 @@ async def test_complaint_upgrade_starts_from_previous_experienced_tier(
     extra = routed2.metadata["routing_extra"]
 
     assert routed2.metadata["routed_tier"] == "c3"
-    assert routed2.model == "z-ai/glm-5.2"
+    assert routed2.model == "anthropic/claude-opus-4.8"
     assert extra["previous_tier"] == "c2"
     assert extra["complaint_detected"] is True
     assert extra["complaint_upgrade_applied"] is True
@@ -936,6 +939,69 @@ async def test_image_route_uses_first_configured_image_tier_without_random_choic
 
 
 @pytest.mark.asyncio
+async def test_image_route_records_tier_provider_for_cross_provider_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        squilla_router_step,
+        "_get_strategy",
+        lambda _config: pytest.fail("image routing should not invoke text strategy"),
+    )
+    ctx = make_context(
+        "What is in this screenshot?",
+        attachments=[{"type": "image", "mime_type": "image/png"}],
+    )
+    ctx.config.llm.provider = "anthropic"
+    ctx.config.squilla_router.cross_provider_tiers = True
+    ctx.config.squilla_router.tiers = {
+        "image_model": {
+            "model": "vision/model-1",
+            "provider": "openai",
+            "supports_image": True,
+            "image_only": True,
+        },
+        "c1": {"model": "text/model-1"},
+    }
+
+    routed = await apply_squilla_router(ctx)
+
+    assert routed.metadata["routing_source"] == "image_route"
+    assert routed.metadata["routing_applied"] is True
+    assert routed.metadata.get("routed_provider") == "openai"
+
+
+@pytest.mark.asyncio
+async def test_image_route_flags_tier_provider_mismatch_when_cross_provider_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        squilla_router_step,
+        "_get_strategy",
+        lambda _config: pytest.fail("image routing should not invoke text strategy"),
+    )
+    ctx = make_context(
+        "Describe this screenshot.",
+        attachments=[{"type": "image", "mime_type": "image/png"}],
+    )
+    ctx.config.llm.provider = "anthropic"
+    ctx.config.squilla_router.cross_provider_tiers = False
+    ctx.config.squilla_router.tiers = {
+        "image_model": {
+            "model": "vision/model-1",
+            "provider": "openai",
+            "supports_image": True,
+            "image_only": True,
+        },
+        "c1": {"model": "text/model-1"},
+    }
+
+    routed = await apply_squilla_router(ctx)
+
+    assert routed.metadata["routing_source"] == "image_route"
+    assert routed.metadata.get("router_tier_provider_mismatch") == "openai"
+
+
+@pytest.mark.asyncio
 async def test_gate_needs_image_routes_followup_to_vision_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1019,6 +1085,51 @@ async def test_image_attachment_without_image_tier_fails_locally(
     )
     ctx = make_context(
         "What is in this screenshot?",
+        attachments=[{"type": "image", "mime_type": "image/png"}],
+    )
+    ctx.config.squilla_router.tiers["image_model"]["supports_image"] = False
+
+    with pytest.raises(
+        RuntimeError,
+        match="No image-capable SquillaRouter tier is configured",
+    ):
+        await apply_squilla_router(ctx)
+
+
+@pytest.mark.asyncio
+async def test_caption_less_image_attachment_still_routes_to_vision_tier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        squilla_router_step,
+        "_get_strategy",
+        lambda _config: pytest.fail("image routing should not invoke text strategy"),
+    )
+    for caption in ("", "   \n\t "):
+        ctx = make_context(
+            caption,
+            attachments=[{"type": "image", "mime_type": "image/png"}],
+        )
+
+        routed = await apply_squilla_router(ctx)
+
+        assert routed.metadata["routing_source"] == "image_route"
+        assert routed.metadata["routed_tier"] == "image_model"
+
+
+@pytest.mark.asyncio
+async def test_caption_less_image_attachment_without_image_tier_fails_locally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        squilla_router_step,
+        "_get_strategy",
+        lambda _config: pytest.fail(
+            "image routing without image tier should not invoke text strategy"
+        ),
+    )
+    ctx = make_context(
+        "",
         attachments=[{"type": "image", "mime_type": "image/png"}],
     )
     ctx.config.squilla_router.tiers["image_model"]["supports_image"] = False
@@ -1208,7 +1319,7 @@ async def test_runtime_router_complex_request_applies_deep_thinking_without_p2_p
 
     assert routed.metadata["routing_source"] == "v4_phase3"
     assert routed.metadata["routed_tier"] == "c3"
-    assert routed.model == "z-ai/glm-5.2"
+    assert routed.model == "anthropic/claude-opus-4.8"
     assert routed.metadata["thinking_mode"] == "T3"
     assert routed.metadata["thinking_requested"] is True
     assert routed.metadata["thinking_level"] == "high"

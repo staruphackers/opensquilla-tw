@@ -39,6 +39,7 @@ root release README with task-oriented guides.
 
 ## Surfaces and Operations
 
+- [`releases/0.5.0rc3.md`](releases/0.5.0rc3.md) - OpenSquilla 0.5.0 Preview 3 release notes.
 - [`releases/0.5.0rc2.md`](releases/0.5.0rc2.md) - OpenSquilla 0.5.0 Preview 2 release notes.
 - [`releases/0.5.0rc1.md`](releases/0.5.0rc1.md) - OpenSquilla 0.5.0 Preview 1 release notes.
 - [`releases/0.4.1.md`](releases/0.4.1.md) - OpenSquilla 0.4.1 release notes.
@@ -63,6 +64,10 @@ root release README with task-oriented guides.
   raw capture guidance, read-only turn replay, and developer replay benchmarks.
 - [`tui-real-terminal-harness.md`](tui-real-terminal-harness.md) - maintainer
   real-terminal TUI integration harness and evidence capture.
+- [`experiments.md`](experiments.md) - opt-in runtime toggle conventions and
+  the delivery-verification tooling in `scripts/experiments/`.
+- [`docker.md`](docker.md) - Docker/Compose deployment on home servers and
+  NAS: prebuilt GHCR images, LAN exposure with token auth, and upgrades.
 - [`operations.md`](operations.md) - sessions, cron, usage, diagnostics,
   migration, MCP server, and install inventory commands.
 - [`troubleshooting.md`](troubleshooting.md) - common install/runtime issues.

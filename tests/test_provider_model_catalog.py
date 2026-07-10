@@ -22,6 +22,33 @@ def test_deepseek_v4_direct_models_use_models_dev_limits() -> None:
         assert caps.reasoning_format == "deepseek"
 
 
+def test_provider_scoped_corrections_budget_outranks_snapshot_merge() -> None:
+    """tokenrhythm has no models.dev table: without the provider-scoped
+    corrections layer, the snapshot's cross-provider bare-id merge would
+    serve the origin providers' budgets (202_752 zhipu glm-5, 262_144
+    moonshot kimi) instead of the relay's own published limits. The rows
+    mirror the platform listing (catalog_overrides.toml block comment);
+    when the listing is reachable the boot-time live ingest supersedes
+    them (see test_provider/test_live_catalog.py)."""
+    catalog = ModelCatalog()
+
+    assert catalog.resolve_context_window_with_source(
+        "deepseek-v4-flash", provider="tokenrhythm"
+    ) == (1_000_000, "catalog")
+    assert catalog.resolve_max_tokens("deepseek-v4-flash", provider="tokenrhythm") == 384_000
+    # Discriminating rows — the bare-id merge would report the origin
+    # providers' windows here, not the relay's published ones.
+    assert catalog.resolve_context_window("glm-5", provider="tokenrhythm") == 1_000_000
+    assert catalog.resolve_context_window("kimi-k2.5", provider="tokenrhythm") == 256_000
+    assert catalog.resolve_context_window("kimi-k2.7-code", provider="tokenrhythm") == 256_000
+    assert catalog.resolve_max_tokens("kimi-k2.7-code", provider="tokenrhythm") == 128_000
+    assert catalog.resolve_context_window("qwen3.7-max", provider="tokenrhythm") == 1_000_000
+    assert catalog.resolve_max_tokens("qwen3.7-max", provider="tokenrhythm") == 256_000
+    # The same bare id on direct DeepSeek keeps its own snapshot-table
+    # budgets — the provider-scoped layer never leaks across providers.
+    assert catalog.resolve_context_window("deepseek-v4-flash", "deepseek") == 1_000_000
+
+
 def test_direct_profile_windows_resolve_from_models_dev_snapshot() -> None:
     catalog = ModelCatalog()
 
@@ -99,7 +126,7 @@ _STATIC_RETIREMENT_PARITY: dict[str, tuple[str, tuple[int, int], tuple[int, int]
     "glm-4.7-flashx": ("zhipu", (131_072, 200_000), (131_072, 200_000)),
     "glm-5": ("zhipu", (16_384, 202_752), (131_072, 204_800)),
     "glm-5.1": ("zhipu", (128_000, 200_000), (131_072, 200_000)),
-    "glm-5.2": ("zhipu", (131_072, 1_000_000), (131_072, 1_000_000)),
+    "glm-5.2": ("zhipu", (128_000, 1_000_000), (131_072, 1_000_000)),
     "minimax-m2.5": ("minimax", (131_072, 204_800), (131_072, 204_800)),
     "minimax-m2.7": ("minimax", (131_072, 204_800), (131_072, 204_800)),
     "step-3.5-flash": ("stepfun", (16_384, 256_000), (16_384, 256_000)),
@@ -186,6 +213,97 @@ def test_openrouter_safe_default_never_raises_smaller_provider_limit() -> None:
 
     assert catalog.resolve_context_window("provider/smaller-output-model") == 12_000
     assert catalog.resolve_max_tokens("provider/smaller-output-model") == 4096
+
+
+def _catalog_with_live_reasoning_model() -> ModelCatalog:
+    catalog = ModelCatalog()
+    catalog._populate_from_data(
+        [
+            {
+                "id": "vendor/reasoning-model",
+                "context_length": 200_000,
+                "top_provider": {"max_completion_tokens": 128_000},
+                "supported_parameters": ["reasoning", "tools", "tool_choice"],
+                "architecture": {"input_modalities": ["text", "image"]},
+            }
+        ]
+    )
+    return catalog
+
+
+def test_get_capabilities_honors_user_reasoning_override() -> None:
+    catalog = _catalog_with_live_reasoning_model()
+    catalog.set_user_overrides(
+        {
+            "vendor/reasoning-model": {
+                "supports_reasoning": False,
+                "reasoning_format": "none",
+            }
+        }
+    )
+
+    caps = catalog.get_capabilities("vendor/reasoning-model", provider_name="openrouter")
+
+    assert caps.supports_reasoning is False
+    assert caps.reasoning_format == "none"
+
+
+def test_get_capabilities_honors_user_vision_override_on_live_reasoning_model() -> None:
+    catalog = _catalog_with_live_reasoning_model()
+    catalog.set_user_overrides({"vendor/reasoning-model": {"supports_vision": False}})
+
+    caps = catalog.get_capabilities("vendor/reasoning-model", provider_name="openrouter")
+
+    assert caps.supports_reasoning is True
+    assert caps.supports_vision is False
+
+
+@pytest.mark.parametrize(
+    ("reasoning_format", "supports_reasoning"),
+    [("deepseek", True), ("none", False)],
+)
+def test_get_capabilities_honors_user_reasoning_format_override_on_live_model(
+    reasoning_format: str,
+    supports_reasoning: bool,
+) -> None:
+    catalog = _catalog_with_live_reasoning_model()
+    catalog.set_user_overrides(
+        {"vendor/reasoning-model": {"reasoning_format": reasoning_format}}
+    )
+
+    caps = catalog.get_capabilities("vendor/reasoning-model", provider_name="openrouter")
+
+    assert caps.supports_reasoning is supports_reasoning
+    assert caps.reasoning_format == reasoning_format
+
+
+def test_resolve_context_window_honors_user_override() -> None:
+    catalog = ModelCatalog()
+    catalog.set_user_overrides({"vllm/self-hosted-model": {"context_window": 131_072}})
+
+    window, source = catalog.resolve_context_window_with_source("self-hosted-model", "vllm")
+
+    assert window == 131_072
+    assert source == "override"
+
+
+def test_resolve_max_tokens_honors_user_override() -> None:
+    catalog = ModelCatalog()
+    catalog.set_user_overrides(
+        {
+            "vllm/self-hosted-model": {
+                "context_window": 131_072,
+                "max_output_tokens": 32_768,
+            }
+        }
+    )
+
+    effective, source = catalog.resolve_max_tokens_with_source(
+        "self-hosted-model", provider="vllm"
+    )
+
+    assert effective == 32_768
+    assert source == "override"
 
 
 @pytest.mark.asyncio

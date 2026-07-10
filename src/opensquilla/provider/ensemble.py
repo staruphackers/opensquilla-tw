@@ -1217,6 +1217,60 @@ _STATIC_OPENROUTER_B5_PROPOSER_MODELS = (
     "qwen/qwen3.7-max",
 )
 _STATIC_OPENROUTER_B5_AGGREGATOR_MODEL = "z-ai/glm-5.2"
+_STATIC_TOKENRHYTHM_B5_PROFILE_NAME = "static_tokenrhythm_b5"
+# The TokenRhythm mirror of the static OpenRouter B5 lineup: same aggregation
+# shape and defaults, model ids in TokenRhythm's bare naming.
+_STATIC_TOKENRHYTHM_B5_PROPOSER_MODELS = (
+    "deepseek-v4-pro",
+    "glm-5.2",
+    "kimi-k2.7-code",
+    "qwen3.7-max",
+)
+_STATIC_TOKENRHYTHM_B5_AGGREGATOR_MODEL = "glm-5.2"
+
+
+@dataclass(frozen=True)
+class StaticB5Profile:
+    """One static B5 lineup: four fixed proposers + one aggregator on a
+    single provider. All static profiles share the aggregation logic and
+    the static-B5 defaults (quorum, timeouts, no shuffle)."""
+
+    profile_name: str
+    provider_id: str
+    proposer_models: tuple[str, ...]
+    aggregator_model: str
+
+
+STATIC_B5_PROFILES: dict[str, StaticB5Profile] = {
+    _STATIC_OPENROUTER_B5_PROFILE_NAME: StaticB5Profile(
+        profile_name=_STATIC_OPENROUTER_B5_PROFILE_NAME,
+        provider_id="openrouter",
+        proposer_models=_STATIC_OPENROUTER_B5_PROPOSER_MODELS,
+        aggregator_model=_STATIC_OPENROUTER_B5_AGGREGATOR_MODEL,
+    ),
+    _STATIC_TOKENRHYTHM_B5_PROFILE_NAME: StaticB5Profile(
+        profile_name=_STATIC_TOKENRHYTHM_B5_PROFILE_NAME,
+        provider_id="tokenrhythm",
+        proposer_models=_STATIC_TOKENRHYTHM_B5_PROPOSER_MODELS,
+        aggregator_model=_STATIC_TOKENRHYTHM_B5_AGGREGATOR_MODEL,
+    ),
+}
+
+
+def static_b5_profile(selection_mode: str) -> StaticB5Profile | None:
+    """Return the static B5 profile for a selection mode (None when dynamic)."""
+
+    return STATIC_B5_PROFILES.get(str(selection_mode or ""))
+
+
+CUSTOM_B5_SELECTION_MODE = "custom_b5"
+
+# Advisory proposer roles for the explicit custom lineup, in display order.
+# They label what each member contributes and ride the selection plan into
+# the decision trace; "aggregator" is structural and handled separately.
+CUSTOM_B5_PROPOSER_ROLES = ("primary", "contrast", "fast_check", "critic")
+
+
 _LEGACY_OPENROUTER_MODEL_OPTIONS = (
     "deepseek/deepseek-v4-pro",
     "z-ai/glm-5.2",
@@ -1230,11 +1284,13 @@ _LEGACY_OPENROUTER_MODEL_OPTIONS = (
 _LEGACY_ENSEMBLE_MIN_SUCCESSFUL_PROPOSERS = 1
 _LEGACY_ENSEMBLE_TIMEOUT_SECONDS = 3600.0
 _LEGACY_ENSEMBLE_SHUFFLE_CANDIDATES = True
-_STATIC_OPENROUTER_B5_DEFAULT_MIN_SUCCESSFUL_PROPOSERS = 3
-_STATIC_OPENROUTER_B5_DEFAULT_PROPOSER_TIMEOUT_SECONDS = 300.0
-_STATIC_OPENROUTER_B5_DEFAULT_AGGREGATOR_TIMEOUT_SECONDS = 480.0
-_STATIC_OPENROUTER_B5_DEFAULT_SHUFFLE_CANDIDATES = False
-_STATIC_OPENROUTER_B5_QUORUM_GRACE_SECONDS = 30.0
+# Shared defaults for every static B5 profile (openrouter and tokenrhythm
+# lineups run the same aggregation logic).
+_STATIC_B5_DEFAULT_MIN_SUCCESSFUL_PROPOSERS = 3
+_STATIC_B5_DEFAULT_PROPOSER_TIMEOUT_SECONDS = 300.0
+_STATIC_B5_DEFAULT_AGGREGATOR_TIMEOUT_SECONDS = 480.0
+_STATIC_B5_DEFAULT_SHUFFLE_CANDIDATES = False
+_STATIC_B5_QUORUM_GRACE_SECONDS = 30.0
 
 _DYNAMIC_SLOT_WEIGHTS = {
     "cheap_contrast": {
@@ -2042,8 +2098,8 @@ def _build_router_dynamic_members(
     return f"router_dynamic/{routed_tier}", proposers, aggregator, plan
 
 
-def _openrouter_ref(model: str) -> _DynamicModelRef:
-    return _DynamicModelRef(provider="openrouter", model=model, thinking=None)
+def _static_b5_ref(provider_id: str, model: str) -> _DynamicModelRef:
+    return _DynamicModelRef(provider=provider_id, model=model, thinking=None)
 
 
 def _static_default_if_legacy(
@@ -2058,31 +2114,169 @@ def _static_default_if_legacy(
     return value
 
 
-def _build_static_openrouter_b5_members(
+def _build_static_b5_members(
+    profile: StaticB5Profile,
     *,
     inherited_provider_config: ProviderConfig,
 ) -> tuple[str, list[EnsembleMemberConfig], EnsembleMemberConfig, dict[str, Any]]:
     proposers = [
         _member_from_ref(
-            _openrouter_ref(model),
+            _static_b5_ref(profile.provider_id, model),
             inherited=inherited_provider_config,
             label=f"proposer_{index + 1}",
         )
-        for index, model in enumerate(_STATIC_OPENROUTER_B5_PROPOSER_MODELS)
+        for index, model in enumerate(profile.proposer_models)
     ]
     aggregator = _member_from_ref(
-        _openrouter_ref(_STATIC_OPENROUTER_B5_AGGREGATOR_MODEL),
+        _static_b5_ref(profile.provider_id, profile.aggregator_model),
         inherited=inherited_provider_config,
         label="aggregator",
     )
     plan = {
-        "strategy": _STATIC_OPENROUTER_B5_PROFILE_NAME,
-        "profile": _STATIC_OPENROUTER_B5_PROFILE_NAME,
-        "proposer_models": list(_STATIC_OPENROUTER_B5_PROPOSER_MODELS),
-        "aggregator_model": _STATIC_OPENROUTER_B5_AGGREGATOR_MODEL,
+        "strategy": profile.profile_name,
+        "profile": profile.profile_name,
+        "proposer_models": list(profile.proposer_models),
+        "aggregator_model": profile.aggregator_model,
         "proposer_count": len(proposers),
     }
-    return _STATIC_OPENROUTER_B5_PROFILE_NAME, proposers, aggregator, plan
+    return profile.profile_name, proposers, aggregator, plan
+
+
+@dataclass(frozen=True)
+class _CustomB5Candidate:
+    """One enabled custom-lineup row, normalized from config."""
+
+    provider: str
+    model: str
+    role: str
+
+
+def _custom_b5_candidates(config: Any) -> list[_CustomB5Candidate]:
+    ensemble_cfg = getattr(config, "llm_ensemble", None)
+    rows: list[_CustomB5Candidate] = []
+    seen: set[tuple[str, str]] = set()
+    for entry in getattr(ensemble_cfg, "candidates", []) or []:
+        if getattr(entry, "enabled", True) is False:
+            continue
+        provider = str(getattr(entry, "provider", "") or "").strip().lower()
+        model = str(getattr(entry, "model", "") or "").strip()
+        if not provider or not model:
+            continue
+        role = str(getattr(entry, "role", "") or "").strip().lower()
+        identity = (provider, model)
+        # The aggregator row may legitimately duplicate a proposer row
+        # (same model both drafts and fuses); proposer rows dedupe.
+        if role != "aggregator":
+            if identity in seen:
+                continue
+            seen.add(identity)
+        rows.append(_CustomB5Candidate(provider=provider, model=model, role=role))
+    return rows
+
+
+def _build_custom_b5_members(
+    *,
+    config: Any,
+    inherited_provider_config: ProviderConfig,
+) -> tuple[str, list[EnsembleMemberConfig], EnsembleMemberConfig, dict[str, Any]]:
+    """Build the explicit user-authored lineup.
+
+    Every enabled candidate without role='aggregator' runs as a proposer;
+    the single 'aggregator' row fuses. When no aggregator row exists the
+    lineup falls back to the currently routed model — the same model the
+    user would have gotten without the ensemble — so a proposer-only config
+    still runs instead of erroring at turn time.
+    """
+    rows = _custom_b5_candidates(config)
+    proposer_rows = [row for row in rows if row.role != "aggregator"]
+    aggregator_rows = [row for row in rows if row.role == "aggregator"]
+    if not proposer_rows:
+        raise ValueError("llm_ensemble custom_b5 lineup has no enabled proposers")
+    proposers = [
+        _member_from_ref(
+            _DynamicModelRef(provider=row.provider, model=row.model, thinking=None),
+            inherited=inherited_provider_config,
+            label=row.role or f"proposer_{index + 1}",
+        )
+        for index, row in enumerate(proposer_rows)
+    ]
+    if aggregator_rows:
+        aggregator_row = aggregator_rows[0]
+        aggregator_source = "candidate_role"
+    else:
+        aggregator_row = _CustomB5Candidate(
+            provider=str(inherited_provider_config.provider or ""),
+            model=str(inherited_provider_config.model or ""),
+            role="aggregator",
+        )
+        aggregator_source = "inherited_model"
+    aggregator = _member_from_ref(
+        _DynamicModelRef(
+            provider=aggregator_row.provider,
+            model=aggregator_row.model,
+            thinking=None,
+        ),
+        inherited=inherited_provider_config,
+        label="aggregator",
+    )
+    plan = {
+        "strategy": CUSTOM_B5_SELECTION_MODE,
+        "profile": CUSTOM_B5_SELECTION_MODE,
+        "proposer_count": len(proposers),
+        "proposers": [
+            {"provider": row.provider, "model": row.model, "role": row.role or ""}
+            for row in proposer_rows
+        ],
+        "aggregator": {
+            "provider": aggregator_row.provider,
+            "model": aggregator_row.model,
+            "source": aggregator_source,
+        },
+    }
+    return CUSTOM_B5_SELECTION_MODE, proposers, aggregator, plan
+
+
+def custom_b5_lineup_ready(
+    config: Any,
+    inherited_provider_config: Any | None = None,
+) -> tuple[bool, str]:
+    """Pre-wrap readiness gate for the custom lineup.
+
+    Returns (ready, reason). Mirrors the member key-resolution order of
+    ``_member_provider_config`` per member — a member whose provider cannot
+    resolve any API key would post the conversation upstream with an empty
+    bearer token, so the wrap must be skipped, same as the static-B5 gate.
+    ``inherited_provider_config`` should be the selector's current config
+    when available (session-scoped provider overrides); it falls back to
+    ``config.llm``.
+    """
+    inherited = (
+        inherited_provider_config
+        if inherited_provider_config is not None
+        else getattr(config, "llm", None)
+    )
+    inherited_cfg = ProviderConfig(
+        provider=str(getattr(inherited, "provider", "") or ""),
+        model=str(getattr(inherited, "model", "") or ""),
+        api_key=str(getattr(inherited, "api_key", "") or ""),
+        base_url=str(getattr(inherited, "base_url", "") or ""),
+        proxy=str(getattr(inherited, "proxy", "") or ""),
+    )
+    rows = _custom_b5_candidates(config)
+    if not [row for row in rows if row.role != "aggregator"]:
+        return False, "no_proposers"
+    for row in rows:
+        try:
+            member = _member_provider_config(
+                _DynamicModelRef(provider=row.provider, model=row.model),
+                inherited_cfg,
+            )
+        except Exception:
+            return False, f"unknown_provider:{row.provider}"
+        spec = get_provider_spec(member.provider)
+        if spec.requires_api_key() and not member.api_key.strip():
+            return False, f"missing_credential:{member.provider}"
+    return True, ""
 
 
 def _secret_from_env(env_name: str) -> str:
@@ -2123,22 +2317,28 @@ def _member_provider_config(ref: Any, inherited: ProviderConfig) -> ProviderConf
     )
 
 
-def static_openrouter_b5_credential_available(
+def static_b5_credential_available(
     config: Any,
     inherited_provider_config: Any,
+    selection_mode: str = _STATIC_OPENROUTER_B5_PROFILE_NAME,
 ) -> bool:
     """Return True when every static-B5 member resolves a non-empty API key.
 
     Mirrors the ``_member_provider_config`` key-resolution order for the
-    static OpenRouter B5 members (all ``provider="openrouter"`` refs with no
-    member-level ``api_key_env``): the inherited provider key when the active
-    provider is OpenRouter, then the registry env key for OpenRouter
-    (``OPENROUTER_API_KEY``). A user whose active provider is not OpenRouter
-    but whose environment carries ``OPENROUTER_API_KEY`` is treated as opted
+    selected static B5 profile's members (all refs bound to the profile's
+    provider with no member-level ``api_key_env``): the inherited provider
+    key when the active provider matches the profile provider, then the
+    registry env key for that provider (e.g. ``OPENROUTER_API_KEY``,
+    ``TOKENRHYTHM_API_KEY``). A user whose active provider differs but whose
+    environment carries the profile provider's env key is treated as opted
     in: the members resolve a key and the ensemble runs. Read-only and
-    side-effect-free; ``config`` is accepted for call-site symmetry (the
-    static profile has no config-level member overrides today).
+    side-effect-free; ``config`` is accepted for call-site symmetry (static
+    profiles have no config-level member overrides today). An unknown
+    ``selection_mode`` returns False.
     """
+    profile = static_b5_profile(selection_mode)
+    if profile is None:
+        return False
     if isinstance(inherited_provider_config, ProviderConfig):
         inherited = inherited_provider_config
     else:
@@ -2153,12 +2353,13 @@ def static_openrouter_b5_credential_available(
                 getattr(inherited_provider_config, "provider_routing", {}) or {}
             ),
         )
-    member_models = (
-        *_STATIC_OPENROUTER_B5_PROPOSER_MODELS,
-        _STATIC_OPENROUTER_B5_AGGREGATOR_MODEL,
-    )
+    member_models = (*profile.proposer_models, profile.aggregator_model)
     return all(
-        bool(_member_provider_config(_openrouter_ref(model), inherited).api_key.strip())
+        bool(
+            _member_provider_config(
+                _static_b5_ref(profile.provider_id, model), inherited
+            ).api_key.strip()
+        )
         for model in member_models
     )
 
@@ -2190,8 +2391,15 @@ def build_ensemble_provider_from_config(
     if ensemble_cfg is None:
         raise ValueError("config.llm_ensemble is required")
     selection_mode = str(getattr(ensemble_cfg, "selection_mode", "router_dynamic") or "")
-    if selection_mode == _STATIC_OPENROUTER_B5_PROFILE_NAME:
-        profile_name, proposers, aggregator, selection_plan = _build_static_openrouter_b5_members(
+    static_profile = static_b5_profile(selection_mode)
+    if static_profile is not None:
+        profile_name, proposers, aggregator, selection_plan = _build_static_b5_members(
+            static_profile,
+            inherited_provider_config=inherited_provider_config,
+        )
+    elif selection_mode == CUSTOM_B5_SELECTION_MODE:
+        profile_name, proposers, aggregator, selection_plan = _build_custom_b5_members(
+            config=config,
             inherited_provider_config=inherited_provider_config,
         )
     elif selection_mode == "router_dynamic":
@@ -2202,45 +2410,53 @@ def build_ensemble_provider_from_config(
         )
     else:
         raise ValueError(f"unknown llm_ensemble.selection_mode {selection_mode!r}")
-    is_static_openrouter_b5 = selection_mode == _STATIC_OPENROUTER_B5_PROFILE_NAME
+    is_custom_b5 = selection_mode == CUSTOM_B5_SELECTION_MODE
+    # Static and custom lineups share the fixed-lineup defaults family
+    # (quorum replacement, 300/480s timeouts, no shuffle, quorum grace);
+    # router_dynamic keeps the legacy defaults untouched.
+    is_static_b5 = static_profile is not None or is_custom_b5
     configured_min_success = int(getattr(ensemble_cfg, "min_successful_proposers", 1) or 1)
     requested_min_success = configured_min_success
     if (
-        is_static_openrouter_b5
+        is_static_b5
         and configured_min_success == _LEGACY_ENSEMBLE_MIN_SUCCESSFUL_PROPOSERS
     ):
-        requested_min_success = _STATIC_OPENROUTER_B5_DEFAULT_MIN_SUCCESSFUL_PROPOSERS
+        requested_min_success = (
+            # Custom lineups size freely (2–6): quorum defaults to N-1, the
+            # same "all but one" shape the 3-of-4 static default encodes.
+            max(1, len(proposers) - 1)
+            if is_custom_b5
+            else _STATIC_B5_DEFAULT_MIN_SUCCESSFUL_PROPOSERS
+        )
     min_successful_proposers = min(requested_min_success, max(1, len(proposers)))
     configured_proposer_timeout_seconds = float(
         getattr(ensemble_cfg, "proposer_timeout_seconds", _LEGACY_ENSEMBLE_TIMEOUT_SECONDS)
     )
     proposer_timeout_seconds = _static_default_if_legacy(
-        is_static=is_static_openrouter_b5,
+        is_static=is_static_b5,
         value=configured_proposer_timeout_seconds,
         legacy=_LEGACY_ENSEMBLE_TIMEOUT_SECONDS,
-        static_default=_STATIC_OPENROUTER_B5_DEFAULT_PROPOSER_TIMEOUT_SECONDS,
+        static_default=_STATIC_B5_DEFAULT_PROPOSER_TIMEOUT_SECONDS,
     )
     configured_aggregator_timeout_seconds = float(
         getattr(ensemble_cfg, "aggregator_timeout_seconds", _LEGACY_ENSEMBLE_TIMEOUT_SECONDS)
     )
     aggregator_timeout_seconds = _static_default_if_legacy(
-        is_static=is_static_openrouter_b5,
+        is_static=is_static_b5,
         value=configured_aggregator_timeout_seconds,
         legacy=_LEGACY_ENSEMBLE_TIMEOUT_SECONDS,
-        static_default=_STATIC_OPENROUTER_B5_DEFAULT_AGGREGATOR_TIMEOUT_SECONDS,
+        static_default=_STATIC_B5_DEFAULT_AGGREGATOR_TIMEOUT_SECONDS,
     )
     configured_shuffle_candidates = bool(
         getattr(ensemble_cfg, "shuffle_candidates", _LEGACY_ENSEMBLE_SHUFFLE_CANDIDATES)
     )
     shuffle_candidates = configured_shuffle_candidates
     if (
-        is_static_openrouter_b5
+        is_static_b5
         and configured_shuffle_candidates == _LEGACY_ENSEMBLE_SHUFFLE_CANDIDATES
     ):
-        shuffle_candidates = _STATIC_OPENROUTER_B5_DEFAULT_SHUFFLE_CANDIDATES
-    quorum_grace_seconds = (
-        _STATIC_OPENROUTER_B5_QUORUM_GRACE_SECONDS if is_static_openrouter_b5 else 0.0
-    )
+        shuffle_candidates = _STATIC_B5_DEFAULT_SHUFFLE_CANDIDATES
+    quorum_grace_seconds = _STATIC_B5_QUORUM_GRACE_SECONDS if is_static_b5 else 0.0
     selection_plan["configured_min_successful_proposers"] = configured_min_success
     selection_plan["effective_min_successful_proposers"] = min_successful_proposers
     selection_plan["configured_proposer_timeout_seconds"] = configured_proposer_timeout_seconds

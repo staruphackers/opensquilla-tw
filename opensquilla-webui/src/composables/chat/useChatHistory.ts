@@ -8,6 +8,7 @@ import type {
 import type { ChatHistoryMessage, ChatHistoryResponse } from '@/types/rpc'
 import { normalizeDisplayAttachments } from '@/utils/chat/attachments'
 import {
+  reconcileClientStopNotices,
   reconcileHistoryMessages,
   reconcileRunningHistoryMessages,
 } from '@/utils/chat/historyMerge'
@@ -52,6 +53,7 @@ export interface UseChatHistoryOptions {
   lastHeaderRole: Ref<string>
   lastHeaderDay: Ref<string>
   preserveLiveTail?: Ref<boolean>
+  autoScroll?: Ref<boolean>
   stripTimePrefix: (text: string) => string
   scrollToBottom: () => void
 }
@@ -127,6 +129,10 @@ export function useChatHistory(options: UseChatHistoryOptions) {
     return msg.messageId || `${msg.role}:${msg.ts || ''}:${msg.text || ''}`
   }
 
+  function hasLocalOptimisticRows(messages: ChatMessage[]): boolean {
+    return messages.some(msg => msg.restoredFromHistory !== true)
+  }
+
   function updateHistoryState(data: ChatHistoryResponse) {
     historyState.value = {
       hasMore: Boolean(data.has_more ?? data.hasMore),
@@ -178,9 +184,13 @@ export function useChatHistory(options: UseChatHistoryOptions) {
       if (msgs.length === 0 && !params.prepend) {
         options.messages.value = preserveLiveTail
           ? reconcileRunningHistoryMessages(options.messages.value, [])
-          : []
-        options.lastHeaderRole.value = ''
-        options.lastHeaderDay.value = ''
+          : hasLocalOptimisticRows(options.messages.value)
+            ? options.messages.value
+            : []
+        if (options.messages.value.length === 0) {
+          options.lastHeaderRole.value = ''
+          options.lastHeaderDay.value = ''
+        }
         flushPendingHistorySync()
         return
       }
@@ -192,16 +202,21 @@ export function useChatHistory(options: UseChatHistoryOptions) {
           ...mapped.filter(msg => !existing.has(messageKey(msg))),
           ...options.messages.value,
         ]
-      } else if (preserveLiveTail) {
-        options.messages.value = reconcileRunningHistoryMessages(options.messages.value, mapped)
-      } else if (historyMergeEnabled) {
+      } else {
+        const previousMessages = options.messages.value
+        let nextMessages: ChatMessage[]
+        if (preserveLiveTail) {
+          nextMessages = reconcileRunningHistoryMessages(previousMessages, mapped)
+        } else if (historyMergeEnabled) {
         // Same-session sync: reconcile by messageId so live-only fields survive
         // the snapshot instead of being clobbered. isCurrentRequest() already
         // guaranteed key === sessionKey.value here, so the prev rows belong to
         // this session and the merge never crosses a session boundary.
-        options.messages.value = reconcileHistoryMessages(options.messages.value, mapped)
-      } else {
-        options.messages.value = mapped
+          nextMessages = reconcileHistoryMessages(previousMessages, mapped)
+        } else {
+          nextMessages = mapped
+        }
+        options.messages.value = reconcileClientStopNotices(previousMessages, nextMessages)
       }
 
       options.lastHeaderRole.value = ''
@@ -213,7 +228,7 @@ export function useChatHistory(options: UseChatHistoryOptions) {
           options.threadRef.value.scrollTop += Math.max(0, nextHeight - previousHeight)
           return
         }
-        options.scrollToBottom()
+        if (options.autoScroll?.value ?? true) options.scrollToBottom()
       })
       flushPendingHistorySync()
     } catch {

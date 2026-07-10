@@ -2,12 +2,22 @@ import { app, BrowserWindow, dialog, Menu, ipcMain, nativeTheme, safeStorage, sh
 import electronUpdater from 'electron-updater'
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { appendFileSync, createWriteStream, existsSync, mkdirSync, readFileSync } from 'node:fs'
-import { access, constants, readFile, readdir, rm, stat, unlink, writeFile } from 'node:fs/promises'
+import { appendFileSync, createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { access, constants, readFile, readdir, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import net from 'node:net'
+import { homedir, tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { DESKTOP_LOCALES, resolveLocaleFromTags, type DesktopLocale } from './desktop-locale.js'
+import { buildCliInvocation } from './cli-invocation.js'
 import { secretStorageBackendForPolicy, shouldUseChromiumMockKeychainForPolicy } from './secret-storage-policy.js'
+import {
+  GITHUB_UPDATE_OWNER,
+  GITHUB_UPDATE_REPO,
+  parseOpenSquillaReleaseTag,
+  selectMacPrereleaseCandidate,
+  type ReleaseSummary,
+} from './update-feed-resolver.js'
 
 interface GatewayState {
   url: string
@@ -84,6 +94,7 @@ interface OnboardingPayload {
   searchProvider?: unknown
   searchApiKey?: unknown
   disableNetworkObservability?: unknown
+  locale?: unknown
 }
 
 interface DesktopSettingsPayload extends OnboardingPayload {}
@@ -139,11 +150,36 @@ const defaultRepoRoot = resolve(packageRoot, '..', '..')
 const repoRoot = process.env.OPENSQUILLA_DESKTOP_REPO_ROOT
   ? resolve(process.env.OPENSQUILLA_DESKTOP_REPO_ROOT)
   : defaultRepoRoot
+const shouldUseNativeApplicationMenu = process.platform === 'darwin'
 
 let mainWindow: BrowserWindow | null = null
 let onboardingWindow: BrowserWindow | null = null
+
+type DesktopNativeThemeSource = 'light' | 'dark' | 'system'
+
+function normalizeDesktopNativeThemeSource(payload: unknown): DesktopNativeThemeSource {
+  const source = typeof payload === 'string'
+    ? payload
+    : payload && typeof payload === 'object' && 'source' in payload
+      ? (payload as { source?: unknown }).source
+      : undefined
+  return source === 'light' || source === 'dark' || source === 'system' ? source : 'system'
+}
+
+function applyDesktopNativeTheme(source: DesktopNativeThemeSource): { source: DesktopNativeThemeSource; shouldUseDarkColors: boolean } {
+  nativeTheme.themeSource = source
+  const backgroundColor = nativeTheme.shouldUseDarkColors ? '#08080A' : '#F7F6F3'
+  for (const window of [mainWindow, onboardingWindow]) {
+    if (window && !window.isDestroyed()) window.setBackgroundColor(backgroundColor)
+  }
+  return { source, shouldUseDarkColors: nativeTheme.shouldUseDarkColors }
+}
 let gatewayProcess: ChildProcessWithoutNullStreams | null = null
 let isQuitting = false
+// Opt stopGateway into the Windows HTTP graceful-drain path even while isQuitting
+// is set, for the update/uninstall flows that keep the main process alive and
+// await the child's exit (so the fire-and-forget drain is not racing app teardown).
+let allowGracefulShutdownWhileQuitting = false
 
 // Main-process lifecycle log (distinct from the gateway child's gateway.log).
 // Records launch, single-instance-lock acquisition, and quit phases so a
@@ -164,6 +200,11 @@ function desktopLog(event: string, detail?: Record<string, unknown>): void {
 let gatewayStartPromise: Promise<GatewayState> | null = null
 let resolveOnboarding: ((credential: DesktopConnection) => void) | null = null
 let rejectOnboarding: ((error: Error) => void) | null = null
+// Legacy home detected for the CURRENT onboarding run. The onboarding migrate
+// IPC handlers read the source path/kind from here (main-process truth), never
+// from the renderer payload.
+let onboardingMigrationCandidate: LegacyImportCandidate | null = null
+let onboardingMigrationPreviewApprovedAt = 0
 let secretStorageBackendCache: SecretEncryption | null = null
 let macCodeSignatureDiagnosticCache: string | null = null
 let bootStatus: BootStatus = {
@@ -172,6 +213,8 @@ let bootStatus: BootStatus = {
   at: new Date().toISOString(),
 }
 let bootError: BootError | null = null
+let forceOnboardingOnNextStartup = false
+const gatewayProcessTreeChildren = new WeakSet<ChildProcessWithoutNullStreams>()
 
 const gatewayState: GatewayState = {
   url: '',
@@ -197,6 +240,349 @@ function credentialPath(): string {
   return join(app.getPath('userData'), 'desktop-credential.json')
 }
 
+// ── Legacy desktop layout relocation (one-time) ────────────────────────────
+// Until 0.5.x the gateway child ran with OPENSQUILLA_STATE_DIR=desktopStateDir()
+// (<home>/state). The Python side treats that env var as the OpenSquilla HOME
+// ROOT, so home-derived data — managed skills, the default workspace with
+// MEMORY.md, session-archive, router self-learning, a user .env, and the
+// paths.state_dir() consumers that nested a second state/ level — landed one
+// level too deep. The gateway spawn now passes desktopHome(); this moves the
+// legacy nested layout up one level, once, before the first spawn with the new
+// env. Databases under state/ (sessions.db, scheduler.db, agents/) are pinned
+// by the TOML state_dir and were always correct — they are never touched.
+// Design: docs/features/legacy-home-migration-design.md (Phase 1).
+const DESKTOP_LAYOUT_MARKER = 'desktop-layout-v2.json'
+const LEGACY_HOME_ENTRIES = [
+  'skills',
+  'skills-taps.json',
+  'skills-lock.json',
+  'workspace',
+  'session-archive',
+  'router',
+  '.env',
+]
+
+function relocateLegacyDesktopStateLayout(): void {
+  const home = desktopHome()
+  const state = desktopStateDir()
+  const markerPath = join(home, DESKTOP_LAYOUT_MARKER)
+  if (existsSync(markerPath)) return
+  if (!existsSync(state)) {
+    // Fresh profile: nothing nested to move; stamp so we never rescan.
+    mkdirSync(home, { recursive: true })
+    writeFileSync(markerPath, JSON.stringify({ migratedAt: new Date().toISOString(), moved: [] }) + '\n', 'utf-8')
+    return
+  }
+  const moved: string[] = []
+  let failed = false
+  const moveUp = (sourceDir: string, name: string, label: string) => {
+    const src = join(sourceDir, name)
+    if (!existsSync(src)) return
+    const dst = join(sourceDir === state ? home : state, name)
+    try {
+      if (existsSync(dst)) {
+        // Never merge or overwrite: park the legacy copy beside the new one.
+        const parked = join(sourceDir, `${name}.pre-relocation`)
+        if (!existsSync(parked)) renameSync(src, parked)
+      } else {
+        renameSync(src, dst)
+        moved.push(label)
+      }
+    } catch (error) {
+      failed = true
+      desktopLog('desktop_layout_relocation_entry_failed', { name: label, error: String(error) })
+    }
+  }
+  for (const name of LEGACY_HOME_ENTRIES) moveUp(state, name, name)
+  // Flatten the nested state/state tree written by direct paths.state_dir()
+  // consumers (router calibration, sandbox grants, approval queue, safety log).
+  const nested = join(state, 'state')
+  if (existsSync(nested)) {
+    for (const name of readdirSync(nested)) moveUp(nested, name, `state/${name}`)
+    try {
+      if (readdirSync(nested).length === 0) rmdirSync(nested)
+    } catch {
+      // A non-empty or locked nested dir stays in place; harmless.
+    }
+  }
+  if (failed) {
+    // No marker on failure: a locked entry (e.g. a lingering gateway) defers
+    // the whole relocation to the next boot instead of stranding half of it.
+    desktopLog('desktop_layout_relocation_deferred', { moved })
+    return
+  }
+  writeFileSync(markerPath, JSON.stringify({ migratedAt: new Date().toISOString(), moved }) + '\n', 'utf-8')
+  if (moved.length > 0) desktopLog('desktop_layout_relocated', { moved })
+}
+
+// ── Legacy home import detection ────────────────────────────────────────────
+// Quick read-only scan for a legacy OpenSquilla home this desktop profile could
+// import. The shape check mirrors the Python migrator's home validator
+// (config.toml, state/, or workspace/ inside), so both sides agree on what
+// counts as a home — but the import itself always runs through the bundled CLI
+// (`opensquilla migrate opensquilla`) so the migration logic exists exactly
+// once, in Python. Design: docs/features/legacy-home-migration-design.md
+// (Phase 3).
+interface LegacyImportCandidate {
+  kind: 'cli-home' | 'windows-portable'
+  path: string
+}
+
+function looksLikeOpenSquillaHome(path: string): boolean {
+  try {
+    if (!statSync(path).isDirectory()) return false
+  } catch {
+    return false
+  }
+  return (
+    existsSync(join(path, 'config.toml'))
+    || existsSync(join(path, 'state'))
+    || existsSync(join(path, 'workspace'))
+  )
+}
+
+// Compare via realpath so a symlinked/relocated desktop home is never offered
+// to itself as an import source.
+function resolvedPathsEqual(a: string, b: string): boolean {
+  const canonical = (path: string): string => {
+    try {
+      return realpathSync(path)
+    } catch {
+      return resolve(path)
+    }
+  }
+  return canonical(a) === canonical(b)
+}
+
+const MIGRATION_ITEM_STATUSES = new Set(['migrated', 'planned', 'skipped', 'error'])
+const MIGRATION_TRANSACTION_ID_RE = /^\d{20}$/
+
+interface MigrationReportExpectation {
+  source: string
+  sourceKind?: LegacyImportCandidate['kind']
+  target: string
+  apply: boolean
+}
+
+function migrationRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+function migrationReportValidationError(
+  value: unknown,
+  expected: MigrationReportExpectation,
+): string | null {
+  const report = migrationRecord(value)
+  if (!report) return 'migration report root is not an object'
+  if (typeof report.source !== 'string' || !resolvedPathsEqual(report.source, expected.source)) {
+    return 'migration report source does not match the approved preview'
+  }
+  if (
+    typeof report.source_kind !== 'string'
+    || !['cli-home', 'windows-portable', 'desktop-home'].includes(report.source_kind)
+    || (expected.sourceKind !== undefined && report.source_kind !== expected.sourceKind)
+  ) {
+    return 'migration report source kind is invalid'
+  }
+  if (typeof report.target !== 'string' || !resolvedPathsEqual(report.target, expected.target)) {
+    return 'migration report target does not match the desktop profile'
+  }
+  if (report.apply !== expected.apply) return 'migration report apply mode is invalid'
+  if (typeof report.output_dir !== 'string') return 'migration report output directory is invalid'
+
+  const items = report.items
+  if (!Array.isArray(items)) return 'migration report items are missing'
+  for (const value of items) {
+    const item = migrationRecord(value)
+    if (
+      !item
+      || typeof item.kind !== 'string'
+      || typeof item.status !== 'string'
+      || !MIGRATION_ITEM_STATUSES.has(item.status)
+      || typeof item.reason !== 'string'
+      || (item.source !== null && typeof item.source !== 'string')
+      || (item.destination !== null && typeof item.destination !== 'string')
+      || !migrationRecord(item.details)
+    ) {
+      return 'migration report contains an invalid item'
+    }
+  }
+
+  for (const key of [
+    'candidates',
+    'config_transforms',
+    'secret_relocations',
+    'paused_jobs',
+    'notes',
+  ]) {
+    if (!Array.isArray(report[key])) return `migration report ${key} is invalid`
+  }
+  const preflight = migrationRecord(report.preflight)
+  if (
+    !preflight
+    || typeof preflight.source_gateway_running !== 'boolean'
+    || typeof preflight.target_gateway_running !== 'boolean'
+    || typeof preflight.schema_ahead !== 'boolean'
+    || typeof preflight.disk_required_bytes !== 'number'
+    || typeof preflight.disk_free_bytes !== 'number'
+  ) {
+    return 'migration report preflight data is invalid'
+  }
+  return null
+}
+
+function migrationReportErrors(report: Record<string, unknown>): Record<string, unknown>[] {
+  return (report.items as unknown[])
+    .map((item) => migrationRecord(item))
+    .filter((item): item is Record<string, unknown> => item?.status === 'error')
+}
+
+function windowsPortableHomeRoots(): string[] {
+  const roots: string[] = []
+  if (process.env.LOCALAPPDATA) {
+    roots.push(join(process.env.LOCALAPPDATA, 'OpenSquilla', 'portable'))
+  }
+  roots.push(join(process.env.TEMP || tmpdir(), 'OpenSquilla', 'portable'))
+  return roots
+}
+
+function targetHasAppliedImportReceipt(
+  source: string,
+  target: string,
+  transactionId?: string,
+): boolean {
+  const receiptRoot = join(target, 'migration', 'opensquilla')
+  let transactionIds: string[]
+  if (transactionId) {
+    if (!MIGRATION_TRANSACTION_ID_RE.test(transactionId)) return false
+    transactionIds = [transactionId]
+  } else {
+    try {
+      transactionIds = readdirSync(receiptRoot)
+        .filter((entry) => MIGRATION_TRANSACTION_ID_RE.test(entry))
+        .sort()
+        .reverse()
+    } catch {
+      return false
+    }
+  }
+  for (const candidateId of transactionIds) {
+    const receiptDir = join(receiptRoot, candidateId)
+    try {
+      const report = JSON.parse(readFileSync(join(receiptDir, 'report.json'), 'utf8')) as unknown
+      const validationError = migrationReportValidationError(report, {
+        source,
+        target,
+        apply: true,
+      })
+      const record = migrationRecord(report)
+      if (
+        validationError === null
+        && record
+        && typeof record.output_dir === 'string'
+        && resolvedPathsEqual(record.output_dir, receiptDir)
+        && migrationReportErrors(record).length === 0
+      ) {
+        return true
+      }
+    } catch {
+      // Ignore incomplete or unrelated report directories and keep looking.
+    }
+  }
+  return false
+}
+
+function sourceWasImportedToTarget(source: string, target: string): boolean {
+  try {
+    const payload = JSON.parse(
+      readFileSync(join(source, '.opensquilla-imported.json'), 'utf8'),
+    ) as { target?: unknown; transaction_id?: unknown }
+    if (typeof payload.target === 'string' && resolvedPathsEqual(payload.target, target)) {
+      const transactionId = typeof payload.transaction_id === 'string'
+        ? payload.transaction_id
+        : ''
+      if (targetHasAppliedImportReceipt(source, target, transactionId)) return true
+    }
+  } catch {
+    // A process can exit after publishing the receipt but before this
+    // best-effort source marker is written. Fall through to the receipt scan.
+  }
+  return targetHasAppliedImportReceipt(source, target)
+}
+
+// The Python importer publishes a complete sibling staging tree by renaming the
+// old target aside and then renaming staging into place. A crash between those
+// two operations leaves this durable journal. Recover it before onboarding or
+// layout relocation can create a fresh empty target over the missing profile.
+function recoverInterruptedDesktopImport(): void {
+  const target = desktopHome()
+  const parent = dirname(target)
+  const journal = join(parent, `.${basename(target)}.import-commit.json`)
+  if (!existsSync(journal)) return
+  const payload = JSON.parse(readFileSync(journal, 'utf8')) as Record<string, unknown>
+  const recordedTarget = String(payload.target || '')
+  const staging = String(payload.staging || '')
+  const backup = String(payload.backup || '')
+  const phase = String(payload.phase || '')
+  const validPhase = ['prepared', 'target-backed-up', 'published'].includes(phase)
+  const validStaging = dirname(resolve(staging)) === resolve(parent)
+    && basename(staging).startsWith('.opensquilla-import-')
+  const validBackup = dirname(resolve(backup)) === resolve(parent)
+    && basename(backup).startsWith(`${basename(target)}.backup.`)
+  if (!resolvedPathsEqual(recordedTarget, target) || !validPhase || !validStaging || !validBackup) {
+    throw new Error(`Unsafe or malformed desktop import recovery journal: ${journal}`)
+  }
+
+  if (!existsSync(target) && existsSync(backup)) {
+    renameSync(backup, target)
+  } else if (!existsSync(target) && phase !== 'prepared') {
+    throw new Error('Interrupted desktop import has no target or rollback backup.')
+  }
+  rmSync(staging, { recursive: true, force: true })
+  unlinkSync(journal)
+  desktopLog('migration_recovered', { phase, target })
+}
+
+function detectLegacyImportCandidate(): LegacyImportCandidate | null {
+  // The plain CLI home wins over portable unpacks when both exist.
+  const cliHome = join(homedir(), '.opensquilla')
+  if (
+    looksLikeOpenSquillaHome(cliHome)
+    && !resolvedPathsEqual(cliHome, desktopHome())
+    && !sourceWasImportedToTarget(cliHome, desktopHome())
+  ) {
+    return { kind: 'cli-home', path: cliHome }
+  }
+  if (process.platform !== 'win32') return null
+  // Windows portable bundles unpack under LOCALAPPDATA/TEMP; pick the home with
+  // the newest config.toml so a stale unpack does not shadow the live one.
+  let best: { path: string; mtime: number } | null = null
+  for (const root of windowsPortableHomeRoots()) {
+    let entries: string[] = []
+    try {
+      entries = readdirSync(root)
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      const candidate = join(root, entry)
+      if (!looksLikeOpenSquillaHome(candidate)) continue
+      if (resolvedPathsEqual(candidate, desktopHome())) continue
+      if (sourceWasImportedToTarget(candidate, desktopHome())) continue
+      let mtime = 0
+      try {
+        mtime = statSync(join(candidate, 'config.toml')).mtimeMs
+      } catch {
+        mtime = 0
+      }
+      if (!best || mtime > best.mtime) best = { path: candidate, mtime }
+    }
+  }
+  return best ? { kind: 'windows-portable', path: best.path } : null
+}
+
 function bootPagePath(): string {
   return app.isPackaged
     ? join(process.resourcesPath, 'boot.html')
@@ -204,9 +590,14 @@ function bootPagePath(): string {
 }
 
 function appIconPath(): string {
+  // Only icon.icns (macOS) and icon.ico (Windows) ship in assets/ — there is no
+  // icon.png, so the previous path resolved to a missing file everywhere. On
+  // macOS BrowserWindow.icon is ignored (the bundle icon is used), so pointing at
+  // the platform icon that exists is correct for the surfaces that do read it.
+  const iconFile = process.platform === 'win32' ? 'icon.ico' : 'icon.icns'
   return app.isPackaged
-    ? join(process.resourcesPath, 'app.asar', 'assets', 'icon.png')
-    : join(packageRoot, 'assets', 'icon.png')
+    ? join(process.resourcesPath, 'app.asar', 'assets', iconFile)
+    : join(packageRoot, 'assets', iconFile)
 }
 
 const MAC_APP_TRANSLOCATION_SEGMENT = '/AppTranslocation/'
@@ -297,8 +688,20 @@ function canonicalTierKey(name: string): string {
   return LEGACY_TEXT_TIER_ALIASES[name] ?? name
 }
 const ROUTER_PROFILE_IDS = new Set(['openrouter', 'dashscope', 'deepseek', 'gemini', 'volcengine', 'openai', 'zhipu', 'moonshot'])
+const TOKENRHYTHM_REGISTER_URL = 'https://tokenrhythm.studio/register'
 
 const PROVIDER_CATALOG: ProviderCatalogEntry[] = [
+  {
+    id: 'tokenrhythm',
+    label: 'TokenRhythm',
+    model: 'deepseek-v4-pro',
+    baseUrl: 'https://tokenrhythm.studio/v1',
+    apiKeyEnv: 'TOKENRHYTHM_API_KEY',
+    requiresApiKey: true,
+    routerSupported: false,
+    deployment: 'cloud',
+    note: 'DeepSeek, GLM, MiniMax and Kimi model families on one key.',
+  },
   {
     id: 'openrouter',
     label: 'OpenRouter',
@@ -308,7 +711,7 @@ const PROVIDER_CATALOG: ProviderCatalogEntry[] = [
     requiresApiKey: true,
     routerSupported: true,
     deployment: 'cloud',
-    note: 'Best default for mixed model routing.',
+    note: 'One account for mixed-model routing.',
   },
   {
     id: 'openai',
@@ -324,7 +727,7 @@ const PROVIDER_CATALOG: ProviderCatalogEntry[] = [
   {
     id: 'openai_responses',
     label: 'OpenAI (Responses API)',
-    model: 'gpt-5.4-mini',
+    model: 'gpt-5.5',
     baseUrl: 'https://api.openai.com/v1',
     apiKeyEnv: 'OPENAI_API_KEY',
     requiresApiKey: true,
@@ -346,7 +749,7 @@ const PROVIDER_CATALOG: ProviderCatalogEntry[] = [
   {
     id: 'dashscope',
     label: 'Aliyun DashScope',
-    model: 'qwen3.6-plus',
+    model: 'qwen3.7-plus',
     baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     apiKeyEnv: 'DASHSCOPE_API_KEY',
     requiresApiKey: true,
@@ -368,7 +771,7 @@ const PROVIDER_CATALOG: ProviderCatalogEntry[] = [
   {
     id: 'gemini',
     label: 'Google Gemini',
-    model: 'gemini-2.5-flash',
+    model: 'gemini-3.5-flash',
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
     apiKeyEnv: 'GEMINI_API_KEY',
     requiresApiKey: true,
@@ -379,7 +782,7 @@ const PROVIDER_CATALOG: ProviderCatalogEntry[] = [
   {
     id: 'moonshot',
     label: 'Moonshot AI',
-    model: 'kimi-k2.5',
+    model: 'kimi-k2.6',
     baseUrl: 'https://api.moonshot.ai/v1',
     apiKeyEnv: 'MOONSHOT_API_KEY',
     requiresApiKey: true,
@@ -401,13 +804,123 @@ const PROVIDER_CATALOG: ProviderCatalogEntry[] = [
   {
     id: 'qianfan',
     label: 'Baidu Qianfan',
-    model: '',
+    model: 'ernie-4.5-turbo-128k',
     baseUrl: 'https://qianfan.baidubce.com/v2',
     apiKeyEnv: 'QIANFAN_API_KEY',
     requiresApiKey: true,
     routerSupported: false,
     deployment: 'cloud',
     note: 'Direct provider model id required.',
+  },
+  {
+    id: 'kimi_coding_openai',
+    label: 'Kimi Coding OpenAI-compatible',
+    model: 'kimi-for-coding',
+    baseUrl: 'https://api.kimi.com/coding/v1',
+    apiKeyEnv: 'KIMI_CODING_API_KEY',
+    requiresApiKey: true,
+    routerSupported: false,
+    deployment: 'cloud',
+    note: 'Kimi coding-plan endpoint.',
+  },
+  {
+    id: 'kimi_coding_anthropic',
+    label: 'Kimi Coding Anthropic-compatible',
+    model: 'kimi-for-coding',
+    baseUrl: 'https://api.kimi.com/coding',
+    apiKeyEnv: 'KIMI_CODING_API_KEY',
+    requiresApiKey: true,
+    routerSupported: false,
+    deployment: 'cloud',
+    note: 'Kimi coding-plan Anthropic-shaped endpoint.',
+  },
+  {
+    id: 'minimax',
+    label: 'MiniMax',
+    model: 'MiniMax-M2.7',
+    baseUrl: 'https://api.minimaxi.com/anthropic',
+    apiKeyEnv: 'MINIMAX_API_KEY',
+    requiresApiKey: true,
+    routerSupported: false,
+    deployment: 'cloud',
+    note: 'MiniMax Anthropic-compatible endpoint.',
+  },
+  {
+    id: 'minimax_cn',
+    label: 'MiniMax Mainland',
+    model: 'MiniMax-M2.7',
+    baseUrl: 'https://api.minimaxi.com/anthropic',
+    apiKeyEnv: 'MINIMAX_CN_API_KEY',
+    requiresApiKey: true,
+    routerSupported: false,
+    deployment: 'cloud',
+    note: 'MiniMax mainland Anthropic-compatible endpoint.',
+  },
+  {
+    id: 'minimax_global',
+    label: 'MiniMax Global',
+    model: 'MiniMax-M2.7',
+    baseUrl: 'https://api.minimax.io/anthropic',
+    apiKeyEnv: 'MINIMAX_API_KEY',
+    requiresApiKey: true,
+    routerSupported: false,
+    deployment: 'cloud',
+    note: 'MiniMax global Anthropic-compatible endpoint.',
+  },
+  {
+    id: 'minimax_openai',
+    label: 'MiniMax OpenAI-compatible',
+    model: 'MiniMax-M2.7',
+    baseUrl: 'https://api.minimax.io/v1',
+    apiKeyEnv: 'MINIMAX_API_KEY',
+    requiresApiKey: true,
+    routerSupported: false,
+    deployment: 'cloud',
+    note: 'MiniMax OpenAI-compatible endpoint.',
+  },
+  {
+    id: 'minimax_coding_openai',
+    label: 'MiniMax Coding OpenAI-compatible',
+    model: 'MiniMax-M2.7',
+    baseUrl: 'https://api.minimaxi.com/v1',
+    apiKeyEnv: 'MINIMAX_CODING_API_KEY',
+    requiresApiKey: true,
+    routerSupported: false,
+    deployment: 'cloud',
+    note: 'MiniMax coding-plan OpenAI-compatible endpoint.',
+  },
+  {
+    id: 'minimax_coding_anthropic',
+    label: 'MiniMax Coding Anthropic-compatible',
+    model: 'MiniMax-M2.7',
+    baseUrl: 'https://api.minimaxi.com/anthropic',
+    apiKeyEnv: 'MINIMAX_CODING_API_KEY',
+    requiresApiKey: true,
+    routerSupported: false,
+    deployment: 'cloud',
+    note: 'MiniMax coding-plan Anthropic-shaped endpoint.',
+  },
+  {
+    id: 'mimo_openai',
+    label: 'MiMo OpenAI-compatible',
+    model: 'mimo-v2.5',
+    baseUrl: 'https://token-plan-cn.xiaomimimo.com/v1',
+    apiKeyEnv: 'MIMO_API_KEY',
+    requiresApiKey: true,
+    routerSupported: false,
+    deployment: 'cloud',
+    note: 'MiMo coding-plan endpoint.',
+  },
+  {
+    id: 'mimo_anthropic',
+    label: 'MiMo Anthropic-compatible',
+    model: 'mimo-v2.5',
+    baseUrl: 'https://token-plan-cn.xiaomimimo.com/anthropic',
+    apiKeyEnv: 'MIMO_API_KEY',
+    requiresApiKey: true,
+    routerSupported: false,
+    deployment: 'cloud',
+    note: 'MiMo coding-plan Anthropic-shaped endpoint.',
   },
   {
     id: 'volcengine',
@@ -419,6 +932,17 @@ const PROVIDER_CATALOG: ProviderCatalogEntry[] = [
     routerSupported: true,
     deployment: 'cloud',
     note: 'Doubao tier profile.',
+  },
+  {
+    id: 'volcengine_coding_plan',
+    label: 'Volcengine Coding Plan',
+    model: 'doubao-seed-2.0-pro',
+    baseUrl: 'https://ark.cn-beijing.volces.com/api/coding/v3',
+    apiKeyEnv: 'VOLCENGINE_API_KEY',
+    requiresApiKey: true,
+    routerSupported: false,
+    deployment: 'cloud',
+    note: 'Volcengine coding-plan endpoint.',
   },
   {
     id: 'zhipu',
@@ -476,11 +1000,46 @@ const SEARCH_PROVIDER_CATALOG: SearchProviderCatalogEntry[] = [
     note: 'Semantic and content-oriented search for research workflows.',
     keyPlaceholder: 'EXA_API_KEY',
   },
+  {
+    providerId: 'iqs',
+    label: 'Alibaba Cloud IQS',
+    envKey: 'IQS_SEARCH_API_KEY',
+    requiresApiKey: true,
+    note: 'Alibaba Cloud web search tuned for agents, with strong Chinese-web coverage.',
+    keyPlaceholder: 'IQS_SEARCH_API_KEY',
+  },
 ]
 
 const SEARCH_PROVIDER_BY_ID = new Map(
   SEARCH_PROVIDER_CATALOG.map((provider) => [provider.providerId, provider]),
 )
+
+function textRouterProfile(
+  provider: string,
+  c0: string,
+  c1: string,
+  c2: string,
+  c3: string,
+  subject: string,
+): Record<string, RouterTier> {
+  return {
+    c0: { provider, model: c0, description: `${subject} fast route`, thinkingLevel: 'off' },
+    c1: { provider, model: c1, description: `${subject} balanced route`, thinkingLevel: 'low' },
+    c2: { provider, model: c2, description: `${subject} strong route`, thinkingLevel: 'medium' },
+    c3: { provider, model: c3, description: `${subject} highest route`, thinkingLevel: 'high' },
+  }
+}
+
+function minimaxRouterProfile(provider: string): Record<string, RouterTier> {
+  return textRouterProfile(
+    provider,
+    'MiniMax-M2.7',
+    'MiniMax-M2.7',
+    'MiniMax-M3',
+    'MiniMax-M3',
+    'MiniMax',
+  )
+}
 
 const ROUTER_PROFILES: Record<string, Record<string, RouterTier>> = {
   openrouter: {
@@ -494,13 +1053,13 @@ const ROUTER_PROFILES: Record<string, Record<string, RouterTier>> = {
     c0: { provider: 'openai', model: 'gpt-5.4-nano', description: 'Fast simple work', thinkingLevel: 'none' },
     c1: { provider: 'openai', model: 'gpt-5.4-mini', description: 'Balanced agent work', thinkingLevel: 'low' },
     c2: { provider: 'openai', model: 'gpt-5.5', description: 'Complex text tasks', thinkingLevel: 'medium' },
-    c3: { provider: 'openai', model: 'gpt-5.5', description: 'Deep reasoning', thinkingLevel: 'high' },
+    c3: { provider: 'openai', model: 'gpt-5.5', description: 'Deep review and analysis', thinkingLevel: 'high' },
   },
   dashscope: {
     c0: { provider: 'dashscope', model: 'qwen3.6-flash', description: 'Fast simple work' },
-    c1: { provider: 'dashscope', model: 'qwen3.6-plus', description: 'Balanced agent work' },
-    c2: { provider: 'dashscope', model: 'qwen3-max', description: 'Complex text tasks' },
-    c3: { provider: 'dashscope', model: 'qwen3-max', description: 'Deep reasoning' },
+    c1: { provider: 'dashscope', model: 'qwen3.7-plus', description: 'Balanced agent work' },
+    c2: { provider: 'dashscope', model: 'qwen3.7-max', description: 'Complex text tasks' },
+    c3: { provider: 'dashscope', model: 'qwen3.7-max', description: 'Deep reasoning' },
   },
   deepseek: {
     c0: { provider: 'deepseek', model: 'deepseek-v4-flash', description: 'Fast simple work' },
@@ -509,29 +1068,74 @@ const ROUTER_PROFILES: Record<string, Record<string, RouterTier>> = {
     c3: { provider: 'deepseek', model: 'deepseek-v4-pro', description: 'Deep reasoning' },
   },
   gemini: {
-    c0: { provider: 'gemini', model: 'gemini-2.5-flash-lite', description: 'Fast simple work' },
-    c1: { provider: 'gemini', model: 'gemini-2.5-flash', description: 'Balanced agent work' },
-    c2: { provider: 'gemini', model: 'gemini-2.5-pro', description: 'Complex text tasks' },
-    c3: { provider: 'gemini', model: 'gemini-2.5-pro', description: 'Deep reasoning' },
+    c0: { provider: 'gemini', model: 'gemini-3.1-flash-lite', description: 'Fast simple work' },
+    c1: { provider: 'gemini', model: 'gemini-3.5-flash', description: 'Balanced agent work', thinkingLevel: 'low' },
+    c2: { provider: 'gemini', model: 'gemini-3.1-pro-preview', description: 'Complex text tasks', thinkingLevel: 'medium' },
+    c3: { provider: 'gemini', model: 'gemini-3.1-pro-preview', description: 'Deep reasoning', thinkingLevel: 'high' },
   },
   moonshot: {
-    c0: { provider: 'moonshot', model: 'kimi-k2.5', description: 'Fast simple work' },
-    c1: { provider: 'moonshot', model: 'kimi-k2.5', description: 'Balanced agent work' },
-    c2: { provider: 'moonshot', model: 'kimi-k2.6', description: 'Complex text and image work', supportsImage: true },
-    c3: { provider: 'moonshot', model: 'kimi-k2.6', description: 'Deep reasoning and image work', supportsImage: true },
+    c0: { provider: 'moonshot', model: 'kimi-k2.6', description: 'Fast multimodal work', supportsImage: true, thinkingLevel: 'low' },
+    c1: { provider: 'moonshot', model: 'kimi-k2.6', description: 'Balanced multimodal work', supportsImage: true, thinkingLevel: 'medium' },
+    c2: { provider: 'moonshot', model: 'kimi-k2.6', description: 'Complex text and image work', supportsImage: true, thinkingLevel: 'medium' },
+    c3: { provider: 'moonshot', model: 'kimi-k2.7-code', description: 'Code-heavy deep reasoning', supportsImage: true, thinkingLevel: 'high' },
   },
+  kimi_coding_openai: textRouterProfile(
+    'kimi_coding_openai',
+    'kimi-for-coding',
+    'kimi-for-coding',
+    'kimi-for-coding',
+    'kimi-for-coding',
+    'Kimi Coding',
+  ),
+  kimi_coding_anthropic: textRouterProfile(
+    'kimi_coding_anthropic',
+    'kimi-for-coding',
+    'kimi-for-coding',
+    'kimi-for-coding',
+    'kimi-for-coding',
+    'Kimi Coding',
+  ),
   volcengine: {
-    c0: { provider: 'volcengine', model: 'doubao-seed-2-0-mini-260215', description: 'Fast simple work' },
+    c0: { provider: 'volcengine', model: 'doubao-seed-2-0-lite-260215', description: 'Fast simple work' },
     c1: { provider: 'volcengine', model: 'doubao-seed-2-0-lite-260215', description: 'Balanced agent work' },
     c2: { provider: 'volcengine', model: 'doubao-seed-2-0-pro-260215', description: 'Complex text tasks' },
-    c3: { provider: 'volcengine', model: 'doubao-seed-2-0-code-preview-260215', description: 'Code-heavy deep reasoning' },
+    c3: { provider: 'volcengine', model: 'doubao-seed-2-0-pro-260215', description: 'Deep review and analysis' },
   },
+  volcengine_coding_plan: textRouterProfile(
+    'volcengine_coding_plan',
+    'doubao-seed-2.0-lite',
+    'doubao-seed-2.0-pro',
+    'doubao-seed-2.0-code',
+    'doubao-seed-2.0-code',
+    'Volcengine Coding Plan',
+  ),
   zhipu: {
-    c0: { provider: 'zhipu', model: 'glm-4.7-flashx', description: 'Fast simple work' },
+    c0: { provider: 'zhipu', model: 'glm-5-turbo', description: 'Fast simple work' },
     c1: { provider: 'zhipu', model: 'glm-5', description: 'Balanced agent work' },
     c2: { provider: 'zhipu', model: 'glm-5.1', description: 'Complex text tasks' },
-    c3: { provider: 'zhipu', model: 'glm-5.1', description: 'Deep reasoning' },
+    c3: { provider: 'zhipu', model: 'glm-5.2', description: 'Deep reasoning', thinkingLevel: 'high' },
   },
+  minimax: minimaxRouterProfile('minimax'),
+  minimax_cn: minimaxRouterProfile('minimax_cn'),
+  minimax_global: minimaxRouterProfile('minimax_global'),
+  minimax_coding_openai: minimaxRouterProfile('minimax_coding_openai'),
+  minimax_coding_anthropic: minimaxRouterProfile('minimax_coding_anthropic'),
+  mimo_openai: textRouterProfile(
+    'mimo_openai',
+    'mimo-v2.5',
+    'mimo-v2.5',
+    'mimo-v2.5-pro',
+    'mimo-v2.5-pro',
+    'MiMo',
+  ),
+  mimo_anthropic: textRouterProfile(
+    'mimo_anthropic',
+    'mimo-v2.5',
+    'mimo-v2.5',
+    'mimo-v2.5-pro',
+    'mimo-v2.5-pro',
+    'MiMo',
+  ),
 }
 
 function cloneRouterTiers(tiers: Record<string, RouterTier>): Record<string, RouterTier> {
@@ -614,6 +1218,11 @@ function normalizeRouterTiers(raw: unknown, fallback: Record<string, RouterTier>
   for (const [rawName, value] of Object.entries(source)) {
     if (!value || typeof value !== 'object') continue
     const name = canonicalTierKey(rawName)
+    // Tier keys are emitted raw into TOML table headers ([squilla_router.tiers.NAME]),
+    // so a key that is not a TOML bare key (spaces, dots, quotes, brackets, newlines)
+    // would produce an unparseable config the gateway rejects on every boot. Drop
+    // such keys and fall back to the profile defaults instead.
+    if (!/^[A-Za-z0-9_-]+$/.test(name)) continue
     const tier = value as Record<string, unknown>
     const provider = String(tier.provider || out[name]?.provider || '').trim()
     const model = String(tier.model || out[name]?.model || '').trim()
@@ -751,27 +1360,42 @@ function configureChromiumKeychainPolicy(): void {
   }
 }
 
-function desktopSecretStorageBackend(): SecretEncryption {
-  if (secretStorageBackendCache) return secretStorageBackendCache
-  const selected = secretStorageBackendForPolicy({
+function desktopSecretStoragePolicyBackend(): SecretEncryption {
+  return secretStorageBackendForPolicy({
     envMode: process.env.OPENSQUILLA_DESKTOP_SECRET_STORAGE,
     platform: process.platform,
     appPackaged: app.isPackaged,
     codesignDiagnostic: macCodeSignatureDiagnostic(),
   })
+}
+
+function desktopSecretStorageBackend(): SecretEncryption {
+  if (secretStorageBackendCache) return secretStorageBackendCache
+  const selected = desktopSecretStoragePolicyBackend()
   secretStorageBackendCache = selected === 'safeStorage' && safeStorage.isEncryptionAvailable() ? 'safeStorage' : 'plain'
   return secretStorageBackendCache
 }
 
 function encryptSecret(secret: string): { value: string; encryption: SecretEncryption } {
-  if (desktopSecretStorageBackend() === 'safeStorage') {
+  const policyBackend = desktopSecretStoragePolicyBackend()
+  const availableBackend = desktopSecretStorageBackend()
+  if (policyBackend === 'safeStorage') {
+    if (availableBackend !== 'safeStorage') {
+      throw new Error(
+        'The OS keychain is unavailable. Unlock it and reopen OpenSquilla before saving credentials.'
+      )
+    }
     try {
       return {
         value: safeStorage.encryptString(secret).toString('base64'),
         encryption: 'safeStorage',
       }
-    } catch {
-      return plainSecret(secret)
+    } catch (error) {
+      throw new Error(
+        `The OS keychain could not encrypt the credential: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      )
     }
   }
   return plainSecret(secret)
@@ -836,6 +1460,21 @@ function normalizeDesktopCredential(parsed: Partial<DesktopConnection>): Desktop
     disableNetworkObservability: normalizeBooleanSetting(parsed.disableNetworkObservability, false),
     createdAt: parsed.createdAt || now,
     updatedAt: parsed.updatedAt || now,
+  }
+}
+
+// Write via a temp file + atomic rename so a crash, power loss, or full disk
+// mid-write cannot leave a truncated credential (silent re-onboarding + lost
+// key) or a truncated config.toml (which, since it is only reseeded when
+// missing, would wedge boot on every launch).
+async function atomicWriteFile(filePath: string, data: string, mode: number): Promise<void> {
+  const tmpPath = `${filePath}.${randomUUID()}.tmp`
+  try {
+    await writeFile(tmpPath, data, { mode })
+    await rename(tmpPath, filePath)
+  } catch (err) {
+    await rm(tmpPath, { force: true }).catch(() => null)
+    throw err
   }
 }
 
@@ -921,23 +1560,82 @@ async function saveDesktopCredential(payload: OnboardingPayload): Promise<Deskto
   }
 
   mkdirSync(app.getPath('userData'), { recursive: true })
-  await writeFile(credentialPath(), JSON.stringify(credential, null, 2), { mode: 0o600 })
+  await atomicWriteFile(credentialPath(), JSON.stringify(credential, null, 2), 0o600)
   await writeDesktopConfig(credential)
   return credential
+}
+
+// Sections the desktop config template owns and regenerates from the credential
+// on every write. Everything else in config.toml is treated as foreign
+// (Control-UI/RPC-owned) and preserved verbatim across regenerations.
+const DESKTOP_OWNED_CONFIG_SECTIONS = ['llm', 'squilla_router', 'llm_ensemble', 'privacy', 'control_ui']
+// Top-level (pre-section) keys the desktop template emits itself. Any OTHER
+// top-level key present in config.toml was written by the Control UI / RPC (which
+// serializes the whole GatewayConfig, so scalar fields like
+// llm_request_timeout_seconds land in the TOML preamble) and must be preserved.
+const DESKTOP_OWNED_CONFIG_PREAMBLE_KEYS = ['state_dir', 'search_provider', 'search_api_key_env']
+
+function isDesktopOwnedConfigSection(header: string): boolean {
+  const name = header.trim()
+  return DESKTOP_OWNED_CONFIG_SECTIONS.some((owned) => name === owned || name.startsWith(`${owned}.`))
+}
+
+// Return the lines of every top-level section that the desktop template does not
+// own, so they survive a config regeneration. Line-based (like the privacy-config
+// reader) to avoid taking on a TOML parser dependency.
+function foreignConfigSectionLines(raw: string): string[] {
+  const out: string[] = []
+  let keeping = false
+  for (const rawLine of raw.split(/\r?\n/)) {
+    const header = rawLine.trim().match(/^\[+\s*([^\]]+?)\s*\]+$/)
+    if (header) keeping = !isDesktopOwnedConfigSection(header[1] ?? '')
+    if (keeping) out.push(rawLine)
+  }
+  while (out.length && out[out.length - 1].trim() === '') out.pop()
+  return out
+}
+
+// Return the top-level (pre-first-section) key lines the desktop template does
+// NOT emit itself, so RPC-written global scalars (llm_request_timeout_seconds,
+// log_level, workspace_dir, diagnostics_enabled, …) survive a regeneration. These
+// must be re-emitted in the preamble (before any [section]) to stay top-level.
+function foreignConfigPreambleLines(raw: string): string[] {
+  const out: string[] = []
+  for (const rawLine of raw.split(/\r?\n/)) {
+    if (/^\s*\[/.test(rawLine)) break // reached the first section header
+    const key = rawLine.match(/^\s*([A-Za-z0-9_-]+)\s*=/)
+    if (!key) continue // blank line or comment
+    if (DESKTOP_OWNED_CONFIG_PREAMBLE_KEYS.includes(key[1] ?? '')) continue
+    out.push(rawLine)
+  }
+  return out
 }
 
 async function writeDesktopConfig(credential: DesktopConnection): Promise<void> {
   mkdirSync(desktopHome(), { recursive: true })
   mkdirSync(desktopStateDir(), { recursive: true })
+  // Only the desktop-owned sections/keys are regenerated from the credential; any
+  // other sections (channels, memory, sandbox, mcp, scheduler, …) AND top-level
+  // scalar keys (llm_request_timeout_seconds, log_level, …) the Control UI wrote
+  // via RPC are read back and preserved, so a settings save no longer wipes live
+  // configuration.
+  let preservedForeignSections: string[] = []
+  let preservedForeignPreamble: string[] = []
+  try {
+    const existingRaw = readFileSync(desktopConfigPath(), 'utf8')
+    preservedForeignSections = foreignConfigSectionLines(existingRaw)
+    preservedForeignPreamble = foreignConfigPreambleLines(existingRaw)
+  } catch {
+    // No existing config to preserve (fresh install) or unreadable.
+  }
   const config = [
     `state_dir = ${tomlString(desktopStateDir())}`,
     `search_provider = ${tomlString(credential.searchProvider)}`,
     ...(credential.searchApiKeyEnv ? [`search_api_key_env = ${tomlString(credential.searchApiKeyEnv)}`] : []),
     // search_max_results is intentionally omitted so the gateway's own default
-    // governs instead of pinning it to a hardcoded value. Note this writer
-    // regenerates the whole config file, so it still does not preserve a value
-    // set through the control UI — that broader limitation of the desktop config
-    // writer is tracked separately.
+    // governs instead of pinning it to a hardcoded value.
+    // Preserved RPC-written top-level keys stay in the preamble (before any table).
+    ...preservedForeignPreamble,
     '',
     '[llm]',
     `provider = ${tomlString(credential.provider)}`,
@@ -953,8 +1651,9 @@ async function writeDesktopConfig(credential: DesktopConnection): Promise<void> 
     'enabled = true',
     'base_path = "/control"',
     '',
+    ...(preservedForeignSections.length ? [...preservedForeignSections, ''] : []),
   ].join('\n')
-  await writeFile(desktopConfigPath(), config, { mode: 0o600 })
+  await atomicWriteFile(desktopConfigPath(), config, 0o600)
 }
 
 function settingsSnapshot(connection: DesktopConnection | null): DesktopSettingsSnapshot {
@@ -1006,6 +1705,17 @@ async function resetDesktopSettings(): Promise<void> {
   // source of truth, so it is no longer regenerated on every boot).
   await rm(credentialPath(), { force: true })
   await rm(desktopConfigPath(), { force: true })
+  transientPendingMigrationProviderSetup = null
+  await rm(pendingMigrationProviderSetupPath(), { force: true })
+  await rm(desktopMigrationResultPath(), { force: true })
+}
+
+function clearReusableGatewayState(): void {
+  gatewayState.url = ''
+  gatewayState.port = 0
+  gatewayState.owned = false
+  gatewayState.status = 'stopped'
+  gatewayState.error = undefined
 }
 
 interface ArtifactOpenRequest {
@@ -1047,23 +1757,35 @@ function artifactMimeKey(mime: unknown): string {
   return String(mime ?? '').split(';', 1)[0].trim().toLowerCase()
 }
 
-// When the name carries no extension, fall back to one implied by the MIME type
-// so shell.openPath can still associate a default application.
+// Append an extension implied by the MIME type unless the name already ends with
+// a recognized document/image extension. The previous "any .xxx suffix counts as
+// an extension" heuristic misclassified version/date suffixes (report.v2,
+// plan.rev3), so the authoritative MIME extension was dropped and shell.openPath
+// hit a missing/incorrect OS association.
 function artifactExtension(name: string, mime: unknown): string {
-  if (/\.[A-Za-z0-9]{1,8}$/.test(name)) return ''
+  const lower = name.toLowerCase()
+  if (Object.values(MIME_EXTENSIONS).some((ext) => lower.endsWith(ext))) return ''
   return MIME_EXTENSIONS[artifactMimeKey(mime)] || ''
 }
 
+// Artifacts opened this session, so the prune never deletes a file that an
+// external viewer (Preview, Excel, a browser) still has open — deleting it out
+// from under the app loses the document and any unsaved edits made there.
+const openedArtifactPaths = new Set<string>()
+
 // Best-effort prune so opened artifacts do not accumulate unboundedly in temp.
+// Skips files opened this session and only removes prior-session leftovers older
+// than a day, so a document a user is actively viewing is never yanked away.
 async function pruneArtifactCache(dir: string): Promise<void> {
   try {
     const now = Date.now()
     const entries = await readdir(dir)
     await Promise.all(entries.map(async (entry) => {
       const full = join(dir, entry)
+      if (openedArtifactPaths.has(full)) return
       try {
         const info = await stat(full)
-        if (now - info.mtimeMs > 60 * 60 * 1000) await unlink(full)
+        if (now - info.mtimeMs > 24 * 60 * 60 * 1000) await unlink(full)
       } catch {}
     }))
   } catch {}
@@ -1073,6 +1795,9 @@ async function openArtifactWithDefaultApp(payload: ArtifactOpenRequest): Promise
   const raw = payload?.data
   if (!raw) return { ok: false, message: 'No artifact data to open.' }
   try {
+    // Reuse the received bytes directly; fs.writeFile accepts a Uint8Array, so
+    // Buffer.from() here would just memcpy a second full copy of the payload
+    // (hundreds of MB for media artifacts) into the main process.
     const bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw)
     const dir = join(app.getPath('temp'), 'opensquilla-artifacts')
     mkdirSync(dir, { recursive: true, mode: 0o700 })
@@ -1081,7 +1806,8 @@ async function openArtifactWithDefaultApp(payload: ArtifactOpenRequest): Promise
     // A random prefix guarantees a unique, non-colliding, non-dotfile path even
     // for two opens in the same millisecond.
     const filePath = join(dir, `${randomUUID()}-${name}${artifactExtension(name, payload?.mime)}`)
-    await writeFile(filePath, Buffer.from(bytes), { mode: 0o600 })
+    await writeFile(filePath, bytes, { mode: 0o600 })
+    openedArtifactPaths.add(filePath)
     const error = await shell.openPath(filePath)
     if (error) return { ok: false, message: error }
     return { ok: true }
@@ -1095,8 +1821,6 @@ async function openArtifactWithDefaultApp(payload: ArtifactOpenRequest): Promise
 // the main-process surfaces that live OUTSIDE the BrowserWindow (app-authored
 // menu group labels and the onboarding window title), keyed off the OS locale.
 // Role-based menu items (Cut/Copy/Paste/…) are localized by Electron itself.
-type DesktopLocale = 'en' | 'zh-Hans' | 'ja' | 'fr' | 'de' | 'es'
-const DESKTOP_LOCALES: DesktopLocale[] = ['en', 'zh-Hans', 'ja', 'fr', 'de', 'es']
 const DESKTOP_LOCALE_LABELS: Record<DesktopLocale, string> = {
   en: 'English',
   'zh-Hans': '简体中文',
@@ -1109,7 +1833,8 @@ let desktopLocale: DesktopLocale = 'en'
 
 const PROVIDER_NOTE_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
   en: {
-    openrouter: 'Best default for mixed model routing.',
+    tokenrhythm: 'DeepSeek, GLM, MiniMax and Kimi model families on one key.',
+    openrouter: 'One account for mixed-model routing.',
     openai: 'OpenAI-only tier profile.',
     openai_responses: 'OpenAI Responses-API shape (chat + responses).',
     anthropic: 'Direct Claude access without SquillaRouter tiers.',
@@ -1123,7 +1848,8 @@ const PROVIDER_NOTE_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     zhipu: 'GLM tier profile.',
   },
   'zh-Hans': {
-    openrouter: '适合混合模型路由的初始默认选项。',
+    tokenrhythm: '一把密钥即可使用 DeepSeek、GLM、MiniMax、Kimi 全系模型。',
+    openrouter: '通过一个账户进行混合模型路由。',
     openai: '仅使用 OpenAI 的层级配置。',
     openai_responses: 'OpenAI Responses API 格式（chat + responses）。',
     anthropic: '直接访问 Claude，不使用 SquillaRouter 层级。',
@@ -1137,7 +1863,8 @@ const PROVIDER_NOTE_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     zhipu: 'GLM 层级配置。',
   },
   ja: {
-    openrouter: '混合モデルルーティングに適した初期デフォルトです。',
+    tokenrhythm: 'DeepSeek・GLM・MiniMax・Kimi の各モデルを 1 つのキーで利用できます。',
+    openrouter: '1 つのアカウントで複数モデルをルーティングできます。',
     openai: 'OpenAI のみを使うティアプロファイルです。',
     openai_responses: 'OpenAI Responses API 形式（chat + responses）です。',
     anthropic: 'SquillaRouter ティアを使わず Claude に直接アクセスします。',
@@ -1151,7 +1878,8 @@ const PROVIDER_NOTE_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     zhipu: 'GLM ティアプロファイルです。',
   },
   fr: {
-    openrouter: 'Bon choix initial par défaut pour le routage de modèles mixtes.',
+    tokenrhythm: 'Les familles DeepSeek, GLM, MiniMax et Kimi avec une seule clé.',
+    openrouter: 'Routage de plusieurs modèles avec un seul compte.',
     openai: 'Profil de niveaux limité à OpenAI.',
     openai_responses: 'Format OpenAI Responses API (chat + responses).',
     anthropic: 'Accès direct à Claude sans niveaux SquillaRouter.',
@@ -1165,7 +1893,8 @@ const PROVIDER_NOTE_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     zhipu: 'Profil de niveaux GLM.',
   },
   de: {
-    openrouter: 'Gute anfängliche Voreinstellung für gemischtes Modellrouting.',
+    tokenrhythm: 'DeepSeek-, GLM-, MiniMax- und Kimi-Modelle mit einem einzigen Schlüssel.',
+    openrouter: 'Routing mehrerer Modelle über ein Konto.',
     openai: 'Nur-OpenAI-Stufenprofil.',
     openai_responses: 'OpenAI Responses-API-Format (chat + responses).',
     anthropic: 'Direkter Claude-Zugriff ohne SquillaRouter-Stufen.',
@@ -1179,7 +1908,8 @@ const PROVIDER_NOTE_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     zhipu: 'GLM-Stufenprofil.',
   },
   es: {
-    openrouter: 'Buena opción inicial para el enrutamiento mixto de modelos.',
+    tokenrhythm: 'Las familias DeepSeek, GLM, MiniMax y Kimi con una sola clave.',
+    openrouter: 'Enrutamiento de varios modelos con una sola cuenta.',
     openai: 'Perfil de niveles solo con OpenAI.',
     openai_responses: 'Formato OpenAI Responses API (chat + responses).',
     anthropic: 'Acceso directo a Claude sin niveles SquillaRouter.',
@@ -1194,19 +1924,101 @@ const PROVIDER_NOTE_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
   },
 }
 
+// Localized descriptive notes for the search providers, mirroring
+// PROVIDER_NOTE_MESSAGES. Without these the onboarding search cards always
+// rendered the hardcoded English catalog notes, so their localized fallbacks
+// were unreachable in every non-English locale.
+const SEARCH_PROVIDER_NOTE_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
+  en: {
+    duckduckgo: 'No key required. Good default for getting started.',
+    bocha: 'Web search with inline summaries and freshness support.',
+    brave: 'Managed search access with freshness support.',
+    tavily: 'Freshness-oriented web search for current research.',
+    exa: 'Semantic and content-oriented search for research workflows.',
+    iqs: 'Alibaba Cloud web search tuned for agents, with strong Chinese-web coverage.',
+  },
+  'zh-Hans': {
+    duckduckgo: '无需密钥。适合入门的默认选项。',
+    bocha: '带内联摘要和时效性支持的网络搜索。',
+    brave: '带时效性支持的托管搜索访问。',
+    tavily: '面向时效性的网络搜索，适合最新研究。',
+    exa: '面向语义和内容的搜索，适合研究工作流。',
+    iqs: '阿里云面向智能体的联网搜索，中文网页覆盖广。',
+  },
+  ja: {
+    duckduckgo: 'キー不要。始めるのに適したデフォルトです。',
+    bocha: 'インライン要約と鮮度対応を備えたウェブ検索です。',
+    brave: '鮮度対応を備えたマネージド検索アクセスです。',
+    tavily: '最新の調査向けの、鮮度重視のウェブ検索です。',
+    exa: '調査ワークフロー向けのセマンティック／コンテンツ指向検索です。',
+    iqs: 'エージェント向けに調整された Alibaba Cloud のウェブ検索。中国語ウェブのカバレッジに優れています。',
+  },
+  fr: {
+    duckduckgo: 'Aucune clé requise. Bon choix par défaut pour démarrer.',
+    bocha: 'Recherche web avec résumés en ligne et prise en charge de la fraîcheur.',
+    brave: 'Accès de recherche géré avec prise en charge de la fraîcheur.',
+    tavily: 'Recherche web axée sur la fraîcheur pour la recherche actuelle.',
+    exa: 'Recherche sémantique et orientée contenu pour les flux de recherche.',
+    iqs: 'Recherche web Alibaba Cloud conçue pour les agents, avec une forte couverture du web chinois.',
+  },
+  de: {
+    duckduckgo: 'Kein Schlüssel erforderlich. Gute Voreinstellung für den Einstieg.',
+    bocha: 'Websuche mit Inline-Zusammenfassungen und Aktualitätsunterstützung.',
+    brave: 'Verwalteter Suchzugriff mit Aktualitätsunterstützung.',
+    tavily: 'Aktualitätsorientierte Websuche für aktuelle Recherche.',
+    exa: 'Semantische und inhaltsorientierte Suche für Recherche-Workflows.',
+    iqs: 'Alibaba-Cloud-Websuche für Agenten, mit starker Abdeckung des chinesischen Webs.',
+  },
+  es: {
+    duckduckgo: 'No se requiere clave. Buena opción predeterminada para empezar.',
+    bocha: 'Búsqueda web con resúmenes en línea y soporte de actualidad.',
+    brave: 'Acceso de búsqueda gestionado con soporte de actualidad.',
+    tavily: 'Búsqueda web orientada a la actualidad para investigación actual.',
+    exa: 'Búsqueda semántica y orientada a contenido para flujos de investigación.',
+    iqs: 'Búsqueda web de Alibaba Cloud orientada a agentes, con amplia cobertura de la web china.',
+  },
+}
+
 function resolveDesktopLocale(): DesktopLocale {
   const preferred = typeof app.getPreferredSystemLanguages === 'function'
     ? app.getPreferredSystemLanguages()
     : []
-  for (const raw of [...preferred, app.getLocale()]) {
-    if (typeof raw !== 'string') continue
-    const t = raw.toLowerCase()
-    if (t.startsWith('zh')) return 'zh-Hans'
-    for (const code of ['ja', 'fr', 'de', 'es'] as const) {
-      if (t === code || t.startsWith(code + '-')) return code
-    }
+  return resolveLocaleFromTags([...preferred, app.getLocale()])
+}
+
+function desktopLocalePath(): string {
+  return join(app.getPath('userData'), 'desktop-locale')
+}
+
+// Persist the locale the user picked during onboarding so every main-process
+// surface (menu, dialogs, boot splash, next onboarding) honors it across
+// launches instead of reverting to the OS locale.
+function loadPersistedDesktopLocale(): DesktopLocale | null {
+  try {
+    const raw = readFileSync(desktopLocalePath(), 'utf8').trim()
+    return DESKTOP_LOCALES.includes(raw as DesktopLocale) ? (raw as DesktopLocale) : null
+  } catch {
+    return null
   }
-  return 'en'
+}
+
+function persistDesktopLocale(locale: DesktopLocale): void {
+  try {
+    mkdirSync(app.getPath('userData'), { recursive: true })
+    writeFileSync(desktopLocalePath(), locale, 'utf8')
+  } catch {
+    // Best-effort; a failed persist just means the next launch re-resolves the OS locale.
+  }
+}
+
+function applyDesktopLocaleChoice(raw: unknown): void {
+  const requested = String(raw ?? '')
+  if (!DESKTOP_LOCALES.includes(requested as DesktopLocale)) return
+  if (requested !== desktopLocale) {
+    desktopLocale = requested as DesktopLocale
+    createApplicationMenu()
+  }
+  persistDesktopLocale(desktopLocale)
 }
 
 const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
@@ -1216,6 +2028,7 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'menu.window': 'Window',
     'menu.checkForUpdates': 'Check for Updates…',
     'menu.relaunchToUpdate': 'Relaunch to Update',
+    'menu.downloadDiagnostics': 'Download Diagnostics…',
     'update.newVersionTitle': 'A new version is available',
     'update.newVersionDetail': 'OpenSquilla {version} is available. Download it now?',
     'update.download': 'Download',
@@ -1230,6 +2043,27 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'update.gatewayShutdownTimeout': 'OpenSquilla could not stop the local runtime. Try relaunching to update again.',
     'update.mockInstallTitle': 'Mock update restart',
     'update.mockInstallDetail': 'Mock mode: OpenSquilla would restart now to install {version}. No files were changed.',
+    'uninstall.confirmTitle': 'Delete local OpenSquilla desktop data?',
+    'uninstall.confirmMessage': 'This permanently deletes the local desktop profile on this machine.',
+    'uninstall.confirmDetail': 'Sessions, configuration, and secrets will be removed. The installed app itself will remain; remove it through your OS after the app closes.',
+    'uninstall.cancel': 'Cancel',
+    'uninstall.deleteEverything': 'Delete everything',
+    'migration.nav.title': 'Import',
+    'migration.nav.sub': 'Existing data',
+    'migration.step.badge': 'Import',
+    'migration.step.heading': 'Import existing OpenSquilla data',
+    'migration.step.subtitle': 'OpenSquilla found data from a previous installation on this machine. Preview what would be imported and bring it into the desktop app, or skip and start fresh.',
+    'migration.step.sourceLabel': 'Detected data location',
+    'migration.step.preview': 'Preview import',
+    'migration.step.import': 'Import',
+    'migration.step.skip': 'Skip',
+    'migration.overwriteTitle': 'Replace conflicting desktop data?',
+    'migration.overwriteMessage': 'This import will replace data in the current desktop profile.',
+    'migration.overwriteDetail': 'A complete timestamped backup will be retained. Confirm the source below before continuing.',
+    'migration.overwriteCancel': 'Cancel',
+    'migration.overwriteConfirm': 'Import and replace',
+    'launch.alreadyRunningTitle': 'OpenSquilla is already running',
+    'launch.alreadyRunningMessage': 'Another OpenSquilla window is already open on this machine. Bringing it to the front.',
     'window.onboarding': 'Set up OpenSquilla',
     'boot.profile': 'Preparing desktop profile',
     'boot.gateway-start': 'Starting local runtime',
@@ -1268,7 +2102,13 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'onboarding.step1.continue': 'Continue',
     'onboarding.step2.badge': 'Required',
     'onboarding.step2.heading': 'Connect a provider',
-    'onboarding.step2.subtitle': 'Choose the provider account the local runtime uses for model calls. OpenRouter starts selected, but any supported provider can be used.',
+    'onboarding.step2.subtitle': 'Choose the provider account the local runtime uses for model calls.',
+    'onboarding.step2.tokenrhythmTitle': 'Recommended: TokenRhythm',
+    'onboarding.step2.tokenrhythmValue': 'TokenRhythm API calls are free for a limited time.',
+    'onboarding.step2.tokenrhythmRegistration': 'During the promotion, register and get an API key to call DeepSeek, GLM, MiniMax, Kimi, and other leading models for free.',
+    'onboarding.step2.tokenrhythmCta': 'Register and get an API key',
+    'onboarding.step2.tokenrhythmCtaExternalLabel': 'Register and get an API key — TokenRhythm (opens in external browser)',
+    'onboarding.step2.otherProviders': 'Other providers',
     'onboarding.step2.apiKey': 'API key',
     'onboarding.step2.endpointSummary': 'Endpoint and direct model',
     'onboarding.step2.baseUrl': 'Base URL',
@@ -1300,6 +2140,7 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'menu.window': '窗口',
     'menu.checkForUpdates': '检查更新…',
     'menu.relaunchToUpdate': '重启以更新',
+    'menu.downloadDiagnostics': '下载诊断信息…',
     'update.newVersionTitle': '有新版本可用',
     'update.newVersionDetail': 'OpenSquilla {version} 已发布，现在下载吗？',
     'update.download': '下载',
@@ -1314,6 +2155,27 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'update.gatewayShutdownTimeout': 'OpenSquilla 无法停止本地运行时。请再次尝试重启以更新。',
     'update.mockInstallTitle': '模拟重启更新',
     'update.mockInstallDetail': '模拟模式：OpenSquilla 现在会重启并安装 {version}。没有修改任何文件。',
+    'uninstall.confirmTitle': '删除本地 OpenSquilla 桌面数据？',
+    'uninstall.confirmMessage': '这将永久删除本机上的本地桌面配置。',
+    'uninstall.confirmDetail': '会话、配置和密钥都将被移除。已安装的应用本身会保留；应用关闭后请通过操作系统将其卸载。',
+    'uninstall.cancel': '取消',
+    'uninstall.deleteEverything': '全部删除',
+    'migration.nav.title': '导入',
+    'migration.nav.sub': '现有数据',
+    'migration.step.badge': '导入',
+    'migration.step.heading': '导入现有的 OpenSquilla 数据',
+    'migration.step.subtitle': 'OpenSquilla 在本机上发现了先前安装留下的数据。可以先预览将导入的内容并将其导入桌面应用，也可以跳过并全新开始。',
+    'migration.step.sourceLabel': '检测到的数据位置',
+    'migration.step.preview': '预览导入',
+    'migration.step.import': '导入',
+    'migration.step.skip': '跳过',
+    'migration.overwriteTitle': '替换冲突的桌面数据？',
+    'migration.overwriteMessage': '此次导入将替换当前桌面配置中的数据。',
+    'migration.overwriteDetail': '系统会保留完整的时间戳备份。继续前请确认下方的数据来源。',
+    'migration.overwriteCancel': '取消',
+    'migration.overwriteConfirm': '导入并替换',
+    'launch.alreadyRunningTitle': 'OpenSquilla 已在运行',
+    'launch.alreadyRunningMessage': '本机已打开另一个 OpenSquilla 窗口。正在将其置于前台。',
     'window.onboarding': '设置 OpenSquilla',
     'boot.profile': '正在准备桌面配置',
     'boot.gateway-start': '正在启动本地运行时',
@@ -1352,7 +2214,13 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'onboarding.step1.continue': '继续',
     'onboarding.step2.badge': '必填',
     'onboarding.step2.heading': '连接提供商',
-    'onboarding.step2.subtitle': '选择本地运行时用于模型调用的提供商账户。OpenRouter 只是初始默认选项，可改用任何支持的提供商。',
+    'onboarding.step2.subtitle': '选择本地运行时用于模型调用的提供商账户。',
+    'onboarding.step2.tokenrhythmTitle': '推荐使用 TokenRhythm',
+    'onboarding.step2.tokenrhythmValue': 'TokenRhythm API 调用限时免费。',
+    'onboarding.step2.tokenrhythmRegistration': '活动期间，注册并获取 API Key，即可免费调用 DeepSeek、GLM、MiniMax、Kimi 等主流模型。',
+    'onboarding.step2.tokenrhythmCta': '注册并获取 API Key',
+    'onboarding.step2.tokenrhythmCtaExternalLabel': '注册并获取 API Key — TokenRhythm（在外部浏览器中打开）',
+    'onboarding.step2.otherProviders': '其他提供商',
     'onboarding.step2.apiKey': 'API 密钥',
     'onboarding.step2.endpointSummary': '端点和直连模型',
     'onboarding.step2.baseUrl': 'Base URL',
@@ -1384,6 +2252,7 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'menu.window': 'ウインドウ',
     'menu.checkForUpdates': 'アップデートを確認…',
     'menu.relaunchToUpdate': '再起動してアップデート',
+    'menu.downloadDiagnostics': '診断情報をダウンロード…',
     'update.newVersionTitle': '新しいバージョンが利用可能です',
     'update.newVersionDetail': 'OpenSquilla {version} が利用可能です。今すぐダウンロードしますか？',
     'update.download': 'ダウンロード',
@@ -1396,6 +2265,27 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'update.errorTitle': 'アップデートの確認に失敗しました',
     'update.moveToApplications': '自動アップデートを有効にするには、OpenSquilla を「アプリケーション」フォルダに移動してから再試行してください。',
     'update.gatewayShutdownTimeout': 'ローカルランタイムを停止できませんでした。もう一度、再起動してアップデートをお試しください。',
+    'uninstall.confirmTitle': 'ローカルの OpenSquilla デスクトップデータを削除しますか？',
+    'uninstall.confirmMessage': 'このマシン上のローカルデスクトッププロファイルを完全に削除します。',
+    'uninstall.confirmDetail': 'セッション、設定、シークレットが削除されます。インストール済みのアプリ自体は残ります。アプリを閉じた後、OS から削除してください。',
+    'uninstall.cancel': 'キャンセル',
+    'uninstall.deleteEverything': 'すべて削除',
+    'migration.nav.title': 'インポート',
+    'migration.nav.sub': '既存データ',
+    'migration.step.badge': 'インポート',
+    'migration.step.heading': '既存の OpenSquilla データをインポート',
+    'migration.step.subtitle': 'このマシンで以前のインストールのデータが見つかりました。インポートされる内容をプレビューしてデスクトップアプリに取り込むか、スキップして新規に始められます。',
+    'migration.step.sourceLabel': '検出されたデータの場所',
+    'migration.step.preview': 'インポートをプレビュー',
+    'migration.step.import': 'インポート',
+    'migration.step.skip': 'スキップ',
+    'migration.overwriteTitle': '競合するデスクトップデータを置き換えますか？',
+    'migration.overwriteMessage': 'このインポートは現在のデスクトッププロファイルのデータを置き換えます。',
+    'migration.overwriteDetail': 'タイムスタンプ付きの完全なバックアップが保持されます。続行する前に以下の移行元を確認してください。',
+    'migration.overwriteCancel': 'キャンセル',
+    'migration.overwriteConfirm': 'インポートして置換',
+    'launch.alreadyRunningTitle': 'OpenSquilla はすでに実行中です',
+    'launch.alreadyRunningMessage': 'このマシンでは別の OpenSquilla ウィンドウがすでに開いています。前面に表示します。',
     'window.onboarding': 'OpenSquilla をセットアップ',
     'boot.profile': 'デスクトッププロファイルを準備しています',
     'boot.gateway-start': 'ローカルランタイムを起動しています',
@@ -1431,13 +2321,28 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'onboarding.step1.continue': '続行',
     'onboarding.step2.badge': '必須',
     'onboarding.step2.heading': 'プロバイダーを接続',
-    'onboarding.step2.subtitle': 'ローカルランタイムがモデル呼び出しに使用するプロバイダーアカウントを選択します。OpenRouter は初期選択であり、対応する任意のプロバイダーに変更できます。',
+    'onboarding.step2.subtitle': 'ローカルランタイムがモデル呼び出しに使用するプロバイダーアカウントを選択します。',
+    'onboarding.step2.tokenrhythmTitle': '推奨：TokenRhythm',
+    'onboarding.step2.tokenrhythmValue': 'TokenRhythm API は期間限定で無料です。',
+    'onboarding.step2.tokenrhythmRegistration': 'キャンペーン期間中に登録して API キーを取得すると、DeepSeek、GLM、MiniMax、Kimi などの主要モデルを無料で利用できます。',
+    'onboarding.step2.tokenrhythmCta': '登録して API キーを取得',
+    'onboarding.step2.tokenrhythmCtaExternalLabel': '登録して API キーを取得 — TokenRhythm（外部ブラウザーで開きます）',
+    'onboarding.step2.otherProviders': 'その他のプロバイダー',
     'onboarding.step2.apiKey': 'API キー',
     'onboarding.step2.endpointSummary': 'エンドポイントと直接モデル',
     'onboarding.step2.baseUrl': 'Base URL',
     'onboarding.step2.directModel': '直接モデル',
     'onboarding.step2.back': '戻る',
     'onboarding.step2.next': '次へ',
+    'onboarding.nav.routing.title': 'ルーティング',
+    'onboarding.nav.routing.sub': 'モード',
+    'onboarding.aria.modelRoutingMode': 'ルーティングモード',
+    'onboarding.step3.badge': '詳細',
+    'onboarding.step3.heading': 'ルーティングモードを選択',
+    'onboarding.step3.subtitle': 'OpenSquilla が Smart Router のティアを使うか、固定モデルを 1 つ呼び出すか、OpenRouter アンサンブルを使うかを選びます。',
+    'onboarding.step3.back': '戻る',
+    'onboarding.step3.next': '次へ',
+    'onboarding.step3.directModel': '直接モデル',
     'onboarding.step4.badge': 'モデル',
     'onboarding.step4.heading': 'ティアのモデルを確認',
     'onboarding.step4.subtitle': 'デフォルトのテキストティアを選んで CLI のデフォルトを維持するか、起動前にモデル id をカスタマイズします。',
@@ -1457,6 +2362,7 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'menu.window': 'Fenêtre',
     'menu.checkForUpdates': 'Rechercher les mises à jour…',
     'menu.relaunchToUpdate': 'Relancer pour mettre à jour',
+    'menu.downloadDiagnostics': 'Télécharger le diagnostic…',
     'update.newVersionTitle': 'Une nouvelle version est disponible',
     'update.newVersionDetail': 'OpenSquilla {version} est disponible. Télécharger maintenant ?',
     'update.download': 'Télécharger',
@@ -1469,6 +2375,27 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'update.errorTitle': 'Échec de la recherche de mises à jour',
     'update.moveToApplications': 'Déplacez OpenSquilla dans votre dossier Applications pour activer les mises à jour automatiques, puis réessayez.',
     'update.gatewayShutdownTimeout': 'OpenSquilla n\'a pas pu arrêter le runtime local. Réessayez de relancer la mise à jour.',
+    'uninstall.confirmTitle': 'Supprimer les données locales du bureau OpenSquilla ?',
+    'uninstall.confirmMessage': 'Cela supprime définitivement le profil de bureau local sur cette machine.',
+    'uninstall.confirmDetail': 'Les sessions, la configuration et les secrets seront supprimés. L’application installée elle-même sera conservée ; supprimez-la via votre système d’exploitation après la fermeture de l’application.',
+    'uninstall.cancel': 'Annuler',
+    'uninstall.deleteEverything': 'Tout supprimer',
+    'migration.nav.title': 'Importation',
+    'migration.nav.sub': 'Données existantes',
+    'migration.step.badge': 'Importation',
+    'migration.step.heading': 'Importer les données OpenSquilla existantes',
+    'migration.step.subtitle': 'OpenSquilla a trouvé sur cette machine des données d\'une installation précédente. Prévisualisez ce qui serait importé et récupérez-les dans l\'application de bureau, ou ignorez cette étape pour repartir de zéro.',
+    'migration.step.sourceLabel': 'Emplacement des données détecté',
+    'migration.step.preview': 'Aperçu de l\'importation',
+    'migration.step.import': 'Importer',
+    'migration.step.skip': 'Ignorer',
+    'migration.overwriteTitle': 'Remplacer les données de bureau en conflit ?',
+    'migration.overwriteMessage': 'Cette importation remplacera des données du profil de bureau actuel.',
+    'migration.overwriteDetail': 'Une sauvegarde complète horodatée sera conservée. Vérifiez la source ci-dessous avant de continuer.',
+    'migration.overwriteCancel': 'Annuler',
+    'migration.overwriteConfirm': 'Importer et remplacer',
+    'launch.alreadyRunningTitle': 'OpenSquilla est déjà en cours d’exécution',
+    'launch.alreadyRunningMessage': 'Une autre fenêtre OpenSquilla est déjà ouverte sur cette machine. Elle va être mise au premier plan.',
     'window.onboarding': 'Configurer OpenSquilla',
     'boot.profile': 'Préparation du profil de bureau',
     'boot.gateway-start': 'Démarrage du runtime local',
@@ -1504,13 +2431,28 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'onboarding.step1.continue': 'Continuer',
     'onboarding.step2.badge': 'Requis',
     'onboarding.step2.heading': 'Connecter un fournisseur',
-    'onboarding.step2.subtitle': 'Choisissez le compte fournisseur utilisé par le runtime local pour les appels de modèle. OpenRouter est sélectionné au départ, mais tout fournisseur pris en charge peut être utilisé.',
+    'onboarding.step2.subtitle': 'Choisissez le compte fournisseur utilisé par le runtime local pour les appels de modèle.',
+    'onboarding.step2.tokenrhythmTitle': 'Recommandé : TokenRhythm',
+    'onboarding.step2.tokenrhythmValue': 'Les appels à l’API TokenRhythm sont gratuits pendant une durée limitée.',
+    'onboarding.step2.tokenrhythmRegistration': 'Pendant l’offre, inscrivez-vous et obtenez une clé API pour appeler gratuitement DeepSeek, GLM, MiniMax, Kimi et d’autres modèles majeurs.',
+    'onboarding.step2.tokenrhythmCta': 'S’inscrire et obtenir une clé API',
+    'onboarding.step2.tokenrhythmCtaExternalLabel': 'S’inscrire et obtenir une clé API — TokenRhythm (s’ouvre dans le navigateur externe)',
+    'onboarding.step2.otherProviders': 'Autres fournisseurs',
     'onboarding.step2.apiKey': 'Clé API',
     'onboarding.step2.endpointSummary': 'Point de terminaison et modèle direct',
     'onboarding.step2.baseUrl': 'Base URL',
     'onboarding.step2.directModel': 'Modèle direct',
     'onboarding.step2.back': 'Retour',
     'onboarding.step2.next': 'Suivant',
+    'onboarding.nav.routing.title': 'Routage',
+    'onboarding.nav.routing.sub': 'Mode',
+    'onboarding.aria.modelRoutingMode': 'Mode de routage',
+    'onboarding.step3.badge': 'Avancé',
+    'onboarding.step3.heading': 'Choisir le mode de routage',
+    'onboarding.step3.subtitle': "Décidez si OpenSquilla doit utiliser les niveaux du Smart Router, appeler un seul modèle fixe, ou utiliser l'ensemble OpenRouter.",
+    'onboarding.step3.back': 'Retour',
+    'onboarding.step3.next': 'Suivant',
+    'onboarding.step3.directModel': 'Modèle direct',
     'onboarding.step4.badge': 'Modèles',
     'onboarding.step4.heading': 'Examiner les modèles par niveau',
     'onboarding.step4.subtitle': 'Choisissez le niveau de texte par défaut et conservez les valeurs par défaut de la CLI, ou personnalisez les id de modèle avant le démarrage.',
@@ -1530,6 +2472,7 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'menu.window': 'Fenster',
     'menu.checkForUpdates': 'Nach Updates suchen…',
     'menu.relaunchToUpdate': 'Zum Aktualisieren neu starten',
+    'menu.downloadDiagnostics': 'Diagnose herunterladen…',
     'update.newVersionTitle': 'Eine neue Version ist verfügbar',
     'update.newVersionDetail': 'OpenSquilla {version} ist verfügbar. Jetzt herunterladen?',
     'update.download': 'Herunterladen',
@@ -1542,6 +2485,27 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'update.errorTitle': 'Update-Prüfung fehlgeschlagen',
     'update.moveToApplications': 'Verschieben Sie OpenSquilla in Ihren Programme-Ordner, um automatische Updates zu aktivieren, und versuchen Sie es erneut.',
     'update.gatewayShutdownTimeout': 'OpenSquilla konnte die lokale Laufzeitumgebung nicht stoppen. Versuchen Sie erneut, zum Aktualisieren neu zu starten.',
+    'uninstall.confirmTitle': 'Lokale OpenSquilla-Desktop-Daten löschen?',
+    'uninstall.confirmMessage': 'Dies löscht das lokale Desktop-Profil auf diesem Gerät dauerhaft.',
+    'uninstall.confirmDetail': 'Sitzungen, Konfiguration und Secrets werden entfernt. Die installierte App selbst bleibt erhalten; entfernen Sie sie nach dem Schließen der App über Ihr Betriebssystem.',
+    'uninstall.cancel': 'Abbrechen',
+    'uninstall.deleteEverything': 'Alles löschen',
+    'migration.nav.title': 'Import',
+    'migration.nav.sub': 'Vorhandene Daten',
+    'migration.step.badge': 'Import',
+    'migration.step.heading': 'Vorhandene OpenSquilla-Daten importieren',
+    'migration.step.subtitle': 'OpenSquilla hat auf diesem Gerät Daten einer früheren Installation gefunden. Sehen Sie sich in der Vorschau an, was importiert würde, und übernehmen Sie die Daten in die Desktop-App — oder überspringen Sie den Schritt und beginnen Sie neu.',
+    'migration.step.sourceLabel': 'Erkannter Datenspeicherort',
+    'migration.step.preview': 'Import-Vorschau',
+    'migration.step.import': 'Importieren',
+    'migration.step.skip': 'Überspringen',
+    'migration.overwriteTitle': 'Konfliktierende Desktop-Daten ersetzen?',
+    'migration.overwriteMessage': 'Dieser Import ersetzt Daten im aktuellen Desktop-Profil.',
+    'migration.overwriteDetail': 'Eine vollständige Sicherung mit Zeitstempel bleibt erhalten. Prüfen Sie vor dem Fortfahren die Quelle unten.',
+    'migration.overwriteCancel': 'Abbrechen',
+    'migration.overwriteConfirm': 'Importieren und ersetzen',
+    'launch.alreadyRunningTitle': 'OpenSquilla läuft bereits',
+    'launch.alreadyRunningMessage': 'Auf diesem Gerät ist bereits ein anderes OpenSquilla-Fenster geöffnet. Es wird in den Vordergrund geholt.',
     'window.onboarding': 'OpenSquilla einrichten',
     'boot.profile': 'Desktop-Profil wird vorbereitet',
     'boot.gateway-start': 'Lokale Laufzeitumgebung wird gestartet',
@@ -1577,13 +2541,28 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'onboarding.step1.continue': 'Weiter',
     'onboarding.step2.badge': 'Erforderlich',
     'onboarding.step2.heading': 'Anbieter verbinden',
-    'onboarding.step2.subtitle': 'Wählen Sie das Anbieterkonto, das die lokale Laufzeitumgebung für Modellaufrufe verwendet. OpenRouter ist anfangs ausgewählt, aber jeder unterstützte Anbieter kann verwendet werden.',
+    'onboarding.step2.subtitle': 'Wählen Sie das Anbieterkonto, das die lokale Laufzeitumgebung für Modellaufrufe verwendet.',
+    'onboarding.step2.tokenrhythmTitle': 'Empfohlen: TokenRhythm',
+    'onboarding.step2.tokenrhythmValue': 'TokenRhythm-API-Aufrufe sind für kurze Zeit kostenlos.',
+    'onboarding.step2.tokenrhythmRegistration': 'Während der Aktion registrieren, API-Schlüssel erhalten und DeepSeek, GLM, MiniMax, Kimi und weitere führende Modelle kostenlos aufrufen.',
+    'onboarding.step2.tokenrhythmCta': 'Registrieren und API-Schlüssel erhalten',
+    'onboarding.step2.tokenrhythmCtaExternalLabel': 'Registrieren und API-Schlüssel erhalten — TokenRhythm (wird im externen Browser geöffnet)',
+    'onboarding.step2.otherProviders': 'Weitere Anbieter',
     'onboarding.step2.apiKey': 'API-Schlüssel',
     'onboarding.step2.endpointSummary': 'Endpunkt und direktes Modell',
     'onboarding.step2.baseUrl': 'Base URL',
     'onboarding.step2.directModel': 'Direktes Modell',
     'onboarding.step2.back': 'Zurück',
     'onboarding.step2.next': 'Weiter',
+    'onboarding.nav.routing.title': 'Routing',
+    'onboarding.nav.routing.sub': 'Modus',
+    'onboarding.aria.modelRoutingMode': 'Routing-Modus',
+    'onboarding.step3.badge': 'Erweitert',
+    'onboarding.step3.heading': 'Routing-Modus wählen',
+    'onboarding.step3.subtitle': 'Legen Sie fest, ob OpenSquilla die Smart-Router-Stufen verwenden, ein festes Modell aufrufen oder das OpenRouter-Ensemble nutzen soll.',
+    'onboarding.step3.back': 'Zurück',
+    'onboarding.step3.next': 'Weiter',
+    'onboarding.step3.directModel': 'Direktes Modell',
     'onboarding.step4.badge': 'Modelle',
     'onboarding.step4.heading': 'Stufenmodelle prüfen',
     'onboarding.step4.subtitle': 'Wählen Sie die Standard-Textstufe und behalten Sie die CLI-Standards bei, oder passen Sie die Modell-ids vor dem Start an.',
@@ -1603,6 +2582,7 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'menu.window': 'Ventana',
     'menu.checkForUpdates': 'Buscar actualizaciones…',
     'menu.relaunchToUpdate': 'Reiniciar para actualizar',
+    'menu.downloadDiagnostics': 'Descargar diagnóstico…',
     'update.newVersionTitle': 'Hay una nueva versión disponible',
     'update.newVersionDetail': 'OpenSquilla {version} está disponible. ¿Descargar ahora?',
     'update.download': 'Descargar',
@@ -1615,6 +2595,27 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'update.errorTitle': 'Error al buscar actualizaciones',
     'update.moveToApplications': 'Mueve OpenSquilla a tu carpeta de Aplicaciones para habilitar las actualizaciones automáticas e inténtalo de nuevo.',
     'update.gatewayShutdownTimeout': 'OpenSquilla no pudo detener el runtime local. Intenta reiniciar para actualizar de nuevo.',
+    'uninstall.confirmTitle': '¿Eliminar los datos locales de escritorio de OpenSquilla?',
+    'uninstall.confirmMessage': 'Esto elimina permanentemente el perfil de escritorio local en esta máquina.',
+    'uninstall.confirmDetail': 'Se eliminarán las sesiones, la configuración y los secretos. La aplicación instalada en sí permanecerá; elimínala a través de tu sistema operativo después de cerrar la aplicación.',
+    'uninstall.cancel': 'Cancelar',
+    'uninstall.deleteEverything': 'Eliminar todo',
+    'migration.nav.title': 'Importación',
+    'migration.nav.sub': 'Datos existentes',
+    'migration.step.badge': 'Importación',
+    'migration.step.heading': 'Importar los datos existentes de OpenSquilla',
+    'migration.step.subtitle': 'OpenSquilla encontró datos de una instalación anterior en esta máquina. Previsualiza lo que se importaría y tráelo a la aplicación de escritorio, u omite este paso y empieza de cero.',
+    'migration.step.sourceLabel': 'Ubicación de datos detectada',
+    'migration.step.preview': 'Vista previa de la importación',
+    'migration.step.import': 'Importar',
+    'migration.step.skip': 'Omitir',
+    'migration.overwriteTitle': '¿Reemplazar los datos de escritorio en conflicto?',
+    'migration.overwriteMessage': 'Esta importación reemplazará datos del perfil de escritorio actual.',
+    'migration.overwriteDetail': 'Se conservará una copia de seguridad completa con marca de tiempo. Confirma la fuente indicada abajo antes de continuar.',
+    'migration.overwriteCancel': 'Cancelar',
+    'migration.overwriteConfirm': 'Importar y reemplazar',
+    'launch.alreadyRunningTitle': 'OpenSquilla ya se está ejecutando',
+    'launch.alreadyRunningMessage': 'Ya hay otra ventana de OpenSquilla abierta en esta máquina. Se traerá al frente.',
     'window.onboarding': 'Configurar OpenSquilla',
     'boot.profile': 'Preparando el perfil de escritorio',
     'boot.gateway-start': 'Iniciando el runtime local',
@@ -1650,13 +2651,28 @@ const DESKTOP_MESSAGES: Record<DesktopLocale, Record<string, string>> = {
     'onboarding.step1.continue': 'Continuar',
     'onboarding.step2.badge': 'Obligatorio',
     'onboarding.step2.heading': 'Conectar un proveedor',
-    'onboarding.step2.subtitle': 'Elige la cuenta de proveedor que usa el runtime local para las llamadas a modelos. OpenRouter empieza seleccionado, pero puedes usar cualquier proveedor compatible.',
+    'onboarding.step2.subtitle': 'Elige la cuenta de proveedor que usa el runtime local para las llamadas a modelos.',
+    'onboarding.step2.tokenrhythmTitle': 'Recomendado: TokenRhythm',
+    'onboarding.step2.tokenrhythmValue': 'Las llamadas a la API de TokenRhythm son gratis por tiempo limitado.',
+    'onboarding.step2.tokenrhythmRegistration': 'Durante la promoción, regístrate y obtén una clave API para usar gratis DeepSeek, GLM, MiniMax, Kimi y otros modelos líderes.',
+    'onboarding.step2.tokenrhythmCta': 'Registrarse y obtener una clave API',
+    'onboarding.step2.tokenrhythmCtaExternalLabel': 'Registrarse y obtener una clave API — TokenRhythm (se abre en el navegador externo)',
+    'onboarding.step2.otherProviders': 'Otros proveedores',
     'onboarding.step2.apiKey': 'Clave API',
     'onboarding.step2.endpointSummary': 'Endpoint y modelo directo',
     'onboarding.step2.baseUrl': 'Base URL',
     'onboarding.step2.directModel': 'Modelo directo',
     'onboarding.step2.back': 'Atrás',
     'onboarding.step2.next': 'Siguiente',
+    'onboarding.nav.routing.title': 'Enrutamiento',
+    'onboarding.nav.routing.sub': 'Modo',
+    'onboarding.aria.modelRoutingMode': 'Modo de enrutamiento',
+    'onboarding.step3.badge': 'Avanzado',
+    'onboarding.step3.heading': 'Elige el modo de enrutamiento',
+    'onboarding.step3.subtitle': 'Decide si OpenSquilla debe usar los niveles del Smart Router, llamar a un único modelo fijo o usar el ensemble de OpenRouter.',
+    'onboarding.step3.back': 'Atrás',
+    'onboarding.step3.next': 'Siguiente',
+    'onboarding.step3.directModel': 'Modelo directo',
     'onboarding.step4.badge': 'Modelos',
     'onboarding.step4.heading': 'Revisa los modelos por nivel',
     'onboarding.step4.subtitle': 'Elige el nivel de texto predeterminado y mantén los valores predeterminados de la CLI, o personaliza los id de modelo antes del inicio.',
@@ -1705,6 +2721,15 @@ const ONBOARDING_SCRIPT_MESSAGES: Record<DesktopLocale, Record<string, string>> 
     directModelRequiredDirect: 'Direct model is required for Direct single model mode.',
     defaultTierRequiresModel: 'Default router tier requires a model.',
     searchApiKeyRequired: '{label} search API key is required.',
+    migrationPreviewRunning: 'Checking the existing data…',
+    migrationApplyRunning: 'Importing data… this can take a few minutes.',
+    migrationItems: 'Items — {counts}',
+    migrationPausedJobs: 'Scheduler jobs to import (arrive paused): {n}',
+    migrationDisk: 'Disk: {required} required, {free} free',
+    migrationNotesLabel: 'Notes',
+    migrationPreviewFailed: 'Preview failed: {detail}',
+    migrationApplyFailed: 'Import failed: {detail}',
+    migrationDone: 'Import complete. {n} scheduler job(s) arrived paused — re-enable them in the Cron view. Your original data remains untouched at {path}.',
     stepLabel: 'Step {n}',
   },
   'zh-Hans': {
@@ -1734,10 +2759,29 @@ const ONBOARDING_SCRIPT_MESSAGES: Record<DesktopLocale, Record<string, string>> 
     directModelRequiredDirect: '直连单模型模式需要直连模型。',
     defaultTierRequiresModel: '默认路由层级需要一个模型。',
     searchApiKeyRequired: '需要 {label} 搜索 API 密钥。',
+    migrationPreviewRunning: '正在检查现有数据……',
+    migrationApplyRunning: '正在导入数据……可能需要几分钟。',
+    migrationItems: '条目 — {counts}',
+    migrationPausedJobs: '将导入的计划任务（导入后为暂停状态）：{n}',
+    migrationDisk: '磁盘：需要 {required}，可用 {free}',
+    migrationNotesLabel: '备注',
+    migrationPreviewFailed: '预览失败：{detail}',
+    migrationApplyFailed: '导入失败：{detail}',
+    migrationDone: '导入完成。{n} 个计划任务已以暂停状态导入——请在 Cron 视图中重新启用。原始数据仍原样保留在 {path}。',
     stepLabel: '步骤 {n}',
   },
   ja: {
     tierDefaultsAvailable: 'ティアのデフォルトを利用できます。',
+    modeSmartRouterTitle: 'Smart Router',
+    modeSmartRouterDesc: 'このプロバイダー向けの既存の階層化された Squilla Router のデフォルトを使用します。',
+    modeDirectTitle: '直接単一モデル',
+    modeDirectDesc: 'すべてのリクエストを、ティアルーティングやアンサンブルなしで 1 つのプロバイダーモデルに送信します。',
+    modeEnsembleTitle: 'アンサンブル',
+    modeEnsembleDesc: 'OpenRouter の static B5 アンサンブルを使用し、ティア表をスキップします。',
+    modeSmartRouterUnavailable: 'このプロバイダーにはまだデスクトップ用のティアデフォルトがありません。',
+    modeEnsembleUnavailable: 'アンサンブルの設定には現在 OpenRouter が必要です。',
+    directModelPrompt: 'リクエストはこのモデルを直接使用します。',
+    directModelRequiredDirect: '直接単一モデルモードには直接モデルが必要です。',
     directModelLabel: '直接モデル',
     noModel: 'モデルなし',
     directModelNote: 'Smart Router はオフです。すべてのリクエストでこのモデルを直接使用します。',
@@ -1753,10 +2797,29 @@ const ONBOARDING_SCRIPT_MESSAGES: Record<DesktopLocale, Record<string, string>> 
     directModelRequiredDisabled: 'Smart Router を無効にする場合は直接モデルが必要です。',
     defaultTierRequiresModel: 'デフォルトのルーターティアにはモデルが必要です。',
     searchApiKeyRequired: '{label} の検索 API キーが必要です。',
+    migrationPreviewRunning: '既存データを確認しています…',
+    migrationApplyRunning: 'データをインポートしています… 数分かかることがあります。',
+    migrationItems: '項目 — {counts}',
+    migrationPausedJobs: 'インポートされるスケジュールジョブ（一時停止状態で取り込み）: {n}',
+    migrationDisk: 'ディスク: 必要 {required} / 空き {free}',
+    migrationNotesLabel: '補足',
+    migrationPreviewFailed: 'プレビューに失敗しました: {detail}',
+    migrationApplyFailed: 'インポートに失敗しました: {detail}',
+    migrationDone: 'インポートが完了しました。{n} 件のスケジュールジョブは一時停止状態で取り込まれました — Cron ビューで再度有効にしてください。元のデータは {path} にそのまま残っています。',
     stepLabel: 'ステップ {n}',
   },
   fr: {
     tierDefaultsAvailable: 'Valeurs de niveau par défaut disponibles.',
+    modeSmartRouterTitle: 'Smart Router',
+    modeSmartRouterDesc: 'Utiliser les valeurs par défaut existantes du Squilla Router en couches pour ce fournisseur.',
+    modeDirectTitle: 'Modèle unique direct',
+    modeDirectDesc: 'Envoyer chaque requête à un seul modèle du fournisseur, sans routage par niveaux ni ensemble.',
+    modeEnsembleTitle: 'Ensemble',
+    modeEnsembleDesc: "Utiliser l'ensemble statique B5 d'OpenRouter et ignorer le tableau des niveaux.",
+    modeSmartRouterUnavailable: "Ce fournisseur n'a pas encore de niveaux par défaut pour le bureau.",
+    modeEnsembleUnavailable: "La configuration de l'ensemble nécessite actuellement OpenRouter.",
+    directModelPrompt: 'Les requêtes utiliseront directement ce modèle.',
+    directModelRequiredDirect: 'Un modèle direct est requis pour le mode Modèle unique direct.',
     directModelLabel: 'Modèle direct',
     noModel: 'Aucun modèle',
     directModelNote: 'Smart Router est désactivé. Chaque requête utilise directement ce modèle.',
@@ -1772,10 +2835,29 @@ const ONBOARDING_SCRIPT_MESSAGES: Record<DesktopLocale, Record<string, string>> 
     directModelRequiredDisabled: 'Un modèle direct est requis lorsque Smart Router est désactivé.',
     defaultTierRequiresModel: 'Le niveau de routeur par défaut nécessite un modèle.',
     searchApiKeyRequired: 'La clé API de recherche {label} est requise.',
+    migrationPreviewRunning: 'Vérification des données existantes…',
+    migrationApplyRunning: 'Importation des données… cela peut prendre quelques minutes.',
+    migrationItems: 'Éléments — {counts}',
+    migrationPausedJobs: 'Tâches planifiées à importer (arrivent en pause) : {n}',
+    migrationDisk: 'Disque : {required} requis, {free} libres',
+    migrationNotesLabel: 'Remarques',
+    migrationPreviewFailed: "Échec de l'aperçu : {detail}",
+    migrationApplyFailed: "Échec de l'importation : {detail}",
+    migrationDone: "Importation terminée. {n} tâche(s) planifiée(s) sont arrivées en pause — réactivez-les dans la vue Cron. Vos données d'origine restent intactes dans {path}.",
     stepLabel: 'Étape {n}',
   },
   de: {
     tierDefaultsAvailable: 'Stufenstandards verfügbar.',
+    modeSmartRouterTitle: 'Smart Router',
+    modeSmartRouterDesc: 'Die vorhandenen mehrstufigen Squilla-Router-Standards für diesen Anbieter verwenden.',
+    modeDirectTitle: 'Einzelnes Direktmodell',
+    modeDirectDesc: 'Jede Anfrage an ein einzelnes Anbietermodell senden, ohne Stufenrouting oder Ensemble.',
+    modeEnsembleTitle: 'Ensemble',
+    modeEnsembleDesc: 'Das statische B5-Ensemble von OpenRouter verwenden und die Stufentabelle überspringen.',
+    modeSmartRouterUnavailable: 'Dieser Anbieter hat noch keine Desktop-Stufenstandards.',
+    modeEnsembleUnavailable: 'Die Ensemble-Einrichtung erfordert derzeit OpenRouter.',
+    directModelPrompt: 'Anfragen verwenden dieses Modell direkt.',
+    directModelRequiredDirect: 'Für den Modus „Einzelnes Direktmodell“ ist ein direktes Modell erforderlich.',
     directModelLabel: 'Direktes Modell',
     noModel: 'Kein Modell',
     directModelNote: 'Smart Router ist aus. Jede Anfrage verwendet dieses Modell direkt.',
@@ -1791,10 +2873,29 @@ const ONBOARDING_SCRIPT_MESSAGES: Record<DesktopLocale, Record<string, string>> 
     directModelRequiredDisabled: 'Ein direktes Modell ist erforderlich, wenn Smart Router deaktiviert ist.',
     defaultTierRequiresModel: 'Die Standard-Routerstufe erfordert ein Modell.',
     searchApiKeyRequired: 'Der Such-API-Schlüssel für {label} ist erforderlich.',
+    migrationPreviewRunning: 'Vorhandene Daten werden geprüft…',
+    migrationApplyRunning: 'Daten werden importiert… das kann einige Minuten dauern.',
+    migrationItems: 'Elemente — {counts}',
+    migrationPausedJobs: 'Zu importierende Scheduler-Jobs (kommen pausiert an): {n}',
+    migrationDisk: 'Speicher: {required} benötigt, {free} frei',
+    migrationNotesLabel: 'Hinweise',
+    migrationPreviewFailed: 'Vorschau fehlgeschlagen: {detail}',
+    migrationApplyFailed: 'Import fehlgeschlagen: {detail}',
+    migrationDone: 'Import abgeschlossen. {n} Scheduler-Job(s) sind pausiert angekommen — aktivieren Sie sie in der Cron-Ansicht wieder. Ihre ursprünglichen Daten bleiben unverändert unter {path}.',
     stepLabel: 'Schritt {n}',
   },
   es: {
     tierDefaultsAvailable: 'Valores de nivel predeterminados disponibles.',
+    modeSmartRouterTitle: 'Smart Router',
+    modeSmartRouterDesc: 'Usar los valores predeterminados por niveles existentes del Squilla Router para este proveedor.',
+    modeDirectTitle: 'Modelo único directo',
+    modeDirectDesc: 'Enviar cada solicitud a un único modelo del proveedor, sin enrutamiento por niveles ni ensemble.',
+    modeEnsembleTitle: 'Ensemble',
+    modeEnsembleDesc: 'Usar el ensemble estático B5 de OpenRouter y omitir la tabla de niveles.',
+    modeSmartRouterUnavailable: 'Este proveedor aún no tiene valores de nivel predeterminados para el escritorio.',
+    modeEnsembleUnavailable: 'La configuración del ensemble requiere actualmente OpenRouter.',
+    directModelPrompt: 'Las solicitudes usarán este modelo directamente.',
+    directModelRequiredDirect: 'Se requiere un modelo directo para el modo Modelo único directo.',
     directModelLabel: 'Modelo directo',
     noModel: 'Sin modelo',
     directModelNote: 'Smart Router está desactivado. Cada solicitud usa este modelo directamente.',
@@ -1810,6 +2911,15 @@ const ONBOARDING_SCRIPT_MESSAGES: Record<DesktopLocale, Record<string, string>> 
     directModelRequiredDisabled: 'Se requiere un modelo directo cuando Smart Router está desactivado.',
     defaultTierRequiresModel: 'El nivel de enrutador predeterminado requiere un modelo.',
     searchApiKeyRequired: 'Se requiere la clave API de búsqueda de {label}.',
+    migrationPreviewRunning: 'Comprobando los datos existentes…',
+    migrationApplyRunning: 'Importando datos… esto puede tardar unos minutos.',
+    migrationItems: 'Elementos — {counts}',
+    migrationPausedJobs: 'Tareas programadas a importar (llegan en pausa): {n}',
+    migrationDisk: 'Disco: {required} necesarios, {free} libres',
+    migrationNotesLabel: 'Notas',
+    migrationPreviewFailed: 'Error en la vista previa: {detail}',
+    migrationApplyFailed: 'Error en la importación: {detail}',
+    migrationDone: 'Importación completada. {n} tarea(s) programada(s) llegaron en pausa: vuelve a activarlas en la vista Cron. Tus datos originales permanecen intactos en {path}.',
     stepLabel: 'Paso {n}',
   },
 }
@@ -1819,6 +2929,10 @@ function desktopT(key: string): string {
 }
 
 function createApplicationMenu(): void {
+  if (!shouldUseNativeApplicationMenu) {
+    Menu.setApplicationMenu(null)
+    return
+  }
   const appSubmenu: Electron.MenuItemConstructorOptions[] = [{ role: 'about' }]
   if (desktopUpdateMenuEnabled()) {
     appSubmenu.push({ type: 'separator' })
@@ -1840,6 +2954,15 @@ function createApplicationMenu(): void {
       },
     })
   }
+  appSubmenu.push(
+    { type: 'separator' },
+    {
+      label: desktopT('menu.downloadDiagnostics'),
+      click: () => {
+        void downloadDiagnostics()
+      },
+    },
+  )
   appSubmenu.push({ type: 'separator' }, { role: 'quit' })
 
   const template: Electron.MenuItemConstructorOptions[] = [
@@ -1865,8 +2988,11 @@ function createApplicationMenu(): void {
     {
       label: desktopT('menu.view'),
       submenu: [
-        { role: 'reload' },
-        { role: 'forceReload' },
+        // Disable reload while the onboarding wizard is open: its state lives only
+        // in the renderer of a one-shot data: URL, so a reload would silently wipe
+        // the in-progress setup (typed key, provider, step, tier edits).
+        { role: 'reload', enabled: currentOnboardingWindow() === null },
+        { role: 'forceReload', enabled: currentOnboardingWindow() === null },
         { role: 'toggleDevTools' },
         { type: 'separator' },
         { role: 'resetZoom' },
@@ -1941,7 +3067,10 @@ function localeOptionsHtml(): string {
   )).join('')
 }
 
-function onboardingHtml(): string {
+function onboardingHtml(
+  detection: LegacyImportCandidate | null = null,
+  pendingProviderSetup: MigrationProviderPrefill | null = null,
+): string {
   return `<!doctype html>
 <html lang="${desktopLocale}">
 <head>
@@ -2189,6 +3318,123 @@ function onboardingHtml(): string {
       display: grid;
       gap: 10px;
       grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .provider-feature {
+      position: relative;
+      width: 100%;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 18px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255,255,255,0.62);
+      padding: 17px 18px;
+      transition: border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+    }
+    .provider-feature.active {
+      border-color: var(--accent);
+      background: #fffaf4;
+      box-shadow: 0 12px 26px rgba(54, 42, 28, 0.065);
+    }
+    .provider-feature.active::after {
+      content: "";
+      position: absolute;
+      top: 11px;
+      right: 11px;
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: var(--accent);
+    }
+    .provider-feature-select {
+      appearance: none;
+      min-height: 0;
+      display: grid;
+      gap: 5px;
+      border: 0;
+      background: transparent;
+      color: var(--ink);
+      cursor: pointer;
+      padding: 0;
+      text-align: left;
+    }
+    .provider-feature-select strong {
+      padding-right: 12px;
+      font-size: 17px;
+      font-weight: 700;
+      line-height: 1.25;
+    }
+    .provider-feature-value {
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 550;
+      line-height: 1.45;
+    }
+    .provider-feature-registration {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 500;
+      line-height: 1.4;
+    }
+    .provider-feature-cta {
+      display: inline-flex;
+      min-height: 38px;
+      align-items: center;
+      justify-content: center;
+      border-radius: 8px;
+      background: var(--accent-dark);
+      color: #fff;
+      font-size: 12px;
+      font-weight: 700;
+      padding: 0 14px;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+    .provider-feature-cta:hover {
+      background: var(--accent);
+    }
+    .provider-disclosure {
+      display: grid;
+      gap: 10px;
+    }
+    .provider-disclosure-toggle {
+      appearance: none;
+      width: 100%;
+      min-height: 40px;
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255,255,255,0.46);
+      color: #565c54;
+      cursor: pointer;
+      font: inherit;
+      font-size: 12px;
+      font-weight: 650;
+      padding: 0 13px;
+      text-align: left;
+    }
+    .provider-disclosure-toggle::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-right: 2px solid #747a73;
+      border-bottom: 2px solid #747a73;
+      transform: rotate(-45deg);
+      transition: transform 180ms ease, border-color 180ms ease;
+    }
+    .provider-disclosure-toggle[aria-expanded="true"]::before {
+      border-color: var(--accent-dark);
+      transform: rotate(45deg);
+    }
+    .provider:focus-visible,
+    .provider-feature-select:focus-visible,
+    .provider-feature-cta:focus-visible,
+    .provider-disclosure-toggle:focus-visible {
+      outline: 3px solid rgba(242, 106, 27, 0.35);
+      outline-offset: 2px;
     }
     .provider-picker {
       min-height: 0;
@@ -2491,6 +3737,34 @@ function onboardingHtml(): string {
       transform: translateY(-1px);
     }
     .primary:disabled { opacity: 0.55; cursor: not-allowed; }
+    .migration-buttons {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .migration-status {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+    }
+    .migration-spinner {
+      width: 14px;
+      height: 14px;
+      flex: none;
+      border: 2px solid rgba(242, 106, 27, 0.25);
+      border-top-color: var(--accent);
+      border-radius: 999px;
+      animation: migration-spin 0.8s linear infinite;
+    }
+    @keyframes migration-spin {
+      to { transform: rotate(360deg); }
+    }
+    .migration-path {
+      display: block;
+      margin-top: 5px;
+      font-size: 12px;
+      word-break: break-all;
+    }
     .error {
       min-height: 18px;
       color: #b42318;
@@ -2505,6 +3779,8 @@ function onboardingHtml(): string {
       .rail { display: none; }
       .setup-card { position: relative; min-height: 620px; height: auto; }
       .provider-grid, .setup-mode-grid, .choice-row, .tier-defaults, .field-pair { grid-template-columns: 1fr; }
+      .provider-feature { grid-template-columns: 1fr; }
+      .provider-feature-cta { width: 100%; }
     }
   </style>
 </head>
@@ -2516,7 +3792,11 @@ function onboardingHtml(): string {
         <p data-i18n="onboarding.rail.subtitle">${ot('onboarding.rail.subtitle')}</p>
       </section>
       <nav class="progress" aria-label="${ot('onboarding.aria.setupSteps')}" data-i18n-aria="onboarding.aria.setupSteps">
-        <button class="step active" type="button" data-step-label="0">
+        ${detection ? `<button class="step active" type="button" data-step-label="5">
+          <span class="step-index">1</span>
+          <span><strong data-i18n="migration.nav.title">${ot('migration.nav.title')}</strong><span data-i18n="migration.nav.sub">${ot('migration.nav.sub')}</span></span>
+        </button>` : ''}
+        <button class="step${detection ? '' : ' active'}" type="button" data-step-label="0">
           <span class="step-index">1</span>
           <span><strong data-i18n="onboarding.nav.mode.title">${ot('onboarding.nav.mode.title')}</strong><span data-i18n="onboarding.nav.mode.sub">${ot('onboarding.nav.mode.sub')}</span></span>
         </button>
@@ -2548,7 +3828,30 @@ function onboardingHtml(): string {
       </div>
     </aside>
     <form id="setup-form" class="deck">
-      <section class="setup-card active" data-screen="0">
+      ${detection ? `<section class="setup-card active" data-screen="5">
+        <header class="card-head">
+          <div>
+            <p class="eyebrow">Step 01</p>
+            <h2 data-i18n="migration.step.heading">${ot('migration.step.heading')}</h2>
+            <p data-i18n="migration.step.subtitle">${ot('migration.step.subtitle')}</p>
+          </div>
+          <span class="card-badge" data-i18n="migration.step.badge">${ot('migration.step.badge')}</span>
+        </header>
+        <div class="card-body">
+          <div class="note"><span data-i18n="migration.step.sourceLabel">${ot('migration.step.sourceLabel')}</span><code class="migration-path">${escapeHtmlServer(detection.path)}</code></div>
+          <div class="note migration-status" id="migrationStatus" hidden><span class="migration-spinner"></span><span id="migrationStatusLabel"></span></div>
+          <div class="note" id="migrationSummary" hidden></div>
+          <div class="note" id="migrationDoneNote" hidden></div>
+        </div>
+        <footer class="actions">
+          <button class="secondary" type="button" id="migrationSkip" data-i18n="migration.step.skip">${ot('migration.step.skip')}</button>
+          <div class="migration-buttons">
+            <button class="secondary" type="button" id="migrationPreview" data-i18n="migration.step.preview">${ot('migration.step.preview')}</button>
+            <button class="primary" type="button" id="migrationImport" data-i18n="migration.step.import" disabled>${ot('migration.step.import')}</button>
+          </div>
+        </footer>
+      </section>` : ''}
+      <section class="setup-card${detection ? '' : ' active'}" data-screen="0">
         <header class="card-head">
           <div>
             <p class="eyebrow">Step 01</p>
@@ -2586,11 +3889,26 @@ function onboardingHtml(): string {
           <span class="card-badge" data-i18n="onboarding.step2.badge">${ot('onboarding.step2.badge')}</span>
         </header>
         <div class="card-body">
-        <div class="provider-picker">
-          <div class="provider-grid" id="providerGrid"></div>
+        <div class="provider-feature active" data-provider-feature="tokenrhythm">
+          <button class="provider-feature-select" type="button" data-provider="tokenrhythm" aria-pressed="true">
+            <strong data-i18n="onboarding.step2.tokenrhythmTitle" data-tokenrhythm-title>${ot('onboarding.step2.tokenrhythmTitle')}</strong>
+            <span class="provider-feature-value" data-i18n="onboarding.step2.tokenrhythmValue" data-tokenrhythm-value>${ot('onboarding.step2.tokenrhythmValue')}</span>
+            <span class="provider-feature-registration" data-i18n="onboarding.step2.tokenrhythmRegistration" data-tokenrhythm-registration>${ot('onboarding.step2.tokenrhythmRegistration')}</span>
+          </button>
+          <a class="provider-feature-cta" id="tokenrhythmRegister" href="${TOKENRHYTHM_REGISTER_URL}" target="_blank" rel="noopener noreferrer" data-i18n="onboarding.step2.tokenrhythmCta" data-i18n-aria="onboarding.step2.tokenrhythmCtaExternalLabel" aria-label="${ot('onboarding.step2.tokenrhythmCtaExternalLabel')}">${ot('onboarding.step2.tokenrhythmCta')}</a>
         </div>
-        <input id="provider" type="hidden" value="openrouter" />
-        <input id="routerMode" type="hidden" value="recommended" />
+        <div class="provider-disclosure">
+          <button class="provider-disclosure-toggle" id="providerMoreToggle" type="button" aria-expanded="false" aria-controls="providerMorePanel">
+            <span data-i18n="onboarding.step2.otherProviders">${ot('onboarding.step2.otherProviders')}</span>
+          </button>
+          <div id="providerMorePanel" hidden>
+            <div class="provider-picker">
+              <div class="provider-grid" id="providerGrid"></div>
+            </div>
+          </div>
+        </div>
+        <input id="provider" type="hidden" value="tokenrhythm" />
+        <input id="routerMode" type="hidden" value="disabled" />
         <label>
           <span data-i18n="onboarding.step2.apiKey">${ot('onboarding.step2.apiKey')}</span>
           <input id="apiKey" name="apiKey" type="password" autocomplete="off" placeholder="sk-..." />
@@ -2632,7 +3950,7 @@ function onboardingHtml(): string {
         </header>
         <div class="card-body">
           <div class="choice-row" id="modelRoutingModeGrid" role="radiogroup" aria-label="${ot('onboarding.aria.modelRoutingMode')}" data-i18n-aria="onboarding.aria.modelRoutingMode"></div>
-          <input id="modelRoutingMode" type="hidden" value="squilla_router" />
+          <input id="modelRoutingMode" type="hidden" value="direct" />
           <div id="directModelPanel" hidden>
             <label>
               <span data-i18n="onboarding.step3.directModel">${ot('onboarding.step3.directModel')}</span>
@@ -2693,6 +4011,7 @@ function onboardingHtml(): string {
     const desktopMessages = ${JSON.stringify(DESKTOP_MESSAGES)};
     const onboardingMessageCatalog = ${JSON.stringify(ONBOARDING_SCRIPT_MESSAGES)};
     const providerNoteCatalog = ${JSON.stringify(PROVIDER_NOTE_MESSAGES)};
+    const searchNoteCatalog = ${JSON.stringify(SEARCH_PROVIDER_NOTE_MESSAGES)};
     let activeLocale = ${JSON.stringify(desktopLocale)};
     let t = messagesFor(activeLocale);
     function messagesFor(locale) {
@@ -2710,7 +4029,9 @@ function onboardingHtml(): string {
     const searchProviders = ${JSON.stringify(SEARCH_PROVIDER_CATALOG)};
     const routerProfiles = ${JSON.stringify(ROUTER_PROFILES)};
     const textTiers = ${JSON.stringify(TEXT_ROUTER_TIERS)};
-    let step = 0;
+    const migrationCandidate = ${JSON.stringify(detection)};
+    const initialProviderPrefill = ${JSON.stringify(pendingProviderSetup)};
+    let step = ${detection ? 5 : 0};
     let routerTiers = clone(routerProfiles.openrouter);
     const setupMode = document.getElementById('setupMode');
     const provider = document.getElementById('provider');
@@ -2734,6 +4055,10 @@ function onboardingHtml(): string {
 	    const endpointPanel = document.getElementById('endpointPanel');
 	    const endpointToggle = document.getElementById('endpointToggle');
 	    const endpointContent = document.getElementById('endpointContent');
+    const tokenRhythmFeature = document.querySelector('[data-provider-feature="tokenrhythm"]');
+    const tokenRhythmProviderButton = tokenRhythmFeature.querySelector('[data-provider="tokenrhythm"]');
+    const providerMoreToggle = document.getElementById('providerMoreToggle');
+    const providerMorePanel = document.getElementById('providerMorePanel');
     function clone(value) {
       return JSON.parse(JSON.stringify(value || {}));
     }
@@ -2768,6 +4093,10 @@ function onboardingHtml(): string {
 	      endpointToggle.setAttribute('aria-expanded', String(open));
 	      endpointContent.setAttribute('aria-hidden', String(!open));
 	    }
+	    function setProviderDisclosureOpen(open) {
+	      providerMoreToggle.setAttribute('aria-expanded', String(open));
+	      providerMorePanel.hidden = !open;
+	    }
 	    function syncProviderDefaults(resetRouter) {
 	      const selected = currentProvider();
 	      if (resetRouter) {
@@ -2787,22 +4116,31 @@ function onboardingHtml(): string {
 	      renderModelRoutingModeGrid();
 	      renderTiers();
 	    }
+    function selectProvider(nextProvider) {
+      const next = nextProvider || 'tokenrhythm';
+      // Re-clicking the already-active provider must not reset base URL, model,
+      // routing mode, and customized tiers back to catalog defaults.
+      if (next === provider.value) return;
+      provider.value = next;
+      errorBox.textContent = '';
+      syncProviderDefaults(true);
+      renderProviderGrid();
+      render();
+    }
     function renderProviderGrid() {
       const grid = document.getElementById('providerGrid');
-      grid.classList.toggle('single-provider', providers.length === 1);
-      grid.innerHTML = providers.map((item) => (
-        '<button class="provider' + (item.id === provider.value ? ' active' : '') + '" type="button" data-provider="' + escapeAttr(item.id) + '">' +
-        '<span class="provider-tag">' + escapeHtml(t.providerField) + '</span><strong>' + escapeHtml(item.label) + '</strong><small>' + escapeHtml(item.routerSupported ? t.tierDefaultsAvailable : providerNote(item)) + '</small></button>'
+      const otherProviders = providers.filter((item) => item.id !== 'tokenrhythm');
+      const tokenRhythmSelected = provider.value === 'tokenrhythm';
+      tokenRhythmFeature.classList.toggle('active', tokenRhythmSelected);
+      tokenRhythmProviderButton.setAttribute('aria-pressed', String(tokenRhythmSelected));
+      tokenRhythmProviderButton.onclick = () => selectProvider('tokenrhythm');
+      grid.classList.toggle('single-provider', otherProviders.length === 1);
+      grid.innerHTML = otherProviders.map((item) => (
+        '<button class="provider' + (item.id === provider.value ? ' active' : '') + '" type="button" data-provider="' + escapeAttr(item.id) + '" aria-pressed="' + String(item.id === provider.value) + '">' +
+        '<span class="provider-tag">' + escapeHtml(t.providerField) + '</span><strong>' + escapeHtml(item.label) + '</strong><small>' + escapeHtml(providerNote(item)) + '</small></button>'
       )).join('');
-      function selectProvider(nextProvider) {
-	        provider.value = nextProvider || 'openrouter';
-	        errorBox.textContent = '';
-	        syncProviderDefaults(true);
-	        renderProviderGrid();
-	        render();
-	      }
       const bindProviderButton = (button) => {
-        button.addEventListener('click', () => selectProvider(button.dataset.provider || 'openrouter'));
+        button.addEventListener('click', () => selectProvider(button.dataset.provider || 'tokenrhythm'));
       };
       grid.querySelectorAll('.provider').forEach(bindProviderButton);
     }
@@ -2918,10 +4256,16 @@ function onboardingHtml(): string {
     function currentSearchProvider() {
       return searchProviders.find((item) => item.providerId === searchProvider.value) || searchProviders[0];
     }
+    function searchProviderNote(item) {
+      return (searchNoteCatalog[activeLocale] && searchNoteCatalog[activeLocale][item.providerId])
+        || (searchNoteCatalog.en && searchNoteCatalog.en[item.providerId])
+        || item.note
+        || (item.requiresApiKey ? t.requiresApiKey : t.noKeyRequired);
+    }
     function renderSearchProviderGrid() {
       searchProviderGrid.innerHTML = searchProviders.map((item) => (
         '<button class="choice' + (item.providerId === searchProvider.value ? ' active' : '') + '" type="button" data-search-provider="' + escapeAttr(item.providerId) + '">' +
-        '<strong>' + escapeHtml(item.label) + '</strong><small>' + escapeHtml(item.note || (item.requiresApiKey ? t.requiresApiKey : t.noKeyRequired)) + '</small></button>'
+        '<strong>' + escapeHtml(item.label) + '</strong><small>' + escapeHtml(searchProviderNote(item)) + '</small></button>'
       )).join('');
       searchProviderGrid.querySelectorAll('[data-search-provider]').forEach((button) => {
         button.addEventListener('click', () => {
@@ -2936,15 +4280,20 @@ function onboardingHtml(): string {
       searchKeyLabel.hidden = !selected.requiresApiKey;
       const input = document.getElementById('searchApiKey');
       if (input) input.placeholder = selected.keyPlaceholder || selected.envKey || 'SEARCH_API_KEY';
-      searchHint.textContent = selected.note || (selected.requiresApiKey ? fmt('searchAvailable', { label: selected.label }) : t.searchHintDefault);
+      searchHint.textContent = searchProviderNote(selected);
     }
     function isSimpleSetup() {
       return setupMode.value === 'simple';
     }
     function routeSteps() {
-      if (isSimpleSetup()) return [0, 1, 4];
-      if (modelRoutingMode.value === 'squilla_router') return [0, 1, 2, 3, 4];
-      return [0, 1, 2, 4];
+      const base = isSimpleSetup()
+        ? [0, 1, 4]
+        : modelRoutingMode.value === 'squilla_router'
+          ? [0, 1, 2, 3, 4]
+          : [0, 1, 2, 4];
+      // The migration step (screen 5) leads the route only when a legacy home
+      // was detected; render() renumbers and hides rail entries automatically.
+      return migrationCandidate ? [5, ...base] : base;
     }
     function routePosition(targetStep) {
       return routeSteps().indexOf(targetStep);
@@ -3029,6 +4378,9 @@ function onboardingHtml(): string {
 	      errorBox.textContent = '';
 	      applyLocale(onboardingLocale.value);
 	    });
+	    providerMoreToggle.addEventListener('click', () => {
+	      setProviderDisclosureOpen(providerMoreToggle.getAttribute('aria-expanded') !== 'true');
+	    });
 	    endpointToggle.addEventListener('click', () => {
 	      setEndpointPanelOpen(!endpointPanel.classList.contains('open'));
 	    });
@@ -3039,7 +4391,14 @@ function onboardingHtml(): string {
       const selected = currentProvider();
       const selectedSearch = currentSearchProvider();
       if (step === 1 && selected.requiresApiKey && !document.getElementById('apiKey').value.trim()) return fmt('apiKeyRequired', { label: selected.label });
-      if (step === 2 && modelRoutingMode.value === 'direct' && !model.value.trim()) return t.directModelRequiredDirect;
+      // Direct mode needs a model. In Simple setup the routing screen (step 2) is
+      // not in the route, so the model is entered on the provider screen (step 1);
+      // validate on whichever step is actually reachable, or the check silently
+      // never runs and the save fails late with a raw main-process error.
+      if (modelRoutingMode.value === 'direct' && !model.value.trim()) {
+        if (isSimpleSetup() && step === 1) return t.directModelRequiredDirect;
+        if (!isSimpleSetup() && step === 2) return t.directModelRequiredDirect;
+      }
       if (step === 3 && modelRoutingMode.value === 'squilla_router') {
         const defaultTier = document.getElementById('routerDefaultTier')?.value || 'c1';
         if (!routerTiers[defaultTier] || !routerTiers[defaultTier].model) return t.defaultTierRequiresModel;
@@ -3086,14 +4445,179 @@ function onboardingHtml(): string {
           routerTiers,
           searchProvider: searchProvider.value,
           searchApiKey: document.getElementById('searchApiKey').value,
+          locale: activeLocale,
         });
       } catch (error) {
         errorBox.textContent = error && error.message ? error.message : String(error);
       }
     });
+    function applyMigrationPrefill(prefill) {
+      if (!prefill || typeof prefill !== 'object') return;
+      const nextProvider = String(prefill.provider || '').trim().toLowerCase();
+      if (nextProvider && nextProvider !== provider.value) {
+        provider.value = nextProvider;
+        syncProviderDefaults(true);
+      }
+      if (nextProvider && nextProvider !== 'tokenrhythm') setProviderDisclosureOpen(true);
+      if (prefill.baseUrl) baseUrl.value = String(prefill.baseUrl);
+      if (prefill.model) model.value = String(prefill.model);
+      if (prefill.apiKey) document.getElementById('apiKey').value = String(prefill.apiKey);
+      syncProviderDefaults(false);
+      renderProviderGrid();
+      render();
+    }
+    if (migrationCandidate) {
+      const migrationPreviewButton = document.getElementById('migrationPreview');
+      const migrationImportButton = document.getElementById('migrationImport');
+      const migrationSkipButton = document.getElementById('migrationSkip');
+      const migrationStatus = document.getElementById('migrationStatus');
+      const migrationStatusLabel = document.getElementById('migrationStatusLabel');
+      const migrationSummary = document.getElementById('migrationSummary');
+      const migrationDoneNote = document.getElementById('migrationDoneNote');
+      let migrationBusy = false;
+      let migrationPreviewOk = false;
+      function setMigrationStatus(label) {
+        if (label) {
+          migrationStatusLabel.textContent = label;
+          migrationStatus.hidden = false;
+        } else {
+          migrationStatus.hidden = true;
+        }
+      }
+      function formatMigrationBytes(value) {
+        const bytes = Number(value);
+        if (!Number.isFinite(bytes) || bytes < 0) return '?';
+        if (bytes >= 1024 * 1024 * 1024) return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+        if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+        if (bytes >= 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        return String(Math.round(bytes)) + ' B';
+      }
+      function migrationErrorDetail(result, errors) {
+        if (errors && errors.length) {
+          return errors.map((item) => String((item && (item.reason || item.kind)) || '')).filter(Boolean).join('; ');
+        }
+        if (result && result.error) return String(result.error);
+        if (result && result.raw) return String(result.raw).slice(-400);
+        return '';
+      }
+      function renderMigrationReport(report) {
+        if (!report || typeof report !== 'object') {
+          migrationSummary.hidden = true;
+          return [];
+        }
+        const items = Array.isArray(report.items) ? report.items : [];
+        const counts = {};
+        for (const item of items) {
+          const status = String((item && item.status) || 'unknown');
+          counts[status] = (counts[status] || 0) + 1;
+        }
+        const countsText = Object.keys(counts).sort().map((status) => status + ': ' + counts[status]).join(', ') || '0';
+        const pausedCount = Array.isArray(report.paused_jobs) ? report.paused_jobs.length : 0;
+        const preflight = (report.preflight && typeof report.preflight === 'object') ? report.preflight : {};
+        const lines = [
+          fmt('migrationItems', { counts: countsText }),
+          fmt('migrationPausedJobs', { n: pausedCount }),
+          fmt('migrationDisk', {
+            required: formatMigrationBytes(preflight.disk_required_bytes),
+            free: formatMigrationBytes(preflight.disk_free_bytes),
+          }),
+        ];
+        const notes = Array.isArray(report.notes) ? report.notes : [];
+        migrationSummary.innerHTML = lines.map((line) => '<div>' + escapeHtml(line) + '</div>').join('')
+          + (notes.length
+            ? '<div>' + escapeHtml(t.migrationNotesLabel) + ': ' + escapeHtml(notes.map((note) => String(note)).join(' | ')) + '</div>'
+            : '');
+        migrationSummary.hidden = false;
+        return items.filter((item) => item && item.status === 'error');
+      }
+      if (typeof window.opensquillaDesktop.onMigrationProgress === 'function') {
+        window.opensquillaDesktop.onMigrationProgress((payload) => {
+          const phase = payload && payload.phase;
+          if (phase === 'preview') setMigrationStatus(t.migrationPreviewRunning);
+          else if (phase === 'applying') setMigrationStatus(t.migrationApplyRunning);
+          else setMigrationStatus('');
+        });
+      }
+      migrationPreviewButton.addEventListener('click', async () => {
+        if (migrationBusy) return;
+        migrationBusy = true;
+        migrationPreviewOk = false;
+        errorBox.textContent = '';
+        migrationDoneNote.hidden = true;
+        migrationPreviewButton.disabled = true;
+        migrationImportButton.disabled = true;
+        setMigrationStatus(t.migrationPreviewRunning);
+        try {
+          const result = await window.opensquillaDesktop.previewOnboardingMigration();
+          const errors = renderMigrationReport(result && result.report);
+          if (result && result.ok && errors.length === 0) {
+            migrationPreviewOk = true;
+          } else {
+            errorBox.textContent = fmt('migrationPreviewFailed', { detail: migrationErrorDetail(result, errors) });
+          }
+        } catch (error) {
+          errorBox.textContent = fmt('migrationPreviewFailed', { detail: error && error.message ? error.message : String(error) });
+        } finally {
+          migrationBusy = false;
+          setMigrationStatus('');
+          migrationPreviewButton.disabled = false;
+          migrationImportButton.disabled = !migrationPreviewOk;
+        }
+      });
+      migrationImportButton.addEventListener('click', async () => {
+        if (migrationBusy || !migrationPreviewOk) return;
+        migrationBusy = true;
+        errorBox.textContent = '';
+        migrationPreviewButton.disabled = true;
+        migrationImportButton.disabled = true;
+        migrationSkipButton.disabled = true;
+        setMigrationStatus(t.migrationApplyRunning);
+        let imported = false;
+        try {
+          const result = await window.opensquillaDesktop.applyOnboardingMigration();
+          const errors = renderMigrationReport(result && result.report);
+          if (result && result.ok && errors.length === 0) {
+            imported = true;
+            const pausedCount = result.report && Array.isArray(result.report.paused_jobs)
+              ? result.report.paused_jobs.length
+              : 0;
+            migrationDoneNote.textContent = fmt('migrationDone', { n: pausedCount, path: migrationCandidate.path });
+            migrationDoneNote.hidden = false;
+            applyMigrationPrefill(result.prefill);
+          } else {
+            errorBox.textContent = fmt('migrationApplyFailed', { detail: migrationErrorDetail(result, errors) });
+          }
+        } catch (error) {
+          errorBox.textContent = fmt('migrationApplyFailed', { detail: error && error.message ? error.message : String(error) });
+        } finally {
+          migrationBusy = false;
+          setMigrationStatus('');
+          migrationSkipButton.disabled = false;
+          if (imported) {
+            // Leave the completion note readable for a beat, then continue to
+            // the provider step with the imported connection prefilled. The
+            // migration card stays reachable from the rail to re-read the note.
+            setTimeout(() => {
+              errorBox.textContent = '';
+              setStep(1);
+            }, 1800);
+          } else {
+            migrationPreviewOk = false;
+            migrationPreviewButton.disabled = false;
+            migrationImportButton.disabled = true;
+          }
+        }
+      });
+      migrationSkipButton.addEventListener('click', () => {
+        if (migrationBusy) return;
+        errorBox.textContent = '';
+        setStep(nextRouteStep(step));
+      });
+    }
     renderProviderGrid();
     renderSearchProviderGrid();
     syncProviderDefaults(true);
+    applyMigrationPrefill(initialProviderPrefill);
     render();
   </script>
 </body>
@@ -3101,8 +4625,27 @@ function onboardingHtml(): string {
 }
 
 async function runOnboarding(): Promise<DesktopConnection> {
+  const pendingProviderSetup = await loadPendingMigrationProviderSetup()
   const existing = await loadDesktopCredential()
-  if (existing && isConnectionReady(existing)) {
+  // A saved credential encrypted with the OS keychain that this session cannot
+  // read (keychain locked or unavailable) must not be treated as "no credential":
+  // silently re-onboarding would re-save the key as plaintext. Surface an
+  // actionable error so the user can unlock and retry, or Reset setup.
+  if (
+    desktopSecretStoragePolicyBackend() === 'safeStorage'
+    && desktopSecretStorageBackend() !== 'safeStorage'
+    && (
+      pendingProviderSetup !== null
+      || Boolean(existing?.encryptedApiKey && existing.encryption === 'safeStorage')
+    )
+  ) {
+    throw new Error(
+      'OpenSquilla needs the OS keychain to read or safely adopt this credential, '
+      + 'but the keychain is currently unavailable. Unlock it and reopen '
+      + 'OpenSquilla, or use "Reset setup" to start over.'
+    )
+  }
+  if (!pendingProviderSetup && existing && isConnectionReady(existing)) {
     // Seed the gateway config from the saved credential only when it does not
     // exist yet. Once it exists the Control UI owns it via RPC, so regenerating
     // it from the credential template here would clobber provider/router/channel
@@ -3112,6 +4655,12 @@ async function runOnboarding(): Promise<DesktopConnection> {
     }
     return existing
   }
+
+  // No usable credential: this is the first-run (or reset) path, the only
+  // interaction point before the gateway first boots — so offer the legacy home
+  // import here, before provider setup (the import must precede first boot).
+  onboardingMigrationCandidate = pendingProviderSetup ? null : detectLegacyImportCandidate()
+  onboardingMigrationPreviewApprovedAt = 0
 
   return new Promise((resolveCredential, rejectCredential) => {
     resolveOnboarding = resolveCredential
@@ -3139,6 +4688,27 @@ async function runOnboarding(): Promise<DesktopConnection> {
     })
     installEditingContextMenu(onboardingWindow)
 
+    onboardingWindow.webContents.setWindowOpenHandler(({ url }) => {
+      if (url === TOKENRHYTHM_REGISTER_URL) {
+        void shell.openExternal(TOKENRHYTHM_REGISTER_URL)
+      }
+      return { action: 'deny' }
+    })
+
+    // The wizard is a single data: URL page; block any renderer-initiated
+    // top-frame navigation (e.g. a dropped file/link) so it can't replace the
+    // onboarding UI — which holds the preload IPC bridge — with a foreign document.
+    const guardOnboardingNavigation = (event: Electron.Event, targetUrl: string) => {
+      event.preventDefault()
+      if (targetUrl === TOKENRHYTHM_REGISTER_URL) {
+        void shell.openExternal(TOKENRHYTHM_REGISTER_URL)
+      }
+    }
+    onboardingWindow.webContents.on('will-navigate', guardOnboardingNavigation)
+    onboardingWindow.webContents.on('will-redirect', guardOnboardingNavigation)
+    // Rebuild the app menu so View → Reload is disabled while onboarding is open.
+    createApplicationMenu()
+
     onboardingWindow.once('ready-to-show', () => {
       if (!onboardingWindow || onboardingWindow.isDestroyed()) return
       onboardingWindow.show()
@@ -3146,6 +4716,8 @@ async function runOnboarding(): Promise<DesktopConnection> {
     })
     onboardingWindow.on('closed', () => {
       onboardingWindow = null
+      // Re-enable View → Reload now that the wizard is gone.
+      createApplicationMenu()
       if (rejectOnboarding) {
         const reject = rejectOnboarding
         resolveOnboarding = null
@@ -3154,7 +4726,7 @@ async function runOnboarding(): Promise<DesktopConnection> {
       }
     })
 
-    onboardingWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(onboardingHtml())}`).catch((error) => {
+    onboardingWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(onboardingHtml(onboardingMigrationCandidate, pendingProviderSetup))}`).catch((error) => {
       rejectCredential(error instanceof Error ? error : new Error(String(error)))
     })
   })
@@ -3264,28 +4836,55 @@ async function resolveGatewayRuntime(): Promise<RuntimeLaunch> {
   }
 }
 
-function isPortOpen(port: number): Promise<boolean> {
-  return new Promise((resolveOpen) => {
-    const socket = net.createConnection({ host: '127.0.0.1', port })
-    socket.setTimeout(350)
-    socket.on('connect', () => {
-      socket.destroy()
-      resolveOpen(true)
-    })
-    socket.on('timeout', () => {
-      socket.destroy()
-      resolveOpen(false)
-    })
-    socket.on('error', () => resolveOpen(false))
+const GATEWAY_PORT_FIRST = 18791
+const GATEWAY_PORT_LAST = 18830
+let gatewayPortCursor = GATEWAY_PORT_FIRST
+
+function explicitGatewayPort(): number | null {
+  const envPort = Number(process.env.OPENSQUILLA_DESKTOP_GATEWAY_PORT || '')
+  return Number.isInteger(envPort) && envPort > 0 ? envPort : null
+}
+
+function hasExplicitGatewayPort(): boolean {
+  return explicitGatewayPort() !== null
+}
+
+function nextGatewayPortAfter(port: number): number {
+  return port >= GATEWAY_PORT_LAST ? GATEWAY_PORT_FIRST : port + 1
+}
+
+function isPortBindable(port: number): Promise<boolean> {
+  return new Promise((resolveBindable) => {
+    const server = net.createServer()
+    let settled = false
+    const settle = (bindable: boolean) => {
+      if (settled) return
+      settled = true
+      server.removeAllListeners()
+      if (server.listening) {
+        server.close(() => resolveBindable(bindable))
+      } else {
+        resolveBindable(bindable)
+      }
+    }
+    server.once('error', () => settle(false))
+    server.once('listening', () => settle(true))
+    server.listen({ host: '127.0.0.1', port, exclusive: true })
   })
 }
 
 async function findGatewayPort(): Promise<number> {
-  const envPort = Number(process.env.OPENSQUILLA_DESKTOP_GATEWAY_PORT || '')
-  if (Number.isInteger(envPort) && envPort > 0) return envPort
+  const envPort = explicitGatewayPort()
+  if (envPort !== null) return envPort
 
-  for (let port = 18791; port <= 18830; port += 1) {
-    if (!(await isPortOpen(port))) return port
+  const portCount = GATEWAY_PORT_LAST - GATEWAY_PORT_FIRST + 1
+  const startPort = Math.min(Math.max(gatewayPortCursor, GATEWAY_PORT_FIRST), GATEWAY_PORT_LAST)
+  for (let offset = 0; offset < portCount; offset += 1) {
+    const port = GATEWAY_PORT_FIRST + ((startPort - GATEWAY_PORT_FIRST + offset) % portCount)
+    if (await isPortBindable(port)) {
+      gatewayPortCursor = nextGatewayPortAfter(port)
+      return port
+    }
   }
   throw new Error('No free OpenSquilla desktop gateway port found in 18791-18830.')
 }
@@ -3324,12 +4923,19 @@ function gatewayExitLooksLikeNewerConfig(output: string): boolean {
   return hasValidationSignal && NEWER_CONFIG_DIAGNOSTIC_FIELDS.some((field) => normalized.includes(field))
 }
 
+function gatewayExitLooksLikePortInUse(output: string): boolean {
+  return /OPENSQUILLA_GATEWAY_PORT_IN_USE/i.test(output)
+    || /gateway could not start:.*is already in use/i.test(output)
+    || /gateway port is already in use/i.test(output)
+    || /:\d+\s+is already in use/i.test(output)
+}
+
 function classifyGatewayExitMessage(message: string, outputTail: string): string {
   if (!gatewayExitLooksLikeNewerConfig(outputTail)) return message
   return (
     message +
     '\n\nOpenSquilla could not read this config because it contains settings written by a newer OpenSquilla version. ' +
-    'Reopen OpenSquilla 0.5.0 Preview 1, or reset the desktop config before running an older version. ' +
+    `Reopen the newer OpenSquilla version that created it, or reset the desktop config before running this version (${app.getVersion()}). ` +
     'Use Reveal log for details.'
   )
 }
@@ -3347,9 +4953,11 @@ async function waitForGateway(url: string, earlyExitMessage?: () => string | nul
   throw new Error(`Gateway did not become healthy at ${url}`)
 }
 
-async function waitForControlUi(url: string): Promise<void> {
+async function waitForControlUi(url: string, earlyExitMessage?: () => string | null): Promise<void> {
   const startedAt = Date.now()
   while (Date.now() - startedAt < 45_000) {
+    const earlyExit = earlyExitMessage?.()
+    if (earlyExit) throw new Error(earlyExit)
     try {
       const response = await fetch(`${url}/control/`, { signal: AbortSignal.timeout(1500) })
       if (response.ok) return
@@ -3358,6 +4966,8 @@ async function waitForControlUi(url: string): Promise<void> {
     }
     await new Promise((resolveWait) => setTimeout(resolveWait, 500))
   }
+  const earlyExit = earlyExitMessage?.()
+  if (earlyExit) throw new Error(earlyExit)
   throw new Error(`Control UI did not become reachable at ${url}/control/`)
 }
 
@@ -3384,7 +4994,7 @@ async function reuseHealthyGatewayState(): Promise<GatewayState | null> {
 }
 
 async function startGateway(): Promise<GatewayState> {
-  const reusableGateway = await reuseHealthyGatewayState()
+  const reusableGateway = forceOnboardingOnNextStartup ? null : await reuseHealthyGatewayState()
   if (reusableGateway) return reusableGateway
 
   assertSupportedMacInstallLocation()
@@ -3393,7 +5003,14 @@ async function startGateway(): Promise<GatewayState> {
     if (hasGatewayProcessExited(gatewayProcess)) {
       gatewayProcess = null
     } else {
+      // Wait for the old child to actually exit before spawning a replacement.
+      // stopGateway() only initiates termination; the gateway drains for several
+      // seconds and holds gateway.pid.lock until it exits, so respawning
+      // immediately makes the new gateway abort on the held lock and the restart
+      // fails with an unclassified error.
+      const previousChild = gatewayProcess
       stopGateway()
+      await waitForGatewayProcessExit(previousChild)
     }
     gatewayState.status = 'stopped'
     gatewayState.error = undefined
@@ -3413,9 +5030,18 @@ async function startGateway(): Promise<GatewayState> {
   }
 
   sendBootStatus('profile')
+  recoverInterruptedDesktopImport()
+  await recoverPendingMigrationReconciliation()
+  relocateLegacyDesktopStateLayout()
   const connection = await runOnboarding()
+  forceOnboardingOnNextStartup = false
   const apiKey = decryptApiKey(connection)
-  if (!apiKey) throw new Error('Saved desktop API key could not be read.')
+  // Keyless providers (e.g. Ollama) ship requiresApiKey=false and are accepted
+  // by onboarding without a key, so only treat a missing key as fatal when the
+  // provider actually needs one — otherwise every keyless credential wedges boot.
+  if (providerDefaults(connection.provider).requiresApiKey && !apiKey) {
+    throw new Error('Saved desktop API key could not be read.')
+  }
   const searchApiKey = decryptSearchApiKey(connection)
   // Config is seeded (when missing) inside runOnboarding / the onboarding save,
   // and is otherwise the RPC-owned source of truth — so it is intentionally NOT
@@ -3430,6 +5056,19 @@ async function startGateway(): Promise<GatewayState> {
   mkdirSync(logDir, { recursive: true })
   const logPath = join(logDir, 'gateway.log')
   const logStream = createWriteStream(logPath, { flags: 'a' })
+  // Node can emit both 'error' and 'exit' for one child, and each handler closes
+  // the stream — so guard writes/close to be idempotent, and swallow any late
+  // write-after-end/EPIPE rather than letting it crash the main process.
+  let logStreamClosed = false
+  logStream.on('error', () => {})
+  const writeLogLine = (text: string) => {
+    if (!logStreamClosed) logStream.write(text)
+  }
+  const closeLogStream = () => {
+    if (logStreamClosed) return
+    logStreamClosed = true
+    logStream.end()
+  }
 
   gatewayState.url = url
   gatewayState.port = port
@@ -3443,13 +5082,18 @@ async function startGateway(): Promise<GatewayState> {
     ...process.env,
     PATH: childPath,
     ...(process.platform === 'win32' ? { Path: childPath } : {}),
-    [connection.apiKeyEnv]: apiKey,
+    ...(connection.apiKeyEnv && apiKey ? { [connection.apiKeyEnv]: apiKey } : {}),
     ...(connection.searchApiKeyEnv && searchApiKey ? { [connection.searchApiKeyEnv]: searchApiKey } : {}),
     OPENSQUILLA_DESKTOP: '1',
     OPENSQUILLA_INSTALL_METHOD: 'desktop',
     OPENSQUILLA_GATEWAY_CONFIG_PATH: desktopConfigPath(),
     OPENSQUILLA_NODE_BIN_DIR: nodeBinCandidates.join(pathDelimiter()),
-    OPENSQUILLA_STATE_DIR: desktopStateDir(),
+    // OPENSQUILLA_STATE_DIR names the OpenSquilla HOME ROOT on the Python side
+    // (runtime state goes into its state/ subdir, matching the TOML-pinned
+    // state_dir below). Passing the state subdir here would re-root skills,
+    // workspace, session-archive, and .env one level too deep — see
+    // relocateLegacyDesktopStateLayout().
+    OPENSQUILLA_STATE_DIR: desktopHome(),
     ...(connection.disableNetworkObservability ? { OPENSQUILLA_PRIVACY_DISABLE_NETWORK_OBSERVABILITY: '1' } : {}),
     PYTHONUNBUFFERED: '1',
     PYTHONUTF8: '1',
@@ -3462,9 +5106,14 @@ async function startGateway(): Promise<GatewayState> {
     {
       cwd: runtime.cwd,
       env: childEnv,
+      detached: runtime.mode === 'dev' && process.platform !== 'win32',
+      // The bundled gateway is a console-subsystem binary; without this Windows
+      // allocates a stray console window whose closure would kill the gateway.
+      windowsHide: true,
     }
   )
   gatewayProcess = child
+  if (runtime.mode === 'dev') gatewayProcessTreeChildren.add(child)
 
   let gatewayOutputTail = ''
   let childExitMessage: string | null = null
@@ -3477,10 +5126,15 @@ async function startGateway(): Promise<GatewayState> {
   child.stderr.pipe(logStream, { end: false })
   child.once('exit', (code, signal) => {
     const message = `gateway exited code=${code ?? 'null'} signal=${signal ?? 'null'}`
-    const classifiedMessage = classifyGatewayExitMessage(message, gatewayOutputTail)
+    const portConflictExit = gatewayExitLooksLikePortInUse(gatewayOutputTail)
+    const exitMessage = portConflictExit ? `${message}\nGateway port is already in use.` : message
+    const classifiedMessage = classifyGatewayExitMessage(exitMessage, gatewayOutputTail)
     const isCurrentGateway = gatewayProcess === child
     if (isCurrentGateway) gatewayProcess = null
-    logStream.write(`\n[desktop] ${message}\n`)
+    writeLogLine(`\n[desktop] ${message}\n`)
+    // Release the append fd; without this every (re)start leaks one open handle
+    // to gateway.log for the lifetime of the main process.
+    closeLogStream()
     if (!isCurrentGateway) return
     if (isQuitting) {
       gatewayState.status = 'stopped'
@@ -3489,15 +5143,74 @@ async function startGateway(): Promise<GatewayState> {
     gatewayState.status = 'error'
     gatewayState.error = classifiedMessage
     childExitMessage = classifiedMessage
+    if (portConflictExit && !hasExplicitGatewayPort()) {
+      gatewayState.status = 'stopped'
+      gatewayState.error = undefined
+      return
+    }
     sendBootError(gatewayState.error)
+    // After boot the window is on the gateway-served Control UI, which never
+    // listens for boot:error. Restore the boot splash so the crash message and
+    // the Retry/Reset recovery affordances are visible instead of a dead origin.
+    void restoreMainWindowToBootPage()
+  })
+
+  // A failed spawn (uv missing in dev, non-executable bundled binary) emits
+  // 'error' and never 'exit'; without a listener Node rethrows it as an uncaught
+  // main-process exception (raw Electron crash dialog) and the boot wait hangs.
+  child.once('error', (err) => {
+    const message = `gateway failed to start: ${err instanceof Error ? err.message : String(err)}`
+    const isCurrentGateway = gatewayProcess === child
+    if (isCurrentGateway) gatewayProcess = null
+    closeLogStream()
+    if (!isCurrentGateway) return
+    childExitMessage = message
+    if (isQuitting) {
+      gatewayState.status = 'stopped'
+      return
+    }
+    gatewayState.status = 'error'
+    gatewayState.error = message
+    sendBootError(message)
   })
 
   sendBootStatus('gateway-health')
   await waitForGateway(url, () => childExitMessage)
-  await waitForControlUi(url)
+  await waitForControlUi(url, () => childExitMessage)
+  // Guard against adopting a foreign gateway that won the probe→bind race: if our
+  // spawned child has already exited, it lost the exclusive bind and the healthy
+  // endpoint belongs to someone else (e.g. a CLI `opensquilla gateway run` on the
+  // same port). Surface it as a port conflict so recovery advances to the next
+  // port instead of silently attaching the window to the wrong profile.
+  if (hasGatewayProcessExited(child) || gatewayProcess !== child) {
+    throw new Error(childExitMessage
+      || 'OPENSQUILLA_GATEWAY_PORT_IN_USE: desktop gateway did not keep the port bind.')
+  }
   sendBootStatus('control')
   gatewayState.status = 'ready'
   return gatewayState
+}
+
+async function startGatewayWithPortRecovery(): Promise<GatewayState> {
+  // Begin each fresh recovery sequence at the first port so a previously-used
+  // port that is now free is reused. The cursor still advances within this loop
+  // to skip a port whose bind lost a post-probe race, but it must not persist
+  // across separate starts — otherwise every in-session restart hops to a new
+  // 127.0.0.1:<port> origin and silently drops the Control UI's per-origin state.
+  if (!hasExplicitGatewayPort()) gatewayPortCursor = GATEWAY_PORT_FIRST
+  const maxAttempts = hasExplicitGatewayPort() ? 1 : GATEWAY_PORT_LAST - GATEWAY_PORT_FIRST + 1
+  let lastError: unknown = null
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      return await startGateway()
+    } catch (err) {
+      lastError = err
+      const message = err instanceof Error ? err.message : String(err)
+      if (hasExplicitGatewayPort() || !gatewayExitLooksLikePortInUse(message)) throw err
+      desktopLog('gateway_port_retry', { attempt: attempt + 1 })
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError || 'Gateway port retry exhausted.'))
 }
 
 async function loadControlUi(window: BrowserWindow, gatewayUrl: string): Promise<void> {
@@ -3513,6 +5226,25 @@ async function loadControlUi(window: BrowserWindow, gatewayUrl: string): Promise
     }
   }
   throw lastError ?? new Error(`Failed to load ${url}`)
+}
+
+// The main window is only ever meant to sit on the gateway-served Control UI
+// origin (its /control paths). Anything else — a dropped file:// document, an
+// off-origin redirect — is a foreign navigation and must be blocked. The boot
+// splash is loaded programmatically (loadFile), which does not go through the
+// navigation guard, so it needs no allow-entry here.
+function isAllowedMainWindowNavigation(targetUrl: string): boolean {
+  if (!gatewayState.url) return false
+  try {
+    const target = new URL(targetUrl)
+    const gateway = new URL(gatewayState.url)
+    return (
+      target.origin === gateway.origin
+      && (target.pathname === '/control' || target.pathname.startsWith('/control/'))
+    )
+  } catch {
+    return false
+  }
 }
 
 function isCurrentWindowAtControlUi(window: BrowserWindow, gatewayUrl: string): boolean {
@@ -3567,6 +5299,22 @@ async function createMainWindow(): Promise<BrowserWindow> {
     return { action: 'deny' }
   })
 
+  // Top-frame navigation guard. Programmatic loadFile/loadURL from the main
+  // process do NOT emit these, so this only blocks renderer-initiated top-frame
+  // navigations: a dropped file/link (Chromium's default drop action) or an
+  // in-content redirect that would replace the Control UI with a foreign document
+  // while keeping the full opensquillaDesktop IPC bridge. SPA route changes use
+  // history.pushState and are unaffected.
+  const guardMainWindowNavigation = (event: Electron.Event, targetUrl: string) => {
+    if (isAllowedMainWindowNavigation(targetUrl)) return
+    event.preventDefault()
+    if (/^https?:\/\//i.test(targetUrl) || targetUrl.startsWith('mailto:')) {
+      void shell.openExternal(targetUrl)
+    }
+  }
+  window.webContents.on('will-navigate', guardMainWindowNavigation)
+  window.webContents.on('will-redirect', guardMainWindowNavigation)
+
   window.once('ready-to-show', () => {
     if (!window.isDestroyed()) window.show()
   })
@@ -3586,7 +5334,7 @@ function currentMainWindow(): BrowserWindow | null {
 function ensureGatewayStarted(): Promise<GatewayState> {
   if (!gatewayStartPromise) {
     sendBootStatus('profile')
-    gatewayStartPromise = startGateway().finally(() => {
+    gatewayStartPromise = startGatewayWithPortRecovery().finally(() => {
       gatewayStartPromise = null
     })
   }
@@ -3612,12 +5360,30 @@ async function loadControlUiIntoCurrentWindow(gatewayUrl: string): Promise<void>
   sendBootStatus('ready')
 }
 
+// Bring the main window back to the boot splash when a gateway failure happens
+// while the window is showing the gateway-served Control UI. The splash owns the
+// boot:error listener plus the Retry/Reset recovery buttons, so this is what
+// turns an otherwise-dead Control UI origin back into a recoverable state.
+async function restoreMainWindowToBootPage(): Promise<void> {
+  const window = currentMainWindow()
+  if (!window) return
+  // Already on the boot splash (initial boot); its own onBootError handler will
+  // render the error. Only navigate back when the window left for the Control UI.
+  if (window.webContents.getURL().startsWith('file:')) return
+  try {
+    await window.loadFile(bootPagePath())
+  } catch {
+    // Best-effort: the diagnostic log and gatewayState still record the failure.
+  }
+}
+
 async function openOrResumeDesktopApp(): Promise<void> {
+  if (isQuitting) return
   await createMainWindow()
   focusMainWindow()
 
   try {
-    const reusableGateway = await reuseHealthyGatewayState()
+    const reusableGateway = forceOnboardingOnNextStartup ? null : await reuseHealthyGatewayState()
     const gateway = reusableGateway ?? await ensureGatewayStarted()
     await loadControlUiIntoCurrentWindow(gateway.url)
   } catch (error) {
@@ -3659,6 +5425,100 @@ async function requestGatewayShutdown(url: string): Promise<boolean> {
   }
 }
 
+// Fetch a diagnostics bundle from the child gateway (loopback owner, no token
+// needed — same auth posture as requestGatewayShutdown) and save it where the
+// user chooses. Falls back to opening the logs folder when no gateway is up.
+async function downloadDiagnostics(): Promise<void> {
+  desktopLog('diagnostics_download_requested')
+  const url = gatewayState.url
+  if (!url) {
+    await shell.openPath(join(app.getPath('userData'), 'logs')).catch(() => null)
+    return
+  }
+  try {
+    const response = await fetch(`${url}/api/v1/diagnostics/bundle`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+      signal: AbortSignal.timeout(60000),
+    })
+    if (!response.ok) {
+      desktopLog('diagnostics_download_failed', { status: response.status })
+      await shell.openPath(join(app.getPath('userData'), 'logs')).catch(() => null)
+      return
+    }
+    // Read the body before showing the modal save dialog: the 60s abort signal
+    // keeps counting while the dialog is open, and a slow deliberation would
+    // otherwise abort the already-successful response.
+    const bytes = Buffer.from(await response.arrayBuffer())
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+    const win = currentMainWindow()
+    const defaultPath = join(
+      app.getPath('downloads'),
+      `opensquilla-bundle-${stamp}.zip`,
+    )
+    const saveOptions: Electron.SaveDialogOptions = {
+      defaultPath,
+      filters: [{ name: 'Zip archive', extensions: ['zip'] }],
+    }
+    const result = win
+      ? await dialog.showSaveDialog(win, saveOptions)
+      : await dialog.showSaveDialog(saveOptions)
+    if (result.canceled || !result.filePath) return
+    await writeFile(result.filePath, bytes)
+    desktopLog('diagnostics_download_saved', { bytes: bytes.length })
+    await shell.showItemInFolder(result.filePath)
+  } catch (err) {
+    desktopLog('diagnostics_download_failed', { error: String(err) })
+    await shell.openPath(join(app.getPath('userData'), 'logs')).catch(() => null)
+  }
+}
+
+async function clearKnownOwnedGatewayPidFile(): Promise<void> {
+  // Leave gateway.pid.lock in place. The persistent lock path is the authority
+  // shared by all contenders; deleting it can create split-brain locks.
+  await rm(join(desktopStateDir(), 'gateway.pid'), { force: true }).catch(() => null)
+}
+
+function hardTerminateGatewayProcess(
+  child: ChildProcessWithoutNullStreams,
+  backstopMs = GATEWAY_HARD_KILL_BACKSTOP_MS,
+): void {
+  if (hasGatewayProcessExited(child)) return
+  terminateGatewayProcess(child, 'SIGTERM')
+  if (process.platform === 'win32') void clearKnownOwnedGatewayPidFile()
+  setTimeout(() => {
+    if (!hasGatewayProcessExited(child)) {
+      terminateGatewayProcess(child, 'SIGKILL')
+      if (process.platform === 'win32') void clearKnownOwnedGatewayPidFile()
+    }
+  }, backstopMs).unref()
+}
+
+function terminateGatewayProcess(
+  child: ChildProcessWithoutNullStreams,
+  signal: NodeJS.Signals,
+): void {
+  const pid = child.pid
+  if (pid && gatewayProcessTreeChildren.has(child)) {
+    if (process.platform === 'win32') {
+      const result = spawnSync('taskkill', ['/pid', String(pid), '/t', '/f'], {
+        stdio: 'ignore',
+        windowsHide: true,
+      })
+      if (result.status === 0) return
+    } else {
+      try {
+        process.kill(-pid, signal)
+        return
+      } catch {
+        // Fall back to signaling the direct child below.
+      }
+    }
+  }
+  child.kill(signal)
+}
+
 function stopGateway(): void {
   if (!gatewayProcess || !gatewayState.owned) return
   const child = gatewayProcess
@@ -3666,11 +5526,7 @@ function stopGateway(): void {
   gatewayProcess = null
 
   const hardTerminate = () => {
-    if (hasGatewayProcessExited(child)) return
-    child.kill('SIGTERM')
-    setTimeout(() => {
-      if (!hasGatewayProcessExited(child)) child.kill('SIGKILL')
-    }, GATEWAY_HARD_KILL_BACKSTOP_MS).unref()
+    hardTerminateGatewayProcess(child)
   }
 
   // The Windows HTTP graceful path is async (fetch + timers) and only works
@@ -3679,7 +5535,7 @@ function stopGateway(): void {
   // and orphan the child — leaving it holding the listen port + PID lock and
   // breaking the next launch. So only take the graceful path when NOT quitting;
   // on quit, fall through to a synchronous TerminateProcess.
-  if (process.platform === 'win32' && !isQuitting) {
+  if (process.platform === 'win32' && (!isQuitting || allowGracefulShutdownWhileQuitting)) {
     // Windows has no real SIGTERM — child.kill('SIGTERM') maps to an immediate
     // TerminateProcess that skips the drain. Trigger the HTTP graceful path,
     // wait for the child to exit on its own, and only force-terminate if it
@@ -3701,10 +5557,7 @@ function stopGateway(): void {
   // child drains and exits on its own after the main process is gone).
   // Windows-on-quit: SIGTERM maps to a synchronous TerminateProcess, killing the
   // child before the main process exits — no drain, but no orphan either.
-  child.kill('SIGTERM')
-  setTimeout(() => {
-    if (!hasGatewayProcessExited(child)) child.kill('SIGKILL')
-  }, GATEWAY_SHUTDOWN_KILL_AFTER_MS).unref()
+  hardTerminateGatewayProcess(child, GATEWAY_SHUTDOWN_KILL_AFTER_MS)
 }
 
 // ── Auto-update (electron-updater) ──────────────────────────────────────────
@@ -3774,12 +5627,24 @@ const NETWORK_OBSERVABILITY_DISABLE_ENV_KEYS = [
   'OPENSQUILLA_UPDATE_CHECK_DISABLED',
 ] as const
 
+// mtime-keyed caches so the update-state publish path (which runs on every
+// download-progress tick) does not re-read + JSON.parse the credential and
+// re-scan config.toml on every call. Invalidated automatically when the file
+// changes — atomicWriteFile's rename bumps mtime, and deletion falls through the
+// existsSync guard.
+let persistedNetObsCache: { mtime: number; value: boolean } | null = null
+let configNetObsCache: { mtime: number; value: boolean | null } | null = null
+
 function desktopPersistedNetworkObservabilityDisabled(): boolean {
   try {
     const path = credentialPath()
     if (!existsSync(path)) return false
+    const mtime = statSync(path).mtimeMs
+    if (persistedNetObsCache && persistedNetObsCache.mtime === mtime) return persistedNetObsCache.value
     const raw = readFileSync(path, 'utf8')
-    return normalizeDesktopCredential(JSON.parse(raw) as Partial<DesktopConnection>).disableNetworkObservability
+    const value = normalizeDesktopCredential(JSON.parse(raw) as Partial<DesktopConnection>).disableNetworkObservability
+    persistedNetObsCache = { mtime, value }
+    return value
   } catch {
     return true
   }
@@ -3810,8 +5675,12 @@ function readDesktopConfigNetworkObservabilitySetting(): boolean | null {
   try {
     const path = desktopConfigPath()
     if (!existsSync(path)) return null
+    const mtime = statSync(path).mtimeMs
+    if (configNetObsCache && configNetObsCache.mtime === mtime) return configNetObsCache.value
     const raw = readFileSync(path, 'utf8')
-    return parseDesktopNetworkObservabilityPrivacyConfig(raw)
+    const value = parseDesktopNetworkObservabilityPrivacyConfig(raw)
+    configNetObsCache = { mtime, value }
+    return value
   } catch {
     return true
   }
@@ -4003,6 +5872,12 @@ function showUpdateError(err: unknown): void {
   manualUpdateCheck = false
   updateDownloadInProgress = false
   if (!shouldNotify) {
+    // electron-updater delivers each failure twice (it emits 'error' AND rejects
+    // the promise our try/catch awaits). The first delivery publishes the visible
+    // error and clears the notify flags; without this guard the second, now-silent
+    // delivery would clobber that error back to idle and wipe the known
+    // latestVersion. Leave an already-published error in place.
+    if (desktopUpdateStatus === 'error') return
     setDesktopUpdateState({
       status: downloadedUpdateVersion ? 'downloaded' : 'idle',
       latestVersion: downloadedUpdateVersion,
@@ -4178,6 +6053,52 @@ function initAutoUpdater(): void {
   })
 }
 
+// ── macOS prerelease update discovery ───────────────────────────────────────
+// The tag-parsing + candidate-selection logic lives in ./update-feed-resolver so
+// it can be unit-tested without Electron; the pieces below are the Electron-bound
+// glue (current version, GitHub fetch, feed wiring).
+
+// The running app version if it is a prerelease we can resolve upgrades for.
+function currentPrereleaseReleaseTarget(): { base: string; rc: number } | null {
+  const parsed = parseOpenSquillaReleaseTag(app.getVersion())
+  return parsed && parsed.rc !== null ? { base: parsed.base, rc: parsed.rc } : null
+}
+
+async function fetchGithubReleaseSummaries(): Promise<ReleaseSummary[]> {
+  const url = `https://api.github.com/repos/${GITHUB_UPDATE_OWNER}/${GITHUB_UPDATE_REPO}/releases?per_page=50`
+  const response = await fetch(url, {
+    headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'OpenSquilla-Desktop' },
+    signal: AbortSignal.timeout(8000),
+  })
+  if (!response.ok) throw new Error(`GitHub releases request failed: ${response.status}`)
+  const data = await response.json()
+  return Array.isArray(data) ? (data as ReleaseSummary[]) : []
+}
+
+// Returns 'default' to leave the built-in GitHub provider in place (stable
+// builds, non-macOS, dev), 'configured' after pointing a generic feed at the
+// resolved candidate, or 'up-to-date' when no newer same-base release exists.
+async function configureDesktopUpdateFeed(): Promise<'default' | 'configured' | 'up-to-date'> {
+  // Default (stable builds, GitHub provider path): never silently downgrade.
+  autoUpdater.allowDowngrade = false
+  if (process.platform !== 'darwin' || !app.isPackaged) return 'default'
+  const current = currentPrereleaseReleaseTarget()
+  if (!current) return 'default'
+  const candidate = selectMacPrereleaseCandidate(current, await fetchGithubReleaseSummaries())
+  if (!candidate) return 'up-to-date'
+  // Generic provider + channel 'latest' fetches latest-mac.yml from this exact
+  // release; the yml's version is then gated by electron-updater's isUpdateAvailable.
+  autoUpdater.setFeedURL({ provider: 'generic', url: candidate.feedUrl, channel: 'latest' })
+  // The resolver already decided this candidate is the correct forward move by
+  // NUMERIC rc order. electron-updater's gate uses semver.gt, which sorts rc
+  // identifiers as strings — so 0.5.0-rc10 ranks BELOW 0.5.0-rc9/rc2 and the
+  // update would be wrongly rejected. Allow the "downgrade": we only ever point
+  // the feed at a genuinely newer release, never an older one.
+  autoUpdater.allowDowngrade = true
+  desktopLog('update_feed_resolved', { tag: candidate.tag, version: candidate.version })
+  return 'configured'
+}
+
 async function checkForUpdates(manual: boolean): Promise<void> {
   if (updateDownloadInProgress || updateApplying) return
 
@@ -4227,6 +6148,21 @@ async function checkForUpdates(manual: boolean): Promise<void> {
     error: null,
   })
   try {
+    const feed = await configureDesktopUpdateFeed()
+    if (feed === 'up-to-date') {
+      // A packaged macOS prerelease with no newer same-base release. Report
+      // up-to-date directly — the default GitHub provider would find nothing
+      // (the rc tags are PEP440, not npm semver) and raise a spurious error.
+      manualUpdateCheck = false
+      setDesktopUpdateState({
+        status: 'not-available',
+        latestVersion: app.getVersion(),
+        progress: null,
+        checkedAt: new Date().toISOString(),
+        error: null,
+      })
+      return
+    }
     await autoUpdater.checkForUpdates()
   } catch (err) {
     console.error('[updater] checkForUpdates failed', err)
@@ -4242,7 +6178,10 @@ function gatewayProcessForUpdateInstall(): ChildProcessWithoutNullStreams | null
   return null
 }
 
-async function waitForGatewayProcessExit(child: ChildProcessWithoutNullStreams): Promise<boolean> {
+async function waitForGatewayProcessExit(
+  child: ChildProcessWithoutNullStreams,
+  timeoutMs = UPDATE_GATEWAY_EXIT_TIMEOUT_MS,
+): Promise<boolean> {
   if (hasGatewayProcessExited(child)) return true
   return new Promise<boolean>((resolve) => {
     let settled = false
@@ -4254,7 +6193,7 @@ async function waitForGatewayProcessExit(child: ChildProcessWithoutNullStreams):
     child.once('exit', () => finish(true))
     setTimeout(() => {
       finish(hasGatewayProcessExited(child))
-    }, UPDATE_GATEWAY_EXIT_TIMEOUT_MS).unref()
+    }, timeoutMs).unref()
   })
 }
 
@@ -4323,7 +6262,14 @@ async function applyDownloadedUpdate(): Promise<void> {
   if (child) {
     if (gatewayProcess === child && gatewayState.owned) {
       updateGatewayShutdownProcess = child
-      stopGateway()
+      // We stay alive and await the exit below, so let the gateway take its
+      // Windows HTTP graceful drain instead of an immediate TerminateProcess.
+      allowGracefulShutdownWhileQuitting = true
+      try {
+        stopGateway()
+      } finally {
+        allowGracefulShutdownWhileQuitting = false
+      }
     }
     const exited = await waitForGatewayProcessExit(child)
     if (!exited) {
@@ -4352,6 +6298,11 @@ async function applyDownloadedUpdate(): Promise<void> {
       message: desktopT('update.errorTitle'),
       detail: String(err instanceof Error ? err.message : err ?? ''),
     })
+    // The owned gateway was stopped for the (now-failed) handoff and its exit was
+    // swallowed as intentional (isQuitting was true). restoreDownloadedUpdateRetryState
+    // cleared isQuitting, so bring the runtime back up instead of leaving the
+    // window stranded on the dead gateway's Control UI.
+    void openOrResumeDesktopApp()
   }
 }
 
@@ -4373,16 +6324,56 @@ ipcMain.handle('desktop:update:relaunch', async () => {
 })
 ipcMain.handle('desktop:update:dismiss', async () => dismissDesktopUpdate())
 ipcMain.handle('desktop:os-locale', () => desktopLocale)
+ipcMain.handle('desktop:theme:set', (_event, payload: unknown) => (
+  applyDesktopNativeTheme(normalizeDesktopNativeThemeSource(payload))
+))
 ipcMain.handle('gateway:status', () => ({ ...gatewayState }))
+ipcMain.handle('gateway:cli-invocation', async () => {
+  const runtime = await resolveGatewayRuntime()
+  return buildCliInvocation({
+    platform: process.platform,
+    mode: runtime.mode,
+    binaryPath: runtime.mode === 'bundled' ? runtime.command : undefined,
+    repoRoot: runtime.mode === 'dev' ? repoRoot : undefined,
+    stateDir: desktopHome(),
+    configPath: desktopConfigPath(),
+  })
+})
 ipcMain.handle('gateway:reveal-log', async () => {
-  if (!gatewayState.logPath) return false
-  await shell.showItemInFolder(gatewayState.logPath)
-  return true
+  if (gatewayState.logPath) {
+    await shell.showItemInFolder(gatewayState.logPath)
+    return true
+  }
+  // Startup can fail before the gateway log path is assigned (e.g. onboarding or
+  // port selection error), so Reveal log would otherwise be a dead button on the
+  // error panel. Fall back to the always-present desktop lifecycle log.
+  const desktopLogPath = join(app.getPath('userData'), 'logs', 'desktop.log')
+  if (existsSync(desktopLogPath)) {
+    await shell.showItemInFolder(desktopLogPath)
+    return true
+  }
+  await shell.openPath(join(app.getPath('userData'), 'logs')).catch(() => null)
+  return false
 })
 ipcMain.handle('desktop:settings:get', async () => loadDesktopSettings())
 ipcMain.handle('desktop:settings:save', async (_event, payload: DesktopSettingsPayload) => saveDesktopSettings(payload))
 ipcMain.handle('desktop:settings:reset', async () => {
   await resetDesktopSettings()
+  forceOnboardingOnNextStartup = true
+  const child = gatewayProcess && gatewayState.owned ? gatewayProcess : null
+  if (child) {
+    stopGateway()
+    await waitForGatewayProcessExit(child)
+  }
+  clearReusableGatewayState()
+  // This IPC is also reachable from the live Control UI (Settings → Runtime),
+  // which stays on the now-dead gateway after the reset. Return the window to the
+  // boot splash and re-run startup so onboarding re-runs, instead of stranding
+  // the user on a dead page. (The boot.html caller also calls retryStartup; the
+  // in-flight start is joined, not double-started.)
+  bootError = null
+  await currentMainWindow()?.loadFile(bootPagePath()).catch(() => null)
+  void openOrResumeDesktopApp()
   return { ok: true }
 })
 ipcMain.handle('desktop:artifact:open', async (_event, payload: ArtifactOpenRequest) => openArtifactWithDefaultApp(payload))
@@ -4394,10 +6385,10 @@ ipcMain.handle('desktop:artifact:open', async (_event, payload: ArtifactOpenRequ
 // credential and gateway logs under userData/). It intentionally does not
 // remove the installed .app / NSIS application; users do that through the OS.
 //
-// Path note: the gateway runs with OPENSQUILLA_STATE_DIR=desktopStateDir()
-// (<userData>/opensquilla/state), but the uninstaller's "home" must be
-// desktopHome() (<userData>/opensquilla) so it resolves config.toml + state/
-// correctly. So we run the CLI with OPENSQUILLA_STATE_DIR=desktopHome().
+// Path note: OPENSQUILLA_STATE_DIR names the OpenSquilla home root. Both the
+// gateway spawn and this uninstall CLI pass desktopHome()
+// (<userData>/opensquilla), so config.toml + state/ resolve identically
+// everywhere.
 async function runUninstallCli(
   extraArgs: string[],
 ): Promise<{ ok: boolean; stdout: string; stderr: string }> {
@@ -4405,6 +6396,7 @@ async function runUninstallCli(
   const prefix = runtime.args.slice(0, -2) // drop the trailing ['gateway','run']
   const child = spawn(runtime.command, [...prefix, 'uninstall', ...extraArgs], {
     cwd: runtime.cwd,
+    windowsHide: true,
     env: {
       ...process.env,
       OPENSQUILLA_DESKTOP: '1',
@@ -4448,12 +6440,12 @@ ipcMain.handle('desktop:uninstall:run', async (_event, payload?: { purgeData?: b
   if (purgeData) {
     const { response } = await dialog.showMessageBox({
       type: 'warning',
-      buttons: ['Cancel', 'Delete everything'],
+      buttons: [desktopT('uninstall.cancel'), desktopT('uninstall.deleteEverything')],
       defaultId: 0,
       cancelId: 0,
-      title: 'Delete local OpenSquilla desktop data?',
-      message: 'This permanently deletes the local desktop profile on this machine.',
-      detail: 'Sessions, configuration, and secrets will be removed. The installed app itself will remain; remove it through your OS after the app closes.',
+      title: desktopT('uninstall.confirmTitle'),
+      message: desktopT('uninstall.confirmMessage'),
+      detail: desktopT('uninstall.confirmDetail'),
     })
     if (response !== 1) return { ok: false, aborted: true, detail: 'cancelled' }
   }
@@ -4464,7 +6456,14 @@ ipcMain.handle('desktop:uninstall:run', async (_event, payload?: { purgeData?: b
   isQuitting = true
   if (gatewayProcess && gatewayState.owned) {
     const child = gatewayProcess
-    stopGateway()
+    // We stay alive and await the exit, so let the gateway take its Windows HTTP
+    // graceful drain instead of an immediate TerminateProcess.
+    allowGracefulShutdownWhileQuitting = true
+    try {
+      stopGateway()
+    } finally {
+      allowGracefulShutdownWhileQuitting = false
+    }
     await new Promise<void>((res) => {
       if (child.exitCode !== null || child.signalCode !== null) return res()
       child.once('exit', () => res())
@@ -4499,28 +6498,757 @@ ipcMain.handle('desktop:uninstall:run', async (_event, payload?: { purgeData?: b
   // purge — these hold the encrypted credential and logs).
   if (purgeData) {
     await rm(credentialPath(), { force: true }).catch(() => null)
+    transientPendingMigrationProviderSetup = null
+    await rm(pendingMigrationProviderSetupPath(), { force: true }).catch(() => null)
+    await rm(desktopMigrationResultPath(), { force: true }).catch(() => null)
     await rm(join(app.getPath('userData'), 'logs'), { recursive: true, force: true }).catch(() => null)
   }
+  // The app keeps running after a successful data cleanup (the user closes it
+  // later), so clear the quit latch — otherwise it stays true and silently
+  // suppresses reporting of any later gateway crash.
+  isQuitting = false
   return result
 })
+
+// ── Legacy home migration (Phase 3 entry points) ─────────────────────────────
+// The import logic lives once in Python (`opensquilla migrate opensquilla`,
+// dry-run by default); the desktop only detects candidates, orchestrates the
+// gateway lifecycle, and spawns the bundled CLI — mirroring the uninstall flow
+// above. Design: docs/features/legacy-home-migration-design.md (Phase 3).
+async function runMigrateCli(
+  extraArgs: string[],
+): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  const runtime = await resolveGatewayRuntime()
+  const prefix = runtime.args.slice(0, -2) // drop the trailing ['gateway','run']
+  const child = spawn(runtime.command, [...prefix, 'migrate', 'opensquilla', ...extraArgs], {
+    cwd: runtime.cwd,
+    windowsHide: true,
+    env: {
+      ...process.env,
+      OPENSQUILLA_DESKTOP: '1',
+      OPENSQUILLA_INSTALL_METHOD: 'desktop',
+      OPENSQUILLA_GATEWAY_CONFIG_PATH: desktopConfigPath(),
+      // OPENSQUILLA_STATE_DIR names the OpenSquilla HOME ROOT: the migrator's
+      // import TARGET. It must match the gateway spawn (desktopHome()), or the
+      // import would land in a home the gateway never reads.
+      OPENSQUILLA_STATE_DIR: desktopHome(),
+      PYTHONUNBUFFERED: '1',
+      PYTHONUTF8: '1',
+      PYTHONIOENCODING: 'utf-8:replace',
+    },
+  })
+  let stdout = ''
+  let stderr = ''
+  child.stdout.on('data', (chunk) => {
+    stdout += String(chunk)
+  })
+  child.stderr.on('data', (chunk) => {
+    stderr += String(chunk)
+  })
+  const code: number = await new Promise((res) => {
+    child.once('exit', (c) => res(c ?? 1))
+    child.once('error', () => res(1))
+  })
+  return { ok: code === 0, stdout, stderr }
+}
+
+// Run the migrate CLI in JSON mode and parse its report. A blocked run exits
+// non-zero but still prints a valid report (items with status "error"), so ok
+// and report are independent signals.
+async function migrateSummaryJson(
+  extraArgs: string[],
+): Promise<{ ok: boolean; report: Record<string, unknown> | null; raw: string }> {
+  const { ok, stdout, stderr } = await runMigrateCli([...extraArgs, '--json'])
+  try {
+    return { ok, report: JSON.parse(stdout) as Record<string, unknown>, raw: stdout }
+  } catch {
+    return { ok: false, report: null, raw: stdout || stderr }
+  }
+}
+
+type DesktopMigrationPhase = 'preview' | 'applying' | 'done' | 'error'
+
+// Coarse migration progress for renderers (same publish pattern as
+// publishDesktopUpdateState): the onboarding card and the settings panel show a
+// spinner/label off these while the CLI runs.
+function publishDesktopMigrationProgress(phase: DesktopMigrationPhase, detail?: string): void {
+  const payload = detail === undefined ? { phase } : { phase, detail }
+  for (const window of BrowserWindow.getAllWindows()) {
+    try {
+      if (!window.isDestroyed()) window.webContents.send('desktop:migration:progress', payload)
+    } catch {
+      // A renderer can disappear while the import replaces its gateway origin.
+      // Progress is advisory; lifecycle cleanup and restart must still run.
+    }
+  }
+}
+
+interface MigrationProviderPrefill {
+  provider: string
+  model: string
+  baseUrl: string
+  apiKeyEnv: string
+  apiKey: string
+}
+
+interface PendingMigrationProviderSetup extends MigrationProviderPrefill {
+  version: 1
+  phase: 'applying' | 'needs-setup'
+  source: string
+  sourceKind: LegacyImportCandidate['kind']
+  target: string
+  knownReceiptIds: string[]
+}
+
+let transientPendingMigrationProviderSetup: PendingMigrationProviderSetup | null = null
+
+function pendingMigrationProviderSetupPath(): string {
+  return join(app.getPath('userData'), 'migration-provider-setup.json')
+}
+
+function migrationReceiptRoot(): string {
+  return join(desktopHome(), 'migration', 'opensquilla')
+}
+
+async function listMigrationReceiptIds(): Promise<string[]> {
+  try {
+    const entries = await readdir(migrationReceiptRoot(), { withFileTypes: true })
+    return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw error
+  }
+}
+
+async function readPendingMigrationProviderSetup(): Promise<PendingMigrationProviderSetup | null> {
+  if (transientPendingMigrationProviderSetup) return transientPendingMigrationProviderSetup
+  let raw = ''
+  try {
+    raw = await readFile(pendingMigrationProviderSetupPath(), 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw new Error(`Could not read the pending desktop import record: ${String(error)}`)
+  }
+  let payload: Record<string, unknown>
+  try {
+    const parsed = JSON.parse(raw) as unknown
+    const record = migrationRecord(parsed)
+    if (!record) throw new Error('record root is not an object')
+    payload = record
+  } catch (error) {
+    throw new Error(`The pending desktop import record is malformed: ${String(error)}`)
+  }
+
+  // Accept the short-lived pre-release marker shape as a needs-setup record so
+  // users who hit this recovery path while testing are not stranded.
+  const legacyShape = payload.phase === undefined
+  const phase = legacyShape ? 'needs-setup' : payload.phase
+  const source = legacyShape ? '' : String(payload.source || '')
+  const sourceKind = legacyShape ? 'cli-home' : String(payload.sourceKind || '')
+  const target = legacyShape ? desktopHome() : String(payload.target || '')
+  if (
+    !legacyShape
+    && (
+      payload.version !== 1
+      || !Array.isArray(payload.knownReceiptIds)
+      || payload.knownReceiptIds.some((value) => typeof value !== 'string')
+    )
+  ) {
+    throw new Error('The pending desktop import record has invalid transaction metadata.')
+  }
+  const knownReceiptIds = legacyShape
+    ? []
+    : payload.knownReceiptIds as string[]
+  if (
+    (phase !== 'applying' && phase !== 'needs-setup')
+    || !resolvedPathsEqual(target, desktopHome())
+    || (!legacyShape && !source)
+    || !['cli-home', 'windows-portable'].includes(sourceKind)
+  ) {
+    throw new Error('The pending desktop import record does not match this desktop profile.')
+  }
+  transientPendingMigrationProviderSetup = {
+    version: 1,
+    phase,
+    source,
+    sourceKind: sourceKind as LegacyImportCandidate['kind'],
+    target,
+    knownReceiptIds,
+    provider: String(payload.provider || ''),
+    model: String(payload.model || ''),
+    baseUrl: String(payload.baseUrl || ''),
+    apiKeyEnv: String(payload.apiKeyEnv || ''),
+    // Secrets are always re-read from the imported target, never the marker.
+    apiKey: '',
+  }
+  return transientPendingMigrationProviderSetup
+}
+
+async function persistPendingMigrationProviderSetup(
+  pending: PendingMigrationProviderSetup,
+): Promise<void> {
+  const durable = { ...pending, apiKey: '' }
+  mkdirSync(app.getPath('userData'), { recursive: true })
+  await atomicWriteFile(
+    pendingMigrationProviderSetupPath(),
+    JSON.stringify(durable, null, 2),
+    0o600,
+  )
+  transientPendingMigrationProviderSetup = durable
+}
+
+async function beginMigrationReconciliationIntent(
+  candidate: LegacyImportCandidate,
+): Promise<PendingMigrationProviderSetup> {
+  const intent: PendingMigrationProviderSetup = {
+    version: 1,
+    phase: 'applying',
+    source: candidate.path,
+    sourceKind: candidate.kind,
+    target: desktopHome(),
+    knownReceiptIds: await listMigrationReceiptIds(),
+    provider: '',
+    model: '',
+    baseUrl: '',
+    apiKeyEnv: '',
+    apiKey: '',
+  }
+  await persistPendingMigrationProviderSetup(intent)
+  return intent
+}
+
+async function findAppliedReceiptForIntent(
+  intent: PendingMigrationProviderSetup,
+): Promise<{ transactionId: string; report: Record<string, unknown> } | null> {
+  const known = new Set(intent.knownReceiptIds)
+  const candidates = (await listMigrationReceiptIds())
+    .filter((transactionId) => !known.has(transactionId))
+    .sort()
+    .reverse()
+  for (const transactionId of candidates) {
+    if (!MIGRATION_TRANSACTION_ID_RE.test(transactionId)) continue
+    try {
+      const report = JSON.parse(
+        await readFile(join(migrationReceiptRoot(), transactionId, 'report.json'), 'utf8'),
+      ) as unknown
+      if (
+        migrationReportValidationError(report, {
+          source: intent.source,
+          sourceKind: intent.sourceKind,
+          target: intent.target,
+          apply: true,
+        }) === null
+        && migrationReportErrors(report as Record<string, unknown>).length === 0
+      ) {
+        return { transactionId, report: report as Record<string, unknown> }
+      }
+    } catch {
+      // Ignore incomplete/unrelated report directories and keep looking.
+    }
+  }
+  return null
+}
+
+async function writePendingMigrationProviderSetup(
+  prefill: MigrationProviderPrefill | null,
+  intent: PendingMigrationProviderSetup,
+): Promise<void> {
+  const pending: PendingMigrationProviderSetup = {
+    ...intent,
+    phase: 'needs-setup',
+    provider: prefill?.provider || '',
+    model: prefill?.model || '',
+    baseUrl: prefill?.baseUrl || '',
+    apiKeyEnv: prefill?.apiKeyEnv || '',
+    // A provider key never belongs in this durable prompt marker. The imported
+    // target .env remains the source until the user confirms it into safeStorage.
+    apiKey: '',
+  }
+  await persistPendingMigrationProviderSetup(pending)
+}
+
+async function clearPendingMigrationProviderSetup(): Promise<void> {
+  transientPendingMigrationProviderSetup = null
+  await rm(pendingMigrationProviderSetupPath(), { force: true })
+}
+
+async function scrubImportedProviderEnvEntry(envKey: string): Promise<void> {
+  if (!envKey) return
+  const envPath = join(desktopHome(), '.env')
+  let raw = ''
+  try {
+    raw = await readFile(envPath, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
+    throw error
+  }
+  const lines = raw.split(/\r?\n/)
+  const kept = lines.filter((line) => {
+    const entry = line.match(/^\s*(?:export\s+)?([A-Za-z0-9_]+)\s*=/)
+    return !entry || entry[1] !== envKey
+  })
+  if (kept.length === lines.length) return
+  while (kept.length > 0 && kept[kept.length - 1] === '') kept.pop()
+  await atomicWriteFile(envPath, kept.length > 0 ? `${kept.join('\n')}\n` : '', 0o600)
+}
+
+async function loadPendingMigrationProviderSetup(): Promise<MigrationProviderPrefill | null> {
+  const pending = await readPendingMigrationProviderSetup()
+  if (!pending) return null
+  if (pending.phase === 'applying') {
+    throw new Error('An interrupted desktop import still needs reconciliation.')
+  }
+  const live = readMigratedProviderPrefill()
+  return {
+    provider: live?.provider || pending.provider,
+    model: live?.model || pending.model,
+    baseUrl: live?.baseUrl || pending.baseUrl,
+    apiKeyEnv: live?.apiKeyEnv || pending.apiKeyEnv,
+    apiKey: live?.apiKey || '',
+  }
+}
+
+async function reconcileImportedDesktopCredential(
+  intent: PendingMigrationProviderSetup,
+): Promise<{ requiresSetup: boolean }> {
+  const prefill = readMigratedProviderPrefill()
+  if (prefill?.provider) {
+    const defaults = providerDefaults(prefill.provider)
+    if (!defaults.requiresApiKey || prefill.apiKey) {
+      try {
+        await saveDesktopCredential(prefill)
+        await scrubImportedProviderEnvEntry(prefill.apiKeyEnv)
+        await clearPendingMigrationProviderSetup()
+        return { requiresSetup: false }
+      } catch (error) {
+        desktopLog('migration_credential_adoption_failed', {
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+  }
+  await writePendingMigrationProviderSetup(prefill, intent)
+  return { requiresSetup: true }
+}
+
+async function recoverPendingMigrationReconciliation(): Promise<void> {
+  const pending = await readPendingMigrationProviderSetup()
+  if (!pending || pending.phase !== 'applying') return
+  const receipt = await findAppliedReceiptForIntent(pending)
+  if (!receipt) {
+    // The commit journal has already been recovered before this runs. With no
+    // new target-side applied receipt, the attempted import never published.
+    await clearPendingMigrationProviderSetup()
+    return
+  }
+  await reconcileImportedDesktopCredential(pending)
+}
+
+// After a successful apply the migrator has rewritten the target config.toml
+// and .env. Read the [llm] section back (line-based, like the privacy-config
+// reader — the file is generated, simple TOML) so the onboarding provider step
+// starts prefilled from the imported connection. The api key travels only over
+// the onboarding IPC response — the same trust boundary as saveOnboarding — and
+// is never logged and never part of any report.
+function readMigratedProviderPrefill(): MigrationProviderPrefill | null {
+  let raw = ''
+  try {
+    raw = readFileSync(desktopConfigPath(), 'utf8')
+  } catch {
+    return null
+  }
+  let inLlmSection = false
+  const values: Record<string, string> = {}
+  for (const rawLine of raw.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line || line.startsWith('#')) continue
+    const section = line.match(/^\[([^\]]+)\]$/)
+    if (section) {
+      inLlmSection = section[1]?.trim() === 'llm'
+      continue
+    }
+    if (!inLlmSection) continue
+    const setting = line.match(/^([A-Za-z0-9_]+)\s*=\s*("(?:[^"\\]|\\.)*")\s*$/)
+    if (!setting) continue
+    try {
+      values[setting[1] ?? ''] = JSON.parse(setting[2] ?? '""') as string
+    } catch {
+      continue
+    }
+  }
+  const provider = (values.provider || '').trim()
+  if (!provider) return null
+  const apiKeyEnv = (values.api_key_env || '').trim()
+  let apiKey = ''
+  if (apiKeyEnv) {
+    try {
+      const envRaw = readFileSync(join(desktopHome(), '.env'), 'utf8')
+      for (const envLine of envRaw.split(/\r?\n/)) {
+        const entry = envLine.match(/^\s*(?:export\s+)?([A-Za-z0-9_]+)\s*=\s*(.*)$/)
+        if (!entry || entry[1] !== apiKeyEnv) continue
+        apiKey = String(entry[2] ?? '').trim().replace(/^(["'])(.*)\1$/, '$2')
+      }
+    } catch {
+      // No migrated .env; the user types the key as usual.
+    }
+  }
+  return {
+    provider,
+    model: (values.model || '').trim(),
+    baseUrl: (values.base_url || '').trim(),
+    apiKeyEnv,
+    apiKey,
+  }
+}
+
+interface TrustedDesktopMigrationPreview {
+  id: string
+  candidate: LegacyImportCandidate
+  report: Record<string, unknown>
+  createdAt: number
+}
+
+interface DesktopMigrationResult {
+  id: string
+  at: string
+  ok: boolean
+  migrationApplied: boolean
+  restartOk: boolean
+  requiresProviderSetup: boolean
+  detail?: string
+}
+
+const DESKTOP_MIGRATION_PREVIEW_TTL_MS = 10 * 60 * 1000
+let trustedDesktopMigrationPreview: TrustedDesktopMigrationPreview | null = null
+
+function migrationPreviewAllowsApply(
+  report: Record<string, unknown>,
+  overwrite: boolean,
+): boolean {
+  const errors = migrationReportErrors(report)
+  if (errors.length === 0) return !overwrite
+  return overwrite
+    && errors.length === 1
+    && errors[0]?.kind === 'preflight/target'
+}
+
+function desktopMigrationResultPath(): string {
+  return join(app.getPath('userData'), 'migration-last-result.json')
+}
+
+async function persistDesktopMigrationResult(result: DesktopMigrationResult): Promise<void> {
+  try {
+    mkdirSync(app.getPath('userData'), { recursive: true })
+    await atomicWriteFile(
+      desktopMigrationResultPath(),
+      JSON.stringify(result, null, 2),
+      0o600,
+    )
+  } catch (error) {
+    desktopLog('migration_result_persist_failed', {
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+}
+
+async function takeDesktopMigrationResult(): Promise<DesktopMigrationResult | null> {
+  let raw = ''
+  try {
+    raw = await readFile(desktopMigrationResultPath(), 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
+  }
+  const parsed = migrationRecord(JSON.parse(raw))
+  if (!parsed) throw new Error('Saved desktop migration result is malformed.')
+  const result: DesktopMigrationResult = {
+    id: String(parsed.id || ''),
+    at: String(parsed.at || ''),
+    ok: parsed.ok === true,
+    migrationApplied: parsed.migrationApplied === true,
+    restartOk: parsed.restartOk === true,
+    requiresProviderSetup: parsed.requiresProviderSetup === true,
+    ...(typeof parsed.detail === 'string' && parsed.detail ? { detail: parsed.detail } : {}),
+  }
+  if (!result.id || !result.at) throw new Error('Saved desktop migration result is malformed.')
+  await rm(desktopMigrationResultPath(), { force: true })
+  return result
+}
+
+ipcMain.handle('desktop:migration:summary', async () => {
+  trustedDesktopMigrationPreview = null
+  const candidate = detectLegacyImportCandidate()
+  if (!candidate) return { ok: true, candidate: null, report: null }
+  // Dry-run is read-only, so the running gateway is deliberately left alone.
+  publishDesktopMigrationProgress('preview')
+  const { ok, report, raw } = await migrateSummaryJson([
+    '--source', candidate.path, '--kind', candidate.kind,
+  ])
+  const validationError = migrationReportValidationError(report, {
+    source: candidate.path,
+    sourceKind: candidate.kind,
+    target: desktopHome(),
+    apply: false,
+  })
+  if (validationError || !report) {
+    const detail = validationError || raw || 'Invalid migration report'
+    publishDesktopMigrationProgress('error', detail)
+    return { ok: false, candidate, report: null, raw: detail }
+  }
+  const preview: TrustedDesktopMigrationPreview = {
+    id: randomUUID(),
+    candidate,
+    report,
+    createdAt: Date.now(),
+  }
+  trustedDesktopMigrationPreview = preview
+  publishDesktopMigrationProgress(ok ? 'done' : 'error')
+  return { ok, candidate, report, previewId: preview.id }
+})
+
+ipcMain.handle('desktop:migration:run', async (
+  _event,
+  payload?: { overwrite?: boolean; previewId?: string },
+) => {
+  const preview = trustedDesktopMigrationPreview
+  if (
+    !preview
+    || payload?.previewId !== preview.id
+    || Date.now() - preview.createdAt > DESKTOP_MIGRATION_PREVIEW_TTL_MS
+  ) {
+    trustedDesktopMigrationPreview = null
+    return {
+      ok: false,
+      report: null,
+      detail: 'The migration preview is missing or expired. Preview the import again.',
+    }
+  }
+  const candidate = preview.candidate
+  const overwrite = Boolean(payload?.overwrite)
+  if (!migrationPreviewAllowsApply(preview.report, overwrite)) {
+    trustedDesktopMigrationPreview = null
+    return {
+      ok: false,
+      report: preview.report,
+      detail: 'The approved preview does not permit this import mode. Preview again.',
+    }
+  }
+  if (
+    !looksLikeOpenSquillaHome(candidate.path)
+    || sourceWasImportedToTarget(candidate.path, desktopHome())
+  ) {
+    trustedDesktopMigrationPreview = null
+    return {
+      ok: false,
+      report: preview.report,
+      detail: 'The approved migration source changed after preview. Preview again.',
+    }
+  }
+  if (overwrite) {
+    const options: Electron.MessageBoxOptions = {
+      type: 'warning',
+      buttons: [desktopT('migration.overwriteCancel'), desktopT('migration.overwriteConfirm')],
+      defaultId: 0,
+      cancelId: 0,
+      title: desktopT('migration.overwriteTitle'),
+      message: desktopT('migration.overwriteMessage'),
+      detail: `${desktopT('migration.overwriteDetail')}\n\n${candidate.path}`,
+    }
+    const window = currentMainWindow()
+    const confirmation = window
+      ? await dialog.showMessageBox(window, options)
+      : await dialog.showMessageBox(options)
+    if (confirmation.response !== 1) {
+      return { ok: false, aborted: true, report: preview.report, detail: 'cancelled' }
+    }
+  }
+  trustedDesktopMigrationPreview = null
+
+  // A live gateway not owned by this process must remain attached and untouched.
+  // Do this before setting the quit latch so a refusal cannot suppress its later
+  // crash reporting or fall through into the owned-gateway restart path.
+  if ((!gatewayProcess || !gatewayState.owned) && gatewayState.url) {
+    if (await healthCheck(gatewayState.url)) {
+      const refused: DesktopMigrationResult = {
+        id: randomUUID(),
+        at: new Date().toISOString(),
+        ok: false,
+        migrationApplied: false,
+        restartOk: true,
+        requiresProviderSetup: false,
+        detail: 'A gateway is still serving this profile; stop it and retry.',
+      }
+      await persistDesktopMigrationResult(refused)
+      return { ...refused, report: null }
+    }
+  }
+
+  publishDesktopMigrationProgress('applying')
+  let report: Record<string, unknown> | null = null
+  let migrationVerified = false
+  let migrationApplied = false
+  let restartOk = false
+  let requiresProviderSetup = false
+  let detail = ''
+  let intent: PendingMigrationProviderSetup | null = null
+  let restartAllowed = true
+  let shouldRestart = true
+  isQuitting = true
+  try {
+    // Quiesce the owned gateway before the CLI writes (the uninstall-run
+    // pattern): wait for the child to actually EXIT, bounded by the kill deadline.
+    if (gatewayProcess && gatewayState.owned) {
+      const child = gatewayProcess
+      // We stay alive and await the exit, so let the gateway take its Windows
+      // HTTP graceful drain instead of an immediate TerminateProcess.
+      allowGracefulShutdownWhileQuitting = true
+      try {
+        stopGateway()
+      } finally {
+        allowGracefulShutdownWhileQuitting = false
+      }
+      const exited = await waitForGatewayProcessExit(child)
+      if (!exited) {
+        // Keep the still-live child visible to the rest of the lifecycle code and
+        // refuse both the import and a replacement spawn against the same profile.
+        gatewayProcess = child
+        gatewayState.owned = true
+        gatewayState.status = 'error'
+        gatewayState.error = 'The desktop gateway did not exit before the import deadline.'
+        restartAllowed = false
+        throw new Error(gatewayState.error)
+      }
+    }
+
+    // Refuse while an unmanaged gateway still serves this profile — the import
+    // must not race live sessions.db/scheduler.db writers.
+    if (gatewayState.url && (await healthCheck(gatewayState.url))) {
+      gatewayState.owned = false
+      gatewayState.status = 'ready'
+      shouldRestart = false
+      throw new Error('A gateway is still serving this profile; stop it and retry.')
+    }
+
+    // The intent is outside the target tree, so it survives target replacement.
+    // Startup can use it plus a new target-side receipt to finish credential
+    // adoption even if Electron dies after the Python commit but before this IPC
+    // handler receives stdout.
+    intent = await beginMigrationReconciliationIntent(candidate)
+    const result = await runMigrateCli([
+      '--source', candidate.path, '--kind', candidate.kind, '--apply',
+      ...(overwrite ? ['--overwrite'] : []),
+      '--json',
+    ])
+    try {
+      report = migrationRecord(JSON.parse(result.stdout))
+    } catch {
+      report = null
+    }
+    const validationError = migrationReportValidationError(report, {
+      source: candidate.path,
+      sourceKind: candidate.kind,
+      target: desktopHome(),
+      apply: true,
+    })
+    migrationVerified = result.ok
+      && report !== null
+      && validationError === null
+      && migrationReportErrors(report).length === 0
+    detail = migrationVerified
+      ? ''
+      : (validationError || result.stderr || result.stdout || 'Invalid migration report').slice(-2000)
+  } catch (error) {
+    detail = error instanceof Error ? error.message : String(error)
+  } finally {
+    if (intent) {
+      try {
+        const receipt = await findAppliedReceiptForIntent(intent)
+        if (receipt) {
+          migrationApplied = true
+          if (!migrationVerified) report = receipt.report
+          // Publication of a validated, previously-unseen target receipt is the
+          // durable commit authority. The CLI child can lose stdout or exit
+          // nonzero after that atomic rename without making the import a failure.
+          migrationVerified = true
+          const reconciliation = await reconcileImportedDesktopCredential(intent)
+          requiresProviderSetup = reconciliation.requiresSetup
+        } else {
+          if (migrationVerified) {
+            detail = 'The migration command succeeded without a valid target-side receipt.'
+            migrationVerified = false
+          }
+          await clearPendingMigrationProviderSetup()
+        }
+      } catch (error) {
+        migrationVerified = false
+        const reconciliationError = error instanceof Error ? error.message : String(error)
+        detail = detail ? `${detail}; ${reconciliationError}` : reconciliationError
+      }
+    }
+    publishDesktopMigrationProgress(migrationVerified ? 'done' : 'error', detail || undefined)
+    // Restart via the boot splash on every path. The imported profile is not
+    // considered ready until the replacement gateway is healthy (and, when a
+    // key could not be adopted, the durable provider-confirmation flow finishes).
+    isQuitting = false
+    if (restartAllowed && shouldRestart) {
+      clearReusableGatewayState()
+      bootError = null
+      await currentMainWindow()?.loadFile(bootPagePath()).catch(() => null)
+      await openOrResumeDesktopApp()
+      restartOk = gatewayState.status === 'ready'
+        && Boolean(gatewayState.url)
+        && await healthCheck(gatewayState.url)
+    } else if (!shouldRestart) {
+      restartOk = Boolean(gatewayState.url) && await healthCheck(gatewayState.url)
+    }
+  }
+
+  if (migrationApplied && !restartOk && !detail) {
+    detail = 'Import applied, but the desktop gateway did not become healthy.'
+  }
+  const finalResult: DesktopMigrationResult = {
+    id: randomUUID(),
+    at: new Date().toISOString(),
+    ok: migrationVerified && restartOk,
+    migrationApplied,
+    restartOk,
+    requiresProviderSetup,
+    ...(detail ? { detail } : {}),
+  }
+  await persistDesktopMigrationResult(finalResult)
+  return { ...finalResult, report }
+})
+
+ipcMain.handle('desktop:migration:last-result', takeDesktopMigrationResult)
+
 ipcMain.handle('desktop:boot:state', () => ({
   status: bootStatus,
   error: bootError,
   gateway: { ...gatewayState },
 }))
 ipcMain.handle('desktop:boot:retry', async () => {
-  const ready = gatewayState.status === 'ready' && gatewayState.url
-    ? await healthCheck(gatewayState.url)
-    : false
+  // Backs both the boot-error "Retry" button and the Control UI "Restart
+  // runtime" action. If a start attempt is already in flight, join it and clear
+  // the stale bootError so the reloaded splash shows live progress instead of
+  // instantly re-rendering the previous error panel.
+  if (gatewayStartPromise) {
+    bootError = null
+    void openOrResumeDesktopApp()
+    return { ok: true }
+  }
 
-  if (!gatewayStartPromise && !ready && gatewayProcess && gatewayState.owned) {
+  // Otherwise force a real runtime restart. "Restart runtime" must relaunch the
+  // child even when the current gateway is healthy, so always tear an owned
+  // gateway down and wait for it to release its port + PID lock before
+  // openOrResumeDesktopApp respawns it — never reuse the existing one here.
+  if (gatewayProcess && gatewayState.owned) {
+    const previousChild = gatewayProcess
     stopGateway()
+    await waitForGatewayProcessExit(previousChild)
   }
-  if (!ready) {
-    gatewayState.status = 'stopped'
-    gatewayState.error = undefined
-    await currentMainWindow()?.loadFile(bootPagePath()).catch(() => null)
-  }
+  clearReusableGatewayState()
+  bootError = null
+  await currentMainWindow()?.loadFile(bootPagePath()).catch(() => null)
 
   void openOrResumeDesktopApp()
   return { ok: true }
@@ -4541,7 +7269,18 @@ ipcMain.handle('desktop:onboarding:defaults', () => ({
   },
 }))
 ipcMain.handle('desktop:onboarding:save', async (_event, payload: OnboardingPayload) => {
+  // Only honor this while an onboarding flow is actually awaiting a result. The
+  // same preload bridge is attached to the Control UI window, so without this
+  // guard any script on the gateway-served page could rewrite the credential and
+  // regenerate config.toml outside onboarding.
+  if (!resolveOnboarding) return { ok: false, error: 'No onboarding in progress.' }
+  const pendingMigration = await readPendingMigrationProviderSetup()
   const credential = await saveDesktopCredential(payload)
+  if (pendingMigration?.phase === 'needs-setup') {
+    await scrubImportedProviderEnvEntry(pendingMigration.apiKeyEnv)
+  }
+  await clearPendingMigrationProviderSetup()
+  applyDesktopLocaleChoice(payload.locale)
   const resolve = resolveOnboarding
   resolveOnboarding = null
   rejectOnboarding = null
@@ -4555,7 +7294,107 @@ ipcMain.handle('desktop:onboarding:cancel', () => {
   rejectOnboarding = null
   onboardingWindow?.close()
   reject?.(new Error('OpenSquilla setup was cancelled.'))
+  // The onboarding "Quit" button routes here; it is a deliberate exit, so quit
+  // the app instead of surfacing the cancellation as a boot failure panel.
+  app.quit()
   return { ok: true }
+})
+ipcMain.handle('desktop:onboarding:migrate:preview', async () => {
+  // Same guard as desktop:onboarding:save: the preload bridge is also attached
+  // to the Control UI window, so these only respond while onboarding awaits.
+  // The source path/kind come from the main process's own detection, never
+  // from the renderer.
+  if (!resolveOnboarding) return { ok: false, error: 'No onboarding in progress.' }
+  const candidate = onboardingMigrationCandidate
+  if (!candidate) return { ok: false, error: 'No legacy OpenSquilla home was detected.' }
+  onboardingMigrationPreviewApprovedAt = 0
+  publishDesktopMigrationProgress('preview')
+  const { ok, report, raw } = await migrateSummaryJson([
+    '--source', candidate.path, '--kind', candidate.kind,
+  ])
+  const validationError = migrationReportValidationError(report, {
+    source: candidate.path,
+    sourceKind: candidate.kind,
+    target: desktopHome(),
+    apply: false,
+  })
+  const approved = ok
+    && report !== null
+    && validationError === null
+    && migrationReportErrors(report).length === 0
+  if (approved) onboardingMigrationPreviewApprovedAt = Date.now()
+  publishDesktopMigrationProgress(approved ? 'done' : 'error', validationError || undefined)
+  return validationError
+    ? { ok: false, report: null, raw: validationError }
+    : { ok, report, raw }
+})
+ipcMain.handle('desktop:onboarding:migrate:apply', async () => {
+  if (!resolveOnboarding) return { ok: false, error: 'No onboarding in progress.' }
+  const candidate = onboardingMigrationCandidate
+  if (!candidate) return { ok: false, error: 'No legacy OpenSquilla home was detected.' }
+  if (
+    !onboardingMigrationPreviewApprovedAt
+    || Date.now() - onboardingMigrationPreviewApprovedAt > DESKTOP_MIGRATION_PREVIEW_TTL_MS
+  ) {
+    onboardingMigrationPreviewApprovedAt = 0
+    return { ok: false, error: 'Preview the import again before applying it.' }
+  }
+  onboardingMigrationPreviewApprovedAt = 0
+  // Onboarding runs before the first gateway spawn, so there is nothing to
+  // quiesce here — the import lands before boot creates sessions.db and before
+  // scheduler jobs (imported paused) are scanned.
+  publishDesktopMigrationProgress('applying')
+  let intent: PendingMigrationProviderSetup | null = null
+  try {
+    intent = await beginMigrationReconciliationIntent(candidate)
+    const result = await migrateSummaryJson([
+      '--source', candidate.path, '--kind', candidate.kind, '--apply',
+    ])
+    const validationError = migrationReportValidationError(result.report, {
+      source: candidate.path,
+      sourceKind: candidate.kind,
+      target: desktopHome(),
+      apply: true,
+    })
+    const receipt = await findAppliedReceiptForIntent(intent)
+    if (!receipt) {
+      await clearPendingMigrationProviderSetup()
+      const detail = validationError || result.raw || 'Import did not publish a valid receipt.'
+      publishDesktopMigrationProgress('error', detail)
+      return { ok: false, report: result.report, raw: detail, prefill: null }
+    }
+
+    const prefill = readMigratedProviderPrefill()
+    await writePendingMigrationProviderSetup(prefill, intent)
+    const outputVerified = result.ok
+      && result.report !== null
+      && validationError === null
+      && migrationReportErrors(result.report).length === 0
+    // The target-side receipt is the crash-safe publication authority. If the
+    // child lost stdout after commit, continue onboarding from that validated
+    // receipt rather than offering a destructive retry against imported data.
+    publishDesktopMigrationProgress('done')
+    return {
+      ok: true,
+      report: outputVerified ? result.report : receipt.report,
+      raw: outputVerified ? result.raw : (validationError || result.raw),
+      prefill,
+    }
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    if (intent) {
+      const receipt = await findAppliedReceiptForIntent(intent).catch(() => null)
+      if (receipt) {
+        const prefill = readMigratedProviderPrefill()
+        await writePendingMigrationProviderSetup(prefill, intent)
+        publishDesktopMigrationProgress('done')
+        return { ok: true, report: receipt.report, raw: detail, prefill }
+      }
+      await clearPendingMigrationProviderSetup().catch(() => null)
+    }
+    publishDesktopMigrationProgress('error', detail)
+    return { ok: false, report: null, raw: detail, prefill: null }
+  }
 })
 
 // Set once the Windows graceful-drain-on-quit sequence has run so the re-issued
@@ -4584,9 +7423,23 @@ app.on('before-quit', (event) => {
       try {
         const accepted = await requestGatewayShutdown(gatewayState.url || '')
         desktopLog('quit_gateway_shutdown_requested', { accepted })
-        const exited = await waitForGatewayProcessExit(child)
-        desktopLog('quit_gateway_exit', { exited })
-        if (!exited) stopGateway()
+        let hardTerminated = false
+        let exited = false
+        if (!accepted) {
+          hardTerminated = true
+          hardTerminateGatewayProcess(child)
+          exited = await waitForGatewayProcessExit(child, GATEWAY_HARD_KILL_BACKSTOP_MS)
+          await clearKnownOwnedGatewayPidFile()
+        } else {
+          exited = await waitForGatewayProcessExit(child)
+          if (!exited) {
+            hardTerminated = true
+            hardTerminateGatewayProcess(child)
+            exited = await waitForGatewayProcessExit(child, GATEWAY_HARD_KILL_BACKSTOP_MS)
+            await clearKnownOwnedGatewayPidFile()
+          }
+        }
+        desktopLog('quit_gateway_exit', { exited, hardTerminated })
       } finally {
         windowsQuitDrainDone = true
         app.exit(0)
@@ -4624,6 +7477,11 @@ configureChromiumKeychainPolicy()
 // unavailable — surface an explicit error instead of exiting silently.
 function acquireSingleInstanceLockWithRetry(): boolean {
   const deadline = Date.now() + 5_000
+  // Atomics.wait blocks this thread without an event loop (app.whenReady has not
+  // fired) and, unlike a Date.now() spin, does not peg a CPU core. Larger sleep
+  // slices also cut the retry count — each failed requestSingleInstanceLock
+  // notifies the running instance (firing its second-instance handler).
+  const sleepSignal = new Int32Array(new SharedArrayBuffer(4))
   let attempt = 0
   for (;;) {
     attempt += 1
@@ -4631,16 +7489,12 @@ function acquireSingleInstanceLockWithRetry(): boolean {
       desktopLog('single_instance_lock_acquired', { attempt })
       return true
     }
-    if (Date.now() >= deadline) {
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) {
       desktopLog('single_instance_lock_unavailable', { attempt })
       return false
     }
-    // Synchronous busy-wait bounded by the deadline: app.whenReady has not
-    // fired yet, so there is no event loop to await on and the window is short.
-    const spinUntil = Math.min(deadline, Date.now() + 150)
-    while (Date.now() < spinUntil) {
-      /* brief spin before the next lock attempt */
-    }
+    Atomics.wait(sleepSignal, 0, 0, Math.min(400, remaining))
   }
 }
 
@@ -4654,9 +7508,12 @@ if (!gotSingleInstanceLock) {
   // silent no-op, then quit.
   desktopLog('launch_aborted_lock_held')
   try {
+    // This runs before app.whenReady, so app.getLocale() is unreliable; fall back
+    // to the persisted onboarding locale (a plain file read) for this dialog.
+    desktopLocale = loadPersistedDesktopLocale() ?? desktopLocale
     dialog.showErrorBox(
-      'OpenSquilla is already running',
-      'Another OpenSquilla window is already open on this machine. Bringing it to the front.',
+      desktopT('launch.alreadyRunningTitle'),
+      desktopT('launch.alreadyRunningMessage'),
     )
   } catch {
     // Dialog is best-effort; the diagnostic log is the durable record.
@@ -4670,7 +7527,7 @@ if (!gotSingleInstanceLock) {
 
   void app.whenReady().then(async () => {
     app.name = 'OpenSquilla'
-    desktopLocale = resolveDesktopLocale()
+    desktopLocale = loadPersistedDesktopLocale() ?? resolveDesktopLocale()
     createApplicationMenu()
     void openOrResumeDesktopApp()
     initAutoUpdater()

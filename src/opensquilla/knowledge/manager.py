@@ -661,7 +661,7 @@ def _question_keyword(text: str) -> str | None:
     cleaned = re.sub(r"\s+", "", text)
     cjk = re.findall(r"[\u3400-\u9fff]{2,12}", cleaned)
     if cjk:
-        return cjk[0][:12]
+        return str(cjk[0])[:12]
     words = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", text)
     return " ".join(words[:3]) if words else None
 
@@ -788,11 +788,11 @@ def _with_char_offsets(chunks: list[KnowledgeChunk], text: str) -> list[Knowledg
     cursor = 0
     for chunk in chunks:
         needle = chunk.text[: min(80, len(chunk.text))].strip()
-        start = text.find(needle, cursor) if needle else -1
-        if start < 0:
-            start = text.find(needle) if needle else -1
-        if start < 0:
-            start = None
+        start_index = text.find(needle, cursor) if needle else -1
+        if start_index < 0:
+            start_index = text.find(needle) if needle else -1
+        start: int | None = start_index if start_index >= 0 else None
+        if start is None:
             end = None
         else:
             end = min(len(text), start + len(chunk.text))

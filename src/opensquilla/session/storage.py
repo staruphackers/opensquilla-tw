@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import logging
 from datetime import UTC, datetime
@@ -752,7 +754,9 @@ class SessionStorage:
         # there is no SQL FK to rely on — explicit purge is required.
         if self._meta_run_writer is not None:
             try:
-                self._meta_run_writer.purge_for_session(session_key)
+                # The writer commits synchronously (busy_timeout=5000); keep the
+                # delete off the event loop like every other writer call site.
+                await asyncio.to_thread(self._meta_run_writer.purge_for_session, session_key)
             except Exception as exc:  # noqa: BLE001
                 log.warning("session_delete.purge_meta_runs_failed: %s", exc)
 
@@ -774,6 +778,36 @@ class SessionStorage:
                 await self.conn.commit()
         except Exception as exc:  # noqa: BLE001
             log.warning("session_delete.purge_router_decisions_failed: %s", exc)
+
+        # Turn error records (V019 turn_errors) — same yoyo-owned-table purge
+        # as router_decisions above; the table is absent on :memory: DBs.
+        try:
+            async with self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='turn_errors'"
+            ) as cur:
+                has_turn_errors = await cur.fetchone() is not None
+            if has_turn_errors:
+                await self.conn.execute(
+                    "DELETE FROM turn_errors WHERE session_key = ?",
+                    (session_key,),
+                )
+                await self.conn.commit()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("session_delete.purge_turn_errors_failed: %s", exc)
+
+        # agent_tasks and memory_durable_receipts are keyed by session_key and
+        # created unconditionally by connect(), but delete_session never purged
+        # them — deleted sessions left orphan task/receipt rows that reattach to
+        # a recreated session sharing the same key. Purge both, best-effort.
+        for table in ("agent_tasks", "memory_durable_receipts"):
+            try:
+                await self.conn.execute(
+                    f"DELETE FROM {table} WHERE session_key = ?",  # noqa: S608 - fixed literals
+                    (session_key,),
+                )
+                await self.conn.commit()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("session_delete.purge_%s_failed: %s", table, exc)
 
     async def prune_stale_sessions(self, before_ms: int) -> int:
         """Delete sessions not updated since before_ms epoch ms. Returns count deleted."""
@@ -1090,6 +1124,13 @@ class SessionStorage:
             ) as cur:
                 inserted = cur.rowcount or 0
             if inserted == 0:
+                # The 0-row INSERT opened an implicit transaction that changed
+                # nothing; roll it back before raising so the shared aiosqlite
+                # connection is not left mid-transaction (which would make the
+                # next writer's BEGIN IMMEDIATE fail or silently join and get
+                # discarded). Nothing of this write is lost — no row was written.
+                with contextlib.suppress(Exception):
+                    await self.conn.rollback()
                 # Fetch actual epoch for the error message (best-effort).
                 async with self.conn.execute(
                     "SELECT epoch FROM sessions WHERE session_key = ?",

@@ -15,7 +15,10 @@ import pytest
 
 from opensquilla.provider import model_catalog as model_catalog_module
 from opensquilla.provider.catalog_types import ModelCatalogEntry
-from opensquilla.provider.model_catalog import ModelCatalog
+from opensquilla.provider.model_catalog import (
+    ModelCatalog,
+    resolve_effective_context_window,
+)
 
 
 def _install_corrections(monkeypatch: pytest.MonkeyPatch, toml_text: str) -> None:
@@ -44,7 +47,10 @@ def test_cold_instance_resolves_snapshot_known_model() -> None:
     assert entry.supports_vision is True
     # The snapshot never knows the streaming dialect.
     assert entry.reasoning_format == "none"
-    assert entry.input_cost_per_mtok is None
+    # The snapshot vendors models.dev cost keys verbatim.
+    assert entry.input_cost_per_mtok == pytest.approx(5.0)
+    assert entry.output_cost_per_mtok == pytest.approx(30.0)
+    assert entry.cache_read_cost_per_mtok == pytest.approx(0.5)
 
 
 def test_cold_instance_synthesizes_unknown_model() -> None:
@@ -255,10 +261,25 @@ def test_packaged_corrections_file_parses_with_expected_tables() -> None:
         "openrouter",
         "dashscope",
         "volcengine",
+        "volcengine_coding_plan",
         "byteplus",
         "deepseek",
         "gemini",
         "zhipu",
+        "qianfan",
+        "tencent_tokenhub",
+        "tencent_token_plan",
+        "tokenrhythm",
+        "kimi_coding_openai",
+        "kimi_coding_anthropic",
+        "minimax",
+        "minimax_cn",
+        "minimax_global",
+        "minimax_openai",
+        "minimax_coding_openai",
+        "minimax_coding_anthropic",
+        "mimo_openai",
+        "mimo_anthropic",
     }
     assert set(payload["moonshot"]) == {
         "moonshot-v1-8k",
@@ -266,6 +287,7 @@ def test_packaged_corrections_file_parses_with_expected_tables() -> None:
         "moonshot-v1-128k",
         "kimi-k2.5*",
         "kimi-k2.6*",
+        "kimi-k2.7*",
         "kimi-k2-thinking*",
         "*",
     }
@@ -301,7 +323,17 @@ def test_ladder_glob_rows_keep_specific_before_general_file_order() -> None:
         .joinpath("catalog_overrides.toml")
         .read_text(encoding="utf-8")
     )
-    for provider in ("dashscope", "moonshot", "volcengine", "byteplus", "gemini", "zhipu"):
+    for provider in (
+        "dashscope",
+        "moonshot",
+        "volcengine",
+        "byteplus",
+        "gemini",
+        "zhipu",
+        "tencent_tokenhub",
+        "tencent_token_plan",
+        "tokenrhythm",
+    ):
         keys = list(payload[provider])
         assert keys[-1] == "*", provider
         assert keys.count("*") == 1, provider
@@ -347,15 +379,27 @@ def test_anthropic_listing_models_priced_via_packaged_corrections() -> None:
     # The corrections rows are the canonical metadata for the SKUs the
     # Anthropic adapter lists (the adapter's _KNOWN_MODELS table has been
     # retired; list_models resolves these rows through the shared catalog).
-    # Literals pin the retired table's values, with per-1k costs converted
-    # to the canonical per-Mtok unit (x1000).
+    # Values are verified against Anthropic's published per-model pricing
+    # page (input/output per Mtok). The opus-4-6 and sonnet-4-6 rows carry
+    # no cache pricing, so their cache_read/write fall through to the
+    # snapshot's vendored models.dev cache rates for the same SKU; the
+    # haiku-4-5 row now carries its own cache rates directly.
     listing_rows = (
-        ("claude-opus-4-6", "Claude Opus 4.6", 200_000, 32_000, 15.0, 75.0),
-        ("claude-sonnet-4-6", "Claude Sonnet 4.6", 200_000, 16_000, 3.0, 15.0),
-        ("claude-haiku-4-5-20251001", "Claude Haiku 4.5", 200_000, 8_192, 0.25, 1.25),
+        ("claude-opus-4-6", "Claude Opus 4.6", 200_000, 32_000, 5.0, 25.0, 0.5, 6.25),
+        ("claude-sonnet-4-6", "Claude Sonnet 4.6", 200_000, 16_000, 3.0, 15.0, 0.3, 3.75),
+        ("claude-haiku-4-5-20251001", "Claude Haiku 4.5", 200_000, 8_192, 1.0, 5.0, 0.1, 1.25),
     )
     catalog = ModelCatalog()
-    for model_id, display_name, context_window, max_output, in_mtok, out_mtok in listing_rows:
+    for (
+        model_id,
+        display_name,
+        context_window,
+        max_output,
+        in_mtok,
+        out_mtok,
+        cr_mtok,
+        cw_mtok,
+    ) in listing_rows:
         entry = catalog.resolve_entry(model_id, provider="anthropic")
         assert entry.source == "corrections", model_id
         assert entry.display_name == display_name, model_id
@@ -364,9 +408,10 @@ def test_anthropic_listing_models_priced_via_packaged_corrections() -> None:
         assert entry.max_output_tokens == max_output, model_id
         assert entry.input_cost_per_mtok == pytest.approx(in_mtok)
         assert entry.output_cost_per_mtok == pytest.approx(out_mtok)
-        # The retired table carried no cache pricing — those stay unknown.
-        assert entry.cache_read_cost_per_mtok is None
-        assert entry.cache_write_cost_per_mtok is None
+        # The retired table carried no cache pricing — corrections stays
+        # silent on it, so the snapshot's vendored rate fills the gap.
+        assert entry.cache_read_cost_per_mtok == pytest.approx(cr_mtok)
+        assert entry.cache_write_cost_per_mtok == pytest.approx(cw_mtok)
 
 
 # ---------------------------------------------------------------------------
@@ -446,6 +491,76 @@ def test_explicit_false_and_zero_overrides_win() -> None:
     assert entry.max_output_tokens == 0
 
 
+def test_context_window_override_governs_legacy_resolver_with_source() -> None:
+    # The [models.*] user-override layer is the top layer of the legacy
+    # resolve_context_window chain too, attributed as "override"; models
+    # without an override keep resolving through live/snapshot/corrections
+    # exactly as the parity net below pins.
+    catalog = _populated_catalog()
+    catalog.set_user_overrides({"openrouter/vendor/model-x": {"context_window": 111}})
+
+    assert catalog.resolve_context_window_with_source(
+        "vendor/model-x", "openrouter"
+    ) == (111, "override")
+    assert catalog.resolve_context_window("vendor/model-x", "openrouter") == 111
+    assert catalog.user_context_window_override("vendor/model-x", "openrouter") == 111
+    # Other models are untouched by the installed override.
+    assert catalog.resolve_context_window_with_source("gpt-5.5", "openai") == (
+        1_050_000,
+        "catalog",
+    )
+    assert catalog.user_context_window_override("gpt-5.5", "openai") is None
+
+
+def test_context_window_override_zero_is_not_a_budgeting_window() -> None:
+    # A 0 override wins per-field in resolve_entry (presence = knowledge) but
+    # cannot serve as a budgeting window, so the legacy chain resolves past it.
+    catalog = _populated_catalog()
+    catalog.set_user_overrides({"openrouter/vendor/model-x": {"context_window": 0}})
+
+    assert catalog.user_context_window_override("vendor/model-x", "openrouter") is None
+    assert catalog.resolve_context_window_with_source("vendor/model-x", "openrouter") == (
+        200_000,
+        "catalog",
+    )
+
+
+def test_resolve_effective_context_window_layers() -> None:
+    # Shared implementation of "[models.*] override > global config window >
+    # catalog > default" used by the engine budgeting and RPC paths.
+    catalog = _populated_catalog()
+    catalog.set_user_overrides({"openrouter/vendor/model-x": {"context_window": 111}})
+
+    assert resolve_effective_context_window(
+        catalog, "vendor/model-x", provider="openrouter", global_override=999_000
+    ) == (111, "override")
+    assert resolve_effective_context_window(
+        catalog, "gpt-5.5", provider="openai", global_override=999_000
+    ) == (999_000, "config")
+    assert resolve_effective_context_window(catalog, "gpt-5.5", provider="openai") == (
+        1_050_000,
+        "catalog",
+    )
+    # Junk/non-positive global values count as unset.
+    assert resolve_effective_context_window(
+        catalog, "gpt-5.5", provider="openai", global_override=-5
+    ) == (1_050_000, "catalog")
+
+
+def test_resolve_effective_context_window_duck_types_plain_catalogs() -> None:
+    class _PlainCatalog:
+        def resolve_context_window(self, model_id: str, provider: str = "") -> int:
+            return 42_000
+
+    # Without *_with_source the value is attributed "catalog" — never
+    # "override" — so the global config value still applies over it.
+    assert resolve_effective_context_window(_PlainCatalog(), "m") == (42_000, "catalog")
+    assert resolve_effective_context_window(_PlainCatalog(), "m", global_override=50_000) == (
+        50_000,
+        "config",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Snapshot-layer cost emission (compact in/out/cr/cw_mtok keys → per-Mtok
 # fields). The committed snapshot carries no cost keys yet, so these drive
@@ -514,6 +629,9 @@ _LEGACY_LIMITS: dict[tuple[str, str], tuple[int, int]] = {
     ("kimi-k2.5", "moonshot"): (8_192, 262_144),
     ("glm-5", "zhipu"): (131_072, 204_800),
     ("glm-5", "zai"): (16_384, 202_752),
+    # models.dev's 2026-07-08 refresh lowered openrouter z-ai/glm-5.2 max
+    # output from 131_072 to 32_768 (the cross-provider min); the window is
+    # unchanged.
     ("z-ai/glm-5.2", ""): (32_768, 1_000_000),
     ("gemini-3.5-flash", "gemini"): (65_536, 1_048_576),
     ("minimax-m2.7", ""): (131_072, 204_800),
@@ -536,7 +654,7 @@ _LEGACY_CAPS: dict[tuple[str, str, str], tuple[bool, bool, bool, str]] = {
     ("glm-4.6", "zhipu", ""): (False, True, False, "none"),
     ("qwen3-coder-plus", "dashscope", ""): (True, True, False, "dashscope"),
     ("kimi-k2.5", "moonshot", ""): (True, True, True, "moonshot"),
-    ("gemini-3.5-flash", "gemini", ""): (False, True, True, "none"),
+    ("gemini-3.5-flash", "gemini", ""): (True, True, True, "gemini"),
     ("doubao-seed-1-6-251015", "volcengine", ""): (True, True, True, "volcengine"),
     ("totally-unknown-model", "openrouter", ""): (False, True, False, "none"),
     ("gpt-4", "openai", ""): (False, True, False, "none"),
@@ -571,7 +689,8 @@ def test_parity_legacy_capabilities_unchanged() -> None:
 
 def test_full_entry_literals_snapshot_and_transcribed_ladder() -> None:
     # Full-literal entry pins (frozen-dataclass equality covers every field,
-    # including the four cost fields staying None). openai has NO ladder
+    # including the four cost fields — the snapshot now vendors models.dev
+    # cost keys, so these are no longer all None). openai has NO ladder
     # rows — the api.openai.com branch is host-guarded and stays code — so
     # its snapshot resolution is byte-identical to the pre-ladder tree:
     # supports_reasoning is snapshot data but reasoning_format stays "none"
@@ -579,7 +698,8 @@ def test_full_entry_literals_snapshot_and_transcribed_ladder() -> None:
     # layer the transcribed capability-ladder rows (reasoning_format,
     # ladder-scoped capability booleans) over snapshot windows, so their
     # source moved to "corrections" — deliberately, as part of the
-    # capability-ladder migration.
+    # capability-ladder migration; the corrections rows carry no cost
+    # fields, so cost still comes from the snapshot layer underneath.
     catalog = ModelCatalog()
     expected_entries = (
         ModelCatalogEntry(
@@ -590,6 +710,9 @@ def test_full_entry_literals_snapshot_and_transcribed_ladder() -> None:
             supports_reasoning=True,
             supports_tools=True,
             supports_vision=True,
+            input_cost_per_mtok=5.0,
+            output_cost_per_mtok=30.0,
+            cache_read_cost_per_mtok=0.5,
             source="snapshot",
         ),
         ModelCatalogEntry(
@@ -603,6 +726,9 @@ def test_full_entry_literals_snapshot_and_transcribed_ladder() -> None:
             supports_tools=True,
             supports_vision=False,
             reasoning_format="deepseek",
+            input_cost_per_mtok=0.14,
+            output_cost_per_mtok=0.28,
+            cache_read_cost_per_mtok=0.0028,
             source="corrections",
         ),
         ModelCatalogEntry(
@@ -614,6 +740,9 @@ def test_full_entry_literals_snapshot_and_transcribed_ladder() -> None:
             supports_tools=True,
             supports_vision=True,
             reasoning_format="gemini",
+            input_cost_per_mtok=1.25,
+            output_cost_per_mtok=10.0,
+            cache_read_cost_per_mtok=0.125,
             source="corrections",
         ),
         ModelCatalogEntry(
@@ -627,6 +756,10 @@ def test_full_entry_literals_snapshot_and_transcribed_ladder() -> None:
             supports_tools=True,
             supports_vision=False,
             reasoning_format="none",
+            input_cost_per_mtok=0.6,
+            output_cost_per_mtok=2.2,
+            cache_read_cost_per_mtok=0.11,
+            cache_write_cost_per_mtok=0.0,
             source="corrections",
         ),
     )

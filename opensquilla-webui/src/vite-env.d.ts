@@ -19,10 +19,12 @@ declare global {
     dismissUpdate?: () => Promise<DesktopUpdateState>
     onUpdateState?: (callback: (payload: unknown) => void) => () => void
     getGatewayStatus: () => Promise<DesktopSettings['gateway']>
+    getCliInvocation?: () => Promise<unknown>
     revealGatewayLog: () => Promise<boolean>
     getDesktopSettings: () => Promise<DesktopSettings>
     saveDesktopSettings: (payload: DesktopSettingsPayload) => Promise<DesktopSettings>
     resetDesktopSettings: () => Promise<{ ok: boolean }>
+    setNativeTheme?: (payload: { source: 'light' | 'dark' | 'system' }) => Promise<unknown>
     openArtifact: (payload: ArtifactOpenRequest) => Promise<ArtifactNativeOpenResult>
     getOnboardingDefaults: () => Promise<unknown>
     saveOnboarding: (payload: unknown) => Promise<unknown>

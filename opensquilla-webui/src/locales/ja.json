@@ -50,15 +50,17 @@
   "nav": {
     "chat": "チャット",
     "sessions": "セッション",
-    "approvals": "承認",
     "agents": "エージェント",
     "channels": "チャンネル",
     "cron": "スケジュール",
     "skills": "スキル",
+    "rag": "ナレッジベース",
     "overview": "概要",
     "usage": "使用量",
     "logs": "ログ",
-    "settings": "設定"
+    "settings": "設定",
+    "groupBuild": "構築",
+    "groupMonitor": "モニター"
   },
   "chrome": {
     "settings": "設定",
@@ -77,10 +79,20 @@
       "connecting": "接続中",
       "disconnected": "切断済み"
     },
+    "bgm": {
+      "label": "BGM",
+      "play": "BGMを再生",
+      "pause": "BGMを一時停止",
+      "volume": "音量",
+      "chooseLocalFile": "ローカルファイルを選択…",
+      "noTracks": "曲がありません — music/ にファイルを追加するかローカルファイルを選択してください"
+    },
     "brandHome": "OpenSquilla ホーム",
     "controlNav": "ナビゲーションの操作",
     "primaryNav": "メイン",
     "primaryMobile": "メイン（モバイル）",
+    "moreThemes": "その他のテーマ…",
+    "moreThemesHint": "追加のテーマは外観設定で利用できます",
     "themeMode": {
       "light": "ライト",
       "dark": "ダーク",
@@ -94,7 +106,9 @@
       "themeLabel": "テーマ",
       "themeDesc": "システムに従うか、ライトまたはダークを指定します。サイドバーの切り替えはこの設定へのショートカットです。",
       "languageLabel": "言語",
-      "languageDesc": "インターフェースの表示言語です。このブラウザーに即時に適用されます。"
+      "languageDesc": "インターフェースの表示言語です。このブラウザーに即時に適用されます。",
+      "bgmLabel": "BGM",
+      "bgmDesc": "トップバーにBGMコントロールを表示します。既定ではオフで、コマンドパレットからも切り替えられます。"
     },
     "dialog": {
       "title": "設定",
@@ -115,7 +129,7 @@
     "rail": {
       "connection": "接続",
       "runtime": "ランタイム",
-      "provider": "Chat Model",
+      "provider": "モデルサービス",
       "modelStrategy": "モデルルーティング",
       "behavior": "動作",
       "privacy": "プライバシー",
@@ -153,6 +167,12 @@
     }
   },
   "setup": {
+    "cli": {
+      "advancedTitle": "詳細 · 内蔵 CLI",
+      "hintBundled": "これらのコマンドはアプリ内蔵の CLI を使用します。ターミナルに貼り付けて実行できます。",
+      "hintDev": "開発モード：コマンドは uv 経由でソースチェックアウトから実行されます。",
+      "restartHint": "アプリの「設定 → ランタイム → 再起動」で反映してください。"
+    },
     "common": {
       "apiKey": "API キー",
       "apiKeyEnv": "API キーの環境変数",
@@ -213,9 +233,29 @@
       "routerReady": "SquillaRouter 準備完了",
       "directOnly": "ダイレクトのみ",
       "chooseToSeeFields": "必須項目を表示するにはプロバイダーを選択してください。",
+      "recommendation": {
+        "title": "おすすめ: TokenRhythm",
+        "value": "TokenRhythm API は期間限定で無料です。",
+        "registration": "キャンペーン期間中に登録して API キーを取得すると、DeepSeek、GLM、MiniMax、Kimi などの主要モデルを無料で利用できます。",
+        "cta": "登録して API キーを取得",
+        "externalLabel": "登録して API キーを取得 — TokenRhythm（新しいタブで開きます）",
+        "stepsLabel": "TokenRhythm の接続方法",
+        "stepRegister": "TokenRhythm アカウントを登録",
+        "stepCopy": "API キーをコピー",
+        "stepPaste": "下の API キー入力欄に貼り付け",
+        "stepSelectAndPaste": "上で TokenRhythm を選択してから、API キーを貼り付け",
+        "stepReplaceAndPaste": "下の「キーを変更」を選択してから、API キーを貼り付け"
+      },
       "advanced": "プロバイダーの詳細オプション",
       "timeoutLabel": "リクエストのタイムアウト（秒）",
       "timeoutDesc": "1 回のモデル応答がタイムアウトするまでの待機時間です。低速なローカルモデル（Ollama、vLLM、LM Studio）では値を大きくしてください。",
+      "contextWindowLabel": "コンテキストウィンドウの上書き（token 数）",
+      "contextWindowDesc": "このモデルのプロンプト組み立て予算に上限を設けます。空欄の場合は自動検出されたウィンドウを使用します。",
+      "contextWindowAuto": "自動",
+      "contextWindowUnknown": "不明",
+      "contextWindowNone": "なし",
+      "contextWindowReadout": "自動検出 {auto} · 上書き {override} · 有効 {effective}",
+      "contextWindowLocalWarning": "有効なコンテキストウィンドウは {tokens} token です。ローカルランタイムの既定ウィンドウは小さいことが多いため、モデルがより大きなウィンドウに対応している場合は上書き値を引き上げてください。",
       "envMissing": "{envKey} はこのゲートウェイプロセスから参照できません。ゲートウェイの起動または再起動前に設定するか、代わりに API キーを貼り付けてください。",
       "envKeyFallback": "選択した API キーの環境変数",
       "copyKeyCommand": "プロバイダーキー設定コマンドをコピー",
@@ -234,6 +274,7 @@
       "viewCredential": "View",
       "replaceCredential": "キーを変更",
       "credentialReplacePlaceholder": "Paste a replacement API key",
+      "credentialEnterPlaceholder": "Paste your API key",
       "showApiKey": "Show API key",
       "hideApiKey": "Hide API key",
       "credentialAdvanced": "Advanced",
@@ -246,6 +287,8 @@
       "keyRejected": "✗ キーが拒否されました — {reason}",
       "notReachable": "✗ 接続できませんでした — {reason}",
       "discoverFailed": "モデル一覧を取得できませんでした — モデル ID を入力してください。",
+      "verdictModels": "{count} 件のモデル · 例: {samples}",
+      "verdictSampleJoiner": "、",
       "failureAuth": "プロバイダーがこの API キーを拒否しました。",
       "failureCredits": "このアカウントにはクレジットが残っていません。",
       "failureRateLimited": "プロバイダーがリクエストを制限しています — 少し待って再試行してください。",
@@ -278,9 +321,11 @@
     "modelStrategy": {
       "title": "モデルルーティング",
       "desc": "Squilla が各リクエストで現在のモデルをどう使うかを選びます。",
-      "providerFirst": "先に Chat Model を設定してから、ルーティング方法を選んでください。",
-      "providerAction": "Chat Model へ →",
+      "providerFirst": "先にモデルサービスを設定してから、ルーティング方法を選んでください。",
+      "providerAction": "モデルサービスへ →",
       "routerTitle": "AI 単一モデルルーティング",
+      "visualModeLabel": "ルーティングパネルの表示スタイル",
+      "visualModeDesc": "チャット返信に表示されるルーティング決定パネルの表示方法。",
       "crossProviderNotice": "プロバイダー横断ルーティングが有効です。保存前に各ティアを確認してください。",
       "cards": {
         "router": {
@@ -300,37 +345,61 @@
       "ensembleTitle": "AI 集約ルーティング",
       "ensembleDependency": "{provider} の認証情報を使用します。既定モデルは {model} です。",
       "ensembleMinimum": "集約ルーティングの効果を得るには、候補モデルを少なくとももう 1 つ追加してください。",
-      "ensembleFailure": "すべての候補が失敗した場合、現在のモデルに戻ります: {provider} · {model}。",
+      "ensembleFailure": "融合できない場合は現在のモデルにフォールバック:{provider} · {model}。",
       "singleTitle": "オフ",
       "singleDependency": "各ターンを現在選択中のモデルに送信します: {provider} · {model}。",
       "singleDesc": "新しいリクエストでは AI ルーティングと集約ルーティングはオフです。",
-      "candidatesLabel": "候補モデル",
-      "candidatesDesc": "モデル階層は自動で含まれます。カスタム候補を追加するとカバー範囲が広がります。",
-      "candidateSourceTier": "モデル階層から",
-      "candidateSourceCustom": "カスタム",
-      "candidateSourceLegacy": "旧設定から",
-      "candidateSourceOpenRouterFixed": "OpenRouter 固定集約",
-      "customCandidatesLabel": "プロバイダー横断のカスタム候補",
-      "openrouterFixedTitle": "OpenRouter 固定集約",
-      "openrouterFixedDesc": "Chat Model が OpenRouter を使う場合、集約ルーティングは 4 つの提案モデルと 1 つの集約モデルを使います。",
-      "customizeOpenRouterLabel": "集約をカスタマイズ",
-      "customizeOpenRouterDesc": "旧 OpenRouter 候補テンプレートを使い、ルーター基準の集約ルーティングに切り替えます。",
+      "openrouterFixedTitle": "{provider} 固定集約",
+      "openrouterFixedDesc": "モデルサービスで {provider} を使用する場合、集約ルーティングは 4 つの提案モデルと 1 つの集約モデルを使います。",
       "openrouterFixedProposer": "提案モデル",
       "openrouterFixedAggregator": "集約モデル",
       "credentialReady": "接続済み",
       "credentialNeeded": "{provider} の認証情報が必要",
       "credentialMissingEnv": "{envKey} が必要",
       "credentialUnknown": "認証情報は未確認",
-      "addCandidatePlaceholder": "provider/model-id",
       "addCandidateProviderLabel": "候補プロバイダー",
       "addCandidateProviderPlaceholder": "provider",
       "addCandidateModelLabel": "候補モデル",
       "addCandidateModelPlaceholder": "model-id",
       "addCandidate": "候補を追加",
-      "resetCandidates": "現在の階層候補にリセット",
       "removeCandidateAria": "{model} を削除",
-      "ensembleEmpty": "候補モデルがまだありません。チャットモデルを保存してルーティング階層を生成するか、候補を手動で追加してください。",
-      "ensembleFailureLabel": "すべての候補が失敗した場合"
+      "ensembleEmpty": "候補モデルがまだありません。モデルサービスの設定を保存してルーティング階層を生成するか、候補を手動で追加してください。",
+      "ensemblePipeline": "仕組み:候補モデルが並行してドラフトを作成し、統合モデルがドラフトを融合して最終回答を生成します。ツールを呼び出せるのは統合モデルのみです。",
+      "legacyDynamicNotice": "この設定は廃止された自動アンサンブルモードを使用しています。カスタム編成に変換すると編集を続けられます。",
+      "legacyDynamicMigrate": "カスタム編成に変換",
+      "schemeLabel": "アンサンブル方式",
+      "schemePresetTitle": "プリセットアンサンブル",
+      "schemePresetBadge": "推奨",
+      "schemePresetDesc": "プロバイダー公式の調整済み編成:候補モデル 4 つと統合モデル 1 つ、すぐに使えます。",
+      "schemeCustomTitle": "カスタムアンサンブル",
+      "schemeCustomBadge": "上級",
+      "schemeCustomDesc": "役割を付けて独自の編成を構築。必要ならプロバイダーを混在できます。",
+      "presetNoteDeepseek": "推論の主力 — 複雑なタスクの基準ドラフト",
+      "presetNoteGlm": "長文と構造化出力 — DeepSeek 系との対照",
+      "presetNoteKimi": "コードとツール意図 — プログラミング要求をカバー",
+      "presetNoteQwen": "知識の幅と多言語対応",
+      "presetNoteGeneric": "候補ドラフト",
+      "aggregatorNote": "全ドラフトを融合して最終回答を生成。ツールを呼び出せる唯一のメンバー",
+      "aggregatorSectionLabel": "統合モデル",
+      "aggregatorSectionDesc": "最終回答を生成する統合モデルは 1 つだけです。編成内で最も強力なモデルを選んでください。",
+      "aggregatorInheritedNote": "統合モデル未指定 — 現在のチャットモデルがドラフトを融合します",
+      "proposerSectionLabel": "候補モデル",
+      "proposerSectionDesc": "候補は並行実行され、全体時間は最も遅いものに依存します。",
+      "proposerCount": "{count} / 上限 {max} · 推奨 {recommendedMin}–{recommendedMax}",
+      "importTierCandidates": "モデル階層からインポート",
+      "roleSelectAria": "{model} の役割",
+      "roleUnassigned": "役割なし",
+      "role_primary": "主力",
+      "role_contrast": "対照",
+      "role_fast_check": "高速チェック",
+      "role_critic": "批評",
+      "role_aggregator": "統合モデル",
+      "addCandidateRoleLabel": "候補の役割",
+      "capacityWarn": "1 ターンあたり {calls} 回のモデル呼び出し — コストは線形に増え、候補 4 つを超えると融合の効果は逓減します。",
+      "capacityFull": "候補の上限 {max} に達しました — これ以上追加しても融合は改善しません。先に 1 つ削除してください。",
+      "diversityHint": "複数の候補が同じモデルファミリーです — 別ベンダーのモデルを追加すると融合が改善されることが多いです。",
+      "effectiveFacts": "1 ターンあたり {calls} 回のモデル呼び出し · {quorum}/{proposers} 件の成功で融合開始 · 候補タイムアウト {proposerTimeout} 秒 · 統合タイムアウト {aggregatorTimeout} 秒 · 充足後 {grace} 秒の猶予",
+      "quorumFailureLabel": "成功した候補が {quorum} 件未満の場合"
     },
     "behavior": {
       "title": "セッションの動作",
@@ -382,27 +451,8 @@
       }
     },
     "ensemble": {
-      "title": "AI 集約ルーティング",
       "statusOn": "AI 集約ルーティングはオンです。複数のモデルが回答し、1つのモデルが最終応答を統合します。",
       "statusOff": "AI 集約ルーティングはオフです。",
-      "enabledLabel": "AI 集約ルーティングを使用",
-      "enabledDesc": "複数のモデルに同時に質問し、1つの最終応答に統合します。",
-      "selectionLabel": "モデル選択",
-      "selectionDesc": "アンサンブルが質問するモデルの選び方。",
-      "selectionStatic": "旧来の組み込みモデルセット",
-      "selectionDynamic": "動的(モデル階層に従う)",
-      "rawValueTooltip": "設定値: {value}",
-      "modelsLabel": "候補モデル",
-      "modelsDesc": "動的選択が質問できるモデル。",
-      "modelsStaticHint": "旧来の組み込み選択は内部モデルセットを使用します — 候補リストは「動的」でのみ有効です。",
-      "addModelPlaceholder": "例: provider/model-id",
-      "addModel": "追加",
-      "removeModelAria": "{model} を削除",
-      "openrouterKeyHint": "旧来の OpenRouter 選択には OpenRouter キー(または OPENROUTER_API_KEY)が必要です — ないと動作しません。",
-      "advanced": "アンサンブルの詳細オプション",
-      "minSuccessfulLabel": "最低成功回答数",
-      "minSuccessfulDesc": "結果を採用するために必要な、回答に成功するモデルの数。",
-      "allFailedLabel": "すべてのモデルが失敗した場合",
       "allFailedFallback": "単一モデルにフォールバック",
       "allFailedError": "停止してエラーを報告"
     },
@@ -559,7 +609,30 @@
       "uninstallPurgePrimary": "データを削除",
       "uninstallDone": "デスクトップのクリーンアップが完了しました。アプリを終了します。アプリ本体を削除する場合は、OS から OpenSquilla を削除してください。",
       "uninstallFailed": "クリーンアップに失敗しました：{detail}",
-      "uninstallCheckLog": "ゲートウェイのログを確認してください。"
+      "uninstallCheckLog": "ゲートウェイのログを確認してください。",
+      "migrationLabel": "以前のデータをインポート",
+      "migrationDesc": "このマシン上の古い OpenSquilla データディレクトリを探して、このランタイムに取り込みます。",
+      "migrationButton": "以前のデータをインポート",
+      "migrationNone": "以前のデータは見つかりませんでした。",
+      "migrationSummaryFailed": "以前のデータの確認に失敗しました：{detail}",
+      "migrationSummaryTitle": "以前のデータが見つかりました",
+      "migrationCountPlanned": "計画 {n} 件",
+      "migrationCountMigrated": "移行済み {n} 件",
+      "migrationCountSkipped": "スキップ {n} 件",
+      "migrationCountError": "エラー {n} 件",
+      "migrationCountNone": "インポートする項目はありません。",
+      "migrationPausedJobs": "スケジューラージョブ（一時停止で取り込み）：{n} 件",
+      "migrationDisk": "ディスク：必要 {required}、空き {free}",
+      "migrationOverwrite": "既存のデータを上書きする（タイムスタンプ付きバックアップを作成）",
+      "migrationImport": "インポート",
+      "migrationCancel": "キャンセル",
+      "migrationConfirmTitle": "以前のデータをインポートしますか？",
+      "migrationConfirmBody": "インポート中はローカルランタイムが停止し、完了後に再起動します。このページの接続は一時的に切断されます。",
+      "migrationConfirmPrimary": "インポート",
+      "migrationStarted": "インポートを開始しました。ローカルランタイムを再起動しています。このページはまもなく再接続します。",
+      "migrationDone": "以前のデータをインポートしました。ローカルランタイムを再起動しています。",
+      "migrationFailed": "インポートに失敗しました：{detail}",
+      "migrationPhase": "進行状況：{phase}"
     },
     "keyboard": {
       "title": "キーボード",
@@ -651,6 +724,35 @@
       "offSurfacesError": "off は元のプロバイダーエラーを表示します。",
       "audioEnvVar": "音声プロバイダーへのアクセスに読み取る環境変数。",
       "remoteEmbeddingKey": "リモート埋め込み API キーまたは環境変数参照。"
+    },
+    "memoryLearning": {
+      "groupTitle": "メモリと自己学習",
+      "dreamLabel": "メモリ整理(dream)",
+      "tokenBadge": "トークン消費",
+      "dreamDesc": "定期的にモデルを呼び出してセッションメモリを整理します(24 時間ごと)。モデルルーティングの自己学習はこの空き時間を訓練の契機として利用します。",
+      "selfLearningLabel": "モデルルーティング自己学習",
+      "selfLearningDesc": "あなたの修正からルーティングの傾向を学習します。すべて端末内で完結——特徴ベクトルのみを保存し、会話の原文は保存しません。",
+      "depDefault": "上のメモリ整理に依存します。これを有効にするとメモリ整理も有効になります。メモリ整理だけを無効にした場合、サンプル収集は続きますが自動訓練は停止します。",
+      "depLinked": "メモリ整理はこの項目と同時に有効化されました。個別に無効化できます——自己学習は収集を続け、自動訓練のみ停止します。",
+      "depPaused": "メモリ整理が無効です——サンプルは収集されていますが、自動訓練は行われません。再度有効にすると再開します。",
+      "restartRequired": "スケジュール変更を反映するにはゲートウェイの再起動が必要です。",
+      "statusModel": "ルーティングモデル",
+      "statusSamples": "修正サンプル",
+      "statusLastAction": "前回の動作",
+      "modelBaseline": "工場出荷ベースライン",
+      "modelLearned": "学習版 v{version}",
+      "samplesTotal": "累計 {total} 件収集",
+      "gatePausedDream": "訓練は一時停止中——メモリ整理の再有効化を待っています",
+      "gateReason": {
+        "ready": "準備完了——次の訓練ウィンドウで実行されます",
+        "disabled": "無効",
+        "no_data": "サンプルはまだありません",
+        "agent_active": "アイドル時間を待機中",
+        "cooldown": "最近訓練したためクールダウン中",
+        "insufficient_data": "未訓練——修正サンプルが不足しています",
+        "insufficient_class_diversity": "未訓練——修正サンプルのルーティング階層が偏っています"
+      },
+      "detachedNote": "ルーティングの基本重みがアップグレードされました。旧重みに基づく学習成果はアーカイブされました。修正サンプルは影響を受けず、新しい重みで自動的に再学習されます。操作は不要です。"
     }
   },
   "sessions": {
@@ -697,6 +799,8 @@
       "timeout": "タイムアウト",
       "interrupted": "中断",
       "cancelled": "キャンセル",
+      "outputInterrupted": "出力が中断されました",
+      "stoppedAfterSeconds": "{seconds}秒後に停止",
       "idle": "アイドル"
     },
     "relTime": {
@@ -779,6 +883,7 @@
       "abortFailed": "中止に失敗しました。"
     },
     "overview": {
+      "title": "概要",
       "subtitle": "ライブの状態、最近のセッション、イベントストリームを表示します。",
       "openChat": "チャットを開く",
       "totalTokens": "合計トークン数",
@@ -805,6 +910,7 @@
       "loadingHealth": "ヘルスレポートを読み込み中",
       "noFindings": "検出結果はありません。",
       "recoveryRestart": "リカバリには再起動が必要です",
+      "openSettings": "設定を開く",
       "findingFallback": "検出結果 {n}",
       "copyCommand": "コマンドをコピー",
       "step": "ステップ",
@@ -891,7 +997,15 @@
         "runLocalDoctorDetail": "ゲートウェイを再起動する前に、ローカルの設定とオンボーディングを確認します。",
         "startLocal": "ローカルゲートウェイを起動",
         "inspectLocal": "ローカルゲートウェイを確認"
-      }
+      },
+      "checkedAgo": "{time}に確認",
+      "rerunChecks": "再チェック",
+      "copyDiagnostics": "診断 JSON をコピー",
+      "copiedDiagnostics": "診断 JSON をコピーしました",
+      "diagnoseWithAgent": "エージェントで診断",
+      "diagnosePrompt": "以下の doctor レポートをもとに、この OpenSquilla 設定の問題を調査してください。根本原因と最小限の修正手順を提案し、破壊的なコマンドは実行しないでください。",
+      "environment": "環境",
+      "latency": "レイテンシ"
     }
   },
   "console": {
@@ -998,40 +1112,6 @@
       "hintRestarting": "ディスパッチエラーの後、アダプターを再起動しています。",
       "hintExhausted": "アダプターは再試行の上限に達しました。`{cmd}` を試してください。",
       "hintConfiguredInactive": "ディスク上に設定されていますが、このゲートウェイプロセスではアクティブではありません — ゲートウェイを再起動して読み込んでください。"
-    },
-    "approvals": {
-      "eyebrow": "操作 · 承認",
-      "title": "承認",
-      "subtitle": "ツール実行のゲートです — リスクの高い操作は、あなたが許可するまで保留します。",
-      "pending": "保留中",
-      "awaitingDecision": "判断待ち",
-      "allClear": "問題なし",
-      "strategy": "ストラテジー",
-      "strategyTitle": "承認の処理方法",
-      "strategyAriaLabel": "承認のストラテジー",
-      "modePromptLabel": "毎回確認",
-      "modePromptDesc": "リスクの高いツール実行ごとに承認プロンプトを開きます。",
-      "modeAutoApproveLabel": "自動承認",
-      "modeAutoApproveDesc": "すべてのツール実行を自動的に承認します。",
-      "modeAutoDenyLabel": "自動拒否",
-      "modeAutoDenyDesc": "すべてのツール実行を自動的に拒否します。",
-      "emptyTitle": "保留中の承認はありません。",
-      "emptyText": "エージェントがリスクの高いツール呼び出しに到達すると、あなたの承認を求めてここに表示されます。",
-      "pendingRequests": "保留中のリクエスト",
-      "agent": "エージェント",
-      "session": "セッション",
-      "command": "コマンド",
-      "details": "詳細",
-      "unknownTool": "不明",
-      "approveOnce": "1 回だけ承認",
-      "allowSameType": "同じ種類を許可",
-      "deny": "拒否",
-      "loadFailed": "承認の読み込みに失敗しました: {msg}",
-      "approved": "承認済み",
-      "denied": "拒否済み",
-      "toastFailed": "失敗しました: {msg}",
-      "toastStrategy": "承認のストラテジー: {mode}",
-      "toastStrategyFailed": "ストラテジーの保存に失敗しました: {msg}"
     }
   },
   "cronSkills": {
@@ -1379,6 +1459,8 @@
       "installVia": "{kind} 経由でインストール",
       "installing": "インストール中...",
       "homepage": "ホームページ",
+      "loadingContent": "SKILL.md を読み込み中...",
+      "emptyContent": "利用できる SKILL.md コンテンツはありません。",
       "removing": "削除中...",
       "remove": "削除"
     },
@@ -1561,7 +1643,8 @@
         "label": "一時的",
         "tooltip": "一時的なセッション — コストはまだ永続化されていません",
         "short": "一時的"
-      }
+      },
+      "cacheBlindHint": "キャッシュされたトークンを通常の入力料金で計算した推定値を含みます — 上限の目安としてご利用ください。"
     },
     "relTime": {
       "justNow": "たった今",
@@ -1576,26 +1659,27 @@
     "logs": {
       "eyebrow": "操作 · ログ",
       "title": "ログ",
-      "subtitle": "ライブのゲートウェイログストリームです — フィルター、追従、エクスポートができます。",
+      "subtitle": "ライブのゲートウェイログストリームです — フィルターと追従ができます。",
       "statusUnavailable": "ログの状態を利用できません",
       "statusUnavailableAria": "ログの状態を利用できません。ログの追従は引き続き動作します。",
       "statusUnavailableTitle": "logs.status は利用できません。ログの追従は引き続き動作します。",
       "fileLogOn": "ファイルログ オン",
       "fileLogOff": "ファイルログ オフ",
-      "fileLogAriaOn": "ファイルログ オン。パス: {path}。log_file_enabled、log_level、rotation、OPENSQUILLA_LOG_DIR で設定できます。",
-      "fileLogAriaOff": "ファイルログ オフ。パス: {path}。log_file_enabled、log_level、rotation、OPENSQUILLA_LOG_DIR で設定できます。",
       "fileLogTitle": "ゲートウェイのファイルログは log_file_enabled、log_level、rotation 設定、OPENSQUILLA_LOG_DIR で設定できます。パス: {path}。",
-      "rawOn": "生のターン呼び出し オン",
-      "rawOff": "生のターン呼び出し オフ",
-      "rawAriaOn": "生のターン呼び出し オン。ソース: {source}。ディレクトリ: {path}。OPENSQUILLA_TURN_CALL_LOG=1 で有効化します。",
-      "rawAriaOff": "生のターン呼び出し オフ。ソース: {source}。ディレクトリ: {path}。OPENSQUILLA_TURN_CALL_LOG=1 で有効化します。",
-      "rawTitle": "生のターン呼び出しのキャプチャは OPENSQUILLA_TURN_CALL_LOG=1 または opensquilla diagnostics on --raw で有効化されます。ソース: {source}。ディレクトリ: {path}。",
-      "diagnosticsCopyRaw": "今後のターンで診断の raw モードが有効です。raw ソース: {source}。",
-      "diagnosticsCopyStandard": "標準の診断と raw キャプチャは別々のレベルです。生のターン呼び出しのキャプチャには opensquilla diagnostics on --raw を使用してください。",
-      "diagnosticsRaw": "診断 raw",
-      "diagnosticsStandard": "診断 標準",
-      "diagnosticsOff": "診断 オフ",
-      "exportTitle": "フィルター済みのログ行をダウンロード",
+      "fileLogOffTitle": "ログはディスクに書き込まれず、診断バンドルに履歴が含まれなくなります。設定で log_file_enabled を有効にしてください。パス: {path}。",
+      "rawOn": "生キャプチャ オン",
+      "rawOff": "生キャプチャ オフ",
+      "rawRecordingPill": "生キャプチャを記録中",
+      "rawTitle": "生キャプチャは、会話内容を含むモデルへのリクエストとレスポンスの全文を記録します。OPENSQUILLA_TURN_CALL_LOG=1 または opensquilla diagnostics on --raw で有効化し、opensquilla diagnostics off で無効化します。ソース: {source}。ディレクトリ: {path}。",
+      "bundleButton": "診断バンドル",
+      "bundleButtonTitle": "機密情報を除去した診断バンドルをダウンロード",
+      "bundleTitle": "診断バンドルをダウンロード",
+      "bundleBody": "ゲートウェイのログ、エラー記録、機密情報を除去した設定を 1 つの zip にまとめ、バグ報告に添付できます。シークレットと API キーは削除されます。会話内容は、下でオプトインしない限り含まれません。",
+      "bundleIncludeContent": "会話内容を含める（プロンプトと応答）",
+      "bundleConfirm": "ダウンロード",
+      "bundleCancel": "キャンセル",
+      "bundleFailed": "診断のダウンロードに失敗しました",
+      "bundleReady": "診断バンドルをダウンロードしました",
       "inView": "表示中",
       "ofLoaded": "/ 読み込み済み {total} 件",
       "errors": "エラー",
@@ -1611,7 +1695,8 @@
       "autoFollow": "自動追従",
       "loading": "ログを読み込み中…",
       "noMatch": "現在のフィルターに一致する行はありません。",
-      "lineDetail": "ログ行の詳細"
+      "lineDetail": "ログ行の詳細",
+      "ofLoadedFoot": "表示中 {visible} 件 · バッファ {total} 件"
     }
   },
   "chat": {
@@ -1628,7 +1713,7 @@
     "removeAttachment": "添付を削除",
     "remove": "削除",
     "attachFiles": "ファイルを添付",
-    "attachFilesTitle": "ファイルを添付: PNG、JPEG、GIF、WEBP、PDF、TXT、MD、HTML、CSV、JSON",
+    "attachFilesTitle": "ファイルを添付: 任意のファイル形式（画像、PDF、Office、テキストは直接読み取り、その他のファイルはエージェントのワークスペースへ）",
     "dropOverlayTitle": "離して添付",
     "dropOverlayHint": "ファイルは入力欄に追加されます",
     "composerSettings": "入力欄の設定",
@@ -1918,6 +2003,12 @@
       "stillWaiting": "まだモデルを待機中",
       "stillWorking": "まだ処理中 — 最後の信号は {seconds} 秒前"
     },
+    "stall": {
+      "title": "応答が停滞している可能性があります",
+      "detail": "{seconds} 秒間、新しい出力がありません — モデルが停止している可能性があります。",
+      "keepWaiting": "このまま待つ",
+      "interrupt": "ターンを中断"
+    },
     "msgMeta": {
       "ensembleModels": "アンサンブル · {count} モデル",
       "tokens": "トークン",
@@ -1932,6 +2023,14 @@
     },
     "modelRouting": {
       "updateFailed": "モデルルーティングを切り替えられませんでした。元に戻しました。ゲートウェイ接続を確認して再試行してください。"
+    },
+    "routeFeedback": {
+      "up": "このターンのモデル選択は適切だった",
+      "down": "このターンのモデル選択は不適切だった",
+      "upEnsemble": "この統合回答に満足",
+      "downEnsemble": "この統合回答に不満",
+      "expired": "このメッセージのルーティング記録は期限切れです",
+      "failed": "評価を記録できませんでした"
     }
   },
   "shared": {
@@ -1951,7 +2050,9 @@
       "groupMessages": "メッセージ",
       "actionNewChat": "新規チャット",
       "actionOpenSettings": "設定を開く",
-      "actionToggleTheme": "テーマを切り替え"
+      "actionToggleTheme": "テーマを切り替え",
+      "actionBgmEnable": "BGMを有効にする",
+      "actionBgmDisable": "BGMを無効にする"
     },
     "toast": {
       "dismiss": "通知を閉じる"
@@ -2009,6 +2110,16 @@
       "hint": "ゲートウェイはまだ実行する準備ができていません。",
       "finishSetup": "セットアップを完了",
       "viewReadiness": "準備状況を表示"
+    },
+    "legacyDataBanner": {
+      "ariaLabel": "以前の OpenSquilla データが見つかりました",
+      "title": "以前の OpenSquilla データが見つかりました",
+      "dismiss": "閉じる",
+      "dismissNotice": "以前のデータの通知を閉じる",
+      "hintWeb": "ゲートウェイを停止してから、次のコマンドを実行してインポートしてください：",
+      "hintDesktop": "設定 → ランタイム の「以前のデータをインポート」から取り込めます。",
+      "openSettings": "ランタイム設定を開く",
+      "copyCommand": "移行コマンドをコピー"
     },
     "shortcuts": {
       "commandPalette": {

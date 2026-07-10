@@ -115,6 +115,10 @@ export interface ChatRunTask {
   status?: string
   task_id?: string
   taskId?: string
+  started_at?: number | string
+  startedAt?: number | string
+  finished_at?: number | string
+  finishedAt?: number | string
   terminal_reason?: string
   terminalReason?: string
 }
@@ -187,6 +191,8 @@ export interface ChatUsagePayload {
   modelUsageBreakdown?: ChatEnsembleUsageRow[]
   ensemble_trace?: ChatEnsembleTrace
   ensembleTrace?: ChatEnsembleTrace
+  /** V017 routing-decision id — presence is what makes a turn rateable. */
+  decision_id?: string
   __savings_ui_suppressed?: boolean
   [key: string]: unknown
 }
@@ -292,6 +298,7 @@ export interface ChatMessage {
   output_tokens?: number
   restoredFromHistory?: boolean
   statusHistory?: import('./parts').StatusPart[]
+  stopNotice?: boolean
   /** Typed terminal error code (e.g. 'sandbox_threshold_exceeded') carried on
    *  role:'error' messages so the renderer can offer a recovery action. */
   errorCode?: string
@@ -310,6 +317,8 @@ export interface ChatMessageMeta {
   savedLabel: string
   turnSavedPct?: number
   ensemble?: ChatEnsembleMeta
+  /** Routing-decision id from turn usage; thumbs render only when present. */
+  decisionId?: string
 }
 
 export interface ChatRenderedMessage {
@@ -351,6 +360,7 @@ export interface ChatRenderedMessage {
   parts?: import('./parts').ChatPart[]
   sources?: import('./parts').SourcePart[]
   statusHistory?: import('./parts').StatusPart[]
+  stopNotice?: boolean
   /** Typed terminal error code, propagated from the raw message so the error
    *  card can render a recovery action (e.g. resume after a sandbox pause). */
   errorCode?: string

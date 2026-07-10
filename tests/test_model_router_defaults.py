@@ -62,7 +62,7 @@ def test_squilla_router_defaults_match_runtime_router_config() -> None:
     assert cfg.tiers["c1"]["thinking_level"] == "high"
     assert cfg.tiers["c2"]["model"] == "z-ai/glm-5.2"
     assert cfg.tiers["c2"]["thinking_level"] == "high"
-    assert cfg.tiers["c3"]["model"] == "z-ai/glm-5.2"
+    assert cfg.tiers["c3"]["model"] == "anthropic/claude-opus-4.8"
     assert cfg.tiers["c3"]["thinking_level"] == "high"
     assert cfg.tiers["image_model"]["model"] == "moonshotai/kimi-k2.6"
     assert cfg.tiers["image_model"]["supports_image"] is True
@@ -169,6 +169,61 @@ def test_direct_legacy_openrouter_router_defaults_are_migrated(provider_id: str)
         assert cfg.squilla_router.tiers[tier]["model"] == expected[tier]["model"]
 
 
+TOKENRHYTHM_EXPECTED_TIER_MODELS = {
+    "c0": "deepseek-v4-flash",
+    "c1": "deepseek-v4-pro",
+    "c2": "kimi-k2.7-code",
+    "c3": "glm-5.2",
+}
+
+
+def test_unset_tier_profile_seeds_tokenrhythm_curated_inline_tiers() -> None:
+    # tokenrhythm has a curated ladder but must never persist as a
+    # tier_profile id (downgrade contract): boot seeds it as inline tiers.
+    gateway_config_cls = _gateway_config_cls()
+
+    cfg = gateway_config_cls(llm={"provider": "tokenrhythm", "model": "deepseek-v4-pro"})
+
+    assert cfg.squilla_router.tier_profile is None
+    for tier, model in TOKENRHYTHM_EXPECTED_TIER_MODELS.items():
+        assert cfg.squilla_router.tiers[tier]["provider"] == "tokenrhythm"
+        assert cfg.squilla_router.tiers[tier]["model"] == model
+    assert cfg.squilla_router.tiers["image_model"]["model"] == "kimi-k2.6"
+
+
+def test_tokenrhythm_direct_legacy_openrouter_router_defaults_are_migrated() -> None:
+    from opensquilla.gateway.config import _router_tier_profile_defaults
+
+    gateway_config_cls = _gateway_config_cls()
+
+    cfg = gateway_config_cls(
+        llm={"provider": "tokenrhythm", "model": "deepseek-v4-pro"},
+        squilla_router={"enabled": True, "tiers": _router_tier_profile_defaults("openrouter")},
+    )
+
+    assert cfg.squilla_router.tier_profile is None
+    for tier, model in TOKENRHYTHM_EXPECTED_TIER_MODELS.items():
+        assert cfg.squilla_router.tiers[tier]["provider"] == "tokenrhythm"
+        assert cfg.squilla_router.tiers[tier]["model"] == model
+
+
+def test_tokenrhythm_boot_seed_respects_custom_inline_tiers() -> None:
+    gateway_config_cls = _gateway_config_cls()
+
+    custom = {
+        tier: {"provider": "tokenrhythm", "model": "glm-5", "description": "custom"}
+        for tier in ("c0", "c1", "c2", "c3")
+    }
+    cfg = gateway_config_cls(
+        llm={"provider": "tokenrhythm", "model": "deepseek-v4-pro"},
+        squilla_router={"enabled": True, "tiers": custom},
+    )
+
+    assert cfg.squilla_router.tier_profile is None
+    for tier in ("c0", "c1", "c2", "c3"):
+        assert cfg.squilla_router.tiers[tier]["model"] == "glm-5"
+
+
 def test_deepseek_direct_legacy_openrouter_model_default_is_normalized() -> None:
     gateway_config_cls = _gateway_config_cls()
 
@@ -217,19 +272,20 @@ def test_openai_profile_uses_streaming_compatible_models() -> None:
     assert cfg.tiers["c3"]["model"] == "gpt-5.5"
     assert cfg.tiers["c3"]["thinking_level"] == "high"
     assert all(
-        cfg.tiers[tier]["model"] != "gpt-5.5-pro" for tier in ("c0", "c1", "c2", "c3")
+        cfg.tiers[tier]["model"] not in {"gpt-5", "gpt-5-mini", "gpt-5.5-pro"}
+        for tier in ("c0", "c1", "c2", "c3")
     )
 
 
-def test_zhipu_profile_uses_glm_5_1_for_strong_tiers() -> None:
+def test_zhipu_profile_uses_current_glm_5_ladder() -> None:
     squilla_router_config_cls = _squilla_router_config_cls()
 
     cfg = squilla_router_config_cls(tier_profile="zhipu")
 
-    assert cfg.tiers["c0"]["model"] == "glm-4.7-flashx"
+    assert cfg.tiers["c0"]["model"] == "glm-5-turbo"
     assert cfg.tiers["c1"]["model"] == "glm-5"
     assert cfg.tiers["c2"]["model"] == "glm-5.1"
-    assert cfg.tiers["c3"]["model"] == "glm-5.1"
+    assert cfg.tiers["c3"]["model"] == "glm-5.2"
     assert cfg.tiers["c3"]["thinking_level"] == "high"
 
 
@@ -238,10 +294,10 @@ def test_moonshot_profile_uses_kimi_for_strong_tiers() -> None:
 
     cfg = squilla_router_config_cls(tier_profile="moonshot")
 
-    assert cfg.tiers["c0"]["model"] == "kimi-k2.5"
-    assert cfg.tiers["c1"]["model"] == "kimi-k2.5"
+    assert cfg.tiers["c0"]["model"] == "kimi-k2.6"
+    assert cfg.tiers["c1"]["model"] == "kimi-k2.6"
     assert cfg.tiers["c2"]["model"] == "kimi-k2.6"
-    assert cfg.tiers["c3"]["model"] == "kimi-k2.6"
+    assert cfg.tiers["c3"]["model"] == "kimi-k2.7-code"
     assert all(
         cfg.tiers[tier]["supports_image"] is True for tier in ("c0", "c1", "c2", "c3")
     )
@@ -252,13 +308,13 @@ def test_volcengine_profile_uses_seed_2_capability_ladder() -> None:
 
     cfg = squilla_router_config_cls(tier_profile="volcengine")
 
-    assert cfg.tiers["c0"]["model"] == "doubao-seed-2-0-mini-260215"
+    assert cfg.tiers["c0"]["model"] == "doubao-seed-2-0-lite-260215"
     assert cfg.tiers["c0"]["thinking_level"] == "off"
     assert cfg.tiers["c1"]["model"] == "doubao-seed-2-0-lite-260215"
     assert cfg.tiers["c1"]["thinking_level"] == "low"
     assert cfg.tiers["c2"]["model"] == "doubao-seed-2-0-pro-260215"
     assert cfg.tiers["c2"]["thinking_level"] == "medium"
-    assert cfg.tiers["c3"]["model"] == "doubao-seed-2-0-code-preview-260215"
+    assert cfg.tiers["c3"]["model"] == "doubao-seed-2-0-pro-260215"
     assert cfg.tiers["c3"]["thinking_level"] == "high"
 
 
@@ -286,7 +342,7 @@ def test_profile_tier_override_merges_keys_inside_tier() -> None:
     )
 
     assert cfg.tiers["c2"]["provider"] == "gemini"
-    assert cfg.tiers["c2"]["model"] == "gemini-2.5-pro"
+    assert cfg.tiers["c2"]["model"] == "gemini-3.1-pro-preview"
     assert cfg.tiers["c2"]["thinking_level"] == "high"
 
 
@@ -328,8 +384,8 @@ def test_example_toml_enables_runtime_router_defaults() -> None:
     data = tomllib.loads(example.read_text(encoding="utf-8"))
     squilla_router = data["squilla_router"]
 
-    assert data["llm"]["provider"] == "openrouter"
-    assert data["llm"]["model"] == "deepseek/deepseek-v4-pro"
+    assert data["llm"]["provider"] == "tokenrhythm"
+    assert data["llm"]["model"] == "deepseek-v4-pro"
     assert squilla_router["enabled"] is True
     assert squilla_router["auto_thinking"] is True
     assert squilla_router["rollout_phase"] == "full"
@@ -346,15 +402,16 @@ def test_example_toml_enables_runtime_router_defaults() -> None:
     assert squilla_router["require_router_runtime"] is True
 
     tiers = squilla_router["tiers"]
-    assert tiers["c0"]["model"] == "deepseek/deepseek-v4-flash"
-    assert tiers["c0"]["thinking_level"] == "high"
-    assert tiers["c1"]["model"] == "deepseek/deepseek-v4-pro"
-    assert tiers["c1"]["thinking_level"] == "high"
-    assert tiers["c2"]["model"] == "z-ai/glm-5.2"
-    assert tiers["c2"]["thinking_level"] == "high"
-    assert tiers["c3"]["model"] == "z-ai/glm-5.2"
-    assert tiers["c3"]["thinking_level"] == "high"
-    assert tiers["image_model"]["model"] == "moonshotai/kimi-k2.6"
+    # TokenRhythm rejects thinking-toggle request fields, so the example
+    # ladder deliberately carries no thinking_level.
+    for name in ("c0", "c1", "c2", "c3", "image_model"):
+        assert tiers[name]["provider"] == "tokenrhythm"
+        assert "thinking_level" not in tiers[name]
+    assert tiers["c0"]["model"] == "deepseek-v4-flash"
+    assert tiers["c1"]["model"] == "deepseek-v4-pro"
+    assert tiers["c2"]["model"] == "kimi-k2.7-code"
+    assert tiers["c3"]["model"] == "glm-5.2"
+    assert tiers["image_model"]["model"] == "kimi-k2.6"
     assert tiers["image_model"]["supports_image"] is True
     assert tiers["image_model"]["image_only"] is True
 
@@ -376,9 +433,9 @@ def test_runtime_router_config_does_not_ship_unused_cost_fields() -> None:
     assert data["tier_registry"]["S"] == ["deepseek/deepseek-v4-flash"]
     assert data["tier_registry"]["M"] == ["deepseek/deepseek-v4-pro"]
     assert data["tier_registry"]["L"] == ["z-ai/glm-5.2"]
-    assert data["tier_registry"]["XL"] == ["z-ai/glm-5.2"]
+    assert data["tier_registry"]["XL"] == ["anthropic/claude-opus-4.8"]
     assert data["tier_explanations"]["L"]["model"] == "z-ai/glm-5.2"
-    assert data["tier_explanations"]["XL"]["model"] == "z-ai/glm-5.2"
+    assert data["tier_explanations"]["XL"]["model"] == "anthropic/claude-opus-4.8"
     assert "cost_ratios:" not in text
     assert "cost_matrix:" not in text
     assert "under_routing_multiplier" not in text

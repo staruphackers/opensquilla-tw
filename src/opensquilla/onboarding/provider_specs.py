@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from opensquilla.gateway.config import ROUTER_TIER_PROFILE_IDS, _router_tier_profile_defaults
 from opensquilla.provider.preset_registry import ProviderPreset, get_preset
 from opensquilla.provider.registry import ProviderSpec, list_provider_specs
 
@@ -62,10 +61,16 @@ _PROVIDER_LABELS: dict[str, str] = {
     "dashscope": "Aliyun DashScope",
     "bailian_coding": "Bailian Coding",
     "moonshot": "Moonshot AI",
+    "kimi_coding_openai": "Kimi Coding OpenAI-compatible",
+    "kimi_coding_anthropic": "Kimi Coding Anthropic-compatible",
     "minimax": "MiniMax",
     "minimax_openai": "MiniMax OpenAI-compatible",
+    "minimax_coding_openai": "MiniMax Coding OpenAI-compatible",
+    "minimax_coding_anthropic": "MiniMax Coding Anthropic-compatible",
     "minimax_cn": "MiniMax Mainland",
     "minimax_global": "MiniMax Global",
+    "mimo_openai": "MiMo OpenAI-compatible",
+    "mimo_anthropic": "MiMo Anthropic-compatible",
     "mistral": "Mistral",
     "groq": "Groq",
     "zhipu": "Zhipu (Z.AI)",
@@ -74,17 +79,50 @@ _PROVIDER_LABELS: dict[str, str] = {
     "aihubmix": "AIHubMix",
     "volcengine": "Volcengine Ark",
     "byteplus": "BytePlus Ark",
+    "tencent_tokenhub": "Tencent TokenHub",
+    "tencent_tokenhub_anthropic": "Tencent TokenHub (Anthropic)",
+    "tencent_tokenhub_intl": "Tencent TokenHub International",
+    "tencent_token_plan": "Tencent Token Plan",
+    "tencent_token_plan_anthropic": "Tencent Token Plan (Anthropic)",
+    "tokenrhythm": "TokenRhythm",
     "vllm": "vLLM (self-hosted)",
     "custom": "Custom OpenAI-compatible endpoint",
     "litellm_proxy": "LiteLLM Proxy",
     "lm_studio": "LM Studio (local)",
     "ovms": "OpenVINO Model Server",
-    "volcengine_coding_plan": "Volcengine Coding Plan",
-    "byteplus_coding_plan": "BytePlus Coding Plan",
+    "volcengine_coding_plan": "Volcengine Coding Plan (OpenAI Responses)",
+    "volcengine_coding_plan_anthropic": "Volcengine Coding Plan (Anthropic)",
+    "byteplus_coding_plan": "BytePlus Coding Plan (OpenAI Responses)",
+    "byteplus_coding_plan_anthropic": "BytePlus Coding Plan (Anthropic)",
     "openai_codex": "OpenAI Codex (OAuth)",
     "github_copilot": "GitHub Copilot (OAuth)",
     "openai_responses": "OpenAI (Responses API)",
 }
+
+# Catalog display order: TokenRhythm is the recommended first pick, then
+# OpenRouter; everything else sorts by label. This one map orders the Web UI
+# dropdown, CLI ``providers list``, and the interactive onboarding picker —
+# every surface renders the server order.
+_CATALOG_RANK = {
+    "tokenrhythm": 0,
+    "openrouter": 1,
+}
+
+_INLINE_ROUTER_SUPPORTED_PROVIDER_IDS: frozenset[str] = frozenset(
+    {
+        "qianfan",
+        "volcengine_coding_plan",
+        "kimi_coding_openai",
+        "kimi_coding_anthropic",
+        "minimax",
+        "minimax_cn",
+        "minimax_global",
+        "minimax_coding_openai",
+        "minimax_coding_anthropic",
+        "mimo_openai",
+        "mimo_anthropic",
+    }
+)
 
 _ONBOARDING_VERIFIED_PROVIDER_IDS = frozenset(
     {
@@ -101,6 +139,7 @@ _ONBOARDING_VERIFIED_PROVIDER_IDS = frozenset(
         "qianfan",
         "volcengine",
         "byteplus",
+        "tokenrhythm",
     }
 )
 
@@ -118,9 +157,26 @@ def _deployment_for(spec: ProviderSpec) -> Deployment:
     return "cloud"
 
 
+def _has_curated_router_ladder(provider_id: str) -> bool:
+    """True when the provider ships a curated tier ladder (packaged or inline).
+
+    Synthesized presets carry no per-tier model ladder, so they do not count:
+    their providers still need an operator-supplied model id.
+    """
+    preset = get_preset(provider_id)
+    return preset is not None and not preset.synthesized
+
+
+def _is_router_supported_provider(provider_id: str) -> bool:
+    return (
+        _has_curated_router_ladder(provider_id)
+        or provider_id in _INLINE_ROUTER_SUPPORTED_PROVIDER_IDS
+    )
+
+
 def _what_you_need(spec: ProviderSpec) -> tuple[str, ...]:
     needs: list[str] = []
-    if spec.provider_id not in ROUTER_TIER_PROFILE_IDS:
+    if not _is_router_supported_provider(spec.provider_id):
         needs.append(
             "A local model name available from your model server."
             if spec.provider_id in _LOCAL_PROVIDER_IDS
@@ -142,10 +198,17 @@ def _what_you_need(spec: ProviderSpec) -> tuple[str, ...]:
 
 
 def _default_direct_model(provider_id: str) -> str:
-    if provider_id in ROUTER_TIER_PROFILE_IDS:
-        tiers = _router_tier_profile_defaults(provider_id)
+    preset = get_preset(provider_id)
+    if preset is None or preset.synthesized:
+        if provider_id in _INLINE_ROUTER_SUPPORTED_PROVIDER_IDS and preset is not None:
+            return preset.default_model
+        return ""
+    if _has_curated_router_ladder(provider_id):
+        tiers = preset.tier_defaults()
         tier = tiers.get("c1") or tiers.get("c0") or {}
         return str(tier.get("model") or "")
+    if provider_id in _INLINE_ROUTER_SUPPORTED_PROVIDER_IDS:
+        return preset.default_model
     return ""
 
 
@@ -161,7 +224,7 @@ def _model_description(spec: ProviderSpec, *, router_supported: bool) -> str:
 
 
 def _fields_for(spec: ProviderSpec) -> tuple[ProviderSetupField, ...]:
-    router_supported = spec.provider_id in ROUTER_TIER_PROFILE_IDS
+    router_supported = _is_router_supported_provider(spec.provider_id)
     return (
         ProviderSetupField(
             name="model",
@@ -178,7 +241,13 @@ def _fields_for(spec: ProviderSpec) -> tuple[ProviderSetupField, ...]:
             required=spec.requires_api_key(),
             default="",
             description=(
-                f"Stored under env key {spec.env_key}." if spec.env_key else ""
+                (
+                    "Saved as plaintext api_key in the config file and used "
+                    f"ahead of {spec.env_key}. Leave blank to read "
+                    f"{spec.env_key} from the environment instead."
+                )
+                if spec.env_key
+                else "Saved as plaintext api_key in the config file."
             ),
             secret=True,
         ),
@@ -243,7 +312,7 @@ def _to_setup_spec(spec: ProviderSpec) -> ProviderSetupSpec:
         default_base_url=spec.default_base_url,
         requires_api_key=spec.requires_api_key(),
         requires_base_url=spec.requires_base_url(),
-        router_supported=spec.provider_id in ROUTER_TIER_PROFILE_IDS,
+        router_supported=_is_router_supported_provider(spec.provider_id),
         deployment=_deployment_for(spec),
         blocking=True,
         # Runtime-supported providers can be probed live (one-token chat via
@@ -262,7 +331,7 @@ def list_provider_setup_specs() -> list[ProviderSetupSpec]:
     return sorted(
         specs,
         key=lambda s: (
-            0 if s.provider_id == "openrouter" else 1,
+            _CATALOG_RANK.get(s.provider_id, len(_CATALOG_RANK)),
             s.label.lower(),
             s.provider_id,
         ),

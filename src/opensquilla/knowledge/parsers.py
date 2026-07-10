@@ -80,8 +80,8 @@ def _parse_pdf(path: Path) -> ParsedDocument:
 
         pages: list[str] = []
         with pdfplumber.open(path) as pdf:
-            for page_number, page in enumerate(pdf.pages, start=1):
-                page_text = page.extract_text() or ""
+            for page_number, pdf_page in enumerate(pdf.pages, start=1):
+                page_text = pdf_page.extract_text() or ""
                 if page_text.strip():
                     pages.append(f"\n\n[page {page_number}]\n{page_text.strip()}")
             text = "\n".join(pages).strip()
@@ -100,8 +100,8 @@ def _parse_pdf(path: Path) -> ParsedDocument:
 
             reader = PdfReader(str(path))
             pages = []
-            for page_number, page in enumerate(reader.pages, start=1):
-                page_text = page.extract_text() or ""
+            for page_number, reader_page in enumerate(reader.pages, start=1):
+                page_text = reader_page.extract_text() or ""
                 if page_text.strip():
                     pages.append(f"\n\n[page {page_number}]\n{page_text.strip()}")
             text = "\n".join(pages).strip()

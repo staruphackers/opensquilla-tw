@@ -164,10 +164,38 @@ def test_experimental_provider_configurable_with_required_fields():
     assert res.config.llm.provider == "azure"
 
 
-def test_coding_plan_provider_still_rejected():
+def test_byteplus_coding_plan_provider_configurable_with_protocol_endpoint():
     cfg = GatewayConfig()
-    with pytest.raises(ValueError, match="not runtime-supported"):
-        upsert_llm_provider(cfg, provider_id="volcengine_coding_plan", model="x", api_key="k")
+    res = upsert_llm_provider(
+        cfg,
+        provider_id="byteplus_coding_plan",
+        model="seed-2-0-lite-260228",
+        api_key="k",
+    )
+
+    assert res.changed is True
+    assert res.config.llm.provider == "byteplus_coding_plan"
+    assert res.config.llm.model == "seed-2-0-lite-260228"
+    assert res.config.llm.api_key == "k"
+    assert res.config.llm.base_url == "https://ark.ap-southeast.bytepluses.com/api/coding/v3"
+
+
+def test_volcengine_coding_plan_provider_configurable():
+    cfg = GatewayConfig()
+    res = upsert_llm_provider(
+        cfg,
+        provider_id="volcengine_coding_plan",
+        model="doubao-seed-2.0-pro",
+        api_key="k",
+    )
+
+    assert res.changed is True
+    assert res.config.llm.provider == "volcengine_coding_plan"
+    assert res.config.llm.model == "doubao-seed-2.0-pro"
+    assert res.config.llm.api_key == "k"
+    assert res.config.llm.base_url == "https://ark.cn-beijing.volces.com/api/coding/v3"
+    assert res.config.squilla_router.tiers["c0"]["model"] == "doubao-seed-2.0-lite"
+    assert res.config.squilla_router.tiers["c3"]["model"] == "doubao-seed-2.0-code"
 
 
 def test_ollama_does_not_require_api_key():
@@ -199,6 +227,38 @@ def test_provider_save_outside_packaged_presets_seeds_inline_router_tiers():
     persisted = res.config.to_toml_dict()["squilla_router"]
     assert "tier_profile" not in persisted
     assert persisted["tiers"]["c0"]["model"] == "test-model"
+
+
+def test_tokenrhythm_provider_save_seeds_curated_inline_ladder():
+    """A tokenrhythm key alone yields the curated c0-c3 ladder as inline tiers.
+
+    The tokenrhythm preset is curated but non-persistable (its id must never
+    appear as a tier_profile — downgrade contract), and the model field may be
+    omitted because the preset supplies the default direct model.
+    """
+    cfg = GatewayConfig()
+    res = upsert_llm_provider(
+        cfg,
+        provider_id="tokenrhythm",
+        api_key="sk-test",
+    )
+    assert res.config.llm.provider == "tokenrhythm"
+    assert res.config.llm.model == "deepseek-v4-pro"
+    assert res.config.squilla_router.enabled is True
+    assert res.config.squilla_router.tier_profile is None
+    expected = {
+        "c0": "deepseek-v4-flash",
+        "c1": "deepseek-v4-pro",
+        "c2": "kimi-k2.7-code",
+        "c3": "glm-5.2",
+        "image_model": "kimi-k2.6",
+    }
+    for tier, model in expected.items():
+        assert res.config.squilla_router.tiers[tier]["provider"] == "tokenrhythm"
+        assert res.config.squilla_router.tiers[tier]["model"] == model
+    persisted = res.config.to_toml_dict()["squilla_router"]
+    assert "tier_profile" not in persisted
+    assert persisted["tiers"]["c3"]["model"] == "glm-5.2"
 
 
 def test_upsert_channel_appends_new():
@@ -355,6 +415,7 @@ def test_upsert_llm_ensemble_accepts_structured_candidates_partial_merge():
             "model": "qwen/qwen3.7-max",
             "source": "custom",
             "enabled": True,
+            "role": "",
         }
     ]
     assert res.public_payload["candidates"] == [
@@ -363,6 +424,7 @@ def test_upsert_llm_ensemble_accepts_structured_candidates_partial_merge():
             "model": "qwen/qwen3.7-max",
             "source": "custom",
             "enabled": True,
+            "role": "",
         }
     ]
 
@@ -519,6 +581,29 @@ def test_upsert_llm_provider_preset_id_synthesized_writes_custom_shape():
     persisted = res.config.to_toml_dict()["squilla_router"]
     assert "tier_profile" not in persisted
     assert persisted["tiers"]["c0"]["model"] == "llama-3.3-70b"
+
+
+def test_upsert_llm_provider_curated_synthesized_preset_preserves_ladder():
+    cfg = GatewayConfig(llm={"provider": "openrouter", "model": "deepseek/x"})
+
+    res = upsert_llm_provider(
+        cfg,
+        provider_id="qianfan",
+        api_key_env="QIANFAN_API_KEY",
+        preset_id="qianfan",
+    )
+
+    router = res.config.squilla_router
+    assert router.enabled is True
+    assert router.tier_profile is None
+    assert res.config.llm.model == "ernie-4.5-turbo-128k"
+    assert router.tiers["c0"]["model"] == "ernie-4.5-turbo-128k"
+    assert router.tiers["c3"]["model"] == "ernie-4.5-turbo-128k"
+    assert router.tiers["image_model"]["model"] == "ernie-4.5-turbo-vl-32k"
+    assert router.tiers["image_model"]["image_only"] is True
+    persisted = res.config.to_toml_dict()["squilla_router"]
+    assert "tier_profile" not in persisted
+    assert persisted["tiers"]["c0"]["model"] == "ernie-4.5-turbo-128k"
 
 
 def test_upsert_llm_provider_preset_id_must_match_provider():
@@ -1087,3 +1172,195 @@ def test_upsert_image_generation_rejects_bad_fallback_reference():
             cfg, provider_id="openrouter", primary=_IMG_PRIMARY, api_key="sk-img",
             fallbacks=["no-slash-ref"],
         )
+
+
+def test_validate_channel_entry_error_never_echoes_secret_values():
+    secret = "tg-super-secret-token-value-1234567890"
+
+    with pytest.raises(ValueError, match="webhook_url") as exc_info:
+        validate_channel_entry(
+            {
+                "type": "telegram",
+                "name": "t",
+                "transport_name": "webhook",
+                "token": secret,
+            }
+        )
+
+    message = str(exc_info.value)
+    assert secret not in message
+    assert secret[-12:] not in message
+    assert "input_value" not in message
+
+
+def test_upsert_channel_error_never_echoes_secret_values():
+    cfg = GatewayConfig()
+    secret = "tg-super-secret-token-value-1234567890"
+
+    with pytest.raises(ValueError, match="webhook_url") as exc_info:
+        upsert_channel(
+            cfg,
+            entry_payload={
+                "type": "telegram",
+                "name": "t",
+                "transport_name": "webhook",
+                "token": secret,
+            },
+        )
+
+    message = str(exc_info.value)
+    assert secret not in message
+    assert secret[-12:] not in message
+
+
+def test_upsert_channel_rejects_blank_required_secret_for_new_entry():
+    cfg = GatewayConfig()
+    with pytest.raises(ValueError, match="token"):
+        upsert_channel(cfg, entry_payload={"type": "telegram", "name": "t", "token": ""})
+
+
+def test_upsert_channel_rejects_whitespace_only_required_secret_for_new_entry():
+    cfg = GatewayConfig()
+    with pytest.raises(ValueError, match="token"):
+        upsert_channel(cfg, entry_payload={"type": "telegram", "name": "t", "token": "   "})
+
+
+def test_validate_channel_entry_rejects_blank_required_secret():
+    with pytest.raises(ValueError, match="token"):
+        validate_channel_entry({"type": "telegram", "name": "t", "token": ""})
+
+
+def test_validate_channel_entry_blank_secret_skips_inapplicable_show_when_fields():
+    # slack socket mode: signing_secret is required only for webhook mode,
+    # so the blank-secret gate must not fire for it here.
+    out = validate_channel_entry(
+        {
+            "type": "slack",
+            "name": "w",
+            "token": "xoxb-test",
+            "connection_mode": "socket",
+            "app_token": "xapp-test",
+        }
+    )
+    assert out["connection_mode"] == "socket"
+
+
+def test_upsert_channel_whitespace_only_secret_keeps_existing_value():
+    cfg = GatewayConfig()
+    first = upsert_channel(
+        cfg,
+        entry_payload={"type": "telegram", "name": "t", "token": "tg-original"},
+    )
+    second = upsert_channel(
+        first.config,
+        entry_payload={"type": "telegram", "name": "t", "token": "   "},
+    )
+    raw = [e.model_dump(mode="python") for e in second.config.channels.channels]
+    entry = next(e for e in raw if e["name"] == "t")
+    assert entry["token"] == "tg-original"
+
+
+def test_router_reconcile_survives_out_of_band_llm_model_change():
+    """R6: a machine-seeded ladder must stay recognizable after llm.model
+    changed out-of-band (config.set RPC / TOML hand-edit): a re-save naming
+    the new model explicitly must reseed the tiers instead of leaving every
+    routed turn pinned to the old model."""
+    cfg = GatewayConfig()
+    seeded = upsert_llm_provider(
+        cfg,
+        provider_id="anthropic",
+        model="model-alpha",
+        api_key="sk-old",
+    ).config
+    for tier in ("c0", "c1", "c2", "c3"):
+        assert seeded.squilla_router.tiers[tier]["model"] == "model-alpha"
+
+    # Out-of-band hot-apply: llm.model changes without a provider save.
+    seeded.llm.model = "model-beta"
+
+    rotated = upsert_llm_provider(
+        seeded,
+        provider_id="anthropic",
+        model="model-beta",
+        api_key="sk-new",
+    ).config
+    assert rotated.llm.model == "model-beta"
+    for tier in ("c0", "c1", "c2", "c3"):
+        assert rotated.squilla_router.tiers[tier]["model"] == "model-beta"
+
+
+def test_router_reconcile_still_preserves_hand_authored_ladder():
+    """The R6 widening must not regress the hand-customized guard: a ladder
+    that matches no machine seeding survives a same-provider re-save."""
+    cfg = GatewayConfig()
+    seeded = upsert_llm_provider(
+        cfg,
+        provider_id="anthropic",
+        model="model-alpha",
+        api_key="sk-old",
+    ).config
+    router_payload = seeded.squilla_router.model_dump(mode="python")
+    router_payload["tiers"]["c0"]["model"] = "model-cheap"
+    router_payload["tiers"]["c3"]["model"] = "model-big"
+    from opensquilla.gateway.config import SquillaRouterConfig
+
+    seeded.squilla_router = SquillaRouterConfig(**router_payload)
+
+    rotated = upsert_llm_provider(
+        seeded,
+        provider_id="anthropic",
+        model="model-alpha",
+        api_key="sk-new",
+    ).config
+    assert rotated.squilla_router.tiers["c0"]["model"] == "model-cheap"
+    assert rotated.squilla_router.tiers["c3"]["model"] == "model-big"
+
+
+def test_upsert_router_non_registry_provider_gets_actionable_error():
+    """X1: a hand-edited non-registry llm.provider used to die on the cryptic
+    "router tier 'c0' must be an object"; the error must now name the
+    provider and point at the two runnable ways out."""
+    cfg = GatewayConfig()
+    cfg.llm.provider = "acme-llm"
+    cfg.llm.model = "acme-model"
+
+    with pytest.raises(ValueError) as exc_info:
+        upsert_router(cfg, mode="recommended", default_tier="c1")
+
+    message = str(exc_info.value)
+    assert "acme-llm" in message
+    assert "opensquilla onboard configure provider --provider" in message
+    assert "--router disabled" in message
+    assert "must be an object" not in message
+
+
+def test_upsert_router_non_registry_provider_disabled_still_works():
+    cfg = GatewayConfig()
+    cfg.llm.provider = "acme-llm"
+    cfg.llm.model = "acme-model"
+    res = upsert_router(cfg, mode="disabled")
+    assert res.config.squilla_router.enabled is False
+
+
+def test_image_generation_explicit_enabled_decision_is_force_persisted(tmp_path):
+    """R1: an explicit enabled=false on a fresh config equals the model
+    default, so the sparse diff alone would drop it — and a later key
+    rotation would re-enable image generation via configure-implies-enable.
+    The mutation must force the decision into the file."""
+    import tomllib as _tomllib
+
+    from opensquilla.onboarding.config_store import load_config, persist_config
+
+    target = tmp_path / "config.toml"
+    cfg = load_config(target)
+    res = upsert_image_generation_provider(
+        cfg,
+        provider_id="openai",
+        primary="openai/gpt-image-1",
+        api_key="sk-image-1",
+        enabled=False,
+    )
+    persist_config(res.config, path=target)
+
+    data = _tomllib.loads(target.read_text())
+    assert data["image_generation"]["enabled"] is False

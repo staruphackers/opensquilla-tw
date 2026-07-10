@@ -362,7 +362,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onActivated, onMounted, reactive, ref } from 'vue'
 import ErrorState from '@/components/ErrorState.vue'
 import Icon from '@/components/Icon.vue'
 import LoadingSpinner from '@/components/LoadingSpinner.vue'
@@ -749,7 +749,17 @@ function messageFromError(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
+let activatedOnce = false
+
 onMounted(() => {
+  void refreshAll()
+})
+
+onActivated(() => {
+  if (!activatedOnce) {
+    activatedOnce = true
+    return
+  }
   void refreshAll()
 })
 </script>
@@ -1159,7 +1169,7 @@ onMounted(() => {
 }
 
 .rag-dot--ok {
-  background: var(--ok);
+  background: var(--ok-fill);
 }
 
 @media (max-width: 1180px) {

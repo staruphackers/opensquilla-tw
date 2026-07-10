@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp, nextTick } from 'vue'
 import { useSetupCatalog } from './useSetupCatalog'
+import { PROVIDER_CREDENTIAL_REVEAL_TIMEOUT_MS } from './useSetupProviderForm'
 
 const rpcCall = vi.hoisted(() => vi.fn())
 const waitForConnection = vi.hoisted(() => vi.fn(async () => {}))
@@ -50,6 +51,7 @@ function mockConfigSequence(configs: Array<Record<string, unknown>>) {
 }
 
 afterEach(() => {
+  vi.useRealTimers()
   vi.restoreAllMocks()
   rpcCall.mockReset()
   waitForConnection.mockClear()
@@ -412,10 +414,171 @@ describe('useSetupCatalog provider credential reveal', () => {
 
     const { api, app } = await mountCatalog()
 
+    vi.useFakeTimers()
     await api.revealProviderCredential()
 
     expect(rpcCall).toHaveBeenCalledWith('onboarding.provider.credential.reveal', { providerId: 'deepseek' })
-    expect((api.providerPanel.value.credentialPanel as { revealed: string }).revealed).toBe('sk-real-value')
+    const credentialPanel = api.providerPanel.value.credentialPanel as { masked: string; revealed: string }
+    expect(credentialPanel.revealed).toBe('sk-real-value')
+
+    vi.advanceTimersByTime(PROVIDER_CREDENTIAL_REVEAL_TIMEOUT_MS)
+    await nextTick()
+
+    const expiredCredentialPanel = api.providerPanel.value.credentialPanel as { masked: string; revealed: string }
+    expect(expiredCredentialPanel.masked).toBe('sk-••••1234')
+    expect(expiredCredentialPanel.revealed).toBe('')
+    app.unmount()
+  })
+})
+
+describe('useSetupCatalog context-window override', () => {
+  const CATALOG = {
+    providers: [
+      {
+        providerId: 'ollama',
+        label: 'Ollama',
+        runtimeSupported: true,
+        requiresApiKey: false,
+        deployment: 'local',
+        fields: [{ name: 'model', label: 'Model' }],
+      },
+      {
+        providerId: 'vllm',
+        label: 'vLLM',
+        runtimeSupported: true,
+        requiresApiKey: false,
+        deployment: 'local',
+        fields: [{ name: 'model', label: 'Model' }],
+      },
+    ],
+  }
+
+  function mockCatalog(config: Record<string, unknown>) {
+    rpcCall.mockImplementation(async (method: string) => {
+      if (method === 'onboarding.catalog') return CATALOG
+      if (method === 'onboarding.status') {
+        return { hasConfig: true, llmConfigured: true, llmSource: 'explicit' }
+      }
+      if (method === 'channels.status') return { channels: [] }
+      if (method === 'config.get') return config
+      if (method === 'onboarding.provider.configure') return {}
+      if (method === 'config.patch') return { restartRequired: false }
+      throw new Error(`Unexpected RPC method: ${method}`)
+    })
+  }
+
+  it('reseeds the context-window field from the saved override when the provider switches', async () => {
+    mockCatalog({
+      llm: { provider: 'ollama', model: 'qwen3:8b' },
+      models: {
+        ollama: { 'qwen3:8b': { context_window: 16384 } },
+        vllm: { 'meta/llama-4': { context_window: 65536 } },
+      },
+    })
+    const { api, app } = await mountCatalog()
+
+    expect(api.providerPanel.value.contextWindowTokens).toBe('16384')
+
+    // Switch provider (select + change, mirroring the panel's @change handler).
+    api.selectProvider('vllm')
+    api.onProviderChange()
+
+    // resetForProvider clears the model field, so the new provider has no saved
+    // override for an empty model → field reseeds to blank, not the stale 16384.
+    expect(api.providerPanel.value.contextWindowTokens).toBe('')
+    app.unmount()
+  })
+
+  it('reseeds from the per-model override when the model field changes', async () => {
+    mockCatalog({
+      llm: { provider: 'ollama', model: 'qwen3:8b' },
+      models: {
+        ollama: {
+          'qwen3:8b': { context_window: 16384 },
+          'qwen3:32b': { context_window: 40960 },
+        },
+      },
+    })
+    const { api, app } = await mountCatalog()
+
+    expect(api.providerPanel.value.contextWindowTokens).toBe('16384')
+
+    api.updateProviderField('model', 'qwen3:32b')
+    expect(api.providerPanel.value.contextWindowTokens).toBe('40960')
+
+    api.updateProviderField('model', 'qwen3:unlisted')
+    expect(api.providerPanel.value.contextWindowTokens).toBe('')
+    app.unmount()
+  })
+
+  it('saves the context-window patch under the currently-selected provider and form model', async () => {
+    mockCatalog({ llm: { provider: 'ollama', model: 'qwen3:8b' } })
+    const { api, app } = await mountCatalog()
+
+    api.updateContextWindow('32768')
+    await api.saveProvider()
+
+    expect(rpcCall).toHaveBeenCalledWith('config.patch', {
+      patch: { models: { ollama: { 'qwen3:8b': { context_window: 32768 } } } },
+    })
+    app.unmount()
+  })
+
+  it('skips the context-window patch when the form model is empty', async () => {
+    mockCatalog({ llm: { provider: 'ollama', model: '' } })
+    const { api, app } = await mountCatalog()
+
+    api.updateContextWindow('32768')
+    await api.saveProvider()
+
+    const deepPatchCalls = rpcCall.mock.calls.filter(
+      (call: unknown[]) => call[0] === 'config.patch' && 'patch' in ((call[1] as Record<string, unknown>) || {}),
+    )
+    expect(deepPatchCalls).toHaveLength(0)
+    app.unmount()
+  })
+})
+
+describe('useSetupCatalog providerIsLocal', () => {
+  function mockLocalCatalog(providerId: string, deployment: string) {
+    rpcCall.mockImplementation(async (method: string) => {
+      if (method === 'onboarding.catalog') {
+        return {
+          providers: [
+            {
+              providerId,
+              label: providerId,
+              runtimeSupported: true,
+              requiresApiKey: false,
+              deployment,
+              fields: [{ name: 'model', label: 'Model' }],
+            },
+          ],
+        }
+      }
+      if (method === 'onboarding.status') return { hasConfig: true, llmConfigured: true, llmSource: 'explicit' }
+      if (method === 'channels.status') return { channels: [] }
+      if (method === 'config.get') return { llm: { provider: providerId, model: 'm' } }
+      throw new Error(`Unexpected RPC method: ${method}`)
+    })
+  }
+
+  it('treats a custom-deployment provider as local (mirrors backend LOCAL_RUNTIME_PROVIDERS)', async () => {
+    // 'custom' is budgeted at the 8192 local default backend-side, so the panel's
+    // small-window warning must fire — a non-'local' deployment tag must not
+    // suppress the known-local-id match.
+    mockLocalCatalog('custom', 'custom')
+    const { api, app } = await mountCatalog()
+
+    expect(api.providerPanel.value.providerIsLocal).toBe(true)
+    app.unmount()
+  })
+
+  it('treats a hosted provider as non-local', async () => {
+    mockLocalCatalog('openai', 'hosted')
+    const { api, app } = await mountCatalog()
+
+    expect(api.providerPanel.value.providerIsLocal).toBe(false)
     app.unmount()
   })
 })

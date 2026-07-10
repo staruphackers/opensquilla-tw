@@ -6,12 +6,16 @@ import { useSetupBehaviorForm } from '@/composables/setup/useSetupBehaviorForm'
 import { hasEffectiveProvider, useSetupProviderForm } from '@/composables/setup/useSetupProviderForm'
 import { useSetupRouterForm, type SetupTierRow } from '@/composables/setup/useSetupRouterForm'
 import {
+  STATIC_B5_PROFILES,
+  staticB5ModeForProvider,
   useSetupEnsembleForm,
   type EnsembleCandidateConfig,
+  type EnsembleCandidateRole,
   type EnsembleCandidateView,
   type EnsembleCredentialStatus,
 } from '@/composables/setup/useSetupEnsembleForm'
 import { useSetupModelStrategyForm } from '@/composables/setup/useSetupModelStrategyForm'
+import { invalidateReadiness } from '@/composables/setup/useReadinessSummary'
 import { useSettingsPromotedForm, DEFAULT_LLM_TIMEOUT_SECONDS } from '@/composables/setup/useSettingsPromotedForm'
 import { useSettingsSection } from '@/composables/setup/useSettingsSection'
 import { SETTINGS_SECTIONS, type SettingsSectionId } from '@/composables/setup/settingsSections'
@@ -66,6 +70,7 @@ interface ProviderSpec {
   requiresApiKey?: boolean
   defaultBaseUrl?: string
   defaultModel?: string
+  deployment?: string
   presets?: ProviderPresetSpec[]
 }
 
@@ -125,6 +130,8 @@ interface OnboardingStatus {
   llmConfigured?: boolean
   llmSource?: string
   sectionDetails?: Record<string, SectionDetail>
+  // Read-only legacy-home detection (absent on older gateways).
+  legacyData?: { path?: string; kind?: string; command?: string } | null
   envRecoveryCommands?: Array<{ section?: string; command?: string; label?: string }>
   configPath?: string
   channelCount?: number
@@ -175,6 +182,9 @@ interface ConfigData {
     [key: string]: unknown
   }
   llm_request_timeout_seconds?: number
+  // Per-provider/per-model overrides (deep-merge subtree; model ids carry
+  // dots/colons so dot-path patches cannot address it).
+  models?: Record<string, Record<string, { context_window?: number }>>
   squilla_router?: {
     enabled?: boolean
     default_tier?: string
@@ -304,6 +314,10 @@ async function loadData() {
     channelsForm.initFromCatalog(catalog.value.channels || [])
     promotedForm.initFromConfig(config.value)
     disableNetworkObservability.value = currentDisableNetworkObservability.value
+    // Every save funnels through this reload, so this is the one spot that can
+    // tell snapshot holders outside the dialog (the sidebar banner) that the
+    // hot-applied config may have changed readiness.
+    invalidateReadiness()
   } catch (err) {
     pushToast(t('setup.toast.loadFailed', { error: err instanceof Error ? err.message : String(err) }), { tone: 'danger' })
   }
@@ -331,8 +345,17 @@ function startChannelPolling() {
 
 const currentProvider = computed(() => (config.value.llm || {}).provider || '')
 const currentProviderConfig = computed(() => config.value.llm || {})
+const currentModel = computed(() => (config.value.llm || {}).model || '')
 const hasSavedProvider = computed(() => hasEffectiveProvider(currentProviderConfig.value, status.value))
-const modelStrategyForm = useSetupModelStrategyForm(routerForm, ensembleForm, currentProvider)
+// Lazy: routerPanel is declared below; this computed is only evaluated from
+// user-triggered strategy switches, long after setup completes.
+const modelStrategyTierCandidates = computed(() => ensembleTierCandidates.value)
+const modelStrategyForm = useSetupModelStrategyForm(
+  routerForm,
+  ensembleForm,
+  currentProvider,
+  modelStrategyTierCandidates,
+)
 
 const runtimeProviders = computed(() => (catalog.value.providers || []).filter(p => p.runtimeSupported))
 const catalogChannels = computed(() => catalog.value.channels || [])
@@ -345,6 +368,28 @@ const providerSpec = computed(() => runtimeProviders.value.find(p => p.providerI
 const providerFields = computed(() => providerSpec.value?.fields || [])
 const providerCoreFields = computed(() => providerFields.value.filter(f => !isProviderCredentialField(f) && !isProviderAdvancedField(f)))
 const providerAdvancedFields = computed(() => providerFields.value.filter(f => !isProviderCredentialField(f) && isProviderAdvancedField(f)))
+
+// Providers that run on the user's own hardware, where the runtime frequently
+// defaults to a much smaller context window than the model supports. Mirrors the
+// backend LOCAL_RUNTIME_PROVIDERS in provider/registry.py — keep in sync.
+const LOCAL_PROVIDER_IDS = new Set(['ollama', 'vllm', 'lm_studio', 'ovms', 'local', 'custom'])
+const providerIsLocal = computed(() => {
+  const spec = providerSpec.value
+  if (!spec) return false
+  // Union, not either/or: the backend budgets 'custom' (deployment='custom') at
+  // the local 8192 default too, so a deployment tag that isn't 'local' must not
+  // suppress the known-local-id match.
+  const deployment = String(spec.deployment || '').trim().toLowerCase()
+  return deployment === 'local' || LOCAL_PROVIDER_IDS.has(spec.providerId)
+})
+
+// The global llm.context_window_tokens layer sits between the per-model override
+// and catalog auto-detection in the backend's precedence. Surface it so the
+// panel readout reflects it when no per-model override is set.
+const contextWindowGlobal = computed<number | null>(() => {
+  const raw = Number((config.value.llm || {}).context_window_tokens)
+  return Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : null
+})
 
 const providerSummary = computed(() => {
   if (!hasSavedProvider.value) return t('setup.summary.notConfigured')
@@ -382,6 +427,7 @@ const providerNeeds = computed(() => {
 
 const providerAdvancedOpen = computed(() => {
   if (promotedForm.llmTimeoutSeconds.value !== DEFAULT_LLM_TIMEOUT_SECONDS) return true
+  if (promotedForm.contextWindowTokens.value.trim() !== '') return true
   return providerAdvancedFields.value.some(f => {
     if (f.required) return true
     const val = providerForm.fieldValue(f, config.value.llm || {}).trim()
@@ -531,6 +577,9 @@ const providerPanel = providerForm.createPanel({
   providerEnvKey,
   providerEnvCommand,
   llmTimeoutSeconds: promotedForm.llmTimeoutSeconds,
+  contextWindowTokens: promotedForm.contextWindowTokens,
+  contextWindowGlobal,
+  providerIsLocal,
 })
 
 const behaviorPanel = behaviorForm.createPanel({
@@ -544,19 +593,29 @@ const privacyPanel = computed(() => ({
 }))
 
 const isOpenrouterProvider = computed(() => currentProvider.value.toLowerCase() === 'openrouter')
+const normalizedProvider = computed(() => currentProvider.value.toLowerCase())
 function reconcileEnsembleProviderCompatibility() {
-  const provider = currentProvider.value.toLowerCase()
-  if (provider && provider !== 'openrouter' && ensembleForm.selectionMode.value === 'static_openrouter_b5') {
-    ensembleForm.setSelectionMode('router_dynamic')
+  const provider = normalizedProvider.value
+  const staticProfile = STATIC_B5_PROFILES[ensembleForm.selectionMode.value]
+  if (provider && staticProfile && provider !== staticProfile.provider) {
+    // The stored static profile belongs to another provider: move to this
+    // provider's own static profile when it has one, else to an explicit
+    // custom lineup (seeded from the router tiers so it can actually run).
+    const ownPreset = staticB5ModeForProvider(provider)
+    if (ownPreset) {
+      ensembleForm.setSelectionMode(ownPreset)
+    } else {
+      ensembleForm.activateForProvider(provider, ensembleTierCandidates.value)
+    }
   }
 }
 
 // openrouter-mix is only valid for the openrouter provider. When the selection
 // moves off openrouter while a stored mix mode is loaded, coerce the mode back
 // to recommended so the save payload stays valid for the new provider. watch
-// only fires on transitions, so an initial non-openrouter load never trips this.
-watch(isOpenrouterProvider, (isOpenrouter) => {
-  if (!isOpenrouter && routerForm.mode.value === 'openrouter-mix') {
+// only fires on transitions, so an initial load never trips this.
+watch(normalizedProvider, (provider) => {
+  if (provider !== 'openrouter' && routerForm.mode.value === 'openrouter-mix') {
     routerForm.setRouterMode('recommended')
   }
   reconcileEnsembleProviderCompatibility()
@@ -578,6 +637,7 @@ const routerPanel = routerForm.createPanel({
 const ensembleTierCandidates = computed(() => routerPanel.value.tierRows.map(row => ({
   provider: row.provider,
   model: row.model,
+  tier: row.name,
 })))
 
 // ---------------------------------------------------------------------------
@@ -634,6 +694,7 @@ const ensembleStatusText = computed(() => (
 const ensemblePanel = ensembleForm.createPanel({
   statusText: ensembleStatusText,
   activeProvider: currentProvider,
+  activeModel: currentModel,
   tierCandidates: ensembleTierCandidates,
   credentialStatus: computed(() => status.value.ensembleCredentialStatus || []),
 })
@@ -892,7 +953,11 @@ function sectionForDetailName(name: string): SettingsSectionId | null {
 // Dirty state
 // ---------------------------------------------------------------------------
 
-const providerDirty = computed(() => providerForm.isDirty.value || promotedForm.timeoutDirty.value)
+const providerDirty = computed(() => (
+  providerForm.isDirty.value
+  || promotedForm.timeoutDirty.value
+  || promotedForm.contextWindowDirty.value
+))
 const behaviorDirty = computed(() => behaviorForm.isDirty.value)
 const privacySectionDirty = computed(() => privacyDirty.value)
 const modelStrategyDirty = computed(() => modelStrategyForm.isDirty.value)
@@ -978,10 +1043,26 @@ function setDisableNetworkObservability(enabled: boolean) {
 
 function onProviderChange() {
   providerForm.resetForProvider(providerSpec.value)
+  // The context-window override is per provider+model, so a provider switch must
+  // reseed the field (value + baseline) from the newly-selected provider's saved
+  // override — otherwise it keeps showing/saving the previous provider's value.
+  promotedForm.reseedContextWindow(config.value, providerForm.selectedProvider.value, currentFormModelValue())
+}
+
+// The model id currently entered in the provider form (form value → saved
+// config → spec default), trimmed. Drives the per-model context-window override.
+function currentFormModelValue(): string {
+  const modelField = providerFields.value.find(f => f.name === 'model') || { name: 'model', label: 'model' }
+  return String(providerForm.fieldValue(modelField, config.value.llm || {}) || '').trim()
 }
 
 function updateProviderField(name: string, value: unknown) {
   providerForm.updateField(name, value)
+  // Editing the model field switches which per-model override applies, so reseed
+  // the context-window field from the saved override for the new model id.
+  if (name === 'model') {
+    promotedForm.reseedContextWindow(config.value, providerForm.selectedProvider.value, String(value ?? '').trim())
+  }
 }
 
 async function revealProviderCredential() {
@@ -1008,6 +1089,10 @@ function probeProviderConnection() {
 
 function updateLlmTimeout(value: number) {
   promotedForm.setLlmTimeoutSeconds(value)
+}
+
+function updateContextWindow(value: string) {
+  promotedForm.setContextWindowTokens(value)
 }
 
 function envRecoveryCommand(section: string): string {
@@ -1072,20 +1157,32 @@ function removeEnsembleModelOption(value: string) {
   ensembleForm.removeModelOption(value)
 }
 
-function addEnsembleCandidate(provider: string, model: string) {
-  ensembleForm.addCandidate(provider, model)
+function addEnsembleCandidate(provider: string, model: string, role: EnsembleCandidateRole = '') {
+  ensembleForm.addCandidate(provider, model, role)
 }
 
 function removeEnsembleCandidate(candidate: EnsembleCandidateView) {
   ensembleForm.removeCandidate(candidate)
 }
 
+function setEnsembleCandidateRole(candidate: EnsembleCandidateView, role: EnsembleCandidateRole) {
+  ensembleForm.setCandidateRole(candidate, role)
+}
+
+function importEnsembleTierCandidates() {
+  ensembleForm.importTierCandidates(ensembleTierCandidates.value)
+}
+
+function migrateEnsembleLegacy() {
+  ensembleForm.migrateLegacyToCustom(ensembleTierCandidates.value)
+}
+
 function resetEnsembleCandidates() {
   ensembleForm.resetModelOptions()
 }
 
-function setOpenRouterCustomEnsemble(value: boolean) {
-  ensembleForm.setOpenRouterCustomEnsemble(value)
+function setEnsembleScheme(scheme: 'preset' | 'custom') {
+  ensembleForm.setScheme(scheme, staticB5ModeForProvider(currentProvider.value))
 }
 
 function setEnsembleMinSuccessful(value: number) {
@@ -1254,14 +1351,34 @@ async function safePatchConfig(patches: Record<string, unknown>): Promise<boolea
   return res?.restartRequired === true
 }
 
+// Deep-merge form of config.patch: `patch` is a nested object merged into the
+// config tree (null deletes a key). Required for the models.<provider>.<model>
+// subtree, whose model-id keys contain dots/colons that dot-path patches would
+// misparse as path separators.
+async function deepPatchConfig(patch: Record<string, unknown>): Promise<boolean> {
+  if (!Object.keys(patch).length) return false
+  const res = await rpc.call<{ restartRequired?: boolean }>('config.patch', { patch })
+  return res?.restartRequired === true
+}
+
 async function saveProvider() {
   if (!providerForm.selectedProvider.value) {
     pushToast(t('setup.toast.chooseProvider'), { tone: 'danger' })
     return
   }
   try {
-    await rpc.call('onboarding.provider.configure', providerForm.payload())
+    const payload = providerForm.payload()
+    await rpc.call('onboarding.provider.configure', payload)
     const restart = await patchConfig(promotedForm.providerPatches())
+    // The per-model context-window override rides the deep-merge patch form. Key
+    // it on the CURRENT form model field (not payload.model, which is empty when
+    // the user didn't retype the model, nor the pre-save config model) and skip
+    // the patch entirely when no model is selected.
+    const contextModel = currentFormModelValue()
+    if (contextModel) {
+      const contextPatch = promotedForm.contextWindowPatch(providerForm.selectedProvider.value, contextModel)
+      if (contextPatch) await deepPatchConfig(contextPatch)
+    }
     await loadData()
     if (providerEnvMissing.value) {
       pushToast(t('setup.toast.envNotVisibleGateway', { envKey: providerEnvKey.value }), { tone: 'danger' })
@@ -1610,13 +1727,17 @@ async function copyConfigPath() {
     removeEnsembleModelOption,
     addEnsembleCandidate,
     removeEnsembleCandidate,
+    setEnsembleCandidateRole,
+    importEnsembleTierCandidates,
+    migrateEnsembleLegacy,
     resetEnsembleCandidates,
-    setOpenRouterCustomEnsemble,
+    setEnsembleScheme,
     setEnsembleMinSuccessful,
     setEnsembleAllFailedPolicy,
     selectChannelType,
     updateProviderField,
     updateLlmTimeout,
+    updateContextWindow,
     probeProviderConnection,
     revealProviderCredential,
     updateTierField,

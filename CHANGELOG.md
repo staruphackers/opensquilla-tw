@@ -6,11 +6,246 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.5.0rc3] - 2026-07-10
+
 ### Added
+
+- Legacy home migration: `opensquilla migrate opensquilla` imports an
+  existing OpenSquilla home — a CLI `~/.opensquilla`, a retired Windows
+  portable data directory (enumerated with a chooser across
+  `%LOCALAPPDATA%\OpenSquilla\portable\*`), or an explicit `--source` path
+  (Docker volumes, relocated or restored homes) — into the current install.
+  Dry-run by default with a pinned machine-readable report
+  (`docs/self-migration-report-contract.md`); apply stages a whole-home
+  copy with WAL-safe database handling and commits transactionally, so an
+  interrupted import never leaves a partial target. Imported configs drop
+  stale absolute path pins, inline provider keys relocate to `.env`, and
+  imported scheduler jobs arrive paused. Entry points: the desktop
+  onboarding offers detected legacy data as a first step (with provider
+  prefill), Settings → Runtime gains an "Import legacy data" rescue action,
+  the Web UI setup flow shows a read-only legacy-data advisory
+  (`onboarding.status` gains the additive `legacyData` block), gateway boot
+  warns once when a fresh home coexists with legacy data, and doctor emits
+  a `migration.legacy_home_detected` finding with copyable fix commands.
+- Golden legacy-config fixtures: every released line's default config dump
+  (0.1 through 0.5, portable and desktop shapes) is pinned as a fixture and
+  must load on current code, so old-config upgrades are tested mechanically.
+- The Web UI gains an opt-in background-music player. Enabling it (Settings →
+  Appearance, or the command palette action) reveals a topbar control that
+  loops tracks from a user-supplied library: `public/music/playlist.local.json`
+  lists bundled filenames or HTTPS URLs, and a session-only "Choose local
+  file…" picker plays ad-hoc audio. Track choice, volume, and play state
+  persist per browser; the feature is off by default and no audio files ship
+  with the repository (see `opensquilla-webui/public/music/README.md`).
+- Attachment resource ceilings: the in-memory staged-upload store now has an
+  aggregate RAM cap (`attachments.upload_store_max_total_bytes`, default
+  300 MiB) — when reached, new uploads are rejected with the additive HTTP
+  507 `UPLOAD_STORE_FULL` (retryable; staged entries expire within the TTL)
+  instead of evicting staged uploads — and attachment copies materialized
+  into agent workspaces are bounded by a disk budget
+  (`attachments.workspace_attachment_disk_budget_bytes`, default 1 GiB) that
+  degrades new materializations to an unavailable marker without evicting
+  existing files.
+- Provider connection tests now report latency: `onboarding.provider.probe`
+  returns an additive `latencyMs` field (0 on pre-network failures), the CLI
+  `models probe --json` rows carry `latency_ms`, and the Web UI setup panel
+  renders a verdict line — connected state with round-trip latency, live
+  model count, and sample model ids; failure pills include the latency so a
+  fast 401 rejection reads differently from a slow timeout.
+- `[models.<provider_id>."<model_id>"].context_window` now governs context
+  budgeting as documented: the catalog resolver consults the per-model
+  override first (new `override` source), the turn budget ladder, compaction
+  window, usage pressure (`windowSource: "model_override"`), and router
+  capability facts all honor it, and the per-model value beats the global
+  `llm.context_window_tokens`. The Web UI setup panel gains a context-window
+  override field with an auto-detected/override/effective readout and a
+  small-window warning for local runtimes.
+- Doctor now lints API-key shape: a key that looks like a URL or an
+  environment-variable name yields a `provider.active.api_key_shape` warning
+  (shape only — key material never leaves the gateway) with recovery steps.
+  `providers.status` rows carry the additive `apiKeyShape` field.
+- The console Overview can copy the full doctor report as sanitized JSON
+  (home paths normalized) and hand it to a new agent chat ("Diagnose with
+  agent", hidden when the provider itself blocks readiness); findings for
+  provider/channel/router surfaces deep-link into the matching settings
+  section, and `/settings/provider#provider-<id>` preselects that provider.
+- Passive provider latency stats: the agent loop records time-to-first-token
+  and call duration per provider call into an in-memory rolling window;
+  `providers.status` rows expose an additive `latency` snapshot
+  (`p50TtftMs`/`p95TtftMs`/`samples`, gated below minimum sample counts) and
+  the Overview shows a latency readout for the active provider.
+- The chat view warns when a streaming turn produces no content events for
+  90 seconds (server heartbeats alone no longer look like progress): a
+  dismissible notice offers keep-waiting or interrupt, and stays quiet while
+  a tool is executing or an approval is pending.
+
+- Added Tencent TokenHub providers for the Hunyuan hy3 family:
+  `tencent_tokenhub` (OpenAI-compatible mainland endpoint,
+  `TENCENT_TOKENHUB_API_KEY`), `tencent_tokenhub_anthropic` (the same
+  deployment's Anthropic Messages protocol with `x-api-key` auth), and
+  `tencent_tokenhub_intl` (the international deployment with its own
+  `TENCENT_TOKENHUB_INTL_API_KEY`). hy3/hy3-preview thinking maps onto the
+  documented `reasoning_effort` `low`/`high` values plus the thinking enable
+  object, and assistant `reasoning_content` is replayed across turns per the
+  hy3 interleaved-thinking contract. The Token Plan subscription is covered
+  too: `tencent_token_plan` (Chat Completions at
+  `api.lkeap.cloud.tencent.com/plan/v3`) and `tencent_token_plan_anthropic`
+  (Anthropic Messages at `/plan/anthropic`, bearer auth), both reading the
+  dedicated `TENCENT_TOKEN_PLAN_API_KEY` (`sk-tp-…`) plan credential.
+- Attachments now accept **any file type** on every surface (Web UI, desktop,
+  CLI `/file`, channels, RPC). Rendered families (images, PDF, text, Office,
+  email) keep their extraction and anti-forgery behavior; everything else is
+  admitted as an *opaque* attachment staged into the agent workspace — the
+  bytes are never parsed, decompressed, or inlined into a provider prompt, and
+  the model receives an escaped metadata envelope plus the workspace path.
+  New config: `attachments.accept_opaque` (default `true`; `false` restores
+  the legacy fail-closed admission gate) and `attachments.opaque_max_bytes`
+  (default 30 MiB).
+- Text attachments above the 2 MB inline threshold now stage through the
+  upload endpoint up to 30 MiB when the whole payload is proven UTF-8, so
+  large LaTeX sources and logs no longer dead-end at "file too large".
+- Channel file downloads (Telegram, Discord, Feishu, Matrix) now use staged
+  per-category ceilings, so archives, voice notes, and videos up to 30 MiB
+  ingest instead of being silently skipped at a flat 5 MiB unknown-type cap.
+
+- Added Alibaba Cloud IQS (`iqs`) as a runtime-supported web search provider:
+  unified-search endpoint with freshness, site include/exclude filters, inline
+  main-text content, and rerank scores, configured via `IQS_SEARCH_API_KEY`.
+- Added a runtime development branch sync: request-proof budgeting with
+  deterministic compaction, DashScope provider profile with prompt-cache
+  markers and thinking-mode plumbing, an optional LLM trace recorder,
+  tool-result store compression, sandbox-descriptor integration for
+  filesystem tools, and a family of default-off, env-lever-controlled
+  runtime recovery modules.
+- Prebuilt multi-arch (`linux/amd64` + `linux/arm64`) container images are
+  published to GHCR (`ghcr.io/opensquilla/opensquilla`) on release tags,
+  with a manual dispatch mode that validates the build without publishing.
+- `docs/docker.md`: a container deployment guide for home servers and NAS
+  (Debian 12 walkthrough, prebuilt images, LAN exposure with token auth,
+  bind-mount ownership, upgrades and rollback).
 
 ### Changed
 
+- The per-turn `[Current user request reminder]` message appended after
+  tool-result turns is now off by default. Re-presenting the objective as a
+  fresh user message every turn re-triggered model reasoning on nearly every
+  request (observed 96–99% of requests emitting reasoning tokens, vs 14–31%
+  without it) and broke the provider prompt-cache suffix each turn, which in
+  internal evaluation cut agent throughput roughly 2.5× on long tool-loop
+  tasks without improving outcomes. Set
+  `OPENSQUILLA_TURN_OBJECTIVE_REMINDER=on` to restore the previous behavior
+  byte-identically, or `trim:<chars>` for a shortened variant.
+- An explicitly configured `llm.base_url` now wins over the provider's
+  derived environment variable (`OPENAI_BASE_URL`, `OPENROUTER_BASE_URL`, …),
+  mirroring the existing api_key rule. Previously the env var silently
+  overrode a custom endpoint saved in the Web UI or via `config.set` on
+  every boot/reload, reverting it to the env value (#484). Endpoints that
+  were never explicitly chosen — a config without `base_url`, or one holding
+  the provider's default URL — still follow the env var, so fleet-wide
+  `*_BASE_URL` overrides keep working, and `OPENSQUILLA_LLM_BASE_URL`
+  (the settings layer) still fills an unset `base_url` and then counts as
+  explicit. As a side effect, a minimal config such as
+  `provider = "openai"` without `base_url` now resolves to that provider's
+  own default endpoint instead of leaking the OpenRouter URL from the model
+  field default.
+- **Security:** the gateway no longer emits CORS headers by default —
+  `cors.allowed_origins` now defaults to `[]` instead of `"*"`. The Web UI
+  (served same-origin from the gateway), the CLI, curl, and the desktop app
+  are unaffected. Deployments that serve a separate frontend from another
+  origin must list that origin explicitly in `cors.allowed_origins` to
+  restore the previous behavior; configuring `"*"` together with
+  `cors.allow_credentials` now logs a boot-time warning.
+- **Security:** state-changing gateway HTTP routes (chat send, system
+  shutdown, approvals settings/resolve, elevated mode, channel logout, file
+  upload, audio transcription, artifact native open, diagnostics bundle) now
+  reject browser requests whose `Origin` is not the gateway itself with
+  `403 FORBIDDEN_ORIGIN`, extending the diagnostics-bundle same-origin guard
+  to the whole HTTP surface. Requests without an `Origin` header (curl, the
+  desktop client) and origins listed in `cors.allowed_origins` still pass.
+- `compose.yaml` now documents prebuilt-image selection, safe LAN exposure,
+  and Web UI token auth, and the troubleshooting guide covers common Docker
+  deployment failures.
+- The Web UI composer's file picker no longer sets an `accept=` filter, so
+  native file dialogs (notably on Windows) show all files instead of hiding
+  types like `.tex` (#472). The attach-button tooltip in all six locales now
+  describes the any-type policy.
+- Under the default `attachments.accept_opaque = true`, the upload endpoint
+  no longer returns HTTP 415 `UNSUPPORTED_MEDIA_TYPE` for type reasons and
+  `sessions.send` no longer raises `unsupported_mime` for unrendered types;
+  the codes and message formats are unchanged for strict deployments that
+  disable the flag. Clients that string-matched the "must be one of [...]"
+  detail should rely on the typed codes instead.
+- Transcripts written by this version may contain opaque attachment
+  envelopes; older builds replay such history with the attachment silently
+  omitted (current builds emit an omission marker).
+- Common non-canonical MIME spellings (`image/jpg`,
+  `application/x-zip-compressed`, `application/x-gzip`) now normalize to
+  their canonical types in every mode, so an `image/jpg` upload is accepted
+  as JPEG even under `accept_opaque = false` where it previously drew a 415.
+
+- Provider retry handling: responses that stop at the length limit without
+  visible text or tool calls now enter the reasoning-only retry path instead
+  of the length-capped continuation path, and a thinking-related provider
+  stream error now disables thinking for the next call only (one-shot)
+  instead of the rest of the turn.
+- Context compaction: `read_file` and `git_diff` results are preserved
+  verbatim (exempt from semantic projection and aggregate compaction), tool
+  results already shown in full are no longer retroactively compacted under
+  context pressure, and compaction placeholders gained `preview_complete`
+  plus retrieval hints.
+- Tool dispatch: a preflight validation pipeline now rejects malformed tool
+  calls before execution and reports invalid tool arguments as retryable;
+  `write_file` refuses destructive overwrites that would shrink an existing
+  large workspace file by more than half; `grep_search` output gained a
+  header, offset paging, VCS-directory exclusion, and binary-file skipping;
+  `edit_file` accepts single-edit shorthand and recovers from near-miss
+  matches by default; `apply_patch` accepts `@@` hunks with optional counts.
+- The `coding` tool profile now enforces fresh workspace reads before edits.
+- `match_workspace_write_deny` deny patterns now apply only to
+  workspace-contained paths (previously they could match paths outside the
+  workspace).
+- Request-proof compaction marks compacted tool arguments with inline
+  `[provider_request_tool_input_compacted: ...]` markers instead of a JSON
+  envelope.
+
 ### Fixed
+
+- The desktop gateway now receives the OpenSquilla home root (not the state
+  subdirectory) in `OPENSQUILLA_STATE_DIR`; a one-time relocation moves the
+  previously nested skills, workspace, session archive, router data, and
+  `.env` up to their intended locations without touching the databases.
+- Legacy configs no longer hard-fail strict validation: stale
+  `memory.dream.model_override` keys are stripped, channel entries with
+  unregistered types are parked with a warning instead of rejecting the
+  file, a `squilla_router.tier_profile` that no longer matches
+  `llm.provider` is cleared, and an unwritable config location degrades the
+  post-migration rewrite to a warning instead of failing boot.
+- The desktop shell resolves the UI language from the OS preference list
+  correctly: English tags now match in place instead of falling through (a
+  Hong Kong list like `en-HK, zh-Hans-HK, …, fr-HK` previously landed on
+  French), and an explicit `Hans` script subtag wins over a
+  Traditional-default region, so `zh-Hans-HK`/`zh-Hans-TW` readers get
+  Simplified Chinese instead of the English fallback. The resolver is
+  extracted to `desktop/electron/src/desktop-locale.ts` with a regression
+  suite (`npm run test:desktop-locale`).
+- Dream (memory consolidation) now resolves its provider credentials through
+  the shared explicit-config-first resolver: previously `OPENROUTER_API_KEY` /
+  `OPENROUTER_BASE_URL` in the gateway environment unconditionally overrode
+  the configured key and endpoint — even when the configured provider was not
+  OpenRouter — silently redirecting Dream turns away from the operator's
+  endpoint.
+- Fixed managed-network sandbox domain grants missing the Bocha, Tavily, and
+  Exa search API hosts: `web_search` runs with those providers active were
+  blocked under the managed-network sandbox. All runtime search providers now
+  have system domain grants and default search-allowlist entries, enforced by
+  a contract test.
+- Byte-level text sniffing no longer misclassifies clean UTF-8 payloads as
+  binary when a multibyte character straddles the sniff peek window (affected
+  CJK plain-text uploads with unrendered MIME claims).
+
+- Fixed secret redaction missing assignment values that start with a quote
+  (for example `password: "..."`); quoted values are now masked in memory
+  persistence and trace capture paths.
 
 ## [0.5.0rc2] - 2026-07-06
 

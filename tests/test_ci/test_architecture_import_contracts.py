@@ -38,6 +38,23 @@ APPROVED_PACKAGE_IMPORTS: frozenset[tuple[str, str]] = frozenset({
     ("cli", "skills"),
     ("cli", "tools"),
     ("cli", "uninstall"),
+    # code-task assembles the subagent's per-run config from the operator's
+    # own provider sections and validates it against the gateway config
+    # schema before spawning (lazy import; gateway never imports contrib, so
+    # no cycle).
+    ("contrib", "gateway"),
+    # code-task's credential preflight reuses the onboarding provider probe and
+    # the provider failure taxonomy / registry to classify results; neither
+    # onboarding nor provider imports contrib, so no cycle.
+    ("contrib", "onboarding"),
+    ("contrib", "provider"),
+    # The diagnostics-bundle shim composes gateway redaction, the offline
+    # doctor, and onboarding config resolution lazily for the bundle
+    # generator; a top-level module (permissions.py precedent) so the
+    # low-level observability package never imports upper layers itself.
+    ("diagnostics_sources.py", "cli"),
+    ("diagnostics_sources.py", "gateway"),
+    ("diagnostics_sources.py", "onboarding"),
     ("engine", "agents"),
     ("engine", "channels"),
     ("engine", "contracts"),
@@ -66,6 +83,10 @@ APPROVED_PACKAGE_IMPORTS: frozenset[tuple[str, str]] = frozenset({
     ("gateway", "engine"),
     ("gateway", "health"),
     ("gateway", "identity"),
+    # Gateway exposes operator-managed document knowledge through RPC handlers
+    # and registers its agent tools at boot. Knowledge remains a leaf package
+    # and does not import gateway back, so this edge closes no cycle.
+    ("gateway", "knowledge"),
     ("gateway", "mcp"),
     ("gateway", "memory"),
     ("gateway", "observability"),
@@ -77,6 +98,9 @@ APPROVED_PACKAGE_IMPORTS: frozenset[tuple[str, str]] = frozenset({
     ("gateway", "search"),
     ("gateway", "session"),
     ("gateway", "skills"),
+    # Gateway's post-dream hook drives the opt-in router self-learning
+    # orchestrator (offline retrain; default-off, fail-open).
+    ("gateway", "squilla_router"),
     ("gateway", "tools"),
     ("identity", "safety"),
     ("identity", "session"),
@@ -87,6 +111,7 @@ APPROVED_PACKAGE_IMPORTS: frozenset[tuple[str, str]] = frozenset({
     ("memory", "gateway"),
     ("memory", "identity"),
     ("memory", "provider"),
+    ("memory", "safety"),
     ("memory", "session"),
     ("memory", "tools"),
     ("migration", "gateway"),
@@ -96,8 +121,14 @@ APPROVED_PACKAGE_IMPORTS: frozenset[tuple[str, str]] = frozenset({
     ("onboarding", "provider"),
     ("onboarding", "search"),
     ("permissions.py", "sandbox"),
+    # turn_error_writer scrubs free-text error records through the low-level
+    # observability.redact utility before insert — sound downward layering.
+    ("persistence", "observability"),
     ("persistence", "skills"),
     ("provider", "engine"),
+    ("provider", "safety"),
+    # Provider argument repair reuses the tool alias/schema helpers (lazy import).
+    ("provider", "tools"),
     ("result_budget.py", "search"),
     ("router_control.py", "engine"),
     ("sandbox", "application"),
@@ -112,6 +143,9 @@ APPROVED_PACKAGE_IMPORTS: frozenset[tuple[str, str]] = frozenset({
     ("scheduler", "session"),
     ("scheduler", "skills"),
     ("scheduler", "tools"),
+    # Self-learning's opt-in audit sidecar reuses the decision-log redactor;
+    # observability is a leaf package, so this closes no cycle.
+    ("squilla_router", "observability"),
     ("session", "compat"),
     ("session", "engine"),
     ("session", "gateway"),
@@ -132,6 +166,8 @@ APPROVED_PACKAGE_IMPORTS: frozenset[tuple[str, str]] = frozenset({
     ("tools", "engine"),
     ("tools", "gateway"),
     ("tools", "identity"),
+    # The built-in knowledge tools consume the leaf KnowledgeBackend contract.
+    ("tools", "knowledge"),
     ("tools", "memory"),
     ("tools", "provider"),
     ("tools", "safety"),

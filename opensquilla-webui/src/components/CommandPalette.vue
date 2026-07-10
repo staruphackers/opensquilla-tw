@@ -80,6 +80,7 @@ import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
 import Icon from './Icon.vue'
 import { useDialogA11y } from '@/composables/useDialogA11y'
+import { useBgm } from '@/composables/useBgm'
 import { getConsoleNavigationSections, getWorkNavigationSection } from '@/router/nav'
 import { useRpcStore } from '@/stores/rpc'
 import { highlightFtsSnippet } from '@/utils/searchSnippet'
@@ -98,6 +99,7 @@ const emit = defineEmits<{
 const { t } = useI18n()
 const router = useRouter()
 const rpcStore = useRpcStore()
+const { enabled: bgmEnabled, setEnabled: setBgmEnabled } = useBgm()
 
 const dialogRef = ref<HTMLElement | null>(null)
 const inputRef = ref<HTMLInputElement | null>(null)
@@ -130,17 +132,19 @@ interface Command {
   run: Run
 }
 
-// Stable group order for the rendered palette. Conversation groups sort below
-// the static nav/action groups so "go to page" stays the top, instant result.
-const GROUP_ORDER = ['Work', 'Manage', 'Monitor', 'Actions', 'Conversations', 'Messages'] as const
+// Stable group order for the rendered palette. Nav groups are keyed on the
+// stable NavGroup taxonomy ('Operate'/'Observe'), never on display labels, so
+// localizing or rewording the sidebar bands cannot silently drop palette rows.
+// Conversation groups sort below the static nav/action groups so "go to page"
+// stays the top, instant result.
+const GROUP_ORDER = ['Work', 'Operate', 'Observe', 'Actions', 'Conversations', 'Messages'] as const
 
-// Display label for a group. The internal group ids above match the (currently
-// English) nav band labels from the nav helper; map the known ids to localized
-// strings, falling back to the raw label for anything unmapped.
+// Display label for a group id. Nav bands resolve through the same nav.* keys
+// the sidebar uses, so the palette and the rail always agree per locale.
 const GROUP_LABEL_KEYS: Record<string, string> = {
   Work: 'shared.cmdp.groupWork',
-  Manage: 'shared.cmdp.groupManage',
-  Monitor: 'shared.cmdp.groupMonitor',
+  Operate: 'nav.groupBuild',
+  Observe: 'nav.groupMonitor',
   Actions: 'shared.cmdp.groupActions',
   Conversations: 'shared.cmdp.groupConversations',
   Messages: 'shared.cmdp.groupMessages',
@@ -175,8 +179,8 @@ const allCommands = computed<Command[]>(() => {
     })
   }
 
-  // Manage + Monitor: the grouped console sections, already label-mapped
-  // (Operate→Manage, Observe→Monitor) by the nav helper.
+  // Build + Monitor: the grouped console sections, keyed on the stable
+  // NavGroup id; the localized band label stays searchable via keywords.
   for (const section of getConsoleNavigationSections()) {
     for (const item of section.items) {
       out.push({
@@ -184,10 +188,30 @@ const allCommands = computed<Command[]>(() => {
         title: item.title,
         icon: item.icon,
         keywords: `${item.title} ${item.path} ${section.label}`.toLowerCase(),
-        group: section.label,
+        group: section.group,
         run: navTo(item.path),
       })
     }
+  }
+
+  // Hub tabs demoted from the rail but first-class in the palette: the Monitor
+  // hub owns /channels, /usage, /logs as tabbed sections. Their canonical
+  // routes stay valid; the palette targets a section directly.
+  const demoted: Array<{ path: string; name: string; icon: IconName; group: string }> = [
+    { path: '/channels', name: 'channels', icon: 'channels', group: 'Observe' },
+    { path: '/usage', name: 'usage', icon: 'usage', group: 'Observe' },
+    { path: '/logs', name: 'logs', icon: 'logs', group: 'Observe' },
+  ]
+  for (const item of demoted) {
+    const title = t(`nav.${item.name}`)
+    out.push({
+      id: `nav:${item.path}`,
+      title,
+      icon: item.icon,
+      keywords: `${title} ${item.path}`.toLowerCase(),
+      group: item.group,
+      run: navTo(item.path),
+    })
   }
 
   // Actions: app-level commands that are not routes.
@@ -215,6 +239,17 @@ const allCommands = computed<Command[]>(() => {
       keywords: 'theme dark light appearance toggle',
       group: 'Actions',
       run: () => emit('toggle-theme'),
+    },
+    // Background-music gate: writes the useBgm singleton directly (no App-level
+    // routing or handler to reuse, unlike the emit-based actions above). The
+    // title tracks the current state via the reactive `enabled` ref.
+    {
+      id: 'action:toggle-bgm',
+      title: bgmEnabled.value ? t('shared.cmdp.actionBgmDisable') : t('shared.cmdp.actionBgmEnable'),
+      icon: 'music',
+      keywords: 'music bgm background sound audio 音乐 背景音乐',
+      group: 'Actions',
+      run: () => setBgmEnabled(!bgmEnabled.value),
     },
   )
 

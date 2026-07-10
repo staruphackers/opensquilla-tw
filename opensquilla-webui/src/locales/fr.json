@@ -50,15 +50,17 @@
   "nav": {
     "chat": "Chat",
     "sessions": "Sessions",
-    "approvals": "Approbations",
     "agents": "Agents",
     "channels": "Canaux",
     "cron": "Cron",
     "skills": "Compétences",
+    "rag": "Base de connaissances",
     "overview": "Vue d'ensemble",
     "usage": "Utilisation",
     "logs": "Journaux",
-    "settings": "Paramètres"
+    "settings": "Paramètres",
+    "groupBuild": "Construire",
+    "groupMonitor": "Surveiller"
   },
   "chrome": {
     "settings": "Paramètres",
@@ -77,10 +79,20 @@
       "connecting": "Connexion…",
       "disconnected": "Déconnecté"
     },
+    "bgm": {
+      "label": "Musique de fond",
+      "play": "Lire la musique de fond",
+      "pause": "Mettre la musique en pause",
+      "volume": "Volume",
+      "chooseLocalFile": "Choisir un fichier local…",
+      "noTracks": "Aucune piste — ajoutez des fichiers dans music/ ou choisissez un fichier local"
+    },
     "brandHome": "Accueil OpenSquilla",
     "controlNav": "Navigation de contrôle",
     "primaryNav": "Principale",
     "primaryMobile": "Principale mobile",
+    "moreThemes": "Plus de thèmes…",
+    "moreThemesHint": "Des thèmes supplémentaires sont disponibles dans les paramètres d'Apparence",
     "themeMode": {
       "light": "Clair",
       "dark": "Sombre",
@@ -94,7 +106,9 @@
       "themeLabel": "Thème",
       "themeDesc": "Suivez votre système, ou forcez le mode clair ou sombre. Le bouton de la barre latérale est un raccourci vers ce même paramètre.",
       "languageLabel": "Langue",
-      "languageDesc": "Langue d'affichage de l'interface. S'applique immédiatement à ce navigateur."
+      "languageDesc": "Langue d'affichage de l'interface. S'applique immédiatement à ce navigateur.",
+      "bgmLabel": "Musique de fond",
+      "bgmDesc": "Affiche la commande de musique de fond dans la barre supérieure. Désactivé par défaut ; modifiable aussi depuis la palette de commandes."
     },
     "dialog": {
       "title": "Paramètres",
@@ -115,7 +129,7 @@
     "rail": {
       "connection": "Connexion",
       "runtime": "Environnement d'exécution",
-      "provider": "Chat Model",
+      "provider": "Service de modèles",
       "modelStrategy": "Routage des modèles",
       "behavior": "Comportement",
       "privacy": "Confidentialité",
@@ -153,6 +167,12 @@
     }
   },
   "setup": {
+    "cli": {
+      "advancedTitle": "Avancé · CLI intégrée",
+      "hintBundled": "Ces commandes utilisent la CLI intégrée à l'application ; collez-les dans un terminal pour les exécuter.",
+      "hintDev": "Mode dev : les commandes s'exécutent depuis la copie source via uv.",
+      "restartHint": "Utilisez Réglages → Runtime → Redémarrer de l'application pour appliquer."
+    },
     "common": {
       "apiKey": "Clé API",
       "apiKeyEnv": "Variable d'env. de la clé API",
@@ -213,9 +233,29 @@
       "routerReady": "SquillaRouter prêt",
       "directOnly": "Direct uniquement",
       "chooseToSeeFields": "Choisissez un fournisseur pour voir les champs requis.",
+      "recommendation": {
+        "title": "Recommandé : TokenRhythm",
+        "value": "Les appels à l’API TokenRhythm sont gratuits pendant une durée limitée.",
+        "registration": "Pendant l’offre, inscrivez-vous et obtenez une clé API pour appeler gratuitement DeepSeek, GLM, MiniMax, Kimi et d’autres modèles majeurs.",
+        "cta": "S’inscrire et obtenir une clé API",
+        "externalLabel": "S’inscrire et obtenir une clé API — TokenRhythm (s’ouvre dans un nouvel onglet)",
+        "stepsLabel": "Comment connecter TokenRhythm",
+        "stepRegister": "Créer un compte TokenRhythm",
+        "stepCopy": "Copier votre clé API",
+        "stepPaste": "La coller dans le champ de clé API ci-dessous",
+        "stepSelectAndPaste": "Sélectionner TokenRhythm ci-dessus, puis coller votre clé API",
+        "stepReplaceAndPaste": "Sélectionner « Remplacer la clé » ci-dessous, puis coller votre clé API"
+      },
       "advanced": "Options avancées du fournisseur",
       "timeoutLabel": "Délai d'expiration de la requête (secondes)",
       "timeoutDesc": "Durée d'attente d'une réponse de modèle avant expiration — augmentez-la pour les modèles locaux lents (Ollama, vLLM, LM Studio).",
+      "contextWindowLabel": "Remplacement de la fenêtre de contexte (tokens)",
+      "contextWindowDesc": "Plafonne le budget d'assemblage du prompt pour ce modèle. Laissez vide pour utiliser la fenêtre détectée automatiquement.",
+      "contextWindowAuto": "auto",
+      "contextWindowUnknown": "inconnu",
+      "contextWindowNone": "aucun",
+      "contextWindowReadout": "auto-détecté {auto} · remplacement {override} · effectif {effective}",
+      "contextWindowLocalWarning": "La fenêtre de contexte effective est de {tokens} tokens. Les runtimes locaux utilisent souvent une petite fenêtre par défaut — augmentez le remplacement si votre modèle en prend en charge davantage.",
       "envMissing": "{envKey} n'est pas visible par ce processus de passerelle. Définissez-la avant de démarrer ou de redémarrer la passerelle, ou collez plutôt une clé API.",
       "envKeyFallback": "la variable d'environnement de clé API sélectionnée",
       "copyKeyCommand": "Copier la commande de définition de la clé du fournisseur",
@@ -234,6 +274,7 @@
       "viewCredential": "View",
       "replaceCredential": "Remplacer la clé",
       "credentialReplacePlaceholder": "Paste a replacement API key",
+      "credentialEnterPlaceholder": "Paste your API key",
       "showApiKey": "Show API key",
       "hideApiKey": "Hide API key",
       "credentialAdvanced": "Advanced",
@@ -246,6 +287,8 @@
       "keyRejected": "✗ Clé refusée — {reason}",
       "notReachable": "✗ Connexion impossible — {reason}",
       "discoverFailed": "Impossible de lister les modèles — saisissez un id de modèle.",
+      "verdictModels": "{count} modèles · p. ex. {samples}",
+      "verdictSampleJoiner": ", ",
       "failureAuth": "Le fournisseur a refusé cette clé d'API.",
       "failureCredits": "Ce compte n'a plus de crédits.",
       "failureRateLimited": "Le fournisseur limite les requêtes — réessayez dans un instant.",
@@ -278,9 +321,11 @@
     "modelStrategy": {
       "title": "Routage des modèles",
       "desc": "Choisissez comment Squilla utilise le modèle actuel pour chaque nouvelle requête.",
-      "providerFirst": "Choisissez d’abord un Chat Model, puis le fonctionnement du routage.",
-      "providerAction": "Aller au Chat Model →",
+      "providerFirst": "Choisissez d’abord un service de modèles, puis le fonctionnement du routage.",
+      "providerAction": "Accéder au service de modèles →",
       "routerTitle": "Routage IA à modèle unique",
+      "visualModeLabel": "Style du panneau de routage",
+      "visualModeDesc": "Présentation du panneau de décision de routage dans les réponses du chat.",
       "crossProviderNotice": "Le routage inter-fournisseurs est actif. Vérifie chaque niveau avant d’enregistrer.",
       "cards": {
         "router": {
@@ -300,37 +345,61 @@
       "ensembleTitle": "Routage IA agrégé",
       "ensembleDependency": "Utilise les identifiants {provider} ; le modèle par défaut est {model}.",
       "ensembleMinimum": "Ajoutez au moins un autre candidat pour bénéficier du routage agrégé.",
-      "ensembleFailure": "Si tous les candidats échouent, revenir au modèle actuel : {provider} · {model}.",
+      "ensembleFailure": "Si la fusion est impossible, revenir au modèle actuel : {provider} · {model}.",
       "singleTitle": "Désactivé",
       "singleDependency": "Chaque tour va au modèle actuellement sélectionné : {provider} · {model}.",
       "singleDesc": "Le routage IA et le routage agrégé sont désactivés pour les nouvelles requêtes.",
-      "candidatesLabel": "Modèles candidats",
-      "candidatesDesc": "Les niveaux de modèle sont inclus automatiquement. Ajoutez des candidats personnalisés pour élargir la couverture.",
-      "candidateSourceTier": "Depuis les niveaux de modèle",
-      "candidateSourceCustom": "Personnalisé",
-      "candidateSourceLegacy": "Depuis l’ancienne configuration",
-      "candidateSourceOpenRouterFixed": "Ensemble OpenRouter fixe",
-      "customCandidatesLabel": "Candidats personnalisés inter-fournisseurs",
-      "openrouterFixedTitle": "Ensemble OpenRouter fixe",
-      "openrouterFixedDesc": "Quand le modèle de chat utilise OpenRouter, le routage agrégé utilise quatre modèles proposants et un agrégateur.",
-      "customizeOpenRouterLabel": "Personnaliser l’ensemble",
-      "customizeOpenRouterDesc": "Passer au routage d’ensemble basé sur le routeur avec l’ancien modèle de candidats OpenRouter.",
+      "openrouterFixedTitle": "Ensemble {provider} fixe",
+      "openrouterFixedDesc": "Quand le service de modèles utilise {provider}, le routage agrégé utilise quatre modèles proposants et un agrégateur.",
       "openrouterFixedProposer": "Modèle proposant",
       "openrouterFixedAggregator": "Agrégateur",
       "credentialReady": "Connecté",
       "credentialNeeded": "Identifiants {provider} requis",
       "credentialMissingEnv": "{envKey} requis",
       "credentialUnknown": "Identifiants non vérifiés",
-      "addCandidatePlaceholder": "provider/model-id",
       "addCandidateProviderLabel": "Fournisseur candidat",
       "addCandidateProviderPlaceholder": "provider",
       "addCandidateModelLabel": "Modèle candidat",
       "addCandidateModelPlaceholder": "model-id",
       "addCandidate": "Ajouter un candidat",
-      "resetCandidates": "Réinitialiser avec les candidats des niveaux actuels",
       "removeCandidateAria": "Retirer {model}",
-      "ensembleEmpty": "Aucun modèle candidat pour le moment. Enregistrez le modèle de chat pour générer les niveaux de routage, ou ajoutez des candidats manuellement.",
-      "ensembleFailureLabel": "Si tous les candidats échouent"
+      "ensembleEmpty": "Aucun modèle candidat pour le moment. Enregistrez les paramètres du service de modèles pour générer les niveaux de routage, ou ajoutez des candidats manuellement.",
+      "ensemblePipeline": "Fonctionnement : les modèles proposants rédigent en parallèle, puis l'agrégateur fusionne les brouillons en réponse finale. Seul l'agrégateur peut appeler des outils.",
+      "legacyDynamicNotice": "Cette configuration utilise l'ancien mode d'ensemble automatique retiré. Convertissez-la en composition personnalisée pour continuer à l'éditer.",
+      "legacyDynamicMigrate": "Convertir en composition personnalisée",
+      "schemeLabel": "Schéma d'ensemble",
+      "schemePresetTitle": "Ensemble prédéfini",
+      "schemePresetBadge": "Recommandé",
+      "schemePresetDesc": "La composition optimisée du fournisseur : quatre proposants plus un agrégateur, prête à l'emploi.",
+      "schemeCustomTitle": "Ensemble personnalisé",
+      "schemeCustomBadge": "Avancé",
+      "schemeCustomDesc": "Composez votre propre alignement avec des rôles ; mélangez les fournisseurs au besoin.",
+      "presetNoteDeepseek": "Ancre de raisonnement — brouillons de référence pour les tâches complexes",
+      "presetNoteGlm": "Texte long et sortie structurée — contraste avec la famille DeepSeek",
+      "presetNoteKimi": "Code et intention d'outils — couvre les demandes de programmation",
+      "presetNoteQwen": "Étendue des connaissances et couverture multilingue",
+      "presetNoteGeneric": "Brouillon proposant",
+      "aggregatorNote": "Fusionne tous les brouillons en réponse finale ; seul membre pouvant appeler des outils",
+      "aggregatorSectionLabel": "Agrégateur",
+      "aggregatorSectionDesc": "Un seul agrégateur produit la réponse finale. Choisissez le modèle le plus puissant de la composition.",
+      "aggregatorInheritedNote": "Aucun agrégateur assigné — le modèle de chat actuel fusionne les brouillons",
+      "proposerSectionLabel": "Modèles proposants",
+      "proposerSectionDesc": "Les proposants rédigent en parallèle ; la durée totale dépend du plus lent.",
+      "proposerCount": "{count} / {max} · recommandé {recommendedMin}–{recommendedMax}",
+      "importTierCandidates": "Importer depuis les niveaux de modèle",
+      "roleSelectAria": "Rôle de {model}",
+      "roleUnassigned": "Aucun rôle",
+      "role_primary": "Principal",
+      "role_contrast": "Contraste",
+      "role_fast_check": "Vérification rapide",
+      "role_critic": "Critique",
+      "role_aggregator": "Agrégateur",
+      "addCandidateRoleLabel": "Rôle du candidat",
+      "capacityWarn": "{calls} appels de modèle par tour — le coût croît linéairement et le gain de fusion s'estompe au-delà de 4 proposants.",
+      "capacityFull": "Limite de {max} proposants atteinte — davantage de brouillons n'améliore plus la fusion ; retirez-en un d'abord.",
+      "diversityHint": "Plusieurs proposants partagent la même famille de modèles — ajouter un autre fournisseur améliore généralement la fusion.",
+      "effectiveFacts": "Par tour : {calls} appels de modèle · fusion dès {quorum}/{proposers} proposants réussis · timeout proposant {proposerTimeout}s · timeout agrégateur {aggregatorTimeout}s · {grace}s de grâce après quorum",
+      "quorumFailureLabel": "Si moins de {quorum} proposants réussissent"
     },
     "behavior": {
       "title": "Comportement des sessions",
@@ -382,27 +451,8 @@
       }
     },
     "ensemble": {
-      "title": "Routage IA agrégé",
       "statusOn": "Le routage IA agrégé est actif : plusieurs modèles répondent et un modèle synthétise la réponse finale.",
       "statusOff": "Le routage IA agrégé est désactivé.",
-      "enabledLabel": "Utiliser le routage IA agrégé",
-      "enabledDesc": "Interroger plusieurs modèles à la fois et synthétiser une réponse finale.",
-      "selectionLabel": "Sélection des modèles",
-      "selectionDesc": "Comment l'ensemble choisit les modèles à interroger.",
-      "selectionStatic": "Jeu de modèles intégré hérité",
-      "selectionDynamic": "Dynamique (suit les niveaux de modèle)",
-      "rawValueTooltip": "Valeur de configuration : {value}",
-      "modelsLabel": "Modèles candidats",
-      "modelsDesc": "Modèles que la sélection dynamique peut interroger.",
-      "modelsStaticHint": "La sélection héritée utilise son jeu de modèles interne — la liste de candidats ne s'applique qu'au mode Dynamique.",
-      "addModelPlaceholder": "fournisseur/id-du-modele",
-      "addModel": "Ajouter",
-      "removeModelAria": "Retirer {model}",
-      "openrouterKeyHint": "La sélection OpenRouter héritée nécessite une clé OpenRouter (ou OPENROUTER_API_KEY) — sinon elle reste inactive.",
-      "advanced": "Options avancées de l'ensemble",
-      "minSuccessfulLabel": "Réponses réussies minimales",
-      "minSuccessfulDesc": "Combien de modèles doivent répondre pour que l'ensemble retienne un résultat.",
-      "allFailedLabel": "Si tous les modèles échouent",
       "allFailedFallback": "Revenir à un modèle unique",
       "allFailedError": "Arrêter et signaler une erreur"
     },
@@ -559,7 +609,30 @@
       "uninstallPurgePrimary": "Supprimer les données",
       "uninstallDone": "Nettoyage du bureau terminé. L'application va se fermer ; supprimez OpenSquilla via votre système si vous souhaitez désinstaller l'application elle-même.",
       "uninstallFailed": "Échec du nettoyage : {detail}",
-      "uninstallCheckLog": "consultez le journal de la passerelle."
+      "uninstallCheckLog": "consultez le journal de la passerelle.",
+      "migrationLabel": "Importer les anciennes données",
+      "migrationDesc": "Recherche un ancien répertoire OpenSquilla sur cette machine et l'importe dans cet environnement d'exécution.",
+      "migrationButton": "Importer les anciennes données",
+      "migrationNone": "Aucune ancienne donnée trouvée.",
+      "migrationSummaryFailed": "Impossible de vérifier la présence d'anciennes données : {detail}",
+      "migrationSummaryTitle": "Anciennes données trouvées",
+      "migrationCountPlanned": "{n} planifiés",
+      "migrationCountMigrated": "{n} migrés",
+      "migrationCountSkipped": "{n} ignorés",
+      "migrationCountError": "{n} en erreur",
+      "migrationCountNone": "Aucun élément à importer.",
+      "migrationPausedJobs": "Tâches planifiées (importées en pause) : {n}",
+      "migrationDisk": "Disque : {required} requis, {free} libres",
+      "migrationOverwrite": "Écraser les données existantes (des sauvegardes horodatées sont créées)",
+      "migrationImport": "Importer",
+      "migrationCancel": "Annuler",
+      "migrationConfirmTitle": "Importer les anciennes données ?",
+      "migrationConfirmBody": "L'environnement d'exécution local s'arrête pendant l'importation et redémarre une fois celle-ci terminée. Cette page perdra brièvement sa connexion.",
+      "migrationConfirmPrimary": "Importer",
+      "migrationStarted": "Importation lancée — l'environnement d'exécution local redémarre, cette page va se reconnecter sous peu.",
+      "migrationDone": "Anciennes données importées. L'environnement d'exécution local redémarre.",
+      "migrationFailed": "Échec de l'importation : {detail}",
+      "migrationPhase": "Progression : {phase}"
     },
     "keyboard": {
       "title": "Clavier",
@@ -651,6 +724,35 @@
       "offSurfacesError": "off affiche l'erreur d'origine du fournisseur.",
       "audioEnvVar": "Variable d'environnement à lire pour l'accès au fournisseur audio.",
       "remoteEmbeddingKey": "Clé API d'embedding distant ou référence d'environnement."
+    },
+    "memoryLearning": {
+      "groupTitle": "Mémoire et auto-apprentissage",
+      "dreamLabel": "Consolidation de la mémoire (dream)",
+      "tokenBadge": "consommation de tokens",
+      "dreamDesc": "Exécute périodiquement un passage du modèle pour consolider la mémoire de session (toutes les 24 h). L’auto-apprentissage du routage s’appuie sur ces fenêtres d’inactivité pour s’entraîner.",
+      "selfLearningLabel": "Auto-apprentissage du routage de modèles",
+      "selfLearningDesc": "Apprend vos préférences de routage à partir de vos corrections. Entièrement local — stocke des vecteurs de caractéristiques, jamais le texte des conversations.",
+      "depDefault": "Dépend de la consolidation de la mémoire ci-dessus : l’activer ici l’active aussi ; désactiver la consolidation seule maintient la collecte mais suspend l’entraînement automatique.",
+      "depLinked": "La consolidation de la mémoire a été activée en même temps. Vous pouvez la désactiver séparément — la collecte continue, seul l’entraînement automatique est suspendu.",
+      "depPaused": "La consolidation de la mémoire est désactivée — les échantillons sont toujours collectés, mais aucun entraînement automatique n’a lieu. Réactivez-la pour reprendre.",
+      "restartRequired": "Un redémarrage de la passerelle est nécessaire pour appliquer le changement de planification.",
+      "statusModel": "Modèle de routage",
+      "statusSamples": "Corrections",
+      "statusLastAction": "Dernière action",
+      "modelBaseline": "Référence d’usine",
+      "modelLearned": "Version apprise v{version}",
+      "samplesTotal": "{total} collectés au total",
+      "gatePausedDream": "Entraînement suspendu — en attente de la réactivation de la consolidation de la mémoire",
+      "gateReason": {
+        "ready": "Prêt — s’entraînera à la prochaine fenêtre",
+        "disabled": "Désactivé",
+        "no_data": "Aucun échantillon collecté pour l’instant",
+        "agent_active": "En attente d’une fenêtre d’inactivité",
+        "cooldown": "En refroidissement après un entraînement récent",
+        "insufficient_data": "Pas encore entraîné — corrections insuffisantes",
+        "insufficient_class_diversity": "Pas encore entraîné — les corrections couvrent trop peu de niveaux de routage"
+      },
+      "detachedNote": "Les poids de base du routage ont été mis à niveau. L’apprentissage bâti sur les anciens poids a été archivé ; vos corrections sont conservées et seront réapprises automatiquement sur les nouveaux poids. Aucune action requise."
     }
   },
   "sessions": {
@@ -697,6 +799,8 @@
       "timeout": "Expiré",
       "interrupted": "Interrompu",
       "cancelled": "Annulé",
+      "outputInterrupted": "Sortie interrompue",
+      "stoppedAfterSeconds": "Arrêté après {seconds} s",
       "idle": "Inactif"
     },
     "relTime": {
@@ -779,6 +883,7 @@
       "abortFailed": "Échec de l'abandon."
     },
     "overview": {
+      "title": "Vue d'ensemble",
       "subtitle": "État en direct, sessions récentes et flux d'événements.",
       "openChat": "Ouvrir le chat",
       "totalTokens": "Total des jetons",
@@ -805,6 +910,7 @@
       "loadingHealth": "Chargement du rapport de santé",
       "noFindings": "Aucun constat retourné.",
       "recoveryRestart": "La récupération nécessite un redémarrage",
+      "openSettings": "Ouvrir les paramètres",
       "findingFallback": "Constat {n}",
       "copyCommand": "Copier la commande",
       "step": "Étape",
@@ -891,7 +997,15 @@
         "runLocalDoctorDetail": "Vérifie la configuration locale et l'intégration avant de redémarrer la passerelle.",
         "startLocal": "Démarrer la passerelle locale",
         "inspectLocal": "Inspecter la passerelle locale"
-      }
+      },
+      "checkedAgo": "Vérifié {time}",
+      "rerunChecks": "Relancer les vérifications",
+      "copyDiagnostics": "Copier le JSON de diagnostic",
+      "copiedDiagnostics": "JSON de diagnostic copié",
+      "diagnoseWithAgent": "Diagnostiquer avec l'agent",
+      "diagnosePrompt": "Veuillez diagnostiquer cette configuration OpenSquilla à l'aide du rapport doctor ci-dessous ; proposez la cause racine et des étapes de correction minimales ; n'exécutez pas de commandes destructrices.",
+      "environment": "Environnement",
+      "latency": "Latence"
     }
   },
   "console": {
@@ -905,7 +1019,7 @@
       "title": "Agents",
       "subtitle": "Personnalités et jeux de compétences personnalisés avec lesquels vous pouvez discuter.",
       "settingsHint": "Les valeurs par défaut de fournisseur et de modèle se trouvent dans les Paramètres",
-      "openSettings": "ouvrir les paramètres",
+      "openSettings": "Ouvrir les paramètres",
       "totalAgents": "Total des agents",
       "builtinCount": "{n} intégré(s)",
       "customCount": "{n} personnalisé(s)",
@@ -971,7 +1085,7 @@
       "title": "Canaux",
       "subtitle": "État d'exécution des canaux configurés. Ajoutez ou modifiez la configuration des canaux dans les Paramètres ou la CLI.",
       "settingsHint": "La configuration des canaux se trouve dans les Paramètres",
-      "openSettings": "ouvrir les paramètres",
+      "openSettings": "Ouvrir les paramètres",
       "totalChannels": "Total des canaux",
       "typeCount": "{n} types",
       "connected": "Connectés",
@@ -998,40 +1112,6 @@
       "hintRestarting": "L'adaptateur redémarre après des erreurs de répartition.",
       "hintExhausted": "L'adaptateur a épuisé son budget de nouvelles tentatives. Essayez `{cmd}`.",
       "hintConfiguredInactive": "Configuré sur le disque mais non actif dans ce processus de passerelle — redémarrez la passerelle pour le charger."
-    },
-    "approvals": {
-      "eyebrow": "Contrôle · Approbations",
-      "title": "Approbations",
-      "subtitle": "Barrière d'exécution des outils — gardez les actions risquées en pause jusqu'à votre feu vert.",
-      "pending": "En attente",
-      "awaitingDecision": "en attente de décision",
-      "allClear": "tout est en ordre",
-      "strategy": "Stratégie",
-      "strategyTitle": "Comment les approbations sont gérées",
-      "strategyAriaLabel": "Stratégie d'approbation",
-      "modePromptLabel": "Demander à chaque fois",
-      "modePromptDesc": "Chaque exécution d'outil risquée ouvre une invite d'approbation.",
-      "modeAutoApproveLabel": "Approbation automatique",
-      "modeAutoApproveDesc": "Toutes les exécutions d'outils sont automatiquement approuvées.",
-      "modeAutoDenyLabel": "Refus automatique",
-      "modeAutoDenyDesc": "Toutes les exécutions d'outils sont automatiquement refusées.",
-      "emptyTitle": "Aucune approbation en attente.",
-      "emptyText": "Lorsqu'un agent atteint un appel d'outil risqué, il apparaîtra ici pour votre validation.",
-      "pendingRequests": "Demandes en attente",
-      "agent": "Agent",
-      "session": "Session",
-      "command": "Commande",
-      "details": "Détails",
-      "unknownTool": "Inconnu",
-      "approveOnce": "Approuver une fois",
-      "allowSameType": "Autoriser le même type",
-      "deny": "Refuser",
-      "loadFailed": "Échec du chargement des approbations : {msg}",
-      "approved": "Approuvé",
-      "denied": "Refusé",
-      "toastFailed": "Échec : {msg}",
-      "toastStrategy": "Stratégie d'approbation : {mode}",
-      "toastStrategyFailed": "Échec de l'enregistrement de la stratégie : {msg}"
     }
   },
   "cronSkills": {
@@ -1379,6 +1459,8 @@
       "installVia": "Installer via {kind}",
       "installing": "Installation...",
       "homepage": "Page d'accueil",
+      "loadingContent": "Chargement de SKILL.md...",
+      "emptyContent": "Aucun contenu SKILL.md disponible.",
       "removing": "Suppression...",
       "remove": "Supprimer"
     },
@@ -1561,7 +1643,8 @@
         "label": "Éphémère",
         "tooltip": "Session éphémère — coût pas encore persisté",
         "short": "éphémère"
-      }
+      },
+      "cacheBlindHint": "Inclut des estimations qui tarifient les jetons en cache au tarif d'entrée plein — à considérer comme un plafond."
     },
     "relTime": {
       "justNow": "à l'instant",
@@ -1576,26 +1659,27 @@
     "logs": {
       "eyebrow": "Contrôle · Journaux",
       "title": "Journaux",
-      "subtitle": "Flux de journaux de passerelle en direct — filtrez, suivez et exportez.",
+      "subtitle": "Flux de journaux de passerelle en direct — filtrez et suivez.",
       "statusUnavailable": "État des journaux indisponible",
       "statusUnavailableAria": "État des journaux indisponible ; le suivi des journaux peut toujours fonctionner.",
       "statusUnavailableTitle": "logs.status est indisponible ; le suivi des journaux peut toujours fonctionner.",
       "fileLogOn": "Journal fichier activé",
       "fileLogOff": "Journal fichier désactivé",
-      "fileLogAriaOn": "Journal fichier activé. Chemin : {path}. Configurable via log_file_enabled, log_level, rotation et OPENSQUILLA_LOG_DIR.",
-      "fileLogAriaOff": "Journal fichier désactivé. Chemin : {path}. Configurable via log_file_enabled, log_level, rotation et OPENSQUILLA_LOG_DIR.",
       "fileLogTitle": "La journalisation fichier de la passerelle est configurable via log_file_enabled, log_level, les paramètres de rotation et OPENSQUILLA_LOG_DIR. Chemin : {path}.",
-      "rawOn": "Capture brute des appels de tour activée",
-      "rawOff": "Capture brute des appels de tour désactivée",
-      "rawAriaOn": "Capture brute des appels de tour activée. Source : {source}. Répertoire : {path}. Activez avec OPENSQUILLA_TURN_CALL_LOG=1.",
-      "rawAriaOff": "Capture brute des appels de tour désactivée. Source : {source}. Répertoire : {path}. Activez avec OPENSQUILLA_TURN_CALL_LOG=1.",
-      "rawTitle": "La capture brute des appels de tour est activée par OPENSQUILLA_TURN_CALL_LOG=1 ou opensquilla diagnostics on --raw. Source : {source}. Répertoire : {path}.",
-      "diagnosticsCopyRaw": "Le mode brut des diagnostics est actif pour les tours futurs. Source brute : {source}.",
-      "diagnosticsCopyStandard": "Les diagnostics standard et la capture brute sont des niveaux distincts. Utilisez opensquilla diagnostics on --raw pour la capture brute des appels de tour.",
-      "diagnosticsRaw": "Diagnostics bruts",
-      "diagnosticsStandard": "Diagnostics standard",
-      "diagnosticsOff": "Diagnostics désactivés",
-      "exportTitle": "Télécharger les lignes de journal filtrées",
+      "fileLogOffTitle": "Les journaux ne sont pas écrits sur le disque ; les paquets de diagnostic manqueront d'historique. Activez log_file_enabled dans la configuration. Chemin : {path}.",
+      "rawOn": "Capture brute activée",
+      "rawOff": "Capture brute désactivée",
+      "rawRecordingPill": "Capture brute en cours",
+      "rawTitle": "La capture brute enregistre l'intégralité des requêtes et réponses du modèle, y compris le contenu des conversations. Activez-la avec OPENSQUILLA_TURN_CALL_LOG=1 ou opensquilla diagnostics on --raw ; désactivez-la avec opensquilla diagnostics off. Source : {source}. Répertoire : {path}.",
+      "bundleButton": "Paquet de diagnostic",
+      "bundleButtonTitle": "Télécharger un paquet de diagnostic expurgé",
+      "bundleTitle": "Télécharger le paquet de diagnostic",
+      "bundleBody": "Rassemble les journaux de la passerelle, les erreurs enregistrées et la configuration expurgée dans un zip que vous pouvez joindre à un rapport de bug. Les secrets et les clés API sont supprimés ; le contenu des conversations est exclu, sauf si vous l'incluez ci-dessous.",
+      "bundleIncludeContent": "Inclure le contenu des conversations (prompts et réponses)",
+      "bundleConfirm": "Télécharger",
+      "bundleCancel": "Annuler",
+      "bundleFailed": "Échec du téléchargement du diagnostic",
+      "bundleReady": "Paquet de diagnostic téléchargé",
       "inView": "Affichées",
       "ofLoaded": "sur {total} chargées",
       "errors": "Erreurs",
@@ -1611,7 +1695,8 @@
       "autoFollow": "Suivi automatique",
       "loading": "Chargement des journaux…",
       "noMatch": "Aucune ligne ne correspond au filtre actuel.",
-      "lineDetail": "Détail de la ligne de journal"
+      "lineDetail": "Détail de la ligne de journal",
+      "ofLoadedFoot": "{visible} affichées · {total} en mémoire"
     }
   },
   "chat": {
@@ -1628,7 +1713,7 @@
     "removeAttachment": "Supprimer la pièce jointe",
     "remove": "Supprimer",
     "attachFiles": "Joindre des fichiers",
-    "attachFilesTitle": "Joindre des fichiers : PNG, JPEG, GIF, WEBP, PDF, TXT, MD, HTML, CSV, JSON",
+    "attachFilesTitle": "Joindre des fichiers : tout type de fichier (images, PDF, Office et texte sont lus directement ; les autres vont dans l'espace de travail de l'agent)",
     "dropOverlayTitle": "Déposez pour joindre",
     "dropOverlayHint": "Les fichiers seront ajoutés au compositeur",
     "composerSettings": "Paramètres du compositeur",
@@ -1918,6 +2003,12 @@
       "stillWaiting": "Toujours en attente du modèle",
       "stillWorking": "Toujours en cours — dernier signal il y a {seconds} s"
     },
+    "stall": {
+      "title": "La réponse est peut-être bloquée",
+      "detail": "Aucune nouvelle sortie depuis {seconds} s — le modèle est peut-être bloqué.",
+      "keepWaiting": "Continuer d'attendre",
+      "interrupt": "Interrompre le tour"
+    },
     "msgMeta": {
       "ensembleModels": "Ensemble · {count} modèles",
       "tokens": "jetons",
@@ -1932,6 +2023,14 @@
     },
     "modelRouting": {
       "updateFailed": "Impossible de changer le routage des modèles — rétabli. Vérifiez la connexion à la passerelle et réessayez."
+    },
+    "routeFeedback": {
+      "up": "Bon choix de modèle pour ce tour",
+      "down": "Mauvais choix de modèle pour ce tour",
+      "upEnsemble": "Satisfait de cette réponse agrégée",
+      "downEnsemble": "Insatisfait de cette réponse agrégée",
+      "expired": "L’enregistrement de routage de ce message a expiré",
+      "failed": "Impossible d’enregistrer votre évaluation"
     }
   },
   "shared": {
@@ -1951,7 +2050,9 @@
       "groupMessages": "Messages",
       "actionNewChat": "Nouveau chat",
       "actionOpenSettings": "Ouvrir les Paramètres",
-      "actionToggleTheme": "Basculer le thème"
+      "actionToggleTheme": "Basculer le thème",
+      "actionBgmEnable": "Activer la musique de fond",
+      "actionBgmDisable": "Désactiver la musique de fond"
     },
     "toast": {
       "dismiss": "Ignorer la notification"
@@ -2009,6 +2110,16 @@
       "hint": "La passerelle n'est pas encore prête à fonctionner.",
       "finishSetup": "Terminer la configuration",
       "viewReadiness": "Voir la préparation"
+    },
+    "legacyDataBanner": {
+      "ariaLabel": "Anciennes données OpenSquilla détectées",
+      "title": "Anciennes données OpenSquilla détectées",
+      "dismiss": "Ignorer",
+      "dismissNotice": "Ignorer l'avis d'anciennes données",
+      "hintWeb": "Arrêtez la passerelle, puis exécutez cette commande pour les importer :",
+      "hintDesktop": "Importez-les depuis Paramètres → Environnement d'exécution avec l'action « Importer les anciennes données ».",
+      "openSettings": "Ouvrir les paramètres d'exécution",
+      "copyCommand": "Copier la commande de migration"
     },
     "shortcuts": {
       "commandPalette": {

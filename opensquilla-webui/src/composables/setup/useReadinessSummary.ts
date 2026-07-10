@@ -9,11 +9,21 @@ export interface ReadinessSectionDetail {
   detail?: string
 }
 
+/** Read-only detection of a legacy OpenSquilla home reported by the gateway. */
+export interface LegacyDataInfo {
+  path: string
+  /** "cli-home" | "windows-portable" (open set — render, don't branch). */
+  kind: string
+  /** Suggested `opensquilla migrate …` invocation to import the home. */
+  command: string
+}
+
 export interface ReadinessStatus {
   needsOnboarding?: boolean
   hasConfig?: boolean
   llmSource?: string
   sectionDetails?: Record<string, ReadinessSectionDetail>
+  legacyData?: LegacyDataInfo | null
 }
 
 /** Pure predicate shared by the Settings dialog and the sidebar banner. */
@@ -37,8 +47,46 @@ export function readinessActionCount(status: ReadinessStatus | null | undefined)
   return n
 }
 
+/**
+ * Normalizes the optional `legacyData` block of `onboarding.status`. Gateways
+ * that predate legacy-home detection never send the field, so absence — and
+ * any malformed payload — degrades to null (no advisory) instead of throwing.
+ */
+export function readinessLegacyData(
+  status: ReadinessStatus | null | undefined,
+): LegacyDataInfo | null {
+  const raw: unknown = status?.legacyData
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const { path, kind, command } = raw as Record<string, unknown>
+  if (typeof path !== 'string' || !path.trim()) return null
+  if (typeof command !== 'string' || !command.trim()) return null
+  return { path, kind: typeof kind === 'string' ? kind : '', command }
+}
+
 export function useReadinessSummary(status: Ref<ReadinessStatus | null>) {
   const needsAction = computed(() => readinessNeedsAction(status.value))
   const actionCount = computed(() => readinessActionCount(status.value))
   return { needsAction, actionCount }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-component invalidation. Settings saves hot-apply config on the
+// gateway, but there is no server push for it, so long-lived holders of an
+// `onboarding.status` snapshot (the sidebar banner) would keep stale state
+// until a full page reload. Saves signal through this module-scope registry;
+// subscribers re-fetch on their own RPC handle.
+
+type ReadinessListener = () => void
+
+const readinessListeners = new Set<ReadinessListener>()
+
+/** Subscribe to readiness invalidations; returns an unsubscribe function. */
+export function onReadinessInvalidated(listener: ReadinessListener): () => void {
+  readinessListeners.add(listener)
+  return () => { readinessListeners.delete(listener) }
+}
+
+/** Signal that gateway config changed and readiness snapshots must re-fetch. */
+export function invalidateReadiness(): void {
+  for (const listener of Array.from(readinessListeners)) listener()
 }

@@ -35,6 +35,7 @@ import {
   taskTerminalAsSessionEvent as normalizeTaskTerminalEvent,
   taskTerminalStatus as eventTaskTerminalStatus,
 } from '@/utils/chat/streamEvents'
+import { stoppedOutputNoticeMessage } from '@/composables/chat/stoppedOutputNotice'
 
 export interface ChatUsageAccumulator {
   input: number
@@ -116,6 +117,7 @@ type ChatDoneUsageFields = {
   modelUsageBreakdown?: unknown
   ensemble_trace?: unknown
   ensembleTrace?: unknown
+  decision_id?: string
 }
 
 type ChatDoneUsagePayload = SessionEventPayload & ChatDoneUsageFields & {
@@ -341,6 +343,7 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
     const interrupted = state.status === 'cancelled' || state.status === 'interrupted'
     if (stream.isStreaming.value) stream.endStreaming(interrupted ? { reason: 'aborted' } : undefined)
     options.applySessionRunState(payload)
+    materializeStoppedOutputNotice(state)
     options.scheduleHistorySync()
     if (interrupted) {
       options.popAllPendingIntoComposer()
@@ -557,7 +560,11 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
       if (activeTaskGroups.value.size > 0) {
         options.applySessionRunState(activeTaskGroupRunState(payloadObj))
       } else {
-        options.applySessionRunState({ run_status: terminalRunStatus, last_task: { ...(payloadObj || {}), status: terminalStatus } })
+        const terminalRunState = { run_status: terminalRunStatus, last_task: { ...(payloadObj || {}), status: terminalStatus } }
+        options.applySessionRunState(terminalRunState)
+        if (!stream.isStreaming.value) {
+          materializeStoppedOutputNotice(options.sessionRunStatus(terminalRunState))
+        }
       }
     }
 
@@ -640,7 +647,9 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
 
       if (payload?.reason === 'aborted') {
         options.popAllPendingIntoComposer()
-        options.applySessionRunState({ run_status: 'cancelled', last_task: { ...(payload || {}), status: 'cancelled' } })
+        const cancelledRunState = { run_status: 'cancelled', last_task: { ...(payload || {}), status: 'cancelled' } }
+        options.applySessionRunState(cancelledRunState)
+        materializeStoppedOutputNotice(options.sessionRunStatus(cancelledRunState))
       } else if (activeTaskGroups.value.size > 0) {
         options.applySessionRunState(activeTaskGroupRunState({ reason: 'task_group_active' }))
       } else {
@@ -664,6 +673,11 @@ export function useChatRpcEventHandlers(options: UseChatRpcEventHandlersOptions)
         options.applySessionRunState({ run_status: 'failed', last_task: { ...(payload || {}), status: 'failed' } })
       }
     }
+  }
+
+  function materializeStoppedOutputNotice(state: ChatRunStatus) {
+    const notice = stoppedOutputNoticeMessage(messages.value, state)
+    if (notice) messages.value.push(notice)
   }
 
   let connectionLostNoted = false

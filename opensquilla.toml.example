@@ -61,10 +61,10 @@
 frontend = "vue"
 
 # Web search settings
-# Use DuckDuckGo for the no-key path, or configure Bocha, Brave, Tavily, or Exa.
-# search_provider = "duckduckgo"  # "duckduckgo", "bocha", "brave", "tavily", or "exa"
+# Use DuckDuckGo for the no-key path, or configure Bocha, Brave, IQS, Tavily, or Exa.
+# search_provider = "duckduckgo"  # "duckduckgo", "bocha", "brave", "iqs", "tavily", or "exa"
 # search_api_key = ""             # one-time pasted key; prefer search_api_key_env
-# search_api_key_env = ""         # BOCHA_SEARCH_API_KEY, BRAVE_SEARCH_API_KEY, TAVILY_API_KEY, or EXA_API_KEY
+# search_api_key_env = ""         # BOCHA_SEARCH_API_KEY, BRAVE_SEARCH_API_KEY, IQS_SEARCH_API_KEY, TAVILY_API_KEY, or EXA_API_KEY
 # search_max_results = 5
 # search_proxy = ""               # e.g. "http://127.0.0.1:7890"
 # search_use_env_proxy = false    # true = allow HTTP_PROXY/HTTPS_PROXY if search_proxy is empty
@@ -78,17 +78,35 @@ frontend = "vue"
 # [tools]
 # trusted_fake_ip_cidrs = ["198.18.0.0/15"]
 
+# Attachment ingestion. Any file type is accepted by default: rendered
+# families (images, PDF, text, Office, email) are extracted or inlined for
+# the model; everything else stages as an opaque agent-workspace file whose
+# bytes are never parsed or inlined into a prompt.
+# Env prefix: OPENSQUILLA_ATTACHMENTS_
+# [attachments]
+# accept_opaque = true          # false = legacy rendered-types-only admission
+# opaque_max_bytes = 31457280   # 30 MiB per-file ceiling for opaque types
+# upload_store_max_total_bytes = 314572800   # 300 MiB staged-upload RAM ceiling
+#                                             # (raise-only; <=0 = default)
+# workspace_attachment_disk_budget_bytes = 1073741824  # 1 GiB workspace copies
+#                                             # (<=0 = unbounded)
+# persist_transcripts = true
+# transcript_disk_budget_bytes = 2147483648
+# artifact_max_bytes = 31457280
+# artifact_disk_budget_bytes = 536870912
+
 [llm]
-provider = "openrouter"
-model = "deepseek/deepseek-v4-pro"
-# api_key = ""          # OpenRouter API key; env OPENROUTER_API_KEY also works
-base_url = "https://openrouter.ai/api/v1"
+provider = "tokenrhythm"
+model = "deepseek-v4-pro"
+# api_key = ""          # TokenRhythm API key; env TOKENRHYTHM_API_KEY also works
+base_url = "https://tokenrhythm.studio/v1"
 # proxy = ""            # e.g. http://127.0.0.1:7890
 
 # Provider quick reference. Support levels marked compat_mock_verified are
 # verified by local mocked-contract tests, not by live vendor calls.
 #
 # provider      env var                 default base_url
+# tokenrhythm   TOKENRHYTHM_API_KEY      https://tokenrhythm.studio/v1
 # openrouter    OPENROUTER_API_KEY       https://openrouter.ai/api/v1
 # openai        OPENAI_API_KEY           https://api.openai.com/v1
 # openai_responses OPENAI_API_KEY        https://api.openai.com/v1  (native Responses-API shape; chat+responses)
@@ -103,6 +121,7 @@ base_url = "https://openrouter.ai/api/v1"
 # zhipu         ZAI_API_KEY              https://open.bigmodel.cn/api/paas/v4
 # siliconflow   SILICONFLOW_API_KEY      https://api.siliconflow.cn/v1
 # volcengine    VOLCENGINE_API_KEY       https://ark.cn-beijing.volces.com/api/v3
+# volcengine_coding_plan VOLCENGINE_API_KEY https://ark.cn-beijing.volces.com/api/coding/v3
 # byteplus      BYTEPLUS_API_KEY         https://ark.ap-southeast.bytepluses.com/api/v3
 # vllm          none                     explicit base_url required
 # custom        CUSTOM_LLM_API_KEY (optional)  explicit base_url required
@@ -111,7 +130,7 @@ base_url = "https://openrouter.ai/api/v1"
 # qianfan       QIANFAN_API_KEY          https://qianfan.baidubce.com/v2
 # aihubmix      AIHUBMIX_API_KEY         https://aihubmix.com/v1
 # minimax       MINIMAX_API_KEY          https://api.minimaxi.com/anthropic  (Anthropic-shape backend)
-# minimax_openai MINIMAX_API_KEY          https://api.minimaxi.com/v1         (OpenAI-compatible variant)
+# minimax_openai MINIMAX_API_KEY          https://api.minimax.io/v1          (OpenAI-compatible variant)
 # azure         provider-specific        unsupported_for_A
 #
 # Example direct DeepSeek config:
@@ -119,6 +138,15 @@ base_url = "https://openrouter.ai/api/v1"
 # model = "deepseek-v4-flash"
 # api_key = ""          # env DEEPSEEK_API_KEY also works
 # base_url = "https://api.deepseek.com"
+#
+# Example direct TokenRhythm config (aggregator: DeepSeek/GLM/MiniMax/Kimi/
+# MiMo/Qwen families on one key). Every served model streams
+# reasoning_content, and reasoning tokens count against max_tokens — keep
+# max_tokens = 0 (auto) rather than setting small caps:
+# provider = "tokenrhythm"
+# model = "deepseek-v4-pro"
+# api_key = ""          # env TOKENRHYTHM_API_KEY also works
+# base_url = "https://tokenrhythm.studio/v1"
 #
 # Example self-hosted / custom OpenAI-compatible endpoint (vLLM, SGLang, TGI,
 # llama.cpp server, or any proxy speaking the Chat Completions API):
@@ -164,6 +192,11 @@ base_url = "https://openrouter.ai/api/v1"
 # every turn falls back to the single configured provider —
 # `opensquilla doctor` reports this as the llm_ensemble finding
 # "LLM ensemble is enabled but cannot run".
+# "static_tokenrhythm_b5" is the TokenRhythm mirror of the same lineup
+# (deepseek-v4-pro, glm-5.2, kimi-k2.7-code, qwen3.7-max + glm-5.2
+# aggregator) and needs a TokenRhythm credential the same way (the [llm]
+# api_key when the active provider is "tokenrhythm", or
+# TOKENRHYTHM_API_KEY in the environment).
 #
 # The keys below are also writable at runtime via the Web UI / the
 # `onboarding.ensemble.configure` RPC; omitted keys keep their current
@@ -171,9 +204,26 @@ base_url = "https://openrouter.ai/api/v1"
 [llm_ensemble]
 enabled = true
 # "static_openrouter_b5": fixed five-member OpenRouter proposer set (default).
-# "router_dynamic": the local router picks proposers from model_options.
+# "static_tokenrhythm_b5": the same lineup served through TokenRhythm.
+# "custom_b5": an explicit user-authored lineup from [[llm_ensemble.candidates]]
+#   — 2-6 enabled proposer rows plus at most one role = "aggregator" row (the
+#   member that fuses drafts into the final answer; omitted = the current chat
+#   model fuses). Proposer roles ("primary", "contrast", "fast_check",
+#   "critic") are advisory labels shown in the UI and decision trace.
+# "router_dynamic": legacy automatic selection; kept readable for existing
+#   configs but no longer offered in the Web UI.
 selection_mode = "static_openrouter_b5"
-# Candidate pool for router_dynamic (ignored by static_openrouter_b5).
+# Explicit lineup for custom_b5 (ignored by the static profiles):
+# [[llm_ensemble.candidates]]
+# provider = "volcengine"
+# model = "doubao-2.0-pro"
+# role = "primary"
+# [[llm_ensemble.candidates]]
+# provider = "volcengine"
+# model = "deepseek-v4-pro"
+# role = "aggregator"
+#
+# Candidate pool for the legacy router_dynamic mode (ignored otherwise).
 model_options = [
   "deepseek/deepseek-v4-pro",
   "z-ai/glm-5.2",
@@ -184,9 +234,12 @@ model_options = [
   "moonshotai/kimi-k2.7-code",
   "minimax/minimax-m3",
 ]
-# Minimum proposers that must succeed before aggregation (>= 1).
+# Minimum proposers that must succeed before aggregation (>= 1). The fixed
+# lineups (static profiles and custom_b5) replace the untouched default of 1
+# with their own quorum at runtime: 3-of-4 for the static profiles, N-1 for a
+# custom lineup of N proposers.
 min_successful_proposers = 1
-# When every proposer fails: "fallback_single" (single-provider turn) or "error".
+# When aggregation cannot proceed: "fallback_single" (single-provider turn) or "error".
 all_failed_policy = "fallback_single"
 
 # Advanced knobs — TOML-only (not on the configure RPC surface). Defaults:
@@ -239,8 +292,10 @@ all_failed_policy = "fallback_single"
 # #                   dashscope | moonshot | volcengine | none
 # reasoning_format = "openrouter"
 # supports_reasoning = true
-# input_cost_per_mtok = 0.5    # USD per million input tokens (example value)
-# output_cost_per_mtok = 2.0   # USD per million output tokens (example value)
+# input_cost_per_mtok = 0.5        # USD per million input tokens (example value)
+# output_cost_per_mtok = 2.0       # USD per million output tokens (example value)
+# cache_read_cost_per_mtok = 0.05  # USD per million cached-prompt-read tokens (example value)
+# cache_write_cost_per_mtok = 0.6  # USD per million cached-prompt-write tokens (example value)
 # thinking_level_map = { high = "high", medium = "medium" }
 
 [memory]
@@ -342,41 +397,38 @@ upgrade_to_c3_compaction_enabled = true
 # that executes on the active provider (or the default tier).
 # tier_provider_mismatch = "route"  # route | veto
 
+# TokenRhythm serves every model in reasoning-streaming mode and rejects
+# thinking-toggle request fields, so these tiers set no thinking_level.
 [squilla_router.tiers.c0]
-provider = "openrouter"
-model = "deepseek/deepseek-v4-flash"
+provider = "tokenrhythm"
+model = "deepseek-v4-flash"
 description = "Fast DeepSeek V4 Flash route for trivial chat, short rewrites, extraction, and low-risk simple Q&A"
 supports_image = false
-thinking_level = "high"
 
 [squilla_router.tiers.c1]
-provider = "openrouter"
-model = "deepseek/deepseek-v4-pro"
+provider = "tokenrhythm"
+model = "deepseek-v4-pro"
 description = "Default balanced text model for normal agent work, coding assistance, debugging, and moderate analysis"
 supports_image = false
-thinking_level = "high"
 
 [squilla_router.tiers.c2]
-provider = "openrouter"
-model = "z-ai/glm-5.2"
-description = "Stronger GLM 5.2 route for multi-step coding, structured reasoning, larger context synthesis, and harder analysis"
+provider = "tokenrhythm"
+model = "kimi-k2.7-code"
+description = "Stronger Kimi K2.7 Code route for multi-step coding, structured reasoning, larger context synthesis, and harder analysis"
 supports_image = false
-thinking_level = "high"
 
 [squilla_router.tiers.c3]
-provider = "openrouter"
-model = "z-ai/glm-5.2"
+provider = "tokenrhythm"
+model = "glm-5.2"
 description = "Highest-tier GLM 5.2 route for difficult planning, deep review, complex debugging, and high-stakes synthesis"
 supports_image = false
-thinking_level = "high"
 
 [squilla_router.tiers.image_model]
-provider = "openrouter"
-model = "moonshotai/kimi-k2.6"
+provider = "tokenrhythm"
+model = "kimi-k2.6"
 description = "Image model: vision-capable route for user-supplied image attachments, screenshots, diagrams, and visual question answering"
 supports_image = true
 image_only = true
-thinking_level = "medium"
 
 # Example: DashScope profile requires:
 # [llm]
@@ -387,6 +439,21 @@ thinking_level = "medium"
 #
 # [squilla_router]
 # tier_profile = "dashscope"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tool policy
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Optional coding/repo-coding narrowed tool surface. Keep commented unless you
+# are intentionally narrowing the tool surface for a scripted run.
+#
+# [tools]
+# profile = "coding"
+# also_allow = ["retrieve_tool_result"]
+# deny = ["execute_code", "background_process", "process"]
+# file_edit_requires_fresh_read = true
+# file_edit_flexible_recovery = true  # default; records used/rejected recovery events
+# workspace_write_deny_globs = []
 
 [agent_token_saving]
 # Project fresh tool results with the built-in tokenjuice reducer before they
@@ -435,6 +502,15 @@ default_mode = "bypass"                 # off | on | bypass | full
 # [auth]
 # mode = "none"         # none | token | password
 # token = ""
+
+# [cors]
+# Cross-origin browser access to the gateway HTTP API. Off by default: the
+# Web UI is served same-origin from the gateway itself and non-browser
+# clients (CLI, desktop app, curl) never need CORS. Only list origins here
+# if you host a separate frontend on another origin; avoid "*", especially
+# together with allow_credentials.
+# allowed_origins = []
+# allow_credentials = true
 
 # [channels]
 # [[channels.channels]]

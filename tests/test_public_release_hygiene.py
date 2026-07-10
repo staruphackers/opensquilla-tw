@@ -12,6 +12,9 @@ from opensquilla.gateway.config import GatewayConfig
 # before the public tree is published.
 SECRET_PATTERNS = {
     "openrouter": re.compile(r"sk-or-v1-[A-Za-z0-9_-]{32,}"),
+    # Real TokenRhythm keys carry a 40+ char base62 tail; the floor keeps
+    # short synthetic fixtures (sk_tr_FAKE...) legal.
+    "tokenrhythm": re.compile(r"\bsk_tr_[A-Za-z0-9]{32,}\b"),
     "brave": re.compile(r"\bBSA[A-Za-z0-9_-]{20,}\b"),
     "github_pat": re.compile(r"\b(?:ghp|github_pat)_[A-Za-z0-9_]{20,}\b"),
     "private_key": re.compile(r"-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----"),
@@ -42,6 +45,13 @@ PUBLIC_RELEASE_MARKER_NAMES = (
 # behavior. They are public fixtures, not leaked developer-machine paths.
 PATH_POLICY_FIXTURE_FILES = {
     "tests/test_artifacts.py",
+    "tests/test_migration/fixtures/homes/cli-0.1/config.toml",
+    "tests/test_migration/fixtures/homes/cli-0.2/config.toml",
+    "tests/test_migration/fixtures/homes/cli-0.3/config.toml",
+    "tests/test_migration/fixtures/homes/cli-0.4/config.toml",
+    "tests/test_migration/fixtures/homes/cli-0.5/config.toml",
+    "tests/test_migration/fixtures/homes/desktop-0.4/config.toml",
+    "tests/test_migration/fixtures/homes/desktop-0.5rc/config.toml",
     "tests/test_provider_image_generation.py",
     "tests/test_sandbox/test_operation_profile.py",
     "tests/test_sandbox/test_windows_default_cache.py",
@@ -52,6 +62,8 @@ PATH_POLICY_FIXTURE_FILES = {
     "tests/test_tools/test_shell_sensitive.py",
     "tests/test_tools/test_web_http_request.py",
     "tests/test_observability/test_decision_log_contract.py",
+    "opensquilla-webui/src/utils/overviewDiagnostics.test.ts",
+    "opensquilla-webui/src/views/OverviewView.diagnostics.test.ts",
 }
 
 
@@ -198,7 +210,7 @@ def test_release_sop_documents_github_only_validation_boundary() -> None:
         "SHA256SUMS",
         "post-publish tag URL checks",
         "curl --fail --head --location",
-        "public wheelhouse zips, macOS portable zips, or Linux portable zips",
+        "public wheelhouse zips, or separately branded macOS or Linux portable bundles",
         "Mark-of-the-Web",
         "SmartScreen",
         "Smart App Control",

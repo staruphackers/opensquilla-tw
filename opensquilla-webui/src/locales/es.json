@@ -50,15 +50,17 @@
   "nav": {
     "chat": "Chat",
     "sessions": "Sesiones",
-    "approvals": "Aprobaciones",
     "agents": "Agentes",
     "channels": "Canales",
     "cron": "Cron",
     "skills": "Habilidades",
+    "rag": "Base de conocimiento",
     "overview": "Resumen",
     "usage": "Uso",
     "logs": "Registros",
-    "settings": "Ajustes"
+    "settings": "Ajustes",
+    "groupBuild": "Construir",
+    "groupMonitor": "Monitorizar"
   },
   "chrome": {
     "settings": "Ajustes",
@@ -77,10 +79,20 @@
       "connecting": "Conectando",
       "disconnected": "Desconectado"
     },
+    "bgm": {
+      "label": "Música de fondo",
+      "play": "Reproducir música de fondo",
+      "pause": "Pausar música de fondo",
+      "volume": "Volumen",
+      "chooseLocalFile": "Elegir archivo local…",
+      "noTracks": "Sin pistas — añade archivos a music/ o elige un archivo local"
+    },
     "brandHome": "Inicio de OpenSquilla",
     "controlNav": "Navegación de control",
     "primaryNav": "Principal",
     "primaryMobile": "Principal móvil",
+    "moreThemes": "Más temas…",
+    "moreThemesHint": "Hay temas adicionales disponibles en los ajustes de Apariencia",
     "themeMode": {
       "light": "Claro",
       "dark": "Oscuro",
@@ -94,7 +106,9 @@
       "themeLabel": "Tema",
       "themeDesc": "Sigue tu sistema o fuerza el modo claro u oscuro. El conmutador de la barra lateral es un atajo a este mismo ajuste.",
       "languageLabel": "Idioma",
-      "languageDesc": "Idioma de visualización de la interfaz. Se aplica al instante a este navegador."
+      "languageDesc": "Idioma de visualización de la interfaz. Se aplica al instante a este navegador.",
+      "bgmLabel": "Música de fondo",
+      "bgmDesc": "Muestra el control de música de fondo en la barra superior. Desactivado por defecto; también se puede alternar desde la paleta de comandos."
     },
     "dialog": {
       "title": "Ajustes",
@@ -115,7 +129,7 @@
     "rail": {
       "connection": "Conexión",
       "runtime": "Tiempo de ejecución",
-      "provider": "Chat Model",
+      "provider": "Servicio de modelos",
       "modelStrategy": "Enrutamiento de modelos",
       "behavior": "Comportamiento",
       "privacy": "Privacidad",
@@ -153,6 +167,12 @@
     }
   },
   "setup": {
+    "cli": {
+      "advancedTitle": "Avanzado · CLI integrada",
+      "hintBundled": "Estos comandos usan la CLI integrada en la aplicación; pégalos en una terminal para ejecutarlos.",
+      "hintDev": "Modo dev: los comandos se ejecutan desde el checkout del código fuente vía uv.",
+      "restartHint": "Usa Ajustes → Runtime → Reiniciar de la aplicación para aplicar."
+    },
     "common": {
       "apiKey": "Clave de API",
       "apiKeyEnv": "Variable de entorno de la clave de API",
@@ -213,9 +233,29 @@
       "routerReady": "SquillaRouter listo",
       "directOnly": "Solo directo",
       "chooseToSeeFields": "Elige un proveedor para ver los campos requeridos.",
+      "recommendation": {
+        "title": "Recomendado: TokenRhythm",
+        "value": "Las llamadas a la API de TokenRhythm son gratis por tiempo limitado.",
+        "registration": "Durante la promoción, regístrate y obtén una clave API para usar gratis DeepSeek, GLM, MiniMax, Kimi y otros modelos líderes.",
+        "cta": "Registrarse y obtener una clave API",
+        "externalLabel": "Registrarse y obtener una clave API — TokenRhythm (se abre en una pestaña nueva)",
+        "stepsLabel": "Cómo conectar TokenRhythm",
+        "stepRegister": "Crear una cuenta de TokenRhythm",
+        "stepCopy": "Copiar tu clave API",
+        "stepPaste": "Pegarla en el campo de clave API de abajo",
+        "stepSelectAndPaste": "Seleccionar TokenRhythm arriba y luego pegar tu clave API",
+        "stepReplaceAndPaste": "Seleccionar «Cambiar clave» abajo y luego pegar tu clave API"
+      },
       "advanced": "Opciones avanzadas del proveedor",
       "timeoutLabel": "Tiempo de espera de la solicitud (segundos)",
       "timeoutDesc": "Cuánto esperar la respuesta de un modelo antes de agotar el tiempo de espera; aumenta este valor para modelos locales lentos (Ollama, vLLM, LM Studio).",
+      "contextWindowLabel": "Anulación de la ventana de contexto (tokens)",
+      "contextWindowDesc": "Limita el presupuesto de ensamblado del prompt para este modelo. Déjalo en blanco para usar la ventana detectada automáticamente.",
+      "contextWindowAuto": "auto",
+      "contextWindowUnknown": "desconocido",
+      "contextWindowNone": "ninguna",
+      "contextWindowReadout": "detección automática {auto} · anulación {override} · efectiva {effective}",
+      "contextWindowLocalWarning": "La ventana de contexto efectiva es de {tokens} tokens. Los runtimes locales suelen usar por defecto una ventana pequeña; aumenta la anulación si tu modelo admite más.",
       "envMissing": "{envKey} no es visible para este proceso de la puerta de enlace. Establécela antes de iniciar o reiniciar la puerta de enlace, o pega una clave de API en su lugar.",
       "envKeyFallback": "la variable de entorno de la clave de API seleccionada",
       "copyKeyCommand": "Copiar comando para establecer la clave del proveedor",
@@ -234,6 +274,7 @@
       "viewCredential": "View",
       "replaceCredential": "Cambiar clave",
       "credentialReplacePlaceholder": "Paste a replacement API key",
+      "credentialEnterPlaceholder": "Paste your API key",
       "showApiKey": "Show API key",
       "hideApiKey": "Hide API key",
       "credentialAdvanced": "Advanced",
@@ -246,6 +287,8 @@
       "keyRejected": "✗ Clave rechazada — {reason}",
       "notReachable": "✗ No se pudo conectar — {reason}",
       "discoverFailed": "No se pudieron listar los modelos — escribe un id de modelo.",
+      "verdictModels": "{count} modelos · p. ej. {samples}",
+      "verdictSampleJoiner": ", ",
       "failureAuth": "El proveedor rechazó esta clave de API.",
       "failureCredits": "Esta cuenta no tiene créditos.",
       "failureRateLimited": "El proveedor está limitando las solicitudes — inténtalo de nuevo en un momento.",
@@ -278,9 +321,11 @@
     "modelStrategy": {
       "title": "Enrutamiento de modelos",
       "desc": "Elige cómo Squilla usa el modelo actual en cada solicitud nueva.",
-      "providerFirst": "Configura primero un Chat Model y luego elige cómo debe funcionar el enrutamiento.",
-      "providerAction": "Ir a Chat Model →",
+      "providerFirst": "Configura primero un servicio de modelos y luego elige cómo debe funcionar el enrutamiento.",
+      "providerAction": "Ir al servicio de modelos →",
       "routerTitle": "Enrutamiento IA de un solo modelo",
+      "visualModeLabel": "Estilo del panel de enrutamiento",
+      "visualModeDesc": "Cómo se muestra el panel de decisión de enrutamiento en las respuestas del chat.",
       "crossProviderNotice": "El routing entre proveedores está activo. Revisa cada nivel antes de guardar.",
       "cards": {
         "router": {
@@ -300,37 +345,61 @@
       "ensembleTitle": "Enrutamiento IA agregado",
       "ensembleDependency": "Usa credenciales de {provider}; el modelo predeterminado es {model}.",
       "ensembleMinimum": "Agrega al menos otro candidato para aprovechar el enrutamiento agregado.",
-      "ensembleFailure": "Si todos los candidatos fallan, vuelve al modelo actual: {provider} · {model}.",
+      "ensembleFailure": "Si la fusión no puede continuar, recurrir al modelo actual: {provider} · {model}.",
       "singleTitle": "Desactivado",
       "singleDependency": "Cada turno va al modelo seleccionado actualmente: {provider} · {model}.",
       "singleDesc": "El enrutamiento IA y el enrutamiento agregado están desactivados para nuevas solicitudes.",
-      "candidatesLabel": "Modelos candidatos",
-      "candidatesDesc": "Los niveles de modelo se incluyen automáticamente. Agrega candidatos propios para ampliar la cobertura.",
-      "candidateSourceTier": "Desde niveles de modelo",
-      "candidateSourceCustom": "Personalizado",
-      "candidateSourceLegacy": "Desde configuración antigua",
-      "candidateSourceOpenRouterFixed": "Conjunto fijo de OpenRouter",
-      "customCandidatesLabel": "Candidatos personalizados entre proveedores",
-      "openrouterFixedTitle": "Conjunto fijo de OpenRouter",
-      "openrouterFixedDesc": "Cuando el modelo de chat usa OpenRouter, el enrutamiento agregado usa cuatro modelos proponentes y un agregador.",
-      "customizeOpenRouterLabel": "Personalizar conjunto",
-      "customizeOpenRouterDesc": "Cambiar al enrutamiento de conjunto basado en router con la plantilla antigua de candidatos OpenRouter.",
+      "openrouterFixedTitle": "Conjunto fijo de {provider}",
+      "openrouterFixedDesc": "Cuando el servicio de modelos usa {provider}, el enrutamiento agregado usa cuatro modelos proponentes y un agregador.",
       "openrouterFixedProposer": "Modelo proponente",
       "openrouterFixedAggregator": "Agregador",
       "credentialReady": "Conectado",
       "credentialNeeded": "Se necesitan credenciales de {provider}",
       "credentialMissingEnv": "Se necesita {envKey}",
       "credentialUnknown": "Credenciales no comprobadas",
-      "addCandidatePlaceholder": "provider/model-id",
       "addCandidateProviderLabel": "Proveedor candidato",
       "addCandidateProviderPlaceholder": "provider",
       "addCandidateModelLabel": "Modelo candidato",
       "addCandidateModelPlaceholder": "model-id",
       "addCandidate": "Agregar candidato",
-      "resetCandidates": "Restablecer a candidatos de niveles actuales",
       "removeCandidateAria": "Quitar {model}",
-      "ensembleEmpty": "Aún no hay modelos candidatos. Guarda tu modelo de chat para generar niveles de enrutamiento, o agrega candidatos manualmente.",
-      "ensembleFailureLabel": "Si fallan todos los candidatos"
+      "ensembleEmpty": "Aún no hay modelos candidatos. Guarda la configuración del servicio de modelos para generar niveles de enrutamiento, o agrega candidatos manualmente.",
+      "ensemblePipeline": "Cómo funciona: los modelos proponentes redactan en paralelo y el agregador fusiona los borradores en la respuesta final. Solo el agregador puede invocar herramientas.",
+      "legacyDynamicNotice": "Esta configuración usa el modo de ensamble automático retirado. Conviértela en una alineación personalizada para seguir editándola.",
+      "legacyDynamicMigrate": "Convertir en alineación personalizada",
+      "schemeLabel": "Esquema de ensamble",
+      "schemePresetTitle": "Ensamble predefinido",
+      "schemePresetBadge": "Recomendado",
+      "schemePresetDesc": "La alineación ajustada del proveedor: cuatro proponentes más un agregador, lista para usar.",
+      "schemeCustomTitle": "Ensamble personalizado",
+      "schemeCustomBadge": "Avanzado",
+      "schemeCustomDesc": "Crea tu propia alineación con roles; mezcla proveedores si lo necesitas.",
+      "presetNoteDeepseek": "Ancla de razonamiento — borradores base para tareas complejas",
+      "presetNoteGlm": "Texto largo y salida estructurada — contrasta con la familia DeepSeek",
+      "presetNoteKimi": "Código e intención de herramientas — cubre solicitudes de programación",
+      "presetNoteQwen": "Amplitud de conocimiento y cobertura multilingüe",
+      "presetNoteGeneric": "Borrador proponente",
+      "aggregatorNote": "Fusiona todos los borradores en la respuesta final; el único miembro que puede invocar herramientas",
+      "aggregatorSectionLabel": "Agregador",
+      "aggregatorSectionDesc": "Exactamente un agregador produce la respuesta final. Elige el modelo más potente de tu alineación.",
+      "aggregatorInheritedNote": "Sin agregador asignado — el modelo de chat actual fusiona los borradores",
+      "proposerSectionLabel": "Modelos proponentes",
+      "proposerSectionDesc": "Los proponentes redactan en paralelo; el tiempo total depende del más lento.",
+      "proposerCount": "{count} / {max} · recomendado {recommendedMin}–{recommendedMax}",
+      "importTierCandidates": "Importar desde niveles de modelo",
+      "roleSelectAria": "Rol de {model}",
+      "roleUnassigned": "Sin rol",
+      "role_primary": "Principal",
+      "role_contrast": "Contraste",
+      "role_fast_check": "Verificación rápida",
+      "role_critic": "Crítico",
+      "role_aggregator": "Agregador",
+      "addCandidateRoleLabel": "Rol del candidato",
+      "capacityWarn": "{calls} llamadas de modelo por turno — el coste crece linealmente y la mejora de fusión decae pasados 4 proponentes.",
+      "capacityFull": "Límite de {max} proponentes alcanzado — más borradores no mejoran la fusión; quita uno antes de añadir otro.",
+      "diversityHint": "Varios proponentes comparten familia de modelos — añadir otro proveedor suele mejorar la fusión.",
+      "effectiveFacts": "Por turno: {calls} llamadas de modelo · fusiona al lograr {quorum}/{proposers} proponentes · timeout de proponente {proposerTimeout}s · timeout de agregador {aggregatorTimeout}s · {grace}s de gracia tras el quórum",
+      "quorumFailureLabel": "Si menos de {quorum} proponentes tienen éxito"
     },
     "behavior": {
       "title": "Comportamiento de la sesión",
@@ -382,27 +451,8 @@
       }
     },
     "ensemble": {
-      "title": "Enrutamiento IA agregado",
       "statusOn": "El enrutamiento IA agregado está activo: varios modelos responden y un modelo sintetiza la respuesta final.",
       "statusOff": "El enrutamiento IA agregado está desactivado.",
-      "enabledLabel": "Usar enrutamiento IA agregado",
-      "enabledDesc": "Preguntar a varios modelos a la vez y sintetizar una respuesta final.",
-      "selectionLabel": "Selección de modelos",
-      "selectionDesc": "Cómo elige el conjunto a qué modelos preguntar.",
-      "selectionStatic": "Conjunto de modelos integrado heredado",
-      "selectionDynamic": "Dinámico (sigue niveles de modelo)",
-      "rawValueTooltip": "Valor de configuración: {value}",
-      "modelsLabel": "Modelos candidatos",
-      "modelsDesc": "Modelos a los que puede preguntar la selección dinámica.",
-      "modelsStaticHint": "La selección heredada usa su conjunto interno de modelos; la lista de candidatos solo aplica en Dinámico.",
-      "addModelPlaceholder": "proveedor/id-del-modelo",
-      "addModel": "Añadir",
-      "removeModelAria": "Quitar {model}",
-      "openrouterKeyHint": "La selección heredada de OpenRouter necesita una clave de OpenRouter (u OPENROUTER_API_KEY); de lo contrario, permanece inactiva.",
-      "advanced": "Opciones avanzadas del conjunto",
-      "minSuccessfulLabel": "Respuestas correctas mínimas",
-      "minSuccessfulDesc": "Cuántos modelos deben responder para que el conjunto conserve un resultado.",
-      "allFailedLabel": "Si todos los modelos fallan",
       "allFailedFallback": "Recurrir a un solo modelo",
       "allFailedError": "Detener y notificar un error"
     },
@@ -559,7 +609,30 @@
       "uninstallPurgePrimary": "Borrar datos",
       "uninstallDone": "Limpieza de escritorio completada. La app se cerrará ahora; elimina OpenSquilla desde tu sistema operativo si quieres quitar la app.",
       "uninstallFailed": "Error al limpiar: {detail}",
-      "uninstallCheckLog": "consulta el registro de la puerta de enlace."
+      "uninstallCheckLog": "consulta el registro de la puerta de enlace.",
+      "migrationLabel": "Importar datos antiguos",
+      "migrationDesc": "Busca un directorio de OpenSquilla anterior en esta máquina y lo importa a este tiempo de ejecución.",
+      "migrationButton": "Importar datos antiguos",
+      "migrationNone": "No se encontraron datos antiguos.",
+      "migrationSummaryFailed": "No se pudo comprobar si hay datos antiguos: {detail}",
+      "migrationSummaryTitle": "Datos antiguos encontrados",
+      "migrationCountPlanned": "{n} planificados",
+      "migrationCountMigrated": "{n} migrados",
+      "migrationCountSkipped": "{n} omitidos",
+      "migrationCountError": "{n} con errores",
+      "migrationCountNone": "No hay elementos que importar.",
+      "migrationPausedJobs": "Tareas programadas (importadas en pausa): {n}",
+      "migrationDisk": "Disco: {required} necesarios, {free} libres",
+      "migrationOverwrite": "Sobrescribir los datos existentes (se crean copias de seguridad con marca de tiempo)",
+      "migrationImport": "Importar",
+      "migrationCancel": "Cancelar",
+      "migrationConfirmTitle": "¿Importar datos antiguos?",
+      "migrationConfirmBody": "El tiempo de ejecución local se detiene durante la importación y se reinicia al terminar. Esta página perderá la conexión brevemente.",
+      "migrationConfirmPrimary": "Importar",
+      "migrationStarted": "Importación iniciada: el tiempo de ejecución local se está reiniciando y esta página se reconectará en breve.",
+      "migrationDone": "Datos antiguos importados. El tiempo de ejecución local se está reiniciando.",
+      "migrationFailed": "Error al importar: {detail}",
+      "migrationPhase": "Progreso: {phase}"
     },
     "keyboard": {
       "title": "Teclado",
@@ -651,6 +724,35 @@
       "offSurfacesError": "off muestra el error original del proveedor.",
       "audioEnvVar": "Variable de entorno que se lee para el acceso al proveedor de audio.",
       "remoteEmbeddingKey": "Clave API de embedding remoto o referencia de entorno."
+    },
+    "memoryLearning": {
+      "groupTitle": "Memoria y autoaprendizaje",
+      "dreamLabel": "Consolidación de memoria (dream)",
+      "tokenBadge": "consumo de tokens",
+      "dreamDesc": "Ejecuta periódicamente una pasada del modelo para consolidar la memoria de sesión (cada 24 h). El autoaprendizaje del enrutamiento de modelos depende de estas ventanas de inactividad para entrenar.",
+      "selfLearningLabel": "Autoaprendizaje del enrutamiento de modelos",
+      "selfLearningDesc": "Aprende preferencias de enrutamiento a partir de tus correcciones. Totalmente local: almacena vectores de características, nunca el texto de las conversaciones.",
+      "depDefault": "Depende de la consolidación de memoria de arriba: activarlo aquí también la habilita; desactivar solo la consolidación mantiene la recopilación pero pausa el entrenamiento automático.",
+      "depLinked": "La consolidación de memoria se habilitó junto con esta opción. Puedes desactivarla por separado: el autoaprendizaje sigue recopilando, solo se pausa el entrenamiento automático.",
+      "depPaused": "La consolidación de memoria está desactivada: las muestras se siguen recopilando, pero no hay entrenamiento automático. Reactívala para reanudarlo.",
+      "restartRequired": "Se necesita reiniciar la pasarela para aplicar el cambio de programación.",
+      "statusModel": "Modelo de enrutamiento",
+      "statusSamples": "Correcciones",
+      "statusLastAction": "Última acción",
+      "modelBaseline": "Línea base de fábrica",
+      "modelLearned": "Versión aprendida v{version}",
+      "samplesTotal": "{total} recopiladas en total",
+      "gatePausedDream": "Entrenamiento en pausa: esperando a que se reactive la consolidación de memoria",
+      "gateReason": {
+        "ready": "Listo: entrenará en la próxima ventana",
+        "disabled": "Desactivado",
+        "no_data": "Aún no hay muestras recopiladas",
+        "agent_active": "Esperando una ventana de inactividad",
+        "cooldown": "En enfriamiento tras un entrenamiento reciente",
+        "insufficient_data": "Sin entrenar: correcciones insuficientes",
+        "insufficient_class_diversity": "Sin entrenar: las correcciones cubren muy pocos niveles de enrutamiento"
+      },
+      "detachedNote": "Los pesos base del enrutamiento se han actualizado. El aprendizaje construido sobre los pesos antiguos se archivó; tus correcciones no se ven afectadas y se reentrenarán automáticamente con los nuevos pesos. No se requiere ninguna acción."
     }
   },
   "sessions": {
@@ -697,6 +799,8 @@
       "timeout": "Tiempo agotado",
       "interrupted": "Interrumpida",
       "cancelled": "Cancelada",
+      "outputInterrupted": "Salida interrumpida",
+      "stoppedAfterSeconds": "Detenido tras {seconds} s",
       "idle": "Inactiva"
     },
     "relTime": {
@@ -779,6 +883,7 @@
       "abortFailed": "Error al abortar."
     },
     "overview": {
+      "title": "Resumen",
       "subtitle": "Estado en vivo, sesiones recientes y el flujo de eventos.",
       "openChat": "Abrir chat",
       "totalTokens": "Total de tokens",
@@ -805,6 +910,7 @@
       "loadingHealth": "Cargando informe de estado",
       "noFindings": "No se devolvieron hallazgos.",
       "recoveryRestart": "La recuperación requiere reiniciar",
+      "openSettings": "Abrir ajustes",
       "findingFallback": "Hallazgo {n}",
       "copyCommand": "Copiar comando",
       "step": "Paso",
@@ -891,7 +997,15 @@
         "runLocalDoctorDetail": "Comprueba la configuración local y la incorporación antes de reiniciar la puerta de enlace.",
         "startLocal": "Iniciar puerta de enlace local",
         "inspectLocal": "Inspeccionar puerta de enlace local"
-      }
+      },
+      "checkedAgo": "Comprobado {time}",
+      "rerunChecks": "Volver a comprobar",
+      "copyDiagnostics": "Copiar el JSON de diagnóstico",
+      "copiedDiagnostics": "JSON de diagnóstico copiado",
+      "diagnoseWithAgent": "Diagnosticar con el agente",
+      "diagnosePrompt": "Diagnostica esta configuración de OpenSquilla usando el informe de doctor a continuación; propón la causa raíz y los pasos mínimos de corrección; no ejecutes comandos destructivos.",
+      "environment": "Entorno",
+      "latency": "Latencia"
     }
   },
   "console": {
@@ -905,7 +1019,7 @@
       "title": "Agentes",
       "subtitle": "Personalidades y conjuntos de habilidades personalizados con los que puedes chatear.",
       "settingsHint": "Los valores predeterminados de proveedor y modelo están en Ajustes",
-      "openSettings": "abrir ajustes",
+      "openSettings": "Abrir ajustes",
       "totalAgents": "Total de agentes",
       "builtinCount": "{n} integrados",
       "customCount": "{n} personalizados",
@@ -971,7 +1085,7 @@
       "title": "Canales",
       "subtitle": "Estado del tiempo de ejecución de los canales configurados. Añade o cambia la configuración de canales en Ajustes o en la CLI.",
       "settingsHint": "La configuración de los canales está en Ajustes",
-      "openSettings": "abrir ajustes",
+      "openSettings": "Abrir ajustes",
       "totalChannels": "Total de canales",
       "typeCount": "{n} tipos",
       "connected": "Conectado",
@@ -998,40 +1112,6 @@
       "hintRestarting": "El adaptador se está reiniciando tras errores de despacho.",
       "hintExhausted": "El adaptador agotó su presupuesto de reintentos. Prueba `{cmd}`.",
       "hintConfiguredInactive": "Configurado en disco pero no activo en este proceso de la puerta de enlace; reinicia la puerta de enlace para cargarlo."
-    },
-    "approvals": {
-      "eyebrow": "Control · Aprobaciones",
-      "title": "Aprobaciones",
-      "subtitle": "Compuerta de ejecución de herramientas: mantén las acciones arriesgadas en pausa hasta que des la orden.",
-      "pending": "Pendientes",
-      "awaitingDecision": "a la espera de decisión",
-      "allClear": "todo en orden",
-      "strategy": "Estrategia",
-      "strategyTitle": "Cómo se gestionan las aprobaciones",
-      "strategyAriaLabel": "Estrategia de aprobación",
-      "modePromptLabel": "Preguntar siempre",
-      "modePromptDesc": "Cada ejecución de herramienta arriesgada abre una solicitud de aprobación.",
-      "modeAutoApproveLabel": "Aprobar automáticamente",
-      "modeAutoApproveDesc": "Todas las ejecuciones de herramientas se aprueban automáticamente.",
-      "modeAutoDenyLabel": "Denegar automáticamente",
-      "modeAutoDenyDesc": "Todas las ejecuciones de herramientas se deniegan automáticamente.",
-      "emptyTitle": "No hay aprobaciones pendientes.",
-      "emptyText": "Cuando un agente llegue a una llamada de herramienta arriesgada, aparecerá aquí para tu visto bueno.",
-      "pendingRequests": "Solicitudes pendientes",
-      "agent": "Agente",
-      "session": "Sesión",
-      "command": "Comando",
-      "details": "Detalles",
-      "unknownTool": "Desconocida",
-      "approveOnce": "Aprobar una vez",
-      "allowSameType": "Permitir el mismo tipo",
-      "deny": "Denegar",
-      "loadFailed": "No se pudieron cargar las aprobaciones: {msg}",
-      "approved": "Aprobada",
-      "denied": "Denegada",
-      "toastFailed": "Error: {msg}",
-      "toastStrategy": "Estrategia de aprobación: {mode}",
-      "toastStrategyFailed": "No se pudo guardar la estrategia: {msg}"
     }
   },
   "cronSkills": {
@@ -1379,6 +1459,8 @@
       "installVia": "Instalar mediante {kind}",
       "installing": "Instalando...",
       "homepage": "Página de inicio",
+      "loadingContent": "Cargando SKILL.md...",
+      "emptyContent": "No hay contenido de SKILL.md disponible.",
       "removing": "Eliminando...",
       "remove": "Eliminar"
     },
@@ -1561,7 +1643,8 @@
         "label": "Efímera",
         "tooltip": "Sesión efímera: el coste aún no se ha persistido",
         "short": "efímera"
-      }
+      },
+      "cacheBlindHint": "Incluye estimaciones que valoran los tokens en caché a la tarifa de entrada completa — considérelo un límite superior."
     },
     "relTime": {
       "justNow": "ahora mismo",
@@ -1576,26 +1659,27 @@
     "logs": {
       "eyebrow": "Control · Registros",
       "title": "Registros",
-      "subtitle": "Flujo de registros en vivo de la puerta de enlace: filtra, sigue y exporta.",
+      "subtitle": "Flujo de registros en vivo de la puerta de enlace: filtra y sigue.",
       "statusUnavailable": "Estado de los registros no disponible",
       "statusUnavailableAria": "Estado de los registros no disponible; el seguimiento de registros aún puede funcionar.",
       "statusUnavailableTitle": "logs.status no está disponible; el seguimiento de registros aún puede funcionar.",
       "fileLogOn": "Registro en archivo activado",
       "fileLogOff": "Registro en archivo desactivado",
-      "fileLogAriaOn": "Registro en archivo activado. Ruta: {path}. Configurable mediante log_file_enabled, log_level, rotation y OPENSQUILLA_LOG_DIR.",
-      "fileLogAriaOff": "Registro en archivo desactivado. Ruta: {path}. Configurable mediante log_file_enabled, log_level, rotation y OPENSQUILLA_LOG_DIR.",
       "fileLogTitle": "El registro en archivo de la puerta de enlace es configurable mediante log_file_enabled, log_level, los ajustes de rotation y OPENSQUILLA_LOG_DIR. Ruta: {path}.",
-      "rawOn": "Captura cruda de llamadas de turno activada",
-      "rawOff": "Captura cruda de llamadas de turno desactivada",
-      "rawAriaOn": "Captura cruda de llamadas de turno activada. Origen: {source}. Directorio: {path}. Actívala con OPENSQUILLA_TURN_CALL_LOG=1.",
-      "rawAriaOff": "Captura cruda de llamadas de turno desactivada. Origen: {source}. Directorio: {path}. Actívala con OPENSQUILLA_TURN_CALL_LOG=1.",
-      "rawTitle": "La captura cruda de llamadas de turno se activa con OPENSQUILLA_TURN_CALL_LOG=1 o con opensquilla diagnostics on --raw. Origen: {source}. Directorio: {path}.",
-      "diagnosticsCopyRaw": "El modo de diagnóstico crudo está activo para los turnos futuros. Origen crudo: {source}.",
-      "diagnosticsCopyStandard": "Los diagnósticos estándar y la captura cruda son niveles distintos. Usa opensquilla diagnostics on --raw para la captura cruda de llamadas de turno.",
-      "diagnosticsRaw": "Diagnósticos crudos",
-      "diagnosticsStandard": "Diagnósticos estándar",
-      "diagnosticsOff": "Diagnósticos desactivados",
-      "exportTitle": "Descargar las líneas de registro filtradas",
+      "fileLogOffTitle": "Los registros no se escriben en disco; los paquetes de diagnóstico carecerán de historial. Activa log_file_enabled en la configuración. Ruta: {path}.",
+      "rawOn": "Captura cruda activada",
+      "rawOff": "Captura cruda desactivada",
+      "rawRecordingPill": "Captura cruda grabando",
+      "rawTitle": "La captura cruda registra las solicitudes y respuestas completas del modelo, incluido el contenido de la conversación. Actívala con OPENSQUILLA_TURN_CALL_LOG=1 o con opensquilla diagnostics on --raw; desactívala con opensquilla diagnostics off. Origen: {source}. Directorio: {path}.",
+      "bundleButton": "Paquete de diagnóstico",
+      "bundleButtonTitle": "Descargar un paquete de diagnóstico depurado",
+      "bundleTitle": "Descargar paquete de diagnóstico",
+      "bundleBody": "Reúne los registros de la puerta de enlace, los registros de errores y la configuración depurada en un único zip que puedes adjuntar a un informe de errores. Los secretos y las claves de API se eliminan; el contenido de las conversaciones queda excluido salvo que lo actives abajo.",
+      "bundleIncludeContent": "Incluir el contenido de las conversaciones (prompts y respuestas)",
+      "bundleConfirm": "Descargar",
+      "bundleCancel": "Cancelar",
+      "bundleFailed": "Error al descargar el diagnóstico",
+      "bundleReady": "Paquete de diagnóstico descargado",
       "inView": "En vista",
       "ofLoaded": "de {total} cargadas",
       "errors": "Errores",
@@ -1611,7 +1695,8 @@
       "autoFollow": "Seguimiento automático",
       "loading": "Cargando registros…",
       "noMatch": "Ninguna línea coincide con el filtro actual.",
-      "lineDetail": "Detalle de la línea de registro"
+      "lineDetail": "Detalle de la línea de registro",
+      "ofLoadedFoot": "{visible} visibles · {total} en búfer"
     }
   },
   "chat": {
@@ -1628,7 +1713,7 @@
     "removeAttachment": "Quitar adjunto",
     "remove": "Quitar",
     "attachFiles": "Adjuntar archivos",
-    "attachFilesTitle": "Adjuntar archivos: PNG, JPEG, GIF, WEBP, PDF, TXT, MD, HTML, CSV, JSON",
+    "attachFilesTitle": "Adjuntar archivos: cualquier tipo de archivo (imágenes, PDF, Office y texto se leen directamente; los demás van al espacio de trabajo del agente)",
     "dropOverlayTitle": "Suelta para adjuntar",
     "dropOverlayHint": "Los archivos se añadirán al redactor",
     "composerSettings": "Ajustes del redactor",
@@ -1918,6 +2003,12 @@
       "stillWaiting": "Aún esperando al modelo",
       "stillWorking": "Aún trabajando — última señal hace {seconds} s"
     },
+    "stall": {
+      "title": "La respuesta puede haberse estancado",
+      "detail": "Sin salida nueva desde hace {seconds} s — puede que el modelo se haya atascado.",
+      "keepWaiting": "Seguir esperando",
+      "interrupt": "Interrumpir el turno"
+    },
     "msgMeta": {
       "ensembleModels": "Conjunto · {count} modelos",
       "tokens": "tokens",
@@ -1932,6 +2023,14 @@
     },
     "modelRouting": {
       "updateFailed": "No se pudo cambiar el enrutamiento de modelos — revertido. Comprueba la conexión con la pasarela e inténtalo de nuevo."
+    },
+    "routeFeedback": {
+      "up": "Buena elección de modelo para este turno",
+      "down": "Mala elección de modelo para este turno",
+      "upEnsemble": "Satisfecho con esta respuesta agregada",
+      "downEnsemble": "Insatisfecho con esta respuesta agregada",
+      "expired": "El registro de enrutamiento de este mensaje ha caducado",
+      "failed": "No se pudo registrar tu valoración"
     }
   },
   "shared": {
@@ -1951,7 +2050,9 @@
       "groupMessages": "Mensajes",
       "actionNewChat": "Nuevo chat",
       "actionOpenSettings": "Abrir Ajustes",
-      "actionToggleTheme": "Cambiar tema"
+      "actionToggleTheme": "Cambiar tema",
+      "actionBgmEnable": "Activar música de fondo",
+      "actionBgmDisable": "Desactivar música de fondo"
     },
     "toast": {
       "dismiss": "Descartar notificación"
@@ -2009,6 +2110,16 @@
       "hint": "La puerta de enlace aún no está lista para ejecutarse.",
       "finishSetup": "Finalizar configuración",
       "viewReadiness": "Ver preparación"
+    },
+    "legacyDataBanner": {
+      "ariaLabel": "Se encontraron datos antiguos de OpenSquilla",
+      "title": "Se encontraron datos antiguos de OpenSquilla",
+      "dismiss": "Descartar",
+      "dismissNotice": "Descartar el aviso de datos antiguos",
+      "hintWeb": "Detén la puerta de enlace y luego ejecuta este comando para importarlos:",
+      "hintDesktop": "Impórtalos desde Ajustes → Tiempo de ejecución con la acción «Importar datos antiguos».",
+      "openSettings": "Abrir los ajustes del tiempo de ejecución",
+      "copyCommand": "Copiar el comando de migración"
     },
     "shortcuts": {
       "commandPalette": {

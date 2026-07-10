@@ -39,11 +39,11 @@ on-device embeddings round out a single shared turn loop.
 Every entry point — Web UI, CLI, and chat channels — runs through that
 same loop, so tool dispatch, retries, and decision logging behave
 identically everywhere. A pluggable provider layer speaks to
-OpenRouter, OpenAI, Anthropic, Ollama, DeepSeek, Gemini, Qwen/DashScope,
-and 20+ other LLM providers with no change to your code or config
+TokenRhythm, OpenRouter, OpenAI, Anthropic, Ollama, DeepSeek, Gemini,
+Qwen/DashScope, and 20+ other LLM providers with no change to your code or config
 schema.
 
-OpenSquilla 0.5.0 Preview 2 is the current preview release.
+OpenSquilla 0.5.0 Preview 3 is the current preview release.
 
 For task-oriented product documentation, start with the
 [OpenSquilla Product Guide](README.product.md) or the
@@ -63,9 +63,9 @@ Develop from source — build **from a Git checkout** (`git clone` + Git LFS).
 Release install commands use published GitHub release assets. Python wheel installs use versioned wheel filenames because installers validate the version
 embedded in the wheel filename.
 
-For 0.5.0 Preview 2 desktop use, prefer the packaged desktop installers from
-the GitHub Release: `OpenSquilla-0.5.0-rc2-mac-arm64.dmg` on macOS and
-`OpenSquilla-0.5.0-rc2-win-x64.exe` on Windows.
+For 0.5.0 Preview 3 desktop use, prefer the packaged desktop installers from
+the GitHub Release: `OpenSquilla-0.5.0-rc3-mac-arm64.dmg` on macOS and
+`OpenSquilla-0.5.0-rc3-win-x64.exe` on Windows.
 
 | Path | Audience | When to use |
 | --- | --- | --- |
@@ -109,11 +109,11 @@ Install links: [Git](https://git-scm.com/downloads) ·
 
 ### Desktop installers
 
-The 0.5.0 Preview 2 desktop installers package the Vue control console and
+The 0.5.0 Preview 3 desktop installers package the Vue control console and
 gateway runtime in an Electron shell.
 
-- macOS Apple Silicon: <https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc2/OpenSquilla-0.5.0-rc2-mac-arm64.dmg>
-- Windows x64: <https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc2/OpenSquilla-0.5.0-rc2-win-x64.exe>
+- macOS Apple Silicon: <https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc3/OpenSquilla-0.5.0-rc3-mac-arm64.dmg>
+- Windows x64: <https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc3/OpenSquilla-0.5.0-rc3-win-x64.exe>
 
 Quit any running OpenSquilla desktop app before upgrading. On macOS, drag the
 app from the DMG into Applications for installation or updates, eject the DMG,
@@ -155,7 +155,7 @@ $env:Path = "$env:USERPROFILE\.local\bin;" + $env:Path
 **2. Install OpenSquilla** — the same command on every platform.
 
 ```sh
-uv tool install --python 3.12 "opensquilla[recommended] @ https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc2/opensquilla-0.5.0rc2-py3-none-any.whl"
+uv tool install --python 3.12 "opensquilla[recommended] @ https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc3/opensquilla-0.5.0rc3-py3-none-any.whl"
 ```
 
 This installs the OpenSquilla wheel from the release URL, then lets
@@ -179,7 +179,7 @@ opensquilla gateway run
 > a new terminal, or re-run the PATH line from step 1.
 
 For a fully pinned install, use the versioned wheel URL:
-`https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc2/opensquilla-0.5.0rc2-py3-none-any.whl`.
+`https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc3/opensquilla-0.5.0rc3-py3-none-any.whl`.
 
 ### Install from source
 
@@ -215,8 +215,10 @@ modify the code.
    The script installs `.[recommended]` (SquillaRouter + memory + local
    models) into a dedicated user environment via `uv tool install`,
    falling back to `python -m pip install --user` when `uv` is
-   unavailable. Open a new terminal if `opensquilla` is not on `PATH`
-   after install.
+   unavailable. If `opensquilla` is not on `PATH` after install (common
+   on a fresh host where `~/.local/bin` is not yet on `PATH`), run
+   `uv tool update-shell` and open a new terminal; see
+   [Troubleshooting](#troubleshooting) for details.
 
 3. **(optional) Install advanced extras.** Most channels — Feishu,
    Telegram, DingTalk, QQ, WeCom, Slack, and Discord — work from the
@@ -567,8 +569,19 @@ to allow inbound TCP on that port. Do not expose the gateway with
 
 **Docker**
 
-The compose path runs an `opensquilla:local` image you build yourself.
-Build it from a source checkout with the Git LFS router assets pulled
+Prebuilt multi-arch images (`amd64`/`arm64`) are published to
+`ghcr.io/opensquilla/opensquilla` on release tags. Preview 3 is published as
+both `v0.5.0rc3` and the moving `latest` tag —
+[`docs/docker.md`](docs/docker.md) is the full container guide
+(home servers and NAS, LAN exposure with token auth, upgrades):
+
+```sh
+OPENSQUILLA_GATEWAY_IMAGE=ghcr.io/opensquilla/opensquilla:latest docker compose up -d
+```
+
+Without `OPENSQUILLA_GATEWAY_IMAGE`, the compose path runs an
+`opensquilla:local` image you build yourself. Build it from a source
+checkout with the Git LFS router assets pulled
 (see [Install from source](#install-from-source) for the clone and
 `git lfs pull`):
 
@@ -587,26 +600,30 @@ settings live in `opensquilla.toml.example`.
 
 ---
 
-## What's New in 0.5.0 Preview 2
+## What's New in 0.5.0 Preview 3
 
-OpenSquilla 0.5.0 Preview 2 is a preview release for the new routing and
-desktop/runtime line:
+OpenSquilla 0.5.0 Preview 3 is a broad preview update for migration, routing,
+desktop, runtime, and deployment:
 
-- **Model Ensemble and smarter routing** - fresh installs stay on the
-  single-model `squilla_router` path, while users who turn on ensemble mode get
-  the static OpenRouter B5 profile by default.
-- **Provider and migration recovery** - provider/router setup, custom provider
-  handling, migration persistence, and onboarding status contracts are steadier.
-- **Desktop and Control UI polish** - local HTML artifact opening, desktop
-  reopen behavior, session cleanup, attachment isolation, composer drafts, and
-  ensemble progress display are more reliable.
-- **Web UI uploads and CI contracts** - staged uploads refresh expired file UUIDs
-  before send, and Preview 2 repairs the main CI contract drift found after
-  Preview 1.
-- **Simplified release assets** - 0.5 preview releases publish Electron desktop installers and the Python wheel only.
+- **Legacy-home migration** - detect and transactionally import older CLI,
+  desktop, portable, relocated, restored, and Docker-volume homes.
+- **Providers and routing** - support expands across TokenRhythm, Tencent
+  TokenHub and Token Plan, and IQS, with live model discovery, probe and context
+  diagnostics, verified coding presets, richer ensemble configuration, and an
+  opt-in router self-learning loop.
+- **Desktop, terminal, and Control UI** - improved updater behavior, onboarding,
+  terminal interaction, diagnostics, themes, attachments, chat navigation, and
+  desktop platform integration.
+- **Runtime and safety hardening** - stronger persistence, MCP, session, tool,
+  sandbox, secret-redaction, same-origin, and provider retry contracts.
+- **Container images** - prebuilt `linux/amd64` and `linux/arm64` gateway images
+  are published as `v0.5.0rc3` and `latest` on GHCR.
+- **Simplified release assets** - 0.5 previews publish Electron installers,
+  updater metadata, the versioned Python wheel, and checksums; Windows portable
+  archives remain retired.
 
 Full notes: [`CHANGELOG.md`](CHANGELOG.md) ·
-[`docs/releases/0.5.0rc2.md`](docs/releases/0.5.0rc2.md).
+[`docs/releases/0.5.0rc3.md`](docs/releases/0.5.0rc3.md).
 
 ## What's New in 0.2.1
 
@@ -666,11 +683,11 @@ Full notes: [`CHANGELOG.md`](CHANGELOG.md) ·
 | --- | --- |
 | **Token-efficient routing** | `SquillaRouter` — a local LightGBM + ONNX classifier in the `recommended` extra — scores each turn on length, language, code, keywords, and semantic embeddings, then routes it across four tiers (C0–C3; legacy T0–T3 names are aliases) to the cheapest capable model. Classification runs on-device; your prompt never leaves the machine to make that decision. |
 | **Adaptive reasoning and prompts** | OpenSquilla requests extended reasoning only for turns the router scores as complex, and the system prompt scales with task complexity — lightweight for trivial turns, full instructions for complex ones. |
-| **20+ LLM providers** | The provider registry targets 20+ LLM backends — OpenRouter, OpenAI, Anthropic, Ollama, DeepSeek, Gemini, DashScope/Qwen, Moonshot, Mistral, Groq, Zhipu, SiliconFlow, vLLM, LM Studio, and more, with primary-plus-fallback selection; first-run onboarding exposes the verified subset. |
+| **20+ LLM providers** | The provider registry targets 20+ LLM backends — TokenRhythm, OpenRouter, OpenAI, Anthropic, Ollama, DeepSeek, Gemini, DashScope/Qwen, Moonshot, Mistral, Groq, Zhipu, SiliconFlow, vLLM, LM Studio, and more, with primary-plus-fallback selection; first-run onboarding exposes the verified subset. |
 | **On-demand skills and MCP** | 15 bundled skills (coding, GitHub, cron, pptx/docx/xlsx/pdf, summarization, tmux, weather, and more) load only when the task needs them. OpenSquilla is an MCP client, and can also run as an MCP server — `opensquilla mcp-server run` needs the `mcp` extra (install `opensquilla[recommended,mcp]`). Skills can be authored, installed, and published from the CLI. |
 | **Persistent local memory** | A curated `MEMORY.md` plus dated Markdown notes, searched with SQLite full-text keyword search and `sqlite-vec` semantic recall. Embeddings run on-device via bundled ONNX, or swap to OpenAI/Ollama. Optional exponential decay and opt-in "dream" consolidation are available. |
 | **Layered security sandbox** | Three policy tiers (Standard / Strict / Locked) on a permission matrix. Bubblewrap isolates code execution on Linux; macOS runs commands through Seatbelt (`sandbox-exec`) with generated SBPL profiles; Windows uses the native `windows_default` backend after setup readiness checks. A denial ledger auto-pauses autonomous runs after repeated denials, rejected outputs are purged, and skill metadata and tool results are XML-escaped against prompt injection. |
-| **Built-in tools** | File read/write/edit, shell and background processes, git, web search (DuckDuckGo, Bocha, Brave, Tavily, or Exa) and fetch behind an SSRF guard, spreadsheet/PPTX/PDF authoring, image generation, and text-to-speech. |
+| **Built-in tools** | File read/write/edit, shell and background processes, git, web search (DuckDuckGo, Bocha, Brave, IQS, Tavily, or Exa) and fetch behind an SSRF guard, spreadsheet/PPTX/PDF authoring, image generation, and text-to-speech. |
 | **Unified gateway** | A Starlette ASGI server on `127.0.0.1:18791` with WebSocket RPC and an embedded control console (`/control/`). Web UI, CLI, and channels for Terminal, WebSocket, Slack, Telegram, Discord, Feishu, DingTalk, WeCom, Matrix, and QQ all share one `TurnRunner`. |
 | **Durable sessions, subagents, and scheduling** | SQLite-backed session, transcript, and replay storage with per-agent workspaces. Agents spawn depth-bounded subagents, and a `SchedulerEngine` with an in-tree cron parser runs recurring jobs via `opensquilla cron`. |
 | **Operator controls** | Human-in-the-loop approvals can pause sensitive tool calls for a decision; per-turn and per-session token and cost rollups (`opensquilla cost`) and diagnostics are available from the CLI and Web UI. |

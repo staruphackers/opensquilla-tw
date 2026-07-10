@@ -23,7 +23,7 @@ def test_deepseek_provider_profile_enables_deepseek_reasoning_format() -> None:
 
 def test_gemini_reasoning_model_uses_gemini_reasoning_format() -> None:
     caps = ModelCatalog().get_capabilities(
-        "gemini-2.5-flash",
+        "gemini-3.5-flash",
         provider_name="gemini",
         base_url="https://generativelanguage.googleapis.com/v1beta/openai",
     )
@@ -50,7 +50,7 @@ def test_direct_openai_gpt_5_models_use_openai_reasoning_effort_format() -> None
 def test_zai_glm5_models_use_zai_reasoning_format() -> None:
     catalog = ModelCatalog()
 
-    for model in ("glm-4.7-flashx", "glm-5", "glm-5.1"):
+    for model in ("glm-5-turbo", "glm-5", "glm-5.1", "glm-5.2"):
         caps = catalog.get_capabilities(
             model,
             provider_name="zhipu",
@@ -65,7 +65,7 @@ def test_zai_glm5_models_use_zai_reasoning_format() -> None:
 def test_dashscope_qwen_thinking_models_use_dashscope_reasoning_format() -> None:
     catalog = ModelCatalog()
 
-    for model in ("qwen3.6-flash", "qwen3.6-plus", "qwen3-max"):
+    for model in ("qwen3.6-flash", "qwen3.7-plus", "qwen3.7-max"):
         caps = catalog.get_capabilities(
             model,
             provider_name="dashscope",
@@ -81,7 +81,7 @@ def test_moonshot_distinguishes_kimi_thinking_from_moonshot_v1() -> None:
     catalog = ModelCatalog()
 
     kimi_caps = catalog.get_capabilities(
-        "kimi-k2.5",
+        "kimi-k2.7-code",
         provider_name="moonshot",
         base_url="https://api.moonshot.cn/v1",
     )
@@ -200,6 +200,18 @@ def test_openrouter_context_capability_profile_centralizes_prompt_cache_decision
     assert zai.prompt_cache == PromptCacheSupport.IMPLICIT
     assert zai.supports_cache_breakpoints is False
     assert zai.native_compaction == NativeCompactionSupport.NONE
+
+
+def test_openrouter_qwen_context_capability_uses_explicit_prompt_cache() -> None:
+    for model in ("qwen/qwen3.6-flash", "qwen3.6-flash"):
+        caps = provider_context_capabilities(
+            provider_kind="openrouter",
+            model=model,
+        )
+
+        assert caps.prompt_cache == PromptCacheSupport.EXPLICIT
+        assert caps.supports_cache_breakpoints is True
+        assert caps.native_compaction == NativeCompactionSupport.NONE
 
 
 def test_anthropic_context_capability_does_not_claim_native_compaction() -> None:

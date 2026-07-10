@@ -64,7 +64,7 @@ from opensquilla.gateway.config import effective_agent_stream_idle_timeout_secon
 from opensquilla.gateway.session_events import build_sessions_changed_payload
 from opensquilla.paths import media_root_from_config
 from opensquilla.permissions import configured_default_elevated
-from opensquilla.session.terminal_reply import build_terminal_reply
+from opensquilla.session.terminal_reply import append_error_ref, build_terminal_reply
 
 if TYPE_CHECKING:
     from opensquilla.gateway.event_bridge import EventBridge
@@ -433,7 +433,9 @@ async def run_channel_dispatch(
             principal_is_owner=_is_channel_admin_sender(config, route_envelope),
         )
 
-        ingested = await _ingest_channel_message_attachments(channel=channel, msg=msg)
+        ingested = await _ingest_channel_message_attachments(
+            channel=channel, msg=msg, config=config
+        )
 
         async with _maybe_lock(session_lock):
             await _record_delivery_context(
@@ -836,7 +838,7 @@ async def _dispatch_combined_message_after_debounce(channel: Any, combined: Any,
         principal_is_owner=_is_channel_admin_sender(config, route_envelope),
     )
 
-    ingested = await _ingest_channel_message_attachments(channel=channel, msg=msg)
+    ingested = await _ingest_channel_message_attachments(channel=channel, msg=msg, config=config)
 
     async with _maybe_lock(session_lock):
         await _record_delivery_context(session_manager, session_key, msg, session_prefix, route_envelope=route_envelope)  # noqa: E501
@@ -1977,16 +1979,21 @@ async def _ingest_channel_message_attachments(
     *,
     channel: Any,
     msg: IncomingMessage,
+    config: Any = None,
 ) -> AttachmentIngestResult:
     materialized = await _materialize_channel_attachments(
         channel,
         list(getattr(msg, "attachments", []) or []),
     )
+    attachments_cfg = getattr(config, "attachments", None)
+    opaque_cap = getattr(attachments_cfg, "opaque_max_bytes", None)
     result = await ingest_attachments(
         msg.content,
         materialized,
         failure_mode="mark",
         mark_bytes_as_staged=True,
+        accept_opaque=bool(getattr(attachments_cfg, "accept_opaque", True)),
+        opaque_limit_bytes=opaque_cap if isinstance(opaque_cap, int) else None,
     )
     for failure in result.failures:
         log.warning(
@@ -2333,7 +2340,10 @@ async def _run_turn_batch_path(
                 await channel.send(
                     _build_reply_message(
                         channel,
-                        build_terminal_reply(_terminal_payload_from_error_event(event)),
+                        append_error_ref(
+                            build_terminal_reply(_terminal_payload_from_error_event(event)),
+                            getattr(event, "error_id", "") or None,
+                        ),
                         msg,
                     )
                 )
@@ -2504,7 +2514,10 @@ async def _run_turn_streaming_path(
                     code=event.code,
                     message=event.message,
                 )
-                stream_error = build_terminal_reply(_terminal_payload_from_error_event(event))
+                stream_error = append_error_ref(
+                    build_terminal_reply(_terminal_payload_from_error_event(event)),
+                    getattr(event, "error_id", "") or None,
+                )
                 break
     except TimeoutError as exc:
         log.error("channel_dispatch.agent_stream_timeout", session_key=session_key)

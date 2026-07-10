@@ -138,11 +138,16 @@ def test_ensemble_never_blocks_onboarding(cfg):
 
 def test_ensemble_status_reports_candidate_provider_credentials(cfg, monkeypatch):
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
-    cfg.llm = LlmProviderConfig(
-        provider="deepseek",
-        model="deepseek-v4-flash",
-        api_key="sk-deepseek",
-        base_url="https://api.deepseek.com",
+    # Construct with the llm section so the router ladder follows the provider;
+    # a post-construction reassignment would leave the built-in default
+    # provider's ladder in place and add its provider to the credential list.
+    cfg = GatewayConfig(
+        llm={
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "api_key": "sk-deepseek",
+            "base_url": "https://api.deepseek.com",
+        }
     )
     cfg.llm_ensemble.enabled = True
     cfg.llm_ensemble.selection_mode = "router_dynamic"
@@ -497,3 +502,49 @@ def test_needs_onboarding_false_when_optional_section_unknown():
         "memory_embedding": SectionStatus.OK,
     }
     assert needs_onboarding(sections) is False
+
+
+# ── shared image-generation provider resolution ─────────────────────────────
+
+def test_image_generation_provider_resolution_has_a_single_implementation():
+    """status.py must reuse section_status's provider resolution verbatim.
+
+    The two modules once carried textually diverging copies of this ~50-line
+    helper; pin the import so any future re-fork fails loudly.
+    """
+    from opensquilla.onboarding import section_status, status
+
+    assert (
+        status._configured_image_generation_provider_ids
+        is section_status._configured_image_generation_provider_ids
+    )
+
+
+def test_default_image_generation_primary_matches_config_default():
+    from opensquilla.gateway.config import ImageGenerationConfig
+    from opensquilla.onboarding.section_status import DEFAULT_IMAGE_GENERATION_PRIMARY
+
+    assert (
+        DEFAULT_IMAGE_GENERATION_PRIMARY
+        == ImageGenerationConfig.model_fields["primary"].default
+    )
+    assert DEFAULT_IMAGE_GENERATION_PRIMARY == GatewayConfig().image_generation.primary
+
+
+def test_both_call_sites_resolve_the_same_providers(cfg, monkeypatch):
+    """Verifier and status annotations must agree on the resolved providers."""
+    from opensquilla.onboarding import section_status
+    from opensquilla.onboarding.status import get_onboarding_status
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    cfg.image_generation.enabled = True
+    cfg.image_generation.primary = "openrouter/google/gemini-3.1-flash-image-preview"
+    cfg.image_generation.providers.openrouter.api_key = "sk-dummy-image"
+
+    resolved = section_status._configured_image_generation_provider_ids(cfg)
+    s = get_onboarding_status(cfg)
+
+    assert resolved == ["openrouter"]
+    assert s.image_generation_provider == "openrouter"
+    assert image_generation_section_status(cfg) is SectionStatus.OK
+    assert s.image_generation_configured is True

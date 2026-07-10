@@ -49,22 +49,24 @@ def _catalog_with_model() -> ModelCatalog:
 
 def test_default_llm_identity_fields_report_default() -> None:
     fields = resolve_effective_llm(_config(), ModelCatalog())
-    assert fields["llm.provider"] == ResolvedField("openrouter", "default")
-    assert fields["llm.model"] == ResolvedField("deepseek/deepseek-v4-pro", "default")
-    assert fields["llm.base_url"] == ResolvedField("https://openrouter.ai/api/v1", "default")
+    assert fields["llm.provider"] == ResolvedField("tokenrhythm", "default")
+    assert fields["llm.model"] == ResolvedField("deepseek-v4-pro", "default")
+    assert fields["llm.base_url"] == ResolvedField("https://tokenrhythm.studio/v1", "default")
 
 
 def test_explicit_llm_identity_fields_report_config() -> None:
+    # The model deliberately differs from the field default: value-vs-baseline
+    # attribution cannot distinguish an explicit value that coincides with it.
     cfg = _config(
         llm=LlmProviderConfig(
             provider="deepseek",
-            model="deepseek-v4-pro",
+            model="deepseek-chat",
             base_url="https://proxy.example/v1",
         )
     )
     fields = resolve_effective_llm(cfg, ModelCatalog())
     assert fields["llm.provider"] == ResolvedField("deepseek", "config")
-    assert fields["llm.model"] == ResolvedField("deepseek-v4-pro", "config")
+    assert fields["llm.model"] == ResolvedField("deepseek-chat", "config")
     assert fields["llm.base_url"] == ResolvedField("https://proxy.example/v1", "config")
 
 
@@ -131,6 +133,33 @@ def test_catalog_source_labels_per_layer() -> None:
     assert catalog.resolve_context_window_with_source(UNKNOWN_MODEL)[1] == "default"
     # Local runtimes report their own default window — still a default layer.
     assert catalog.resolve_context_window_with_source(UNKNOWN_MODEL, "ollama")[1] == "default"
+    # A positive [models.*] override is its own top layer.
+    catalog.set_user_overrides({CATALOG_MODEL: {"context_window": 55_000}})
+    assert catalog.resolve_context_window_with_source(CATALOG_MODEL) == (55_000, "override")
+
+
+def test_context_window_model_override_reports_config() -> None:
+    # The [models.*] per-model override is operator config; the provenance
+    # vocabulary maps the catalog's "override" label to "config".
+    cfg = _config(llm=LlmProviderConfig(model=CATALOG_MODEL))
+    catalog = _catalog_with_model()
+    catalog.set_user_overrides({CATALOG_MODEL: {"context_window": 55_000}})
+    fields = resolve_effective_llm(cfg, catalog)
+    assert fields["llm.context_window"] == ResolvedField(55_000, "config")
+
+
+def test_context_window_global_config_beats_catalog_reports_config() -> None:
+    cfg = _config(llm=LlmProviderConfig(model=CATALOG_MODEL, context_window_tokens=99_000))
+    fields = resolve_effective_llm(cfg, _catalog_with_model())
+    assert fields["llm.context_window"] == ResolvedField(99_000, "config")
+
+
+def test_context_window_model_override_beats_global_config() -> None:
+    cfg = _config(llm=LlmProviderConfig(model=CATALOG_MODEL, context_window_tokens=99_000))
+    catalog = _catalog_with_model()
+    catalog.set_user_overrides({CATALOG_MODEL: {"context_window": 55_000}})
+    fields = resolve_effective_llm(cfg, catalog)
+    assert fields["llm.context_window"] == ResolvedField(55_000, "config")
 
 
 # --- squilla_router.tiers.* (preset vs config) -------------------------------

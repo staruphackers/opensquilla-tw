@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -108,3 +111,41 @@ async def test_knowledge_search_tool_merges_collection_and_retrieval_filters() -
             },
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_knowledge_tools_use_live_config_and_offload_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from opensquilla.tools.builtin import knowledge_tools as knowledge_tools_module
+
+    class StatusBackend:
+        def __init__(self, endpoint: str) -> None:
+            self.endpoint = endpoint
+
+        def status(self) -> dict[str, object]:
+            if self.endpoint == "first":
+                time.sleep(0.35)
+            return {"ok": True, "endpoint": self.endpoint}
+
+    config = SimpleNamespace(endpoint="first")
+    monkeypatch.setattr(
+        knowledge_tools_module,
+        "manager_from_config",
+        lambda live_config: StatusBackend(live_config.endpoint),
+    )
+    registry = ToolRegistry()
+    create_knowledge_tools(config=config, registry=registry)
+    status_tool = registry.get("knowledge_status")
+    assert status_tool is not None
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    request = asyncio.create_task(status_tool.handler())
+    await asyncio.sleep(0.01)
+
+    assert loop.time() - started < 0.2
+    assert json.loads(await request)["endpoint"] == "first"
+
+    config.endpoint = "second"
+    assert json.loads(await status_tool.handler())["endpoint"] == "second"

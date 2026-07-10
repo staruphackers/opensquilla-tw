@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 
 from opensquilla.provider.preset_registry import (
+    CURATED_INLINE_PRESET_IDS,
     LEGACY_PROVIDER_PRESET_IDS,
     ProviderPreset,
     get_preset,
@@ -35,6 +36,22 @@ LEGACY_NINE = frozenset(
     }
 )
 TEXT_TIERS = ("c0", "c1", "c2", "c3")
+CURATED_SYNTHETIC_PRESET_IDS = frozenset(
+    {
+        "qianfan",
+        "minimax",
+        "minimax_cn",
+        "minimax_global",
+        "minimax_openai",
+        "minimax_coding_openai",
+        "minimax_coding_anthropic",
+        "kimi_coding_openai",
+        "kimi_coding_anthropic",
+        "mimo_openai",
+        "mimo_anthropic",
+        "volcengine_coding_plan",
+    }
+)
 
 
 def _golden() -> dict[str, dict]:
@@ -49,10 +66,20 @@ def test_legacy_profile_ids_equal_the_literal_nine() -> None:
     assert LEGACY_PROVIDER_PRESET_IDS == LEGACY_NINE
 
 
-def test_non_synthesized_registry_ids_equal_the_literal_nine() -> None:
+def test_non_synthesized_registry_ids_equal_legacy_plus_curated() -> None:
     packaged = list_presets(include_synthesized=False)
-    assert frozenset(p.preset_id for p in packaged) == LEGACY_NINE
+    assert frozenset(p.preset_id for p in packaged) == LEGACY_NINE | CURATED_INLINE_PRESET_IDS
     assert all(not p.synthesized for p in packaged)
+
+
+def test_only_legacy_ids_are_persistable() -> None:
+    for preset in list_presets():
+        assert preset.persistable is (preset.preset_id in LEGACY_NINE)
+    for preset_id in sorted(CURATED_INLINE_PRESET_IDS):
+        preset = get_preset(preset_id)
+        assert preset is not None
+        assert preset.synthesized is False
+        assert preset.persistable is False
 
 
 def test_packaged_presets_match_golden_tier_data_exactly() -> None:
@@ -112,6 +139,38 @@ def test_tier_defaults_returns_fresh_copies() -> None:
     assert "extra" not in preset.tier_defaults()
 
 
+# --- curated inline presets --------------------------------------------------
+
+
+def test_tokenrhythm_curated_ladder() -> None:
+    preset = get_preset("tokenrhythm")
+    assert preset is not None
+    assert preset.synthesized is False
+    assert preset.persistable is False
+    assert preset.default_model == "deepseek-v4-pro"
+    expected_models = {
+        "c0": "deepseek-v4-flash",
+        "c1": "deepseek-v4-pro",
+        "c2": "kimi-k2.7-code",
+        "c3": "glm-5.2",
+        "image_model": "kimi-k2.6",
+    }
+    tiers = preset.tier_defaults()
+    assert set(tiers) == set(expected_models)
+    for name, model in expected_models.items():
+        assert tiers[name]["provider"] == "tokenrhythm", name
+        assert tiers[name]["model"] == model, name
+        # The endpoint rejects thinking-toggle request fields, so the curated
+        # ladder must not carry a thinking_level for the request builder.
+        assert "thinking_level" not in tiers[name], name
+    assert tiers["image_model"]["supports_image"] is True
+    assert tiers["image_model"]["image_only"] is True
+
+
+def test_curated_inline_ids_are_never_legacy_profile_ids() -> None:
+    assert not (CURATED_INLINE_PRESET_IDS & legacy_profile_ids())
+
+
 # --- synthesized presets ----------------------------------------------------
 
 
@@ -132,16 +191,102 @@ def test_synthesized_presets_bind_all_text_tiers_to_provider_default() -> None:
     assert synthesized, "expected at least one synthesized preset"
     for preset in synthesized:
         assert preset.preset_id not in LEGACY_NINE
-        # Onboarding's direct default model is empty for non-curated providers.
-        assert preset.default_model == ""
-        assert set(preset.tiers) == set(TEXT_TIERS)
-        assert "image_model" not in preset.tiers
+        if preset.preset_id in CURATED_SYNTHETIC_PRESET_IDS:
+            assert preset.default_model
+            assert set(TEXT_TIERS).issubset(preset.tiers)
+        else:
+            # Onboarding's direct default model is empty for non-curated providers.
+            assert preset.default_model == ""
+            assert set(preset.tiers) == set(TEXT_TIERS)
+            assert "image_model" not in preset.tiers
         for tier in TEXT_TIERS:
             entry = preset.tiers[tier]
             assert entry["provider"] == preset.provider_id
-            assert entry["model"] == preset.default_model
+            if preset.preset_id not in CURATED_SYNTHETIC_PRESET_IDS:
+                assert entry["model"] == preset.default_model
+            else:
+                assert entry["model"]
             assert entry["description"]
             assert entry["supports_image"] is False
+
+
+def test_curated_synthesized_presets_pin_live_verified_ladders() -> None:
+    expected = {
+        "qianfan": {
+            "default": "ernie-4.5-turbo-128k",
+            "tiers": {
+                "c0": "ernie-4.5-turbo-128k",
+                "c1": "ernie-4.5-turbo-128k",
+                "c2": "ernie-4.5-turbo-128k",
+                "c3": "ernie-4.5-turbo-128k",
+                "image_model": "ernie-4.5-turbo-vl-32k",
+            },
+        },
+        "minimax_openai": {
+            "default": "MiniMax-M2.7",
+            "tiers": {
+                "c0": "MiniMax-M2.7",
+                "c1": "MiniMax-M2.7",
+                "c2": "MiniMax-M3",
+                "c3": "MiniMax-M3",
+            },
+        },
+        "minimax_coding_openai": {
+            "default": "MiniMax-M2.7",
+            "tiers": {
+                "c0": "MiniMax-M2.7",
+                "c1": "MiniMax-M2.7",
+                "c2": "MiniMax-M3",
+                "c3": "MiniMax-M3",
+            },
+        },
+        "minimax_coding_anthropic": {
+            "default": "MiniMax-M2.7",
+            "tiers": {
+                "c0": "MiniMax-M2.7",
+                "c1": "MiniMax-M2.7",
+                "c2": "MiniMax-M3",
+                "c3": "MiniMax-M3",
+            },
+        },
+        "kimi_coding_openai": {
+            "default": "kimi-for-coding",
+            "tiers": {
+                "c0": "kimi-for-coding",
+                "c1": "kimi-for-coding",
+                "c2": "kimi-for-coding",
+                "c3": "kimi-for-coding",
+            },
+        },
+        "mimo_openai": {
+            "default": "mimo-v2.5",
+            "tiers": {
+                "c0": "mimo-v2.5",
+                "c1": "mimo-v2.5",
+                "c2": "mimo-v2.5-pro",
+                "c3": "mimo-v2.5-pro",
+            },
+        },
+        "volcengine_coding_plan": {
+            "default": "doubao-seed-2.0-pro",
+            "tiers": {
+                "c0": "doubao-seed-2.0-lite",
+                "c1": "doubao-seed-2.0-pro",
+                "c2": "doubao-seed-2.0-code",
+                "c3": "doubao-seed-2.0-code",
+            },
+        },
+    }
+
+    for preset_id, spec in expected.items():
+        preset = get_preset(preset_id)
+        assert preset is not None
+        assert preset.synthesized is True
+        assert preset.default_model == spec["default"]
+        assert {
+            tier: preset.tiers[tier]["model"]
+            for tier in spec["tiers"]
+        } == spec["tiers"]
 
 
 def test_synthesized_ids_are_never_legacy_profile_ids() -> None:

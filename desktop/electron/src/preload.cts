@@ -9,10 +9,12 @@ contextBridge.exposeInMainWorld('opensquillaDesktop', {
   relaunchToUpdate: () => ipcRenderer.invoke('desktop:update:relaunch'),
   dismissUpdate: () => ipcRenderer.invoke('desktop:update:dismiss'),
   getGatewayStatus: () => ipcRenderer.invoke('gateway:status'),
+  getCliInvocation: () => ipcRenderer.invoke('gateway:cli-invocation'),
   revealGatewayLog: () => ipcRenderer.invoke('gateway:reveal-log'),
   getDesktopSettings: () => ipcRenderer.invoke('desktop:settings:get'),
   saveDesktopSettings: (payload: unknown) => ipcRenderer.invoke('desktop:settings:save', payload),
   resetDesktopSettings: () => ipcRenderer.invoke('desktop:settings:reset'),
+  setNativeTheme: (payload: unknown) => ipcRenderer.invoke('desktop:theme:set', payload),
   openArtifact: (payload: unknown) => ipcRenderer.invoke('desktop:artifact:open', payload),
   getOnboardingDefaults: () => ipcRenderer.invoke('desktop:onboarding:defaults'),
   saveOnboarding: (payload: unknown) => ipcRenderer.invoke('desktop:onboarding:save', payload),
@@ -22,6 +24,11 @@ contextBridge.exposeInMainWorld('opensquillaDesktop', {
   quitApp: () => ipcRenderer.invoke('desktop:boot:quit'),
   uninstallSummary: () => ipcRenderer.invoke('desktop:uninstall:summary'),
   uninstallRun: (payload: unknown) => ipcRenderer.invoke('desktop:uninstall:run', payload),
+  migrationSummary: () => ipcRenderer.invoke('desktop:migration:summary'),
+  migrationRun: (payload: unknown) => ipcRenderer.invoke('desktop:migration:run', payload),
+  migrationTakeLastResult: () => ipcRenderer.invoke('desktop:migration:last-result'),
+  previewOnboardingMigration: () => ipcRenderer.invoke('desktop:onboarding:migrate:preview'),
+  applyOnboardingMigration: () => ipcRenderer.invoke('desktop:onboarding:migrate:apply'),
   onBootStatus: (callback: (payload: unknown) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload)
     ipcRenderer.on('desktop:boot:status', listener)
@@ -36,5 +43,10 @@ contextBridge.exposeInMainWorld('opensquillaDesktop', {
     const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload)
     ipcRenderer.on('desktop:update:state-changed', listener)
     return () => ipcRenderer.removeListener('desktop:update:state-changed', listener)
+  },
+  onMigrationProgress: (callback: (payload: unknown) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload)
+    ipcRenderer.on('desktop:migration:progress', listener)
+    return () => ipcRenderer.removeListener('desktop:migration:progress', listener)
   },
 })

@@ -20,7 +20,7 @@
     <!-- Brand -->
     <div class="sidebar-brand">
       <router-link
-        to="/sessions"
+        to="/overview"
         class="sidebar-brand-link"
         :aria-label="t('chrome.brandHome')"
         @click="handleNavClick"
@@ -85,45 +85,56 @@
       >
         <Icon :name="item.icon" :size="16" />
         <span class="sidebar-fn-label">{{ item.title }}</span>
+        <!-- Live pending-approvals count on the Sessions row: approvals resolve
+             inline in chat; the Sessions attention strip is the queue's home
+             and the topbar pill remains the interrupt affordance. -->
+        <span
+          v-if="item.path === '/sessions' && appStore.approvalCount > 0"
+          class="sidebar-count-badge"
+        >{{ appStore.approvalCount }}</span>
       </router-link>
-      <!-- Manage / Monitor bands. Option B leans the DESKTOP rail to the
-           command-palette-led essentials, so these are hidden on desktop
-           (docked + hover) via CSS and reached through the palette / deep links.
-           They stay rendered for the <=768px drawer ("More") so the secondary
-           destinations are still a tap away on mobile; routes are unchanged. -->
+      <!-- Build / Monitor bands: labeled, collapsible, remembered. The rail
+           serves two products at once — a chat client's history and a console
+           index — so the console bands yield vertical space to Recents unless
+           the operator opens them. A band holding the active route auto-expands
+           so navigation can never hide "where am I". -->
       <div class="sidebar-core__managed">
-        <template v-for="section in moreSections" :key="section.group">
-          <p class="sidebar-nav-group-label" aria-hidden="true">{{ section.label }}</p>
-          <router-link
-            v-for="route in section.items"
-            :key="route.path"
-            :to="route.path"
-            class="sidebar-fn-item"
-            :class="{ 'is-active': isNavActive(route.path) }"
-            :aria-current="isNavActive(route.path) ? 'page' : undefined"
-            @click="handleNavClick"
+        <template v-for="section in consoleSections" :key="section.group">
+          <button
+            type="button"
+            class="sidebar-nav-group-toggle"
+            :aria-expanded="!isBandCollapsed(section.group)"
+            @click="toggleBand(section.group)"
           >
-            <Icon :name="route.icon" :size="16" />
-            <span class="sidebar-fn-label">{{ route.title }}</span>
-          </router-link>
+            <span class="sidebar-nav-group-label">{{ section.label }}</span>
+            <span
+              v-if="isBandCollapsed(section.group) && bandHasActive(section)"
+              class="sidebar-band-active-dot"
+              aria-hidden="true"
+            ></span>
+            <Icon
+              name="chevronDown"
+              :size="12"
+              class="sidebar-band-chevron"
+              :class="{ 'is-collapsed': isBandCollapsed(section.group) }"
+            />
+          </button>
+          <template v-if="!isBandCollapsed(section.group)">
+            <router-link
+              v-for="route in section.items"
+              :key="route.path"
+              :to="route.path"
+              class="sidebar-fn-item"
+              :class="{ 'is-active': isNavActive(route.path) }"
+              :aria-current="isNavActive(route.path) ? 'page' : undefined"
+              @click="handleNavClick"
+            >
+              <Icon :name="route.icon" :size="16" />
+              <span class="sidebar-fn-label">{{ route.title }}</span>
+            </router-link>
+          </template>
         </template>
       </div>
-      <!-- "More": the secondary destinations (Agents / Channels / Overview /
-           Usage / Logs). Hidden on mobile, where the bands render inline. -->
-      <button
-        ref="moreTriggerRef"
-        type="button"
-        class="sidebar-fn-item sidebar-more-btn"
-        :class="{ 'is-open': moreOpen }"
-        aria-haspopup="dialog"
-        :aria-expanded="moreOpen"
-        aria-label="More"
-        @click="toggleMore"
-      >
-        <Icon name="menu" :size="16" />
-        <span class="sidebar-fn-label">{{ t('chrome.more') }}</span>
-        <Icon name="chevronDown" :size="14" class="sidebar-more-chevron" />
-      </button>
     </div>
 
     <SidebarSetupBanner />
@@ -180,35 +191,6 @@
     @select-session="onPaletteSelectSession"
   />
 
-  <!-- "More" popover: teleported to <body> so it escapes the rail's
-       overflow:hidden and dock/hover transform. -->
-  <Teleport to="body">
-    <div
-      v-if="moreOpen"
-      ref="morePopoverRef"
-      class="sidebar-more-popover"
-      :style="moreStyle"
-      role="dialog"
-      :aria-label="t('chrome.moreDestinations')"
-    >
-      <template v-for="section in moreSections" :key="section.group">
-        <p class="sidebar-nav-group-label">{{ section.label }}</p>
-        <router-link
-          v-for="route in section.items"
-          :key="route.path"
-          :to="route.path"
-          class="sidebar-fn-item"
-          :class="{ 'is-active': isNavActive(route.path) }"
-          :aria-current="isNavActive(route.path) ? 'page' : undefined"
-          @click="onMoreNavigate"
-        >
-          <Icon :name="route.icon" :size="16" />
-          <span class="sidebar-fn-label">{{ route.title }}</span>
-        </router-link>
-      </template>
-    </div>
-  </Teleport>
-
   <!-- Main content -->
   <div
     ref="mainRef"
@@ -253,6 +235,9 @@
         >{{ connectionStateLabel }}</button>
         <span v-else class="conn-pill" :class="rpcStore.state">{{ connectionStateLabel }}</span>
         <DesktopUpdateIndicator />
+        <!-- Opt-in (Settings → Appearance or the command palette); off by
+             default so the topbar stays music-free until asked for. -->
+        <BgmControl v-if="bgmEnabled" />
         <LanguageSwitcher />
         <div class="theme-menu-wrap">
           <button
@@ -277,14 +262,31 @@
               @click="pickTheme(opt.mode)"
             >
               <Icon :name="opt.icon" :size="15" />
-              <span>{{ t('chrome.themeMode.' + opt.mode) }}</span>
+              <span>{{ opt.labelKey ? t(opt.labelKey) : opt.label }}</span>
               <Icon v-if="appStore.theme === opt.mode" class="theme-menu__check" name="check" :size="14" />
+            </button>
+            <button
+              type="button"
+              class="theme-menu__item theme-menu__item--more"
+              role="menuitem"
+              :title="t('chrome.moreThemesHint')"
+              @click="openMoreThemes"
+            >
+              <Icon name="chevronRight" :size="15" />
+              <span>{{ t('chrome.moreThemes') }}</span>
+              <Icon v-if="isCustomThemeActive" class="theme-menu__check" name="check" :size="14" />
             </button>
           </div>
         </div>
       </div>
     </header>
-    <main class="content" :class="{ 'content--chat': isChatRoute }" id="content">
+    <main
+      class="content"
+      :class="{ 'content--chat': isChatRoute }"
+      :data-skin="skinId || undefined"
+      :data-skin-variant="variants || undefined"
+      id="content"
+    >
       <ErrorBoundary>
         <router-view v-slot="{ Component, route }">
           <!-- out-in: one view in the DOM at a time, so pages never overlap (no
@@ -308,7 +310,12 @@
     </main>
   </div>
 
-  <!-- Mobile bottom tab bar (<=768px only; hides while the keyboard is up) -->
+  <!-- Mobile bottom tab bar (<=768px only; hides while the keyboard is up).
+       Surfaces the primary destinations directly instead of burying them in
+       "More": Chat + Sessions (the two chat-product tabs), Overview (the Monitor
+       hub — Overview/Channels/Usage/Logs live as its tabs), Agents (the core
+       Build concept), then More for the rest (Skills / Cron / Settings) via the
+       full organized drawer. -->
   <nav
     class="mobile-tabbar"
     :class="{ 'is-keyboard-open': mobileKeyboardOpen }"
@@ -331,16 +338,25 @@
     >
       <Icon name="sessions" :size="20" />
       <span class="mobile-tab__label">{{ t('nav.sessions') }}</span>
+      <span v-if="appStore.approvalCount > 0" class="mobile-tab__badge">{{ appStore.approvalCount }}</span>
     </router-link>
     <router-link
-      to="/approvals"
+      to="/overview"
       class="mobile-tab"
-      :class="{ 'is-active': isNavActive('/approvals') }"
+      :class="{ 'is-active': isMonitorHubActive }"
       @click="handleNavClick"
     >
-      <Icon name="approvals" :size="20" />
-      <span class="mobile-tab__label">{{ t('nav.approvals') }}</span>
-      <span v-if="appStore.approvalCount > 0" class="mobile-tab__badge">{{ appStore.approvalCount }}</span>
+      <Icon name="home" :size="20" />
+      <span class="mobile-tab__label">{{ t('nav.overview') }}</span>
+    </router-link>
+    <router-link
+      to="/agents"
+      class="mobile-tab"
+      :class="{ 'is-active': isNavActive('/agents') }"
+      @click="handleNavClick"
+    >
+      <Icon name="agents" :size="20" />
+      <span class="mobile-tab__label">{{ t('nav.agents') }}</span>
     </router-link>
     <button
       type="button"
@@ -371,7 +387,6 @@ import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { routeTitle } from './router'
 import { getPlatform } from '@/platform'
-import { useDialogA11y } from '@/composables/useDialogA11y'
 import { useAppStore, type ThemeMode, type PendingApproval } from './stores/app'
 import { useRpcStore } from './stores/rpc'
 import {
@@ -391,10 +406,14 @@ import SidebarConversations from './components/SidebarConversations.vue'
 import SidebarSetupBanner from './components/SidebarSetupBanner.vue'
 import CommandPalette from './components/CommandPalette.vue'
 import LanguageSwitcher from './components/LanguageSwitcher.vue'
+import BgmControl from './components/BgmControl.vue'
+import { useBgm } from './composables/useBgm'
 import { useDocumentEvent } from './composables/useDocumentEvent'
 import { useAgentOptions } from './composables/useAgentOptions'
 import { useToasts } from './composables/useToasts'
 import { useNavigation } from './app/useNavigation'
+import { useSurfaceSkin } from './themes/useSurfaceSkin'
+import { themePickerOptions, getManifest } from './themes/registry'
 import { normalizeAgentId } from './utils/chat/sessionKeys'
 import { installSessionNavigationDiagConsole, recordSessionNavigationDiag } from './utils/chat/sessionNavigationDiag'
 import type { RpcEventHandler } from '@/lib/rpc'
@@ -437,8 +456,13 @@ watch(() => appStore.locale, () => {
   void nextTick(syncTopbarReserve)
 })
 const { allSessions, sessionListError, isLoading, loadSessions } = useSessions()
-const { moreSections, bottomRoutes, workNav } = useNavigation()
+const { consoleSections, bottomRoutes, workNav } = useNavigation()
+// Axis-B: the active expressive skin for the routed content area (meta.skin).
+const { skinId, variants } = useSurfaceSkin()
 const { pushToast } = useToasts()
+// Feature-gated topbar music control; the singleton `enabled` ref is written by
+// Settings → Appearance and the command palette.
+const { enabled: bgmEnabled } = useBgm()
 const webConfigEnabled = getPlatform().capabilities.hasWebConfig
 
 installSessionNavigationDiagConsole()
@@ -470,7 +494,8 @@ const newChatHint = computed(() =>
 
 const themeIconName = computed(() => {
   if (appStore.theme === 'system') return 'monitor'
-  return appStore.resolvedTheme === 'dark' ? 'moon' : 'sun'
+  const active = getManifest(appStore.resolvedTheme)
+  return active?.icon ?? (appStore.resolvedTheme === 'dark' ? 'moon' : 'sun')
 })
 
 const themeMenuOpen = ref(false)
@@ -561,16 +586,29 @@ function syncTopbarReserve() {
     : mainRect.right - cluster.getBoundingClientRect().left + gap
   main.style.setProperty('--topbar-right-reserve', `${Math.max(0, Math.round(reserve))}px`)
 }
-const themeOptions = [
-  { mode: 'light', label: 'Light', icon: 'sun' },
-  { mode: 'dark', label: 'Dark', icon: 'moon' },
-  { mode: 'system', label: 'System', icon: 'monitor' },
-] as const
+// The compact topbar menu deliberately lists only the basic modes (Light / Dark
+// / System). Custom value themes live in Settings → Appearance, reached via the
+// "More themes…" action below — see themePickerOptions({ scope }) in registry.ts.
+const themeOptions = themePickerOptions({ scope: 'basic' })
+
+// A custom value theme (chosen in Settings) is active but not shown in the basic
+// topbar menu; mark "More themes…" instead of leaving no selection indicator.
+const isCustomThemeActive = computed(
+  () => !themeOptions.some((o) => o.mode === appStore.theme),
+)
 
 function pickTheme(mode: ThemeMode) {
   appStore.setTheme(mode)
   themeMenuOpen.value = false
   themeButtonRef.value?.focus()
+}
+
+// "More themes…": the full theme list lives in Settings → Appearance. Close the
+// menu and deep-link straight to that section.
+function openMoreThemes() {
+  themeMenuOpen.value = false
+  handleNavClick()
+  router.push('/settings/appearance')
 }
 
 useDocumentEvent('click', (e) => {
@@ -579,57 +617,6 @@ useDocumentEvent('click', (e) => {
   if (wrap && e.target instanceof Node && !wrap.contains(e.target)) {
     themeMenuOpen.value = false
   }
-})
-
-// "More" popover: the secondary destinations on desktop. Built on the shared
-// dialog-a11y composable (Tab-trap + Escape + focus restore to the trigger) and
-// teleported to <body>, so it is anchored to the trigger via a fixed-position
-// rect rather than nested inside the rail's overflow:hidden scroll container.
-const moreOpen = ref(false)
-const moreTriggerRef = ref<HTMLElement | null>(null)
-const morePopoverRef = ref<HTMLElement | null>(null)
-const moreStyle = ref<Record<string, string>>({})
-
-useDialogA11y(morePopoverRef, moreOpen, () => { moreOpen.value = false })
-
-function toggleMore() {
-  if (moreOpen.value) {
-    moreOpen.value = false
-    return
-  }
-  const trigger = moreTriggerRef.value
-  if (!trigger) return
-  const r = trigger.getBoundingClientRect()
-  // The trigger sits high in the rail (just below the pinned rows; Recents owns
-  // the space beneath it), so the popover opens downward, left-aligned, capped to
-  // the room below so a long list scrolls inside instead of overflowing.
-  moreStyle.value = {
-    position: 'fixed',
-    left: `${r.left}px`,
-    top: `${r.bottom + 4}px`,
-    minWidth: `${Math.max(r.width, 220)}px`,
-    maxHeight: `${Math.max(160, window.innerHeight - r.bottom - 12)}px`,
-  }
-  moreOpen.value = true
-}
-
-function onMoreNavigate() {
-  moreOpen.value = false
-  handleNavClick()
-}
-
-// Pointer dismissal scoped to the popover + its trigger (mirrors the theme menu);
-// useDialogA11y already owns Escape + focus restore, so no second key handler.
-useDocumentEvent('click', (e) => {
-  if (!moreOpen.value) return
-  const target = e.target
-  if (
-    target instanceof Element &&
-    (target.closest('.sidebar-more-popover') || target.closest('.sidebar-more-btn'))
-  ) {
-    return
-  }
-  moreOpen.value = false
 })
 
 // Current session key from ChatView via URL
@@ -657,6 +644,55 @@ function isNavActive(path: string): boolean {
   if (path === '/chat') return isChatRoute.value
   return $route.path === path
 }
+
+// The Monitor hub hosts Overview/Channels/Usage/Logs as one destination, so the
+// mobile "Overview" tab stays lit on any of the hub's four sub-routes.
+const MONITOR_HUB_PATHS = new Set(['/overview', '/channels', '/usage', '/logs'])
+const isMonitorHubActive = computed(() => MONITOR_HUB_PATHS.has($route.path))
+
+// ── Collapsible console bands ────────────────────────────────────────────
+// Collapsed state per NavGroup, persisted so the rail keeps the user's chosen
+// balance between the console index and the Recents list. Chat-first default:
+// both bands start collapsed, giving the vertical budget to conversation
+// history until the operator opens a band.
+const NAV_BANDS_STORAGE_KEY = 'opensquilla-nav-bands'
+function readCollapsedBands(): Record<string, boolean> {
+  // With the console consolidated to a handful of destinations the bands fit
+  // comfortably, so they default open; collapsing is a per-user space tradeoff
+  // (more visible chat history) that persists once made.
+  const defaults: Record<string, boolean> = {}
+  try {
+    const raw = localStorage.getItem(NAV_BANDS_STORAGE_KEY)
+    if (!raw) return defaults
+    return { ...defaults, ...JSON.parse(raw) }
+  } catch {
+    return defaults
+  }
+}
+const collapsedBands = ref<Record<string, boolean>>(readCollapsedBands())
+
+function isBandCollapsed(group: string): boolean {
+  return collapsedBands.value[group] === true
+}
+
+function toggleBand(group: string) {
+  collapsedBands.value = { ...collapsedBands.value, [group]: !isBandCollapsed(group) }
+  try { localStorage.setItem(NAV_BANDS_STORAGE_KEY, JSON.stringify(collapsedBands.value)) } catch {}
+}
+
+function bandHasActive(section: { items: Array<{ path: string }> }): boolean {
+  return section.items.some((item) => isNavActive(item.path))
+}
+
+// A collapsed band never hides the current page: navigating into a band opens
+// it (session-only — the persisted preference is what the user last toggled).
+watch(() => $route.path, () => {
+  for (const section of consoleSections.value) {
+    if (bandHasActive(section) && isBandCollapsed(section.group)) {
+      collapsedBands.value = { ...collapsedBands.value, [section.group]: false }
+    }
+  }
+}, { immediate: true })
 
 function agentDisplayName(agentId: string): string {
   const agent = agents.value.find(a => a.id === agentId)
@@ -825,12 +861,10 @@ function onPaletteOpenSettings() {
 }
 
 function onPaletteToggleTheme() {
-  // Cycle the appearance MODE (light → dark → system) so the palette keeps
-  // parity with the topbar's 3-way picker instead of collapsing to binary and
-  // silently dropping the "system" follow option.
-  const order: ThemeMode[] = ['light', 'dark', 'system']
-  const next = order[(order.indexOf(appStore.theme) + 1) % order.length]
-  appStore.setTheme(next)
+  // Cycle the appearance mode through the same registry-driven order as the
+  // topbar picker (every selectable value theme + system), so the palette
+  // never resets a custom theme back to 'light'.
+  appStore.cycleTheme()
 }
 
 function onPaletteSelectSession(key: string) {
@@ -961,7 +995,9 @@ function openBlockedApprovalSession() {
     switchToSession(oldest.sessionKey, 'approval.openBlockedSession')
     return
   }
-  router.push('/approvals')
+  // No session attached to the pending approval: land on Sessions, whose
+  // attention strip shows the pending count (the /approvals page is retired).
+  router.push('/sessions')
 }
 
 // Footer settings row. Both platforms mount the same `/settings` overlay now, so
@@ -1065,8 +1101,8 @@ function errorMessage(err: unknown): string {
 // ---------------------------------------------------------------------------
 // App-wide approval awareness
 //
-// The Approvals page only updates the count while it is mounted; a tool that
-// blocks a background/queued turn must surface the badge from any view. The
+// A view-local snapshot is not enough; a tool that blocks a background/queued
+// turn must surface the badge from any view. The
 // gateway pushes `<namespace>.approval.requested|resolved` the moment a run
 // blocks or a decision lands, so we keep `pendingApprovals`/`approvalCount`
 // live here, seeded once on (re)connect to recover requests that predate the
@@ -1120,7 +1156,7 @@ function snapshotItemToPending(item: ApprovalSnapshotItem): PendingApproval | nu
 }
 
 // Seed the live list from the snapshot so the count is correct after a reload
-// while a request is already pending; mirrors how ApprovalsView fetches it. The
+// while a request is already pending. The
 // snapshot is ordered oldest-first, which the deep-link relies on.
 async function seedPendingApprovals() {
   try {
@@ -1216,7 +1252,7 @@ onMounted(() => {
   loadAgents()
   loadSessions()
   rpcUnsubSessionsChanged = rpcStore.on('sessions.changed', scheduleSessionRefresh)
-  // Keep the approval badge/count live app-wide, not just on the Approvals page.
+  // Keep the approval badge/count live app-wide.
   subscribeApprovals()
   // Seed now in case the socket is already connected (the `_state` listener
   // covers later reconnects); recovers a request pending before mount.

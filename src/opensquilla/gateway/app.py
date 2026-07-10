@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import functools
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 
+import structlog
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, RedirectResponse
+from starlette.responses import JSONResponse, RedirectResponse, Response
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket
 
@@ -23,8 +26,15 @@ from opensquilla.gateway.middleware import (
     RateLimitMiddleware,
     SecurityHeadersMiddleware,
 )
+from opensquilla.gateway.origin_guard import (
+    extract_http_token,
+    forbidden_origin_response,
+    request_origin_allowed,
+)
 from opensquilla.gateway.rpc import RpcContext, get_dispatcher
 from opensquilla.gateway.websocket import handle_ws_connection
+
+log = structlog.get_logger(__name__)
 
 _start_time = time.time()
 
@@ -47,6 +57,7 @@ def create_gateway_app(
     heartbeat_loop: Any = None,
     agent_registry: Any = None,
     diagnostics_state: Any = None,
+    provider_stats: Any = None,
     memory_managers: dict[str, Any] | None = None,
     memory_stores: dict[str, Any] | None = None,
     memory_retrievers: dict[str, Any] | None = None,
@@ -73,6 +84,25 @@ def create_gateway_app(
         if code == "UNAVAILABLE":
             return 503
         return default
+
+    def _same_origin(
+        handler: Callable[[Request], Awaitable[Response]],
+    ) -> Callable[[Request], Awaitable[Response]]:
+        """Wrap a state-changing handler with the shared same-origin guard.
+
+        Rejects browser-mediated cross-origin requests (403 FORBIDDEN_ORIGIN)
+        before the handler runs; requests without an Origin header (curl, the
+        desktop client) and same-origin Web UI requests pass through. Origins
+        explicitly listed in ``cors.allowed_origins`` are also accepted.
+        """
+
+        @functools.wraps(handler)
+        async def guarded(request: Request) -> Response:
+            if not request_origin_allowed(request, config):
+                return forbidden_origin_response()
+            return await handler(request)
+
+        return guarded
 
     # ── HTTP endpoint handlers ───────────────────────────────────────────────
 
@@ -135,7 +165,7 @@ def create_gateway_app(
     async def api_system_status(request: Request) -> JSONResponse:
         uptime = int((time.time() - _start_time) * 1000)
         provider_name = None
-        if provider_selector is not None:
+        if provider_selector is not None and getattr(provider_selector, "is_configured", True):
             # Report the *configured* provider id (e.g. "openrouter"), not the
             # wire-protocol backend class. OpenAI-compatible providers
             # (openrouter / deepseek / gemini) are all served by OpenAIProvider,
@@ -199,22 +229,11 @@ def create_gateway_app(
         msg = result.error.message if result.error else "error"
         return JSONResponse({"error": msg}, status_code=_rpc_status_code(result))
 
-    def _extract_http_token(request: Request | None) -> str | None:
-        if request is None:
-            return None
-        auth_header = request.headers.get("authorization", "")
-        if auth_header.startswith("Bearer "):
-            return auth_header[7:]
-        token_header = request.headers.get("x-opensquilla-token")
-        if token_header:
-            return token_header
-        return request.query_params.get("token")
-
     def _make_ctx(request: Request | None = None, role_claim: str = "operator") -> RpcContext:
         from opensquilla.gateway.auth import Principal, resolve_auth
 
         auth_params: dict[str, str] = {}
-        token = _extract_http_token(request)
+        token = extract_http_token(request)
         if token:
             auth_params["token"] = token
         peer_ip = request.client.host if request is not None and request.client else None
@@ -251,6 +270,7 @@ def create_gateway_app(
             heartbeat_loop=heartbeat_loop,
             agent_registry=agent_registry,
             diagnostics_state=diagnostics_state,
+            provider_stats=provider_stats,
             memory_managers=memory_managers or {},
             memory_stores=memory_stores or {},
             memory_retrievers=memory_retrievers or {},
@@ -492,6 +512,7 @@ def create_gateway_app(
             heartbeat_loop=heartbeat_loop,
             agent_registry=agent_registry,
             diagnostics_state=diagnostics_state,
+            provider_stats=provider_stats,
             memory_managers=memory_managers,
             memory_stores=memory_stores,
             memory_retrievers=memory_retrievers,
@@ -507,19 +528,19 @@ def create_gateway_app(
         Route("/readyz", ready, methods=["GET"]),
         Route("/api/config", api_config, methods=["GET"]),
         Route("/api/sessions", api_sessions, methods=["GET"]),
-        Route("/api/chat", api_chat, methods=["POST"]),
+        Route("/api/chat", _same_origin(api_chat), methods=["POST"]),
         Route("/api/chat/history", api_chat_history, methods=["GET"]),
         Route("/api/agents", api_agents, methods=["GET"]),
         Route("/api/cron", api_cron, methods=["GET"]),
         Route("/api/system/status", api_system_status, methods=["GET"]),
-        Route("/api/system/shutdown", api_system_shutdown, methods=["POST"]),
+        Route("/api/system/shutdown", _same_origin(api_system_shutdown), methods=["POST"]),
         Route("/api/usage", api_usage, methods=["GET"]),
         Route("/api/channels/status", api_channels_status, methods=["GET"]),
-        Route("/api/channels/logout", api_channels_logout, methods=["POST"]),
+        Route("/api/channels/logout", _same_origin(api_channels_logout), methods=["POST"]),
         Route("/api/approvals", api_approvals, methods=["GET"]),
-        Route("/api/approvals/settings", api_approvals_settings, methods=["POST"]),
-        Route("/api/approvals/resolve", api_approvals_resolve, methods=["POST"]),
-        Route("/api/elevated-mode", api_elevated_mode, methods=["POST"]),
+        Route("/api/approvals/settings", _same_origin(api_approvals_settings), methods=["POST"]),
+        Route("/api/approvals/resolve", _same_origin(api_approvals_resolve), methods=["POST"]),
+        Route("/api/elevated-mode", _same_origin(api_elevated_mode), methods=["POST"]),
         WebSocketRoute("/ws", ws_endpoint),
     ]
 
@@ -532,19 +553,37 @@ def create_gateway_app(
 
     # ── Middleware ───────────────────────────────────────────────────────────
 
-    middleware = [
-        Middleware(ErrorHandlingMiddleware),
-        Middleware(
-            CORSMiddleware,
-            allow_origins=config.cors.allowed_origins,
-            allow_credentials=config.cors.allow_credentials,
-            allow_methods=config.cors.allowed_methods,
-            allow_headers=config.cors.allowed_headers,
-        ),
-        Middleware(RateLimitMiddleware, config=config),
-        Middleware(SecurityHeadersMiddleware, path_prefix=config.control_ui.base_path),
-        Middleware(AuthMiddleware, config=config),
-    ]
+    middleware = [Middleware(ErrorHandlingMiddleware)]
+    if config.cors.allowed_origins:
+        # CORS headers are opt-in: the default empty list installs no CORS
+        # middleware at all, so browsers refuse cross-origin reads. The Web UI
+        # is same-origin and non-browser clients never need CORS.
+        if "*" in config.cors.allowed_origins and config.cors.allow_credentials:
+            log.warning(
+                "gateway.cors_wildcard_with_credentials",
+                detail=(
+                    "cors.allowed_origins contains '*' with allow_credentials "
+                    "enabled, which lets any website the browser visits read "
+                    "authenticated gateway responses — list explicit origins "
+                    "instead."
+                ),
+            )
+        middleware.append(
+            Middleware(
+                CORSMiddleware,
+                allow_origins=config.cors.allowed_origins,
+                allow_credentials=config.cors.allow_credentials,
+                allow_methods=config.cors.allowed_methods,
+                allow_headers=config.cors.allowed_headers,
+            )
+        )
+    middleware.extend(
+        [
+            Middleware(RateLimitMiddleware, config=config),
+            Middleware(SecurityHeadersMiddleware, path_prefix=config.control_ui.base_path),
+            Middleware(AuthMiddleware, config=config),
+        ]
+    )
 
     app = Starlette(routes=routes, middleware=middleware, debug=config.debug)
     app.state.diagnostics_state = diagnostics_state
@@ -564,9 +603,27 @@ def create_gateway_app(
     # replace the default in-memory-only singleton; respect a test-injected store.
     _upload_store = get_upload_store()
     if getattr(_upload_store, "marker_dir", None) is None:
+        from opensquilla.gateway.uploads import (  # noqa: PLC0415
+            _DEFAULT_MAX_TOTAL_BYTES as _UPLOAD_STORE_DEFAULT_TOTAL,
+        )
         from opensquilla.paths import media_root_from_config  # noqa: PLC0415
 
-        _upload_store = UploadStore(marker_dir=media_root_from_config(config) / "uploads")
+        _store_total_cap = getattr(config.attachments, "upload_store_max_total_bytes", None)
+        if not isinstance(_store_total_cap, int) or _store_total_cap <= 0:
+            if _store_total_cap is not None:
+                log.warning(
+                    "attachments.upload_store_max_total_bytes=%r is not a "
+                    "positive integer; using the %d byte default (this RAM "
+                    "cap can be raised but not disabled)",
+                    _store_total_cap,
+                    _UPLOAD_STORE_DEFAULT_TOTAL,
+                )
+            _store_total_cap = _UPLOAD_STORE_DEFAULT_TOTAL
+        _upload_store = UploadStore(
+            marker_dir=media_root_from_config(config) / "uploads",
+            accept_opaque=bool(getattr(config.attachments, "accept_opaque", True)),
+            max_total_bytes=_store_total_cap,
+        )
         set_upload_store(_upload_store)
     register_upload_routes(app, config=config, store=_upload_store)
     from opensquilla.gateway.artifacts import register_artifact_routes  # noqa: PLC0415
@@ -586,5 +643,8 @@ def create_gateway_app(
         session_manager=session_manager,
     )
     register_audio_transcription_routes(app, config=config)
+    from opensquilla.gateway.bundle_routes import register_bundle_routes  # noqa: PLC0415
+
+    register_bundle_routes(app, config=config)
 
     return app

@@ -60,6 +60,7 @@ class OpenAICompatPolicy:
     supports_explicit_prompt_cache: bool = False
     anthropic_top_level_cache: bool = False
     stream_timeout_fallback: bool = False
+    empty_stream_fallback: bool = False
     log_payload_cache_shape: bool = False
 
     # Gateway proxies with their own routing (LiteLLM): pin the requested
@@ -103,6 +104,11 @@ _ARK_UNSUPPORTED_TOOL_SCHEMA_KEYWORDS = frozenset(
 )
 
 _DEEPSEEK_V4_MODEL_IDS = frozenset({"deepseek-v4-flash", "deepseek-v4-pro"})
+
+# TokenHub's hy3 family documents interleaved thinking: assistant turns must
+# carry reasoning_content back (an empty string when there is none), or the
+# reasoning context is lost across tool-call rounds.
+_TOKENHUB_HY3_MODEL_IDS = frozenset({"hy3", "hy3-preview"})
 
 # OpenRouter's reasoning controls are model/provider-specific: GLM can be
 # stabilized by explicitly disabling reasoning when OpenSquilla has not
@@ -148,16 +154,23 @@ _POLICIES_BY_KIND: dict[str, OpenAICompatPolicy] = {
         require_reasoning_content_model_ids=_DEEPSEEK_V4_MODEL_IDS,
     ),
     "gemini": OpenAICompatPolicy(display_name="Gemini"),
-    "dashscope": OpenAICompatPolicy(display_name="DashScope"),
+    "dashscope": OpenAICompatPolicy(
+        display_name="DashScope",
+        text_tool_synthesis=True,
+        supports_explicit_prompt_cache=True,
+        stream_timeout_fallback=True,
+    ),
     "bailian_coding": OpenAICompatPolicy(display_name="Bailian Coding"),
     "moonshot": OpenAICompatPolicy(
         display_name="Moonshot",
-        fixed_sampling_model_prefixes=("kimi-k2.5", "kimi-k2.6"),
+        fixed_sampling_model_prefixes=("kimi-k2.5", "kimi-k2.6", "kimi-k2.7"),
+        empty_stream_fallback=True,
     ),
     "minimax": OpenAICompatPolicy(
         display_name="MiniMax",
         text_tool_synthesis=True,
     ),
+    "mimo": OpenAICompatPolicy(display_name="MiMo"),
     "mistral": OpenAICompatPolicy(display_name="Mistral"),
     "groq": OpenAICompatPolicy(display_name="Groq"),
     "zhipu": OpenAICompatPolicy(display_name="Zhipu"),
@@ -171,6 +184,25 @@ _POLICIES_BY_KIND: dict[str, OpenAICompatPolicy] = {
     "byteplus": OpenAICompatPolicy(
         display_name="BytePlus",
         tool_schema_unsupported_keywords=_ARK_UNSUPPORTED_TOOL_SCHEMA_KEYWORDS,
+    ),
+    "tencent_tokenhub": OpenAICompatPolicy(
+        display_name="Tencent TokenHub",
+        replay_reasoning_format="tencent_tokenhub",
+        require_reasoning_content_model_ids=_TOKENHUB_HY3_MODEL_IDS,
+    ),
+    # TokenRhythm relays the DeepSeek/GLM/MiniMax/Kimi/MiMo/Qwen families
+    # behind one host, and every served model streams DeepSeek-style
+    # reasoning_content unconditionally (the parse side needs no config).
+    # The endpoint rejects unknown request fields — a DeepSeek ``thinking``
+    # toggle is an UNKNOWN_FIELD 400 — so no default_reasoning_format and no
+    # thinking_toggle_model_ids here, and the packaged catalog rows pin
+    # reasoning_format="none" to keep dialect injection off. The V4 ids keep
+    # only the reasoning_content replay requirement (live-verified accepted).
+    "tokenrhythm": OpenAICompatPolicy(
+        display_name="TokenRhythm",
+        official_host="tokenrhythm.studio",
+        text_tool_synthesis=True,
+        require_reasoning_content_model_ids=_DEEPSEEK_V4_MODEL_IDS,
     ),
     "lm_studio": OpenAICompatPolicy(display_name="LM Studio"),
     "ovms": OpenAICompatPolicy(display_name="OpenVINO Model Server"),

@@ -71,16 +71,16 @@ COMPAT_THINKING_MODELS: dict[str, tuple[str, str]] = {
     # _DEEPSEEK_V4_MODEL_IDS: thinking-toggle + require-reasoning_content
     # sets (compat_policy); deepseek reasoning_shape -> "deepseek".
     "deepseek": ("deepseek-v4-flash", "deepseek"),
-    # gemini-2.5 prefix ladder (model_catalog) -> "gemini"; the flash id also
-    # exercises the documented reasoning_effort="none" off-toggle.
-    "gemini": ("gemini-2.5-flash", "gemini"),
+    # gemini-3 prefix ladder (model_catalog) -> "gemini".
+    "gemini": ("gemini-3.5-flash", "gemini"),
     # qwen3 prefix ladder (model_catalog dashscope branch) -> "dashscope".
     "dashscope": ("qwen3-coder-plus", "dashscope"),
     "bailian_coding": (_NEUTRAL_MODEL, "none"),
-    # kimi-k2.5 ladder (model_catalog moonshot branch) -> "moonshot"; also in
+    # kimi-k2.7 ladder (model_catalog moonshot branch) -> "moonshot"; also in
     # fixed_sampling_model_prefixes so the non-default temperature is dropped.
-    "moonshot": ("kimi-k2.5", "moonshot"),
+    "moonshot": ("kimi-k2.7-code", "moonshot"),
     "minimax": (_NEUTRAL_MODEL, "none"),
+    "mimo": (_NEUTRAL_MODEL, "none"),
     "mistral": (_NEUTRAL_MODEL, "none"),
     "groq": (_NEUTRAL_MODEL, "none"),
     # glm-5 prefix in the zai ladder (model_catalog) -> "zai".
@@ -94,6 +94,16 @@ COMPAT_THINKING_MODELS: dict[str, tuple[str, str]] = {
     # seed-1-6 ladder (model_catalog byteplus branch) -> shared "volcengine"
     # dialect; ark schema keyword strips apply here too.
     "byteplus": ("seed-1-6", "volcengine"),
+    # hy3 ladder ([tencent_tokenhub."hy3*"] corrections rows) ->
+    # "tencent_tokenhub" dialect; the policy also requires assistant
+    # reasoning_content replay for the hy3 ids, frozen by the tools golden.
+    "tencent_tokenhub": ("hy3", "tencent_tokenhub"),
+    # [tokenrhythm."deepseek-v4-flash"] corrections row pins
+    # reasoning_format="none": the relay streams reasoning_content on its
+    # own but 400s on any thinking payload, so the thinking golden freezes
+    # the omission. The id is also in require_reasoning_content_model_ids,
+    # so the tools golden freezes assistant reasoning_content replay.
+    "tokenrhythm": ("deepseek-v4-flash", "none"),
     "lm_studio": (_NEUTRAL_MODEL, "none"),
     "ovms": (_NEUTRAL_MODEL, "none"),
     "litellm_proxy": (_NEUTRAL_MODEL, "none"),
@@ -239,6 +249,23 @@ def build_cases() -> list[GoldenCase]:
                 slug="minimax__plain",
                 provider_id="minimax",
                 model="minimax-m2.5",
+            ),
+            # Anthropic-shaped Tencent TokenHub endpoint: freezes x-api-key
+            # auth on a non-Anthropic host and the bare-host /v1/messages
+            # URL join.
+            GoldenCase(
+                backend="anthropic",
+                slug="tencent_tokenhub_anthropic__plain",
+                provider_id="tencent_tokenhub_anthropic",
+                model="hy3",
+            ),
+            # Token Plan Anthropic endpoint: freezes bearer auth and the
+            # /plan/anthropic/v1/messages URL join on the lkeap host.
+            GoldenCase(
+                backend="anthropic",
+                slug="tencent_token_plan_anthropic__plain",
+                provider_id="tencent_token_plan_anthropic",
+                model="hy3",
             ),
         ]
     )

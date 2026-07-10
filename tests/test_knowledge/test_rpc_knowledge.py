@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -136,3 +138,33 @@ async def test_knowledge_rpc_search_merges_retrieval_and_embedding_filters(
             },
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_knowledge_rpc_offloads_blocking_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from opensquilla.gateway import rpc_knowledge as rpc_knowledge_module
+
+    class SlowKnowledgeBackend:
+        def status(self) -> dict[str, object]:
+            time.sleep(0.35)
+            return {"ok": True}
+
+    monkeypatch.setattr(
+        rpc_knowledge_module,
+        "manager_from_config",
+        lambda _config: SlowKnowledgeBackend(),
+    )
+    ctx = RpcContext(conn_id="test", config=SimpleNamespace())
+    dispatcher = get_dispatcher()
+
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    request = asyncio.create_task(dispatcher.dispatch("status-slow", "knowledge.status", {}, ctx))
+    await asyncio.sleep(0.01)
+
+    assert loop.time() - started < 0.2
+    result = await request
+    assert result.ok is True
+    assert result.payload == {"ok": True}

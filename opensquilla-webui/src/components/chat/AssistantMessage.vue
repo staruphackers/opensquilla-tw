@@ -1,14 +1,18 @@
 <template>
   <div
     class="msg-ai"
-    :class="{ 'msg-ai--share-mode': shareMode, 'msg-ai--share-selected': shareSelected }"
+    :class="{
+      'msg-ai--share-mode': shareMode && !message.stopNotice,
+      'msg-ai--share-selected': shareSelected && !message.stopNotice,
+      'msg-ai--stop-notice': message.stopNotice,
+    }"
     :data-message-id="message.messageId"
-    :data-share-message-id="shareMessageId"
-    :data-share-selected="shareSelected ? 'true' : undefined"
+    :data-share-message-id="message.stopNotice ? undefined : shareMessageId"
+    :data-share-selected="shareSelected && !message.stopNotice ? 'true' : undefined"
     @click="onMessageClick"
   >
     <button
-      v-if="shareMode"
+      v-if="shareMode && !message.stopNotice"
       type="button"
       class="chat-share-picker"
       :class="{ 'is-selected': shareSelected }"
@@ -85,7 +89,7 @@
 
         <SourcesRow v-if="message.toolCalls?.length" ref="sourcesRowRef" :calls="message.toolCalls" :sources="message.sources ?? []" />
 
-        <div class="msg-ai-footer">
+        <div v-if="showFooter" class="msg-ai-footer">
           <div v-if="message.meta" class="msg-ai-meta">
             <span v-if="message.meta.model && !message.meta.ensemble" class="msg-meta__model">{{ message.meta.modelShort }}</span>
             <span v-if="message.meta.costUsd && !message.meta.ensemble" class="msg-meta__cost">${{ message.meta.costUsd.toFixed(6).replace(/\.?0+$/, '') }}</span>
@@ -163,7 +167,7 @@
               </div>
             </span>
           </div>
-          <div v-if="!shareMode" class="msg-ai-actions">
+          <div v-if="!shareMode && !message.stopNotice" class="msg-ai-actions">
             <button
               type="button"
               class="msg-action"
@@ -178,6 +182,32 @@
             <button type="button" class="msg-action" :title="t('chat.regenerate')" :aria-label="t('chat.regenerate')" @click="$emit('regenerate', message)">
               <Icon name="refresh" :size="12" />
             </button>
+            <template v-if="feedbackDecisionId">
+              <button
+                type="button"
+                class="msg-action msg-action--vote"
+                :class="{ 'msg-action--ok': feedbackRating === 'up' }"
+                :disabled="feedbackBusy"
+                :aria-pressed="feedbackRating === 'up'"
+                :title="feedbackUpTitle"
+                :aria-label="feedbackUpTitle"
+                @click="onFeedbackClick('up')"
+              >
+                <Icon name="thumbs-up" :size="12" />
+              </button>
+              <button
+                type="button"
+                class="msg-action msg-action--vote"
+                :class="{ 'msg-action--err': feedbackRating === 'down' }"
+                :disabled="feedbackBusy"
+                :aria-pressed="feedbackRating === 'down'"
+                :title="feedbackDownTitle"
+                :aria-label="feedbackDownTitle"
+                @click="onFeedbackClick('down')"
+              >
+                <Icon name="thumbs-down" :size="12" />
+              </button>
+            </template>
             <button
               v-if="isTip"
               type="button"
@@ -213,6 +243,7 @@ import InterruptPart from '@/components/chat/parts/InterruptPart.vue'
 import ReasoningPart from '@/components/chat/parts/ReasoningPart.vue'
 import StatusHistoryPart from '@/components/chat/parts/StatusHistoryPart.vue'
 import TextPart from '@/components/chat/parts/TextPart.vue'
+import { useChatRouteFeedback } from '@/composables/chat/useChatRouteFeedback'
 import { useCopyFeedback } from '@/composables/chat/useCopyFeedback'
 import { useRelativeNow } from '@/composables/useRelativeNow'
 import type {
@@ -267,6 +298,25 @@ const emit = defineEmits<{
 // clock, so a tick re-evaluates one cheap computed per visible bubble.
 const { t } = useI18n()
 
+// Routing feedback: buttons only exist when the turn carries a V017 decision
+// id (router actually decided this turn). The copy differs by execution kind —
+// a single-model rating judges the tier choice, an ensemble rating judges the
+// aggregated answer (backend excludes it from tier training accordingly).
+const routeFeedback = useChatRouteFeedback()
+const feedbackDecisionId = computed(() => props.message.meta?.decisionId)
+const feedbackRating = computed(() => routeFeedback.ratingFor(feedbackDecisionId.value))
+const feedbackBusy = computed(() => routeFeedback.busy(feedbackDecisionId.value))
+const feedbackUpTitle = computed(() =>
+  props.message.meta?.ensemble ? t('chat.routeFeedback.upEnsemble') : t('chat.routeFeedback.up'),
+)
+const feedbackDownTitle = computed(() =>
+  props.message.meta?.ensemble ? t('chat.routeFeedback.downEnsemble') : t('chat.routeFeedback.down'),
+)
+function onFeedbackClick(rating: 'up' | 'down') {
+  const id = feedbackDecisionId.value
+  if (id) void routeFeedback.submit(id, rating)
+}
+
 const now = useRelativeNow()
 const timeIso = computed(() => isoTime(props.message.ts))
 const timeAbs = computed(() => absoluteTime(props.message.ts))
@@ -302,6 +352,7 @@ const interruptParts = computed(
 // The persisted activity timeline for this finished turn. Empty (fold hidden)
 // for OFF-mode turns and reloaded threads, which carry no snapshot.
 const statusHistory = computed(() => props.message.statusHistory ?? [])
+const showFooter = computed(() => !!props.message.meta || (!props.shareMode && !props.message.stopNotice))
 
 // A citation pill in the body asks the paired SourcesRow to reveal + highlight
 // the source it points at. No-op when no SourcesRow is mounted (which only
@@ -399,6 +450,7 @@ const legacyTimelineItems = computed<ChatStreamTimelineItem[]>(() => {
 
 function onMessageClick(event: MouseEvent) {
   if (!props.shareMode) return
+  if (props.message.stopNotice) return
   if ((event.target as HTMLElement | null)?.closest('button,a,input,textarea,select')) return
   emit('toggleShare', props.shareMessageId)
 }
@@ -499,6 +551,36 @@ function ensembleRole(role: string, label: string): string {
   min-width: 0;
   max-width: none;
   padding-top: 0.0625rem;
+}
+
+.msg-ai--stop-notice .msg-ai-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: 0 1 auto;
+  max-width: min(30rem, 100%);
+  padding: 0.375rem 0.625rem;
+  border: 1px solid color-mix(in srgb, var(--warn) 38%, var(--border));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--warn) 10%, var(--bg-surface));
+  color: var(--warn);
+}
+
+.msg-ai--stop-notice .msg-ai-main::before {
+  content: "";
+  width: 0.4375rem;
+  height: 0.4375rem;
+  flex: 0 0 auto;
+  border-radius: var(--radius-full);
+  background: var(--warn);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 12%, transparent);
+}
+
+.msg-ai--stop-notice :deep(.msg-ai-text) {
+  margin: 0;
+  font-size: 0.8125rem;
+  line-height: 1.35;
+  color: inherit;
 }
 
 .msg-ai-footer {
@@ -612,6 +694,17 @@ function ensembleRole(role: string, label: string): string {
 .msg-action.msg-action--err,
 .msg-action.msg-action--err:hover {
   color: var(--danger);
+}
+
+.msg-action--vote:disabled {
+  cursor: progress;
+  opacity: 0.55;
+}
+
+/* A cast vote stays visible without hover — the row otherwise fades out and
+   the user would lose the only cue that their rating registered. */
+.msg-ai-actions:has(.msg-action--vote[aria-pressed='true']) {
+  opacity: 1;
 }
 
 .msg-copy-live {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -48,7 +49,8 @@ def create_knowledge_tools(
     expose operator-indexed local documents as a retrieval source.
     """
 
-    resolved_manager = manager or manager_from_config(config)
+    def current_manager() -> KnowledgeBackend:
+        return manager if manager is not None else manager_from_config(config)
 
     @tool(
         name="knowledge_status",
@@ -69,7 +71,7 @@ def create_knowledge_tools(
         result_budget_class="compact",
     )
     async def knowledge_status(collection: str | None = None) -> str:
-        payload = resolved_manager.status()
+        payload = await asyncio.to_thread(current_manager().status)
         if collection:
             payload["collection"] = collection
         return json.dumps(payload, ensure_ascii=False)
@@ -162,7 +164,12 @@ def create_knowledge_tools(
             embedding_model=embedding_model,
             embedding_dimensions=embedding_dimensions,
         )
-        payload = resolved_manager.search(clean_query, top_k=top_k, filters=merged_filters)
+        payload = await asyncio.to_thread(
+            current_manager().search,
+            clean_query,
+            top_k=top_k,
+            filters=merged_filters,
+        )
         if collection:
             payload["collection"] = collection
         return json.dumps(payload, ensure_ascii=False)
@@ -192,7 +199,11 @@ def create_knowledge_tools(
     ) -> str:
         if not chunk_id and not document_id:
             raise ToolError("chunk_id or document_id is required")
-        payload = resolved_manager.get(chunk_id=chunk_id, document_id=document_id)
+        payload = await asyncio.to_thread(
+            current_manager().get,
+            chunk_id=chunk_id,
+            document_id=document_id,
+        )
         if payload is None:
             raise ToolError("knowledge item not found")
         return json.dumps(payload, ensure_ascii=False)

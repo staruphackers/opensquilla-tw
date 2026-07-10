@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal
@@ -151,6 +152,10 @@ class ErrorEvent:
     kind: Literal["error"] = field(default="error", init=False)
     message: str = ""
     code: str = ""
+    # Short reference id joining this error to its durable turn_errors row.
+    # Appended last with a default: positional construction elsewhere must not
+    # shift (same hazard the DoneEvent comment in this file documents).
+    error_id: str = ""
 
 
 @dataclass
@@ -198,6 +203,15 @@ class DoneEvent:
     vision_followup_fallback: str | None = None
     model_usage_breakdown: list[dict[str, Any]] = field(default_factory=list)
     ensemble_trace: dict[str, Any] | None = None
+    # Quality label of the estimate component behind cost_usd:
+    # "cache_aware" | "cache_blind" | "free" | None (None when the reported
+    # cost has no estimated component, e.g. fully provider-billed turns).
+    estimate_basis: str | None = None
+    # V017 router-decision record id for this turn, when one was staged.
+    # Lets chat clients attribute feedback (router.feedback.submit) to the
+    # exact routing decision. None when the router is disabled, the turn
+    # bypassed classification, or no decision writer is registered.
+    decision_id: str | None = None
 
     @property
     def upstream_cost_usd(self) -> float:
@@ -211,9 +225,10 @@ class RouterDecisionEvent:
     pre-turn pipeline resolves the tier/model. Frontend uses this to drive
     the router HUD (tier pill, tier-shift highlight, scanner popover).
 
-    Routing fires exactly once per user-message; the tier sticks across
-    the entire agent loop. Subsequent events in the same turn carry no
-    routing information.
+    Routing fires once per user-message and the tier sticks across the
+    agent loop; consumers must treat the event as last-writer-wins state,
+    because a mid-turn selector failover re-emits it once before the
+    DoneEvent with ``source="fallback"`` and the model that actually ran.
     """
 
     kind: Literal["router_decision"] = field(default="router_decision", init=False)
@@ -432,14 +447,24 @@ class AgentConfig:
     max_turn_input_tokens: int = 0
     max_turn_output_tokens: int = 0
     max_turn_billed_cost_usd: float = 0.0
+    # Estimate-backed cousin of max_turn_billed_cost_usd: falls back to
+    # estimate_cost() for calls with no provider-reported billed_cost, so the
+    # gate works even on providers/paths that never report real dollars.
+    max_turn_cost_usd: float = 0.0
     max_turn_tool_errors: int = 0
     temperature: float | None = None
+    top_p: float | None = None
     thinking: bool | ThinkingLevel = False
     thinking_budget_tokens: int = _THINKING_BUDGET_DEFAULT
     system_prompt: str | None = None
     extra_system_prompt: str | None = None
     workspace_dir: str | None = None
     model_id: str | None = None
+    # CONFIGURED provider id (e.g. "vllm", "lm_studio"), sourced from
+    # config.llm.provider — NOT the adapter class name (openai_compat
+    # deployments all report provider_name == "openai"). Threaded into usage
+    # tracking so the layered price resolver can treat local runtimes as free.
+    provider_id: str = ""
     stop_sequences: list[str] = field(default_factory=list)
     context_window_tokens: int = 200000
     context_overflow_threshold: float = 0.85  # trigger at 85%
@@ -464,9 +489,7 @@ class AgentConfig:
     skills_context_prompt: str | None = None
     # Pre-compaction memory flush
     flush_enabled: bool = False
-    flush_triggers: list[str] = field(
-        default_factory=lambda: list(DEFAULT_FLUSH_TRIGGERS)
-    )
+    flush_triggers: list[str] = field(default_factory=lambda: list(DEFAULT_FLUSH_TRIGGERS))
     flush_pre_compaction: bool = False
     flush_timeout_seconds: float = 15.0
     flush_background_timeout_seconds: float = 120.0
@@ -494,19 +517,144 @@ class AgentConfig:
     tool_result_compression_summary_timeout_seconds: float = 20.0
     tool_result_compression_summary_input_max_chars: int = 60_000
     tool_result_projection_max_inline_chars: int = 60_000
+    # Fresh diagnostic delivery is experimental; unattended profiles should opt
+    # in only after model-specific validation.
+    tool_result_fresh_diagnostic_policy_enabled: bool = False
+    tool_result_diagnostic_retrieval_gate_enabled: bool = False
+    # When the fresh diagnostic policy is enabled, keep bounded failures intact
+    # for the immediate handoff, then let older history/replay compaction handle
+    # long-term context pressure.
+    tool_result_fresh_diagnostic_inline_max_chars: int = 64_000
+    # Dispatch-layer tool result caps. 0 disables the cap. These run before
+    # provider-request projection and are intended for unattended automation
+    # profiles that must keep broad local command output bounded.
+    tool_result_dispatch_max_chars: int = 0
+    tool_result_dispatch_turn_max_chars: int = 0
     tool_result_provider_request_max_chars: int = 0
     provider_request_proof_max_chars: int = 0
     tool_use_argument_provider_request_max_chars: int = 0
     tool_use_argument_projection_enabled: bool = False
     tool_result_external_keep_recent: int = 2
     tool_failure_loop_block_threshold: int = 3
+    repeated_tool_call_recovery_threshold: int = 0
+    # Extra tool names covered by repeated-identical-call recovery, on top of
+    # the built-in read-only set. Set via OPENSQUILLA_TOOL_REPEAT_NUDGE_TOOLS
+    # (comma-separated); the threshold is tunable via
+    # OPENSQUILLA_TOOL_REPEAT_NUDGE_THRESHOLD.
+    repeated_tool_call_recovery_extra_tools: tuple[str, ...] = ()
+    progress_watchdog_mode: Literal["off", "log", "warn_model", "block"] = "off"
+    progress_watchdog_repeated_tool_error_threshold: int = 3
+    progress_watchdog_repeated_provider_failure_threshold: int = 2
+    progress_watchdog_repeated_failure_anchor_threshold: int = 3
+    post_write_convergence_enabled: bool = False
+    post_write_convergence_warn_threshold: int = 3
+    post_write_convergence_finalize_after_warning: int = 3
+    patch_evidence_ledger_path: str | None = None
+    # Finalize-time red-evidence gate (see engine.finalize_evidence_gate).
+    # Off by default; enabled per run via OPENSQUILLA_FINALIZE_EVIDENCE_GATE.
+    finalize_evidence_gate_enabled: bool = False
+    # Keep rejection feedback visible when blocked compacted-placeholder tool
+    # calls are projected out of provider requests: the blocked tool_use keeps
+    # a placeholder input and its error tool_result stays in the projection.
+    # Off by default; enabled via OPENSQUILLA_PROVIDER_CONTEXT_BLOCK_FEEDBACK.
+    provider_context_block_feedback: bool = False
+    # Byte-identical provider-request loop breaker. 0 = off. At N consecutive
+    # identical projected payloads the request is perturbed with a loop nudge;
+    # at 2N the turn aborts. Set via OPENSQUILLA_IDENTICAL_REQUEST_LOOP_BREAK.
+    identical_request_loop_break_threshold: int = 0
+    # Escalating recovery directive for repeated compacted-placeholder tool-call
+    # offenses within one turn. 0 = off. From the Nth iteration that blocks a
+    # placeholder reuse onward, a stronger directive is appended after the tool
+    # results so the model rebuilds arguments from fresh file/command output
+    # instead of re-offending until the wall clock expires. Set via
+    # OPENSQUILLA_PLACEHOLDER_ESCALATION_THRESHOLD.
+    placeholder_escalation_threshold: int = 0
+    # Pre-deadline wrap-up nudge. 0 = off. When positive and a total turn
+    # timeout is configured, the wrap-up directive arms once when remaining
+    # wall-clock time drops below this many seconds, then is rebuilt each
+    # iteration (so the remaining-minutes figure stays current) and spliced
+    # into every subsequent provider request; only the arming log event is
+    # one-shot. Unlike the max_iterations finalization, tools stay available
+    # so the model can still apply and verify its final changes. Set via
+    # OPENSQUILLA_DEADLINE_WRAPUP_MARGIN_SECONDS.
+    deadline_wrapup_margin_seconds: int = 0
+    # Retry the reasoning-only provider failure with thinking disabled instead
+    # of re-requesting visible content with thinking still enabled. Off by
+    # default (the retry keeps thinking on). Set via
+    # OPENSQUILLA_REASONING_ONLY_THINKING_FALLBACK.
+    reasoning_only_thinking_fallback: bool = False
+    # Force thinking off for every provider call once remaining wall-clock
+    # time drops below this many seconds. 0 = off. Complements the wrap-up
+    # directive: the nudge alone leaves thinking enabled, so the model can
+    # still spend the entire margin inside a single reasoning stream. Set via
+    # OPENSQUILLA_DEADLINE_THINKING_OFF_MARGIN_SECONDS.
+    deadline_thinking_off_margin_seconds: int = 0
+    # Preempt a runaway reasoning-only stream once its streamed reasoning text
+    # exceeds this many characters. 0 = off. The partial reasoning is
+    # discarded and the call retries immediately with thinking disabled for
+    # that retry only (the next iteration re-enables thinking), so the budget
+    # goes to tool calls instead of one unbounded reasoning stream. One
+    # preempt per iteration; attempts that already emitted user-visible text
+    # or tool calls are never preempted. Set via
+    # OPENSQUILLA_REASONING_STREAM_CHAR_CAP.
+    reasoning_stream_char_cap: int = 0
+    # Re-apply captured source-diff candidates whose paths end the turn with
+    # no live workspace diff (that path's earlier work would otherwise be
+    # missing from the collected patch). Off by default. Runs once per turn
+    # end — normal finalization and terminal errors alike — applying the
+    # newest candidate per path, each guarded by `git apply --check`. Set via
+    # OPENSQUILLA_FINAL_DIFF_SALVAGE.
+    final_diff_salvage: bool = False
+    # Freeze workspace-reverting git commands (restore, checkout paths or
+    # branches, reset --hard, clean -fd, stash) in the shell tools once
+    # remaining wall-clock time drops below this many seconds. 0 = off.
+    # Unlike source_diff_preservation_mode="block", the freeze blocks the
+    # operations outright — no protected-path intersection — so a last-minute
+    # revert cannot empty the collected diff. Set via
+    # OPENSQUILLA_ENDGAME_GIT_FREEZE_MARGIN_SECONDS.
+    endgame_git_freeze_margin_seconds: int = 0
+    # Mid-budget progress nudges. Off by default. When enabled and the turn
+    # has a wall-clock budget (timeout > 0), a one-shot user message is
+    # appended after tool results the first time elapsed time crosses 50% and
+    # again at 75% of the budget while the workspace shows no change yet (no
+    # write receipts, no captured diff candidates, empty live workspace
+    # diff). Set via OPENSQUILLA_MID_BUDGET_NO_DIFF_NUDGE.
+    mid_budget_no_diff_nudge: bool = False
+    # Provider-view dedup of byte-identical repeated tool results. Off by
+    # default. When enabled, older duplicate tool_result payloads (same content
+    # emitted N+ times across iterations) are replaced in the provider request
+    # projection with a compact back-reference to the surviving newest copy;
+    # persisted history is never mutated. Set via
+    # OPENSQUILLA_PROVIDER_HISTORY_DEDUP.
+    provider_history_dedup_enabled: bool = False
+    # Minimum number of byte-identical copies of a tool result before dedup
+    # elides the older ones (keeps the newest copy full). Set via
+    # OPENSQUILLA_PROVIDER_HISTORY_DEDUP_MIN_REPEATS.
+    provider_history_dedup_min_repeats: int = 2
+    tool_loop_observer_mode: Literal["off", "log"] = "off"
+    runtime_recovery_mode: Literal["off", "log", "warn_model"] = "log"
+    runtime_recovery_source_loop_max_nudges: int = 1
+    final_diff_contract_mode: Literal["off", "log", "warn_model"] = "log"
+    source_diff_preservation_mode: Literal["off", "log", "block"] = "log"
+    source_diff_candidate_mode: Literal["off", "log", "warn_model"] = "log"
+    runtime_state_capsule_mode: Literal["off", "log", "inject"] = "off"
+    post_tool_empty_recovery_mode: Literal["off", "log", "warn_model"] = "log"
+    text_only_tool_recovery_mode: Literal["off", "log", "warn_model"] = "off"
+    reasoning_prefill_recovery_mode: Literal["off", "log", "recover"] = "log"
+    runtime_events_path: str | None = None
     tool_result_store_dir: str | None = None
     tool_result_store_session_id: str | None = None
     tool_result_store_session_key: str | None = None
     tool_result_store_agent_id: str | None = None
+    tool_result_store_full_trace: bool = False
     tool_result_store_max_bytes: int | None = 8 * 1024 * 1024
     tool_result_store_disk_budget_bytes: int | None = 256 * 1024 * 1024
     tool_result_store_retention_seconds: int | None = 7 * 24 * 60 * 60
+    # Optional gateway-injected observer invoked once per provider call with
+    # keyword args (provider_id, model, ttft_ms, duration_ms, ok,
+    # failure_kind). The agent loop swallows observer errors so the engine
+    # stays gateway-agnostic and a broken observer can never affect a turn.
+    provider_call_observer: Callable[..., None] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

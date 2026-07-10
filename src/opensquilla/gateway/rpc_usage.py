@@ -7,7 +7,10 @@ from collections.abc import Mapping
 from typing import Any
 
 from opensquilla.gateway.rpc import RpcContext, get_dispatcher
-from opensquilla.provider.model_catalog import shared_catalog
+from opensquilla.provider.model_catalog import (
+    resolve_effective_context_window,
+    shared_catalog,
+)
 from opensquilla.session.cost_rollup import rollup_cost_source
 from opensquilla.session.tokenizer import estimate_tokens
 
@@ -58,22 +61,39 @@ def _transcript_entry_tokens(entry: Any) -> int:
     return total
 
 
+# Shared-resolver sources -> this RPC's wire labels; "catalog"/"default"
+# keep the per-catalog labels below (unchanged wire behavior).
+_WINDOW_SOURCE_LABELS = {"override": "model_override", "config": "config"}
+
+
 def _resolve_context_window(model: str | None, ctx: RpcContext) -> tuple[int | None, str]:
     config = ctx.config
+    provider = str(getattr(getattr(config, "llm", None), "provider", "") or "")
+    runtime_catalog = getattr(getattr(ctx, "turn_runner", None), "_model_catalog", None)
+    global_window = None
     for owner in (config, getattr(config, "llm", None)):
-        window = _positive_int(getattr(owner, "context_window_tokens", None))
-        if window is not None:
-            return window, "config"
+        global_window = _positive_int(getattr(owner, "context_window_tokens", None))
+        if global_window is not None:
+            break
     if model:
-        provider = str(getattr(getattr(config, "llm", None), "provider", "") or "")
-        catalog = getattr(getattr(ctx, "turn_runner", None), "_model_catalog", None)
-        if catalog is not None and hasattr(catalog, "resolve_context_window"):
-            window = _positive_int(catalog.resolve_context_window(model, provider))
-            if window is not None:
-                return window, "runtime_model_catalog"
-        window = _positive_int(shared_catalog().resolve_context_window(model, provider))
-        if window is not None:
-            return window, "static_model_catalog"
+        # One shared-resolver call per catalog, runtime first: the resolver
+        # owns the "[models.*] override > global config window > catalog >
+        # default" precedence (same rule as the engine budgeting path).
+        for catalog, catalog_label in (
+            (runtime_catalog, "runtime_model_catalog"),
+            (shared_catalog(), "static_model_catalog"),
+        ):
+            if catalog is None or not hasattr(catalog, "resolve_context_window"):
+                continue
+            window, source = resolve_effective_context_window(
+                catalog, model, provider=provider, global_override=global_window or 0
+            )
+            resolved = _positive_int(window)
+            if resolved is None:
+                continue
+            return resolved, _WINDOW_SOURCE_LABELS.get(source, catalog_label)
+    if global_window is not None:
+        return global_window, "config"
     return None, "unavailable"
 
 
@@ -162,6 +182,8 @@ def _resolved_session_cost_fields(
 
     missing_entries = _field(source, "missing_cost_entries", 0) or 0
     cost_source = _field(source, "cost_source")
+    estimate_basis = _first_field(source, "estimate_basis", "estimateBasis")
+    price_source = _first_field(source, "price_source", "priceSource")
     if total_cost is None:
         total_cost = legacy_total
     if (
@@ -196,6 +218,13 @@ def _resolved_session_cost_fields(
         "cost_source": cost_source,
         "missing_cost_entries": int(missing_entries or 0),
         "cost_ephemeral": bool(ephemeral),
+        # Additive provenance keys, sourced from the session record when
+        # present; ``None`` when the persisted row predates them or never
+        # carried per-model breakdown provenance. ``_usage_row`` fans these
+        # snake_case values out to both key cases, matching the other cost
+        # fields returned here.
+        "estimate_basis": estimate_basis,
+        "price_source": price_source,
     }
 
 
@@ -211,6 +240,8 @@ def _usage_row(
     cost_source: str = "none",
     missing_cost_entries: int = 0,
     cost_ephemeral: bool = False,
+    estimate_basis: str | None = None,
+    price_source: str | None = None,
     cache_read_tokens: int = 0,
     cache_write_tokens: int = 0,
     created_at: int | None = None,
@@ -233,6 +264,10 @@ def _usage_row(
         "costSource": cost_source,
         "missingCostEntries": missing_cost_entries,
         "costEphemeral": cost_ephemeral,
+        # Additive provenance keys — None when the source has no per-model
+        # breakdown to derive them from (see _resolved_session_cost_fields).
+        "estimateBasis": estimate_basis,
+        "priceSource": price_source,
         "cacheReadTokens": cache_read_tokens,
         "cacheWriteTokens": cache_write_tokens,
         "createdAt": created_at,
@@ -252,6 +287,8 @@ def _usage_row(
         "cost_source": cost_source,
         "missing_cost_entries": missing_cost_entries,
         "cost_ephemeral": cost_ephemeral,
+        "estimate_basis": estimate_basis,
+        "price_source": price_source,
         "cache_read_tokens": cache_read_tokens,
         "cache_write_tokens": cache_write_tokens,
         "created_at": created_at,
@@ -301,7 +338,10 @@ def _tracker_rows(ctx: RpcContext, *, now_ms: int) -> list[dict[str, Any]]:
             # canonical cost so it matches the breakdown sum exactly.
             cost_fields["cost_usd"] = usage_total
             cost_fields["billed_cost_usd"] = usage_billed
-            cost_fields["estimated_cost_usd"] = usage_estimate
+            # The estimated component is the UNBILLED remainder, not the full
+            # list-price estimate — otherwise cost_usd != billed + estimated and
+            # fully-billed rows falsely show a large "estimated" figure.
+            cost_fields["estimated_cost_usd"] = max(0.0, usage_total - usage_billed)
             cost_fields["cost_source"] = usage_cost_source  # provider_billed or mixed
         else:
             cost_fields["cost_usd"] = usage_estimate

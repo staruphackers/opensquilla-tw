@@ -2,17 +2,28 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from opensquilla.gateway.rpc import RpcContext, get_dispatcher
+from opensquilla.knowledge.backend import KnowledgeBackend
 from opensquilla.knowledge.manager import manager_from_config
 
 _d = get_dispatcher()
 
 
-def _manager(ctx: RpcContext):
+def _manager(ctx: RpcContext) -> KnowledgeBackend:
     return manager_from_config(getattr(ctx, "config", None))
+
+
+async def _call_backend[T](
+    operation: Callable[..., T],
+    *args: Any,
+    **kwargs: Any,
+) -> T:
+    return await asyncio.to_thread(operation, *args, **kwargs)
 
 
 def _top_k(params: dict[str, Any], *, default: int = 8) -> int:
@@ -49,14 +60,14 @@ def _search_filters(params: dict[str, Any]) -> dict[str, Any] | None:
 async def _handle_knowledge_status(params: dict | None, ctx: RpcContext) -> dict[str, Any]:
     if params is not None and not isinstance(params, dict):
         raise ValueError("params must be an object")
-    return _manager(ctx).status()
+    return await _call_backend(_manager(ctx).status)
 
 
 @_d.method("knowledge.collections", scope="operator.read")
 async def _handle_knowledge_collections(params: dict | None, ctx: RpcContext) -> dict[str, Any]:
     if params is not None and not isinstance(params, dict):
         raise ValueError("params must be an object")
-    return _manager(ctx).collections()
+    return await _call_backend(_manager(ctx).collections)
 
 
 @_d.method("knowledge.prepare_sample", scope="operator.admin")
@@ -70,7 +81,8 @@ async def _handle_knowledge_prepare_sample(params: dict | None, ctx: RpcContext)
         parsed_limit = int(limit)
     except (TypeError, ValueError) as exc:
         raise ValueError("params.limit must be an integer") from exc
-    return _manager(ctx).prepare_sample(
+    return await _call_backend(
+        _manager(ctx).prepare_sample,
         source_root=Path(str(source_root)) if source_root else None,
         limit=parsed_limit,
         collection_name=str(collection_name) if collection_name else None,
@@ -92,7 +104,8 @@ async def _handle_knowledge_ingest(params: dict | None, ctx: RpcContext) -> dict
         parsed_limit = int(limit)
     except (TypeError, ValueError) as exc:
         raise ValueError("params.limit must be an integer") from exc
-    return _manager(ctx).ingest_collection(
+    return await _call_backend(
+        _manager(ctx).ingest_collection,
         source_root=Path(str(source_root)) if source_root else None,
         limit=parsed_limit,
         collection_name=str(collection_name) if collection_name else None,
@@ -109,7 +122,12 @@ async def _handle_knowledge_search(params: dict | None, ctx: RpcContext) -> dict
     if not query:
         raise ValueError("params.query is required")
     filters = _search_filters(params)
-    return _manager(ctx).search(query, top_k=_top_k(params), filters=filters)
+    return await _call_backend(
+        _manager(ctx).search,
+        query,
+        top_k=_top_k(params),
+        filters=filters,
+    )
 
 
 @_d.method("knowledge.get", scope="operator.read")
@@ -120,7 +138,8 @@ async def _handle_knowledge_get(params: dict | None, ctx: RpcContext) -> dict[st
     document_id = params.get("documentId") or params.get("document_id")
     if not chunk_id and not document_id:
         raise ValueError("params.chunkId or params.documentId is required")
-    return _manager(ctx).get(
+    return await _call_backend(
+        _manager(ctx).get,
         chunk_id=str(chunk_id) if chunk_id else None,
         document_id=str(document_id) if document_id else None,
     )
@@ -130,11 +149,11 @@ async def _handle_knowledge_get(params: dict | None, ctx: RpcContext) -> dict[st
 async def _handle_knowledge_questions(params: dict | None, ctx: RpcContext) -> dict[str, Any]:
     if params is not None and not isinstance(params, dict):
         raise ValueError("params must be an object")
-    return _manager(ctx).questions()
+    return await _call_backend(_manager(ctx).questions)
 
 
 @_d.method("knowledge.judgment", scope="operator.write")
 async def _handle_knowledge_judgment(params: dict | None, ctx: RpcContext) -> dict[str, Any]:
     if not isinstance(params, dict):
         raise ValueError("params must be an object")
-    return _manager(ctx).record_judgment(params)
+    return await _call_backend(_manager(ctx).record_judgment, params)

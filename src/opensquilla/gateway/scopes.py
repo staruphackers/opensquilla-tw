@@ -156,6 +156,10 @@ METHOD_SCOPES: dict[str, str] = {
     # router_decisions). The table stores enum tokens and numbers only (no
     # prompt text), so the listing is a plain operator read.
     "router.decisions.list": READ_SCOPE,
+    # OpenSquilla-only — self-learning loop status (active model, sample
+    # counts, gate reason, last receipt). Derived from on-disk loop state;
+    # no prompt text, no side effects — a plain operator read.
+    "router.selflearning.status": READ_SCOPE,
     # OpenSquilla-only — onboarding catalog and status are operator-readable.
     "onboarding.status": READ_SCOPE,
     "onboarding.catalog": READ_SCOPE,
@@ -248,11 +252,11 @@ METHOD_SCOPES: dict[str, str] = {
     "meta.runs.replay": ADMIN_SCOPE,
     "meta.runs.validate": ADMIN_SCOPE,
     "meta.runs.eval_baseline": ADMIN_SCOPE,
-    # OpenSquilla-only — dormant feedback intake (deferred F7 follow-up).
-    # Validates and logs an operator rating for one decision record; nothing
-    # consumes it and it never feeds routing or calibration. Admin because it
-    # is a write-shaped mutation intake, not an observability read.
-    "router.feedback.submit": ADMIN_SCOPE,
+    # OpenSquilla-only — live feedback intake (F7). Resolves a decision id and
+    # appends a rating to the per-agent self-learning feedback sidecar. Write
+    # scope: chat surfaces submit ratings on behalf of the user; it never
+    # mutates routing state directly (consumption is offline, at training).
+    "router.feedback.submit": WRITE_SCOPE,
     # Proposal mutation changes the managed skill layer or unattended
     # synthesis state, so require authenticated admin rather than remote
     # no-auth operator.proposals.

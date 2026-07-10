@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, shallowRef } from 'vue'
+import { computed, onMounted, onUnmounted, ref, shallowRef } from 'vue'
 import { useI18n } from 'vue-i18n'
 import Icon from '@/components/Icon.vue'
 import GatewayStatusBlock from '@/components/settings/GatewayStatusBlock.vue'
@@ -7,6 +7,11 @@ import SettingsUpdatePanel from '@/components/settings/SettingsUpdatePanel.vue'
 import { usePlatform, type GatewayStatus } from '@/platform'
 import { useConfirm } from '@/composables/useConfirm'
 import { useToasts } from '@/composables/useToasts'
+import {
+  formatByteSize,
+  summarizeMigrationReport,
+  type MigrationReportSummary,
+} from '@/utils/migrationReport'
 
 const { t } = useI18n()
 
@@ -52,10 +57,46 @@ interface UninstallBridge {
   uninstallRun?: (payload: { purgeData: boolean }) => Promise<{ ok: boolean; aborted?: boolean; detail?: string }>
   quitApp?: () => Promise<unknown>
 }
+
+// Legacy-home import rides the same preload bridge (also desktop-only and
+// self-contained: the Electron main process quiesces the gateway, shells out to
+// the bundled `opensquilla migrate`, then restarts behind the boot splash).
+// All methods are optional so a panel served by a newer gateway to an older
+// desktop shell simply hides the row instead of crashing.
+interface MigrationBridge {
+  migrationSummary?: () => Promise<{
+    ok: boolean
+    candidate: { kind: string; path: string } | null
+    report: unknown | null
+    previewId?: string
+    raw?: string
+  }>
+  migrationRun?: (opts: { overwrite?: boolean; previewId: string }) => Promise<{
+    ok: boolean
+    aborted?: boolean
+    migrationApplied?: boolean
+    restartOk?: boolean
+    requiresProviderSetup?: boolean
+    report?: unknown
+    detail?: string
+  }>
+  migrationTakeLastResult?: () => Promise<{
+    ok: boolean
+    migrationApplied: boolean
+    restartOk: boolean
+    requiresProviderSetup: boolean
+    detail?: string
+  } | null>
+  onMigrationProgress?: (cb: (state: { phase: string; detail?: string }) => void) => () => void
+}
+
 const desktopBridge = (
-  globalThis as unknown as { opensquillaDesktop?: UninstallBridge }
+  globalThis as unknown as { opensquillaDesktop?: UninstallBridge & MigrationBridge }
 ).opensquillaDesktop
 const canUninstall = computed(() => Boolean(desktopBridge?.uninstallRun))
+const canMigrate = computed(
+  () => Boolean(desktopBridge?.migrationSummary && desktopBridge?.migrationRun),
+)
 
 async function loadStatus() {
   loading.value = true
@@ -151,7 +192,162 @@ async function uninstall(purgeData: boolean) {
   }
 }
 
-onMounted(loadStatus)
+// --- Legacy-home import (rescue flow for users past first run) ---
+const migrationOpen = ref(false)
+const migrationBusy = ref(false)
+const migrationCandidate = ref<{ kind: string; path: string } | null>(null)
+const migrationSummary = shallowRef<MigrationReportSummary | null>(null)
+const migrationPreviewId = ref('')
+const migrationOverwrite = ref(false)
+const migrationPhase = ref('')
+let migrationProgressUnsub: (() => void) | null = null
+
+const migrationCountsText = computed(() => {
+  const summary = migrationSummary.value
+  if (!summary) return ''
+  const c = summary.itemCounts
+  const parts: string[] = []
+  if (c.planned) parts.push(t('setup.runtime.migrationCountPlanned', { n: c.planned }))
+  if (c.migrated) parts.push(t('setup.runtime.migrationCountMigrated', { n: c.migrated }))
+  if (c.skipped) parts.push(t('setup.runtime.migrationCountSkipped', { n: c.skipped }))
+  if (c.error) parts.push(t('setup.runtime.migrationCountError', { n: c.error }))
+  return parts.length ? parts.join(' · ') : t('setup.runtime.migrationCountNone')
+})
+const migrationDiskText = computed(() => {
+  const summary = migrationSummary.value
+  if (!summary) return ''
+  return t('setup.runtime.migrationDisk', {
+    required: formatByteSize(summary.diskRequiredBytes),
+    free: formatByteSize(summary.diskFreeBytes),
+  })
+})
+const migrationHasBlockingErrors = computed(() => {
+  const summary = migrationSummary.value
+  if (!summary) return true
+  // The one preflight/target error is resolved by explicitly opting into
+  // overwrite-with-backups. Every other report error remains blocking.
+  const acknowledgedByOverwrite = summary.needsOverwrite ? 1 : 0
+  return summary.itemCounts.error > acknowledgedByOverwrite
+})
+
+function subscribeMigrationProgress() {
+  if (migrationProgressUnsub || !desktopBridge?.onMigrationProgress) return
+  migrationProgressUnsub = desktopBridge.onMigrationProgress((state) => {
+    if (!state || typeof state.phase !== 'string') return
+    migrationPhase.value = state.detail ? `${state.phase} — ${state.detail}` : state.phase
+  })
+}
+
+function unsubscribeMigrationProgress() {
+  migrationProgressUnsub?.()
+  migrationProgressUnsub = null
+}
+
+// Row click: dry-run summary over the bridge, then the inline confirm block.
+async function openMigration() {
+  if (!desktopBridge?.migrationSummary) return
+  migrationBusy.value = true
+  try {
+    const result = await desktopBridge.migrationSummary()
+    const candidate = result.candidate && typeof result.candidate.path === 'string'
+      ? result.candidate
+      : null
+    if (!candidate) {
+      if (!result?.ok) {
+        pushToast(t('setup.runtime.migrationSummaryFailed', { detail: result?.raw || t('setup.runtime.uninstallCheckLog') }), { tone: 'danger' })
+      } else {
+        pushToast(t('setup.runtime.migrationNone'))
+      }
+      return
+    }
+    // A blocked dry run exits nonzero but still emits the report that explains
+    // the preflight failure. Treat parsing (report !== null), not exit status,
+    // as the preview-validity signal.
+    if (result.report == null || typeof result.previewId !== 'string' || !result.previewId) {
+      pushToast(t('setup.runtime.migrationSummaryFailed', { detail: result?.raw || t('setup.runtime.uninstallCheckLog') }), { tone: 'danger' })
+      return
+    }
+    migrationCandidate.value = { kind: String(candidate.kind ?? ''), path: candidate.path }
+    migrationSummary.value = summarizeMigrationReport(result.report)
+    migrationPreviewId.value = result.previewId
+    migrationOverwrite.value = false
+    migrationPhase.value = ''
+    migrationOpen.value = true
+    subscribeMigrationProgress()
+  } catch (err) {
+    pushToast(t('setup.runtime.migrationSummaryFailed', { detail: err instanceof Error ? err.message : String(err) }), { tone: 'danger' })
+  } finally {
+    migrationBusy.value = false
+  }
+}
+
+function cancelMigration() {
+  migrationOpen.value = false
+  migrationCandidate.value = null
+  migrationSummary.value = null
+  migrationPreviewId.value = ''
+  migrationPhase.value = ''
+  unsubscribeMigrationProgress()
+}
+
+async function runMigration() {
+  if (!desktopBridge?.migrationRun || !migrationOpen.value || !migrationPreviewId.value) return
+  const ok = await confirm({
+    title: t('setup.runtime.migrationConfirmTitle'),
+    body: t('setup.runtime.migrationConfirmBody'),
+    primaryLabel: t('setup.runtime.migrationConfirmPrimary'),
+  })
+  if (!ok) return
+  migrationBusy.value = true
+  // The run quiesces the gateway and restarts it behind the boot splash, so
+  // this page's RPC connection is expected to drop mid-run. Surface the
+  // restart notice up front. The main process persists the terminal result so
+  // the replacement renderer can surface it the next time this panel mounts.
+  pushToast(t('setup.runtime.migrationStarted'))
+  try {
+    const result = await desktopBridge.migrationRun({
+      overwrite: migrationOverwrite.value,
+      previewId: migrationPreviewId.value,
+    })
+    if (result?.aborted) return
+    await desktopBridge.migrationTakeLastResult?.().catch(() => null)
+    if (!result?.ok) {
+      pushToast(t('setup.runtime.migrationFailed', { detail: result?.detail || t('setup.runtime.uninstallCheckLog') }), { tone: 'danger' })
+      return
+    }
+    pushToast(t('setup.runtime.migrationDone'))
+    cancelMigration()
+  } catch (err) {
+    pushToast(t('setup.runtime.migrationFailed', { detail: err instanceof Error ? err.message : String(err) }), { tone: 'danger' })
+  } finally {
+    migrationBusy.value = false
+  }
+}
+
+async function showLastMigrationResult() {
+  if (!desktopBridge?.migrationTakeLastResult) return
+  try {
+    const result = await desktopBridge.migrationTakeLastResult()
+    if (!result) return
+    if (result.ok) {
+      pushToast(t('setup.runtime.migrationDone'))
+    } else {
+      pushToast(t('setup.runtime.migrationFailed', {
+        detail: result.detail || t('setup.runtime.uninstallCheckLog'),
+      }), { tone: 'danger' })
+    }
+  } catch (err) {
+    pushToast(t('setup.runtime.migrationFailed', {
+      detail: err instanceof Error ? err.message : String(err),
+    }), { tone: 'danger' })
+  }
+}
+
+onMounted(() => {
+  void loadStatus()
+  void showLastMigrationResult()
+})
+onUnmounted(unsubscribeMigrationProgress)
 </script>
 
 <template>
@@ -196,6 +392,78 @@ onMounted(loadStatus)
       </div>
     </div>
 
+    <div v-if="canMigrate" class="control-row">
+      <div class="control-row__label-block">
+        <span class="control-row__label">{{ t('setup.runtime.migrationLabel') }}</span>
+        <span class="control-row__desc">{{ t('setup.runtime.migrationDesc') }}</span>
+      </div>
+      <div class="control-row__control">
+        <button
+          type="button"
+          class="btn btn--ghost"
+          :disabled="busy || migrationBusy || migrationOpen"
+          data-testid="runtime-migration-open"
+          @click="openMigration"
+        >
+          {{ t('setup.runtime.migrationButton') }}
+        </button>
+      </div>
+    </div>
+
+    <div
+      v-if="migrationOpen && migrationSummary && migrationCandidate"
+      class="migration-summary"
+      data-testid="runtime-migration-summary"
+    >
+      <div class="migration-summary__head">
+        <span class="migration-summary__title">{{ t('setup.runtime.migrationSummaryTitle') }}</span>
+        <span class="migration-summary__kind">{{ migrationCandidate.kind }}</span>
+      </div>
+      <code class="migration-summary__path">{{ migrationCandidate.path }}</code>
+      <ul class="migration-summary__facts">
+        <li>{{ migrationCountsText }}</li>
+        <li>{{ t('setup.runtime.migrationPausedJobs', { n: migrationSummary.pausedJobs }) }}</li>
+        <li>{{ migrationDiskText }}</li>
+      </ul>
+      <ul v-if="migrationSummary.errorNotes.length" class="migration-summary__errors">
+        <li v-for="note in migrationSummary.errorNotes" :key="note">{{ note }}</li>
+      </ul>
+      <ul v-if="migrationSummary.notes.length" class="migration-summary__notes">
+        <li v-for="note in migrationSummary.notes" :key="note">{{ note }}</li>
+      </ul>
+      <label
+        v-if="migrationSummary.needsOverwrite"
+        class="migration-summary__overwrite"
+        data-testid="runtime-migration-overwrite"
+      >
+        <input v-model="migrationOverwrite" type="checkbox" />
+        <span>{{ t('setup.runtime.migrationOverwrite') }}</span>
+      </label>
+      <p v-if="migrationPhase" class="migration-summary__phase" role="status" aria-live="polite">
+        {{ t('setup.runtime.migrationPhase', { phase: migrationPhase }) }}
+      </p>
+      <div class="migration-summary__actions">
+        <button
+          type="button"
+          class="btn btn--ghost"
+          :disabled="migrationBusy"
+          data-testid="runtime-migration-cancel"
+          @click="cancelMigration"
+        >
+          {{ t('setup.runtime.migrationCancel') }}
+        </button>
+        <button
+          type="button"
+          class="btn"
+          :disabled="migrationBusy || migrationHasBlockingErrors || (migrationSummary.needsOverwrite && !migrationOverwrite)"
+          data-testid="runtime-migration-run"
+          @click="runMigration"
+        >
+          {{ t('setup.runtime.migrationImport') }}
+        </button>
+      </div>
+    </div>
+
     <div v-if="canUninstall" class="control-row danger-zone">
       <div class="control-row__label-block">
         <span class="control-row__label">{{ t('setup.runtime.uninstallLabel') }}</span>
@@ -233,6 +501,74 @@ onMounted(loadStatus)
 .danger-zone__actions {
   display: flex;
   flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+/* Inline dry-run summary + confirm block for the legacy-home import */
+.migration-summary {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+}
+
+.migration-summary__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+}
+
+.migration-summary__title {
+  font-weight: 700;
+}
+
+.migration-summary__kind {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+}
+
+.migration-summary__path {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  word-break: break-all;
+}
+
+.migration-summary__facts,
+.migration-summary__errors,
+.migration-summary__notes {
+  margin: 0;
+  padding-left: var(--sp-4);
+  font-size: var(--fs-sm);
+}
+
+.migration-summary__errors {
+  color: var(--danger);
+}
+
+.migration-summary__notes {
+  color: var(--text-muted);
+}
+
+.migration-summary__overwrite {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--fs-sm);
+}
+
+.migration-summary__phase {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--fs-sm);
+}
+
+.migration-summary__actions {
+  display: flex;
+  justify-content: flex-end;
   gap: var(--sp-2);
 }
 </style>

@@ -61,18 +61,23 @@ from opensquilla.onboarding.provider_specs import (  # noqa: E402
 EXPECTED_VERIFIED = {
     "openrouter", "openai", "openai_responses", "anthropic", "ollama", "deepseek",
     "gemini", "dashscope", "moonshot", "zhipu", "qianfan",
-    "volcengine", "byteplus",
+    "volcengine", "byteplus", "tokenrhythm",
 }
 # Experimental: registry-runnable, offered with a visible caveat.
 EXPECTED_EXPERIMENTAL = {
-    "azure", "bailian_coding", "minimax", "minimax_openai", "minimax_cn",
-    "minimax_global", "mistral", "groq", "aihubmix", "vllm", "custom",
+    "azure", "bailian_coding", "kimi_coding_openai", "kimi_coding_anthropic",
+    "minimax", "minimax_openai", "minimax_coding_openai",
+    "minimax_coding_anthropic", "minimax_cn", "minimax_global", "mimo_openai",
+    "mimo_anthropic", "mistral", "groq", "aihubmix", "vllm", "custom",
     "lm_studio", "siliconflow", "ovms", "litellm_proxy", "openai_codex",
+    "volcengine_coding_plan", "volcengine_coding_plan_anthropic",
+    "byteplus_coding_plan", "byteplus_coding_plan_anthropic",
+    "tencent_tokenhub", "tencent_tokenhub_anthropic", "tencent_tokenhub_intl",
+    "tencent_token_plan", "tencent_token_plan_anthropic",
 }
 EXPECTED_SUPPORTED = EXPECTED_VERIFIED | EXPECTED_EXPERIMENTAL
-# No runtime support at all (coding-plan/OAuth stubs): never configurable.
+# No runtime support at all: never configurable.
 EXPECTED_DISABLED = {
-    "volcengine_coding_plan", "byteplus_coding_plan",
     "github_copilot",
 }
 
@@ -99,11 +104,12 @@ def test_catalog_marks_unsupported_providers_disabled():
         assert specs[pid].runtime_supported is False
 
 
-def test_catalog_prioritizes_openrouter_then_sorts_remaining_providers():
+def test_catalog_prioritizes_tokenrhythm_then_openrouter_then_sorts_remaining():
     specs = list_provider_setup_specs()
-    assert specs[0].provider_id == "openrouter"
-    assert [(s.label.lower(), s.provider_id) for s in specs[1:]] == sorted(
-        (s.label.lower(), s.provider_id) for s in specs[1:]
+    assert specs[0].provider_id == "tokenrhythm"
+    assert specs[1].provider_id == "openrouter"
+    assert [(s.label.lower(), s.provider_id) for s in specs[2:]] == sorted(
+        (s.label.lower(), s.provider_id) for s in specs[2:]
     )
 
 
@@ -138,8 +144,34 @@ def test_api_key_providers_expose_env_key_field_in_setup_spec():
     assert env_field.secret is False
 
 
+def test_api_key_field_describes_plaintext_config_storage_accurately():
+    """A pasted key is persisted as plaintext api_key in the config file and
+    is consulted ahead of the env var — the description must say so instead
+    of implying the paste lands under the env key."""
+    spec = get_provider_setup_spec("openrouter")
+    api_field = next(f for f in spec.fields if f.name == "api_key")
+
+    assert "Stored under env key" not in api_field.description
+    assert "plaintext api_key" in api_field.description
+    assert "config file" in api_field.description
+    assert "ahead of OPENROUTER_API_KEY" in api_field.description
+    assert "Leave blank to read OPENROUTER_API_KEY" in api_field.description
+
+
+def test_api_key_field_description_stays_accurate_without_an_env_key():
+    # Providers without a registry env key still persist pastes in plaintext.
+    for spec in list_provider_setup_specs():
+        api_field = next(f for f in spec.fields if f.name == "api_key")
+        if spec.env_key:
+            assert spec.env_key in api_field.description
+        else:
+            assert api_field.description == (
+                "Saved as plaintext api_key in the config file."
+            )
+
+
 def test_non_router_providers_explain_required_model_in_setup_spec():
-    for provider_id in ("anthropic", "ollama", "qianfan", "openai_responses"):
+    for provider_id in ("anthropic", "ollama", "openai_responses"):
         spec = get_provider_setup_spec(provider_id)
         model_field = next(f for f in spec.fields if f.name == "model")
 
@@ -148,6 +180,41 @@ def test_non_router_providers_explain_required_model_in_setup_spec():
         assert "Required" in model_field.description
         assert "router" not in model_field.description.lower()
         assert any("model" in item.lower() for item in spec.what_you_need)
+
+
+@pytest.mark.parametrize(
+    "provider_id",
+    [
+        "qianfan",
+        "volcengine_coding_plan",
+        "kimi_coding_openai",
+        "kimi_coding_anthropic",
+        "minimax",
+        "minimax_cn",
+        "minimax_global",
+        "minimax_coding_openai",
+        "minimax_coding_anthropic",
+        "mimo_openai",
+        "mimo_anthropic",
+    ],
+)
+def test_inline_router_preset_providers_are_router_supported(provider_id: str):
+    spec = get_provider_setup_spec(provider_id)
+    row = next(row for row in provider_catalog_payload() if row["providerId"] == provider_id)
+    model_field = next(f for f in spec.fields if f.name == "model")
+
+    assert spec.router_supported is True
+    assert model_field.required is False
+    assert row["routerSupported"] is True
+    assert row["presets"]
+
+
+def test_minimax_openai_remains_direct_only_for_current_support_matrix():
+    spec = get_provider_setup_spec("minimax_openai")
+    row = next(row for row in provider_catalog_payload() if row["providerId"] == "minimax_openai")
+
+    assert spec.router_supported is False
+    assert row["routerSupported"] is False
 
 
 def test_azure_requires_base_url_in_setup_spec():

@@ -45,11 +45,11 @@ et partagée.
 Chaque point d'entrée — Web UI, CLI et canaux de chat — passe par cette même boucle,
 si bien que la répartition des outils, les nouvelles tentatives et la journalisation
 des décisions se comportent de façon identique partout. Une couche de fournisseurs
-enfichable dialogue avec OpenRouter, OpenAI, Anthropic, Ollama, DeepSeek, Gemini,
+enfichable dialogue avec TokenRhythm, OpenRouter, OpenAI, Anthropic, Ollama, DeepSeek, Gemini,
 Qwen/DashScope et plus de 20 autres fournisseurs de LLM, sans aucun changement dans
 votre code ni dans votre schéma de configuration.
 
-OpenSquilla 0.5.0 Preview 2 est la préversion actuelle.
+OpenSquilla 0.5.0 Preview 3 est la préversion actuelle.
 
 Pour une documentation produit orientée tâches, commencez par le
 [Guide produit OpenSquilla](README.product.md) ou par l'[index de la
@@ -72,9 +72,9 @@ GitHub publiées. Les installations de wheel Python utilisent des noms de fichie
 wheel versionnés, car les installateurs valident la version intégrée au nom de
 fichier du wheel.
 
-Pour un usage bureau en 0.5.0 Preview 2, préférez les installateurs de bureau empaquetés issus de la
-Release GitHub : `OpenSquilla-0.5.0-rc2-mac-arm64.dmg` sous macOS et
-`OpenSquilla-0.5.0-rc2-win-x64.exe` sous Windows.
+Pour un usage bureau en 0.5.0 Preview 3, préférez les installateurs de bureau empaquetés issus de la
+Release GitHub : `OpenSquilla-0.5.0-rc3-mac-arm64.dmg` sous macOS et
+`OpenSquilla-0.5.0-rc3-win-x64.exe` sous Windows.
 
 | Voie | Public | Quand l'utiliser |
 | --- | --- | --- |
@@ -121,11 +121,11 @@ Liens d'installation : [Git](https://git-scm.com/downloads) ·
 
 ### Installateurs de bureau
 
-Les installateurs de bureau 0.5.0 Preview 2 empaquettent la console de contrôle Vue et
+Les installateurs de bureau 0.5.0 Preview 3 empaquettent la console de contrôle Vue et
 l'environnement d'exécution de la passerelle dans une enveloppe Electron.
 
-- macOS Apple Silicon : <https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc2/OpenSquilla-0.5.0-rc2-mac-arm64.dmg>
-- Windows x64 : <https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc2/OpenSquilla-0.5.0-rc2-win-x64.exe>
+- macOS Apple Silicon : <https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc3/OpenSquilla-0.5.0-rc3-mac-arm64.dmg>
+- Windows x64 : <https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc3/OpenSquilla-0.5.0-rc3-win-x64.exe>
 
 Quittez toute application de bureau OpenSquilla en cours d'exécution avant la mise à
 niveau. Les fichiers `~/.opensquilla/config.toml` et les données de session existants
@@ -160,7 +160,7 @@ $env:Path = "$env:USERPROFILE\.local\bin;" + $env:Path
 **2. Installer OpenSquilla** — la même commande sur toutes les plateformes.
 
 ```sh
-uv tool install --python 3.12 "opensquilla[recommended] @ https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc2/opensquilla-0.5.0rc2-py3-none-any.whl"
+uv tool install --python 3.12 "opensquilla[recommended] @ https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc3/opensquilla-0.5.0rc3-py3-none-any.whl"
 ```
 
 Cela installe le wheel OpenSquilla depuis l'URL de release, puis laisse `uv`
@@ -185,7 +185,7 @@ opensquilla gateway run
 > nouveau terminal, ou réexécutez la ligne PATH de l'étape 1.
 
 Pour une installation entièrement épinglée, utilisez l'URL de wheel versionnée :
-`https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc2/opensquilla-0.5.0rc2-py3-none-any.whl`.
+`https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc3/opensquilla-0.5.0rc3-py3-none-any.whl`.
 
 <a id="install-from-source"></a>
 
@@ -536,7 +536,18 @@ cloud autorise le trafic TCP entrant sur ce port. N'exposez pas la passerelle av
 
 **Docker**
 
-La voie compose exécute une image `opensquilla:local` que vous construisez vous-même.
+Des images multi-architecture préconstruites (`amd64`/`arm64`) sont publiées sur
+`ghcr.io/opensquilla/opensquilla` à chaque tag de release —
+[`docs/docker.md`](docs/docker.md) est le guide conteneur complet
+(serveurs domestiques et NAS, exposition LAN avec authentification par jeton,
+mises à niveau) :
+
+```sh
+OPENSQUILLA_GATEWAY_IMAGE=ghcr.io/opensquilla/opensquilla:latest docker compose up -d
+```
+
+Sans `OPENSQUILLA_GATEWAY_IMAGE`, la voie compose exécute une image
+`opensquilla:local` que vous construisez vous-même.
 Construisez-la à partir d'un dépôt source dont les ressources de routeur Git LFS ont été
 récupérées (voir [Installation depuis les sources](#install-from-source) pour le clone
 et `git lfs pull`) :
@@ -646,7 +657,7 @@ Notes complètes : [`CHANGELOG.md`](CHANGELOG.md) ·
 | --- | --- |
 | **Routage économe en Token** | `SquillaRouter` — un classifieur local LightGBM + ONNX présent dans l'extra `recommended` — évalue chaque tour selon la longueur, la langue, le code, les mots-clés et les embeddings sémantiques, puis l'achemine à travers quatre niveaux (C0–C3 ; les anciens noms T0–T3 sont des alias) vers le modèle le moins coûteux capable de le traiter. La classification s'exécute sur l'appareil ; votre prompt ne quitte jamais la machine pour prendre cette décision. |
 | **Raisonnement et prompts adaptatifs** | OpenSquilla ne demande un raisonnement étendu que pour les tours que le routeur évalue comme complexes, et le prompt système s'adapte à la complexité de la tâche — léger pour les tours triviaux, instructions complètes pour les tours complexes. |
-| **Plus de 20 fournisseurs de LLM** | Le registre des fournisseurs vise plus de 20 backends de LLM — OpenRouter, OpenAI, Anthropic, Ollama, DeepSeek, Gemini, DashScope/Qwen, Moonshot, Mistral, Groq, Zhipu, SiliconFlow, vLLM, LM Studio, et bien d'autres, avec une sélection principal-plus-repli ; l'onboarding de premier démarrage expose le sous-ensemble vérifié. |
+| **Plus de 20 fournisseurs de LLM** | Le registre des fournisseurs vise plus de 20 backends de LLM — TokenRhythm, OpenRouter, OpenAI, Anthropic, Ollama, DeepSeek, Gemini, DashScope/Qwen, Moonshot, Mistral, Groq, Zhipu, SiliconFlow, vLLM, LM Studio, et bien d'autres, avec une sélection principal-plus-repli ; l'onboarding de premier démarrage expose le sous-ensemble vérifié. |
 | **Compétences à la demande et MCP** | 15 compétences intégrées (coding, GitHub, cron, pptx/docx/xlsx/pdf, résumé, tmux, météo, et plus encore) ne se chargent que lorsque la tâche en a besoin. OpenSquilla est un client MCP, et peut aussi s'exécuter comme serveur MCP — `opensquilla mcp-server run` nécessite l'extra `mcp` (installez `opensquilla[recommended,mcp]`). Les compétences peuvent être créées, installées et publiées depuis la CLI. |
 | **Mémoire locale persistante** | Un `MEMORY.md` soigneusement constitué, complété par des notes Markdown datées, interrogé via la recherche par mots-clés en texte intégral de SQLite et le rappel sémantique de `sqlite-vec`. Les embeddings s'exécutent sur l'appareil via un ONNX intégré, ou basculent vers OpenAI/Ollama. Une décroissance exponentielle facultative et une consolidation « dream » activable sur option sont disponibles. |
 | **Bac à sable de sécurité en couches** | Trois niveaux de stratégie (Standard / Strict / Locked) sur une matrice de permissions. Bubblewrap isole l'exécution de code sous Linux ; le backend Seatbelt de macOS ne fait pour l'instant que générer des profils (l'exécution est à venir), et il n'existe pas encore de backend de bac à sable sous Windows. Un registre de refus (denial ledger) met automatiquement en pause les exécutions autonomes après des refus répétés, les sorties rejetées sont purgées, et les métadonnées de compétences ainsi que les résultats d'outils sont échappés en XML contre l'injection de prompt. |

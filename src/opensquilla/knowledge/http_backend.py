@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, overload
 
 import httpx
 
@@ -110,6 +110,28 @@ class HttpKnowledgeBackend:
 
     def record_judgment(self, payload: dict[str, Any]) -> dict[str, Any]:
         return self._request("POST", "/v1/judgments", json=payload)
+
+    @overload
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+        missing_ok: Literal[False] = False,
+    ) -> dict[str, Any]: ...
+
+    @overload
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json: dict[str, Any] | None = None,
+        params: dict[str, Any] | None = None,
+        missing_ok: Literal[True],
+    ) -> dict[str, Any] | None: ...
 
     def _request(
         self,

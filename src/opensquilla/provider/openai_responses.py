@@ -13,16 +13,19 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
+import structlog
 
 from opensquilla.env import trust_env as _trust_env
 from opensquilla.secrets import clean_header_secret
 
 from .failures import retry_after_from_headers
-from .openai import _http_error_body_text, _resolve_llm_proxy
+from .openai import _VERSIONED_BASE_URL_RE, _http_error_body_text, _resolve_llm_proxy
 from .protocol import ProviderConnectionConfig, ProviderMetadata
 from .stream_assembly import ToolStreamAccumulator
+from .trace_recorder import LLMTraceRecorder
 from .types import (
     ChatConfig,
+    ContentBlockImage,
     ContentBlockText,
     ContentBlockToolResult,
     ContentBlockToolUse,
@@ -33,9 +36,12 @@ from .types import (
     StreamEvent,
     TextDeltaEvent,
     ToolDefinition,
+    ToolUseEndEvent,
 )
 
 _OPENAI_RESPONSES_BASE = "https://api.openai.com/v1"
+
+log = structlog.get_logger(__name__)
 
 
 def _responses_tool(tool: ToolDefinition) -> dict[str, Any]:
@@ -79,6 +85,21 @@ def _responses_input(messages: list[Message]) -> list[dict[str, Any]]:
             if isinstance(block, ContentBlockText):
                 content_type = "output_text" if message.role == "assistant" else "input_text"
                 pending_content.append({"type": content_type, "text": block.text})
+            elif isinstance(block, ContentBlockImage):
+                # input_image is only valid on user/system input, not assistant
+                # output. Drop (with a warning) on assistant turns rather than
+                # emit an invalid part.
+                if message.role == "assistant":
+                    log.warning(
+                        "openai_responses.dropped_assistant_image",
+                        note="input_image is not valid on assistant output",
+                    )
+                    continue
+                if block.source_type == "url":
+                    image_url = block.data
+                else:
+                    image_url = f"data:{block.media_type};base64,{block.data}"
+                pending_content.append({"type": "input_image", "image_url": image_url})
             elif isinstance(block, ContentBlockToolUse):
                 flush_pending_message()
                 items.append(
@@ -163,7 +184,7 @@ class OpenAIResponsesProvider:
         )
 
     def _api_url(self, path: str) -> str:
-        if self._base_url.endswith("/v1") and path.startswith("/v1/"):
+        if path.startswith("/v1/") and _VERSIONED_BASE_URL_RE.search(self._base_url):
             return f"{self._base_url}{path[3:]}"
         return f"{self._base_url}{path}"
 
@@ -219,6 +240,19 @@ class OpenAIResponsesProvider:
         if tools:
             payload["tools"] = [_responses_tool(tool) for tool in tools]
             payload["tool_choice"] = config.tool_choice or "auto"
+        endpoint = self._api_url("/v1/responses")
+        trace = LLMTraceRecorder(
+            provider="openai_responses",
+            model=self._model,
+            base_url=self._base_url,
+            endpoint=endpoint,
+            stream=False,
+        )
+        trace.record_request(
+            payload=payload,
+            headers=headers,
+            metadata={"timeout_seconds": config.timeout, "tools_count": len(tools or [])},
+        )
 
         try:
             async with httpx.AsyncClient(
@@ -227,14 +261,16 @@ class OpenAIResponsesProvider:
                 proxy=self._proxy,
             ) as client:
                 response = await client.post(
-                    self._api_url("/v1/responses"),
+                    endpoint,
                     headers=headers,
                     json=payload,
                 )
         except httpx.TimeoutException as exc:
+            trace.record_error(code="timeout", message=f"Request timed out: {exc}")
             yield ErrorEvent(message=f"Request timed out: {exc}", code="timeout")
             return
         except httpx.RequestError as exc:
+            trace.record_error(code="request_error", message=f"Request error: {exc}")
             yield ErrorEvent(message=f"Request error: {exc}", code="request_error")
             return
 
@@ -243,6 +279,12 @@ class OpenAIResponsesProvider:
             message = f"OpenAI Responses API error {response.status_code}"
             if detail:
                 message = f"{message}: {detail}"
+            trace.record_error(
+                code=str(response.status_code),
+                message=message,
+                status_code=response.status_code,
+                response_body=response.text,
+            )
             yield ErrorEvent(
                 message=message,
                 code=str(response.status_code),
@@ -256,6 +298,11 @@ class OpenAIResponsesProvider:
         try:
             data = response.json()
         except json.JSONDecodeError:
+            trace.record_error(
+                code="invalid_json",
+                message="Invalid JSON response from OpenAI Responses API",
+                response_body=response.text,
+            )
             yield ErrorEvent(
                 message="Invalid JSON response from OpenAI Responses API",
                 code="invalid_json",
@@ -264,6 +311,8 @@ class OpenAIResponsesProvider:
 
         emitted_tool = False
         tools_acc = ToolStreamAccumulator()
+        assistant_text_parts: list[str] = []
+        trace_tool_calls: list[dict[str, Any]] = []
         for item in data.get("output") or []:
             if not isinstance(item, dict):
                 continue
@@ -272,6 +321,7 @@ class OpenAIResponsesProvider:
                     if isinstance(part, dict) and part.get("type") == "output_text":
                         text = part.get("text")
                         if isinstance(text, str) and text:
+                            assistant_text_parts.append(text)
                             yield TextDeltaEvent(text=text)
             elif item.get("type") == "function_call":
                 emitted_tool = True
@@ -291,20 +341,74 @@ class OpenAIResponsesProvider:
                         yield tool_event
                 for tool_event in tools_acc.finish(key):
                     yield tool_event
+                    if isinstance(tool_event, ToolUseEndEvent):
+                        try:
+                            if arguments_text:
+                                json.loads(arguments_text)
+                            arguments_valid = True
+                        except json.JSONDecodeError:
+                            arguments_valid = False
+                        trace_tool_calls.append(
+                            {
+                                "id": tool_event.tool_use_id,
+                                "name": tool_event.tool_name,
+                                "arguments_raw": arguments_text,
+                                "arguments_json_valid": arguments_valid,
+                                "arguments": tool_event.arguments,
+                            }
+                        )
 
         input_tokens, output_tokens, reasoning_tokens, cached_tokens = _usage_fields(
             data.get("usage")
         )
+        actual_model = data.get("model") or self._model
+        # Map an incomplete response truncated by the output-token cap to the
+        # "length" stop reason so the length-capped continuation logic (and
+        # telemetry) see the truncation, matching the chat-completions backend.
+        incomplete = data.get("incomplete_details") or {}
+        truncated_by_length = (
+            data.get("status") == "incomplete"
+            and isinstance(incomplete, dict)
+            and incomplete.get("reason") == "max_output_tokens"
+        )
+        if emitted_tool:
+            stop_reason = "tool_use"
+        elif truncated_by_length:
+            stop_reason = "length"
+        else:
+            stop_reason = "end_turn"
+        trace.record_response(
+            response=data,
+            usage={
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "reasoning_tokens": reasoning_tokens,
+                "cached_tokens": cached_tokens,
+            },
+            stop_reason=stop_reason,
+            actual_model=actual_model,
+            assistant_text="".join(assistant_text_parts),
+            tool_calls=trace_tool_calls,
+            response_ids=[str(data["id"])] if data.get("id") else [],
+        )
         yield DoneEvent(
-            stop_reason="tool_use" if emitted_tool else "end_turn",
+            stop_reason=stop_reason,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             reasoning_tokens=reasoning_tokens,
             cached_tokens=cached_tokens,
-            model=data.get("model") or self._model,
+            model=actual_model,
         )
 
-    async def list_models(self) -> list[ModelInfo]:
+    async def list_models(self, *, raise_on_error: bool = False) -> list[ModelInfo]:
+        """List available models.
+
+        By default any auth/transport failure degrades to an empty list (the
+        historical contract every runtime caller relies on). Pass
+        ``raise_on_error=True`` to surface the underlying exception instead,
+        so callers that must distinguish a wrong key from an empty catalog
+        (e.g. onboarding discovery) can classify it.
+        """
         headers = {"Authorization": f"Bearer {self._api_key}"}
         try:
             async with httpx.AsyncClient(
@@ -314,13 +418,21 @@ class OpenAIResponsesProvider:
             ) as client:
                 response = await client.get(self._api_url("/v1/models"), headers=headers)
         except httpx.HTTPError:
+            if raise_on_error:
+                raise
             return []
 
         if response.status_code != 200:
+            if raise_on_error:
+                # 4xx/5xx raise a classifiable HTTPStatusError; an unexpected
+                # non-200 success shape still degrades to the empty list.
+                response.raise_for_status()
             return []
         try:
             data = response.json()
         except json.JSONDecodeError:
+            if raise_on_error:
+                raise
             return []
 
         models: list[ModelInfo] = []
@@ -356,6 +468,20 @@ class OpenAIResponsesProvider:
         }
         if self._org_id:
             headers["OpenAI-Organization"] = self._org_id
+        endpoint = self._api_url("/v1/responses/compact")
+        payload = {"model": self._model, "input": input_items}
+        trace = LLMTraceRecorder(
+            provider="openai_responses",
+            model=self._model,
+            base_url=self._base_url,
+            endpoint=endpoint,
+            stream=False,
+        )
+        trace.record_request(
+            payload=payload,
+            headers=headers,
+            metadata={"timeout_seconds": cfg.timeout, "operation": "compact_window"},
+        )
 
         async with httpx.AsyncClient(
             timeout=cfg.timeout,
@@ -363,9 +489,9 @@ class OpenAIResponsesProvider:
             proxy=self._proxy,
         ) as client:
             response = await client.post(
-                self._api_url("/v1/responses/compact"),
+                endpoint,
                 headers=headers,
-                json={"model": self._model, "input": input_items},
+                json=payload,
             )
 
         if response.status_code != 200:
@@ -373,12 +499,36 @@ class OpenAIResponsesProvider:
             message = f"OpenAI Responses compact API error {response.status_code}"
             if detail:
                 message = f"{message}: {detail}"
+            trace.record_error(
+                code=str(response.status_code),
+                message=message,
+                status_code=response.status_code,
+                response_body=response.text,
+                metadata={"operation": "compact_window"},
+            )
             raise RuntimeError(message)
 
         try:
             data = response.json()
         except json.JSONDecodeError as exc:
+            trace.record_error(
+                code="invalid_json",
+                message="Invalid JSON response from OpenAI Responses compact API",
+                response_body=response.text,
+                metadata={"operation": "compact_window"},
+            )
             raise RuntimeError("Invalid JSON response from OpenAI Responses compact API") from exc
         if not isinstance(data, dict):
+            trace.record_error(
+                code="invalid_shape",
+                message="Invalid response shape from OpenAI Responses compact API",
+                metadata={"operation": "compact_window"},
+            )
             raise RuntimeError("Invalid response shape from OpenAI Responses compact API")
+        trace.record_response(
+            response=data,
+            actual_model=data.get("model") or self._model,
+            response_ids=[str(data["id"])] if data.get("id") else [],
+            metadata={"operation": "compact_window"},
+        )
         return data

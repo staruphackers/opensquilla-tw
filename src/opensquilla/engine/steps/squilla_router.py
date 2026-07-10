@@ -11,6 +11,7 @@ import logging
 import threading
 import time
 from inspect import Parameter, signature
+from pathlib import Path
 from typing import Any, Protocol, cast
 
 import structlog
@@ -47,6 +48,7 @@ from opensquilla.router_tiers import (
     TEXT_TIERS,
     TierConfig,
     normalize_text_tier,
+    tier_index,
 )
 from opensquilla.squilla_router.controller import (
     derive_prompt_policy,
@@ -297,6 +299,86 @@ class _UnavailableV4Strategy:
         )
 
 
+def _capture_flags(config: object) -> tuple[bool, bool]:
+    """Return ``(emit_train_features, emit_raw_bge)`` from self-learning config."""
+
+    sl = getattr(config, "self_learning", None)
+    if sl is None:
+        return (False, False)
+    capture = bool(getattr(sl, "enabled", False)) and bool(getattr(sl, "capture_enabled", True))
+    return (capture, bool(getattr(sl, "enable_mlp", False)))
+
+
+def _active_bundle_dir(config: object) -> str | None:
+    """Resolve a promoted self-learning bundle dir, or None to use the base.
+
+    Only consulted when self-learning is enabled, so the default install pays no
+    extra cost. Verifies the candidate's base-fingerprint pin first (memoized
+    per pointer/base pair inside ``verify_active_bundle``, so the hash cost is
+    paid once per swap, not per turn): a package upgrade that replaced the
+    shipped weights detaches the now-stale candidate instead of serving a
+    hybrid of new projections and an old head. Falls back to baseline on any
+    error.
+    """
+
+    sl = getattr(config, "self_learning", None)
+    if sl is None or not getattr(sl, "enabled", False):
+        return None
+    try:
+        from opensquilla.squilla_router.self_learning.promotion import (
+            resolve_active_bundle_dir,
+            verify_active_bundle,
+        )
+
+        verify_active_bundle(_base_bundle_dir(config))
+        resolved = resolve_active_bundle_dir()
+        return str(resolved) if resolved is not None else None
+    except Exception:  # noqa: BLE001 — never let pointer resolution break routing
+        return None
+
+
+def _base_bundle_dir(config: object) -> Path:
+    """The configured or packaged base bundle root (never the learned one)."""
+
+    configured = getattr(config, "v4_bundle_dir", None)
+    if configured:
+        return Path(configured)
+    from opensquilla.squilla_router.v4_phase3 import default_bundle_dir
+
+    return default_bundle_dir()
+
+
+def invalidate_strategy_cache() -> None:
+    """Drop the cached strategy so the next turn reloads the active bundle.
+
+    Called after a promotion/rollback swaps the active pointer in-process.
+    """
+
+    global _strategy, _strategy_key  # noqa: PLW0603
+    with _strategy_lock:
+        _strategy = None
+        _strategy_key = None
+        _history_store.clear()
+
+
+def _register_self_learning_invalidator() -> None:
+    """Hand the offline self-learning loop a way to drop our strategy cache.
+
+    Registration lives here (engine -> squilla_router is an approved import
+    edge) so the orchestrator never has to import the engine back.
+    """
+
+    try:
+        from opensquilla.squilla_router.self_learning.hooks import set_cache_invalidator
+
+        set_cache_invalidator(invalidate_strategy_cache)
+    except Exception:  # noqa: BLE001 — the seam is optional; routing must not care
+        pass
+
+
+_register_self_learning_invalidator()
+
+
 def _strategy_cache_key(config: object) -> tuple:
     strategy_name = _strategy_name(config)
     confidence = getattr(config, "confidence_threshold", 0.5)
@@ -306,6 +388,8 @@ def _strategy_cache_key(config: object) -> tuple:
         getattr(config, "v4_use_aux_head", None),
         getattr(config, "require_router_runtime", False),
         confidence,
+        _capture_flags(config),
+        _active_bundle_dir(config),
     )
 
 
@@ -359,32 +443,58 @@ def _get_strategy(config: object) -> RouterStrategy:
         if _strategy_key is not None and _strategy_key != key:
             _history_store.clear()
 
-        try:
+        emit_train_features, emit_raw_bge = _capture_flags(config)
+        learned_dir = _active_bundle_dir(config)
+        base_dir = getattr(config, "v4_bundle_dir", None)
+
+        def _build(bundle_dir: str | None) -> RouterStrategy:
             from opensquilla.squilla_router.v4_phase3 import V4Phase3Strategy
 
-            strategy = cast(
+            built = cast(
                 RouterStrategy,
                 V4Phase3Strategy(
-                    bundle_dir=getattr(config, "v4_bundle_dir", None),
+                    bundle_dir=bundle_dir,
                     confidence_threshold=getattr(config, "confidence_threshold", 0.5),
                     require_router_runtime=getattr(config, "require_router_runtime", False),
                     use_aux_head=getattr(config, "v4_use_aux_head", None),
+                    emit_train_features=emit_train_features,
+                    emit_raw_bge=emit_raw_bge,
                 ),
             )
-        except Exception as exc:  # noqa: BLE001
-            log.warning("squilla_router.strategy_unavailable", error=str(exc))
-            _warn_router_runtime_fallback_once(exc)
-            strategy = _degraded_fallback_strategy(exc)
-        else:
-            if getattr(strategy, "source", "") == "v4_phase3" and not getattr(
-                strategy, "_available", True
+            if getattr(built, "source", "") == "v4_phase3" and not getattr(
+                built, "_available", True
             ):
                 # require_router_runtime=false: the V4 adapter swallowed its
-                # own init failure. Fall back to heuristic tiering here too —
-                # the flag opts out of loud failure, not of useful routing.
-                error = RuntimeError("V4 Phase 3 router did not become available")
-                _warn_router_runtime_fallback_once(error)
-                strategy = _degraded_fallback_strategy(error)
+                # own init failure. Surface it so the fallback chain (learned
+                # -> baseline -> heuristic) applies uniformly — the flag opts
+                # out of loud failure, not of useful routing.
+                raise RuntimeError("V4 Phase 3 router did not become available")
+            return built
+
+        try:
+            strategy = _build(str(learned_dir) if learned_dir else base_dir)
+        except Exception as exc:  # noqa: BLE001
+            if learned_dir is not None:
+                # A broken learned bundle must degrade to the shipped ML
+                # baseline, not straight to heuristic tiering.
+                log.warning(
+                    "squilla_router.learned_bundle_failed",
+                    bundle_dir=str(learned_dir),
+                    error=str(exc),
+                    action="falling_back_to_baseline",
+                )
+                try:
+                    strategy = _build(base_dir)
+                except Exception as base_exc:  # noqa: BLE001
+                    log.warning(
+                        "squilla_router.strategy_unavailable", error=str(base_exc)
+                    )
+                    _warn_router_runtime_fallback_once(base_exc)
+                    strategy = _degraded_fallback_strategy(base_exc)
+            else:
+                log.warning("squilla_router.strategy_unavailable", error=str(exc))
+                _warn_router_runtime_fallback_once(exc)
+                strategy = _degraded_fallback_strategy(exc)
         _strategy = strategy
         _strategy_key = key
         return strategy
@@ -611,8 +721,9 @@ def _tier_capability_facts(
       early return, none of which is a definite non-vision signal.
     - ``context_window`` is known only when
       ``resolve_context_window_with_source`` attributes the value to the
-      catalog (live/snapshot/corrections); engine defaults are estimates,
-      not knowledge.
+      catalog (live/snapshot/corrections) or to a per-model ``[models.*]``
+      override (operator-declared knowledge); engine defaults are
+      estimates, not knowledge.
     """
     catalog = shared_catalog()
     empty_capabilities = ModelCapabilities()
@@ -630,7 +741,10 @@ def _tier_capability_facts(
             if capabilities != empty_capabilities:
                 supports_vision = capabilities.supports_vision
         window, window_source = catalog.resolve_context_window_with_source(tier.model, provider)
-        context_window = window if window_source == "catalog" and window > 0 else None
+        # Operator-declared [models.*] windows count as definite facts for the
+        # capability gate, same as catalog knowledge; only engine defaults
+        # remain estimates.
+        context_window = window if window_source in ("catalog", "override") and window > 0 else None
         facts[name] = TierCapability(
             supports_vision=supports_vision,
             context_window=context_window,
@@ -666,6 +780,14 @@ def _session_accumulated_spend(ctx: TurnContext) -> tuple[float | None, str]:
     present at all — a fresh session with no billed total yet — so the gate
     suspends rather than acting on missing data. Keys present but all zero are
     a known-zero spend, not an unknown one.
+
+    The returned source records the spend's cost basis. A positive billed total
+    is ``"billed"``. Estimate-based spend is refined with the session's seeded
+    rollup label (``session_cost_source``): a ``"mixed"`` rollup — billed and
+    estimated components together — becomes ``"estimate_mixed"``, while a pure
+    ``"opensquilla_estimate"``, an absent label, or anything else collapses to
+    the plain ``"estimate"`` the gate already understood. ``"none"`` (known-zero
+    spend) and ``"unknown"`` (no signal) semantics are unchanged.
     """
     metadata = getattr(ctx, "metadata", {}) or {}
     if not any(key in metadata for key in _BUDGET_SPEND_KEYS):
@@ -673,12 +795,14 @@ def _session_accumulated_spend(ctx: TurnContext) -> tuple[float | None, str]:
     billed = _budget_cost_value(metadata.get("session_billed_cost_usd"))
     if billed is not None and billed > 0:
         return billed, "billed"
+    label = str(metadata.get("session_cost_source", "") or "").strip().lower()
+    estimate_source = "estimate_mixed" if label == "mixed" else "estimate"
     total = _budget_cost_value(metadata.get("session_total_cost_usd"))
     if total is not None and total > 0:
-        return total, "estimate"
+        return total, estimate_source
     estimated = _budget_cost_value(metadata.get("session_estimated_cost_usd"))
     if estimated is not None and estimated > 0:
-        return estimated, "estimate"
+        return estimated, estimate_source
     return 0.0, "none"
 
 
@@ -766,6 +890,7 @@ def _log_budget_outcome(ctx: TurnContext) -> None:
             spend_usd=ctx.metadata.get("router_budget_spend_usd"),
             limit_usd=ctx.metadata.get("router_budget_limit_usd"),
             action=ctx.metadata.get("router_budget_action"),
+            spend_source=ctx.metadata.get("router_budget_spend_source"),
         )
     elif outcome == "cap":
         log.warning(
@@ -774,6 +899,7 @@ def _log_budget_outcome(ctx: TurnContext) -> None:
             spend_usd=ctx.metadata.get("router_budget_spend_usd"),
             limit_usd=ctx.metadata.get("router_budget_limit_usd"),
             action=ctx.metadata.get("router_budget_action"),
+            spend_source=ctx.metadata.get("router_budget_spend_source"),
             from_tier=ctx.metadata.get("router_budget_from_tier"),
             to_tier=ctx.metadata.get("router_budget_to_tier"),
         )
@@ -951,8 +1077,6 @@ async def apply_squilla_router(ctx: TurnContext) -> TurnContext:
         semantic_message = getattr(ctx, "raw_message", None)
     if semantic_message is None:
         semantic_message = ctx.message
-    if not semantic_message.strip():
-        return ctx
     if ":subagent:" in ctx.session_key:
         return ctx
 
@@ -962,6 +1086,11 @@ async def apply_squilla_router(ctx: TurnContext) -> TurnContext:
     # for current uploads. Historical images require the upstream semantic
     # follow-up gate; recent-image/sticky metadata alone is observability and
     # replay context, not enough to force vision.
+    #
+    # This runs BEFORE the empty-text guard below: the image route is
+    # deterministic and never consumes the message text, so an image turn with
+    # an empty/whitespace caption must still be routed to a vision tier rather
+    # than falling through the empty-text early return.
     current_turn_has_image = _attachments_include_image(ctx.attachments)
     history_gate_needs_image = (
         ctx.metadata.get("router_vision_followup_needs_image") is True
@@ -1013,12 +1142,31 @@ async def apply_squilla_router(ctx: TurnContext) -> TurnContext:
             )
         ctx.metadata["route_max_history_turns"] = history_turns
         ctx.metadata.update(_compute_savings(decision.model, tiers))
+        # Record the image tier's provider (and assess cross-provider/mismatch)
+        # like the hold and classify paths — without this, a vision tier that
+        # declares provider=X never executes the cross-provider switch and no
+        # mismatch telemetry is emitted.
+        _flag_tier_provider_mismatch(ctx, tiers, decision.tier, routing_applied=True)
         _record_thinking_metadata(ctx, router_cfg, image_tiers[tier_name])
         stage_router_decision(ctx, decision=decision)
         log.debug("squilla_router.image_routed", tier=decision.tier, model=decision.model)
         return ctx
 
+    # Empty-text guard for the ML text classifier: only reached for non-image
+    # turns (the vision bypass above already handled empty-caption images).
+    if not semantic_message.strip():
+        return ctx
+
+    # Order valid_tiers by the canonical c0<c1<c2<c3 ladder rather than TOML
+    # insertion order — downstream policy stages rank tiers by position in this
+    # list, so trusting declaration order inverted upgrades/holds for configs
+    # that list tiers out of order. Unknown/custom tier names (tier_index == -1)
+    # sort after the canonical ones, preserving their relative order (stable).
     valid_tiers = [name for name, tier in tiers.items() if not tier.get("image_only", False)]
+    valid_tiers = sorted(
+        valid_tiers,
+        key=lambda name: (0, tier_index(name)) if tier_index(name) >= 0 else (1, 0),
+    )
     if not valid_tiers:
         return ctx
 
@@ -1129,6 +1277,12 @@ async def apply_squilla_router(ctx: TurnContext) -> TurnContext:
         ctx.metadata["routing_extra"] = extra
         thinking_mode = extra.get("thinking_mode")
         prompt_policy = extra.get("prompt_policy")
+        # Move the (large) self-learning feature vectors out of routing_extra so
+        # they never reach decision logs or accumulated routing history.
+        train_features = extra.pop("_train_features", None)
+        if train_features is not None:
+            ctx.metadata["routing_train_features"] = train_features
+            ctx.metadata["routing_train_turn_index"] = len(routing_history or [])
 
     if tier_name is None or tier_name not in tiers:
         default = normalize_text_tier(getattr(router_cfg, "default_tier", DEFAULT_TEXT_TIER))

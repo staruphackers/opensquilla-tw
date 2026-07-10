@@ -7,8 +7,12 @@ import i18n, {
   isSupportedLocale,
   type LocaleCode,
 } from '@/i18n'
+import { getManifest, isValueThemeId, normalizeThemeId, themePickerOptions } from '@/themes/registry'
+import { ensureThemeWorld } from '@/themes/apply'
 
-export type ThemeMode = 'light' | 'dark' | 'system'
+// 'system' or any registered value-theme id. The string branch keeps custom
+// themes typeable while preserving autocomplete for the built-ins.
+export type ThemeMode = 'light' | 'dark' | 'system' | (string & {})
 
 type FeatureWindow = Window & {
   OPENSQUILLA_FEATURES?: Record<string, boolean>
@@ -34,14 +38,14 @@ export const useAppStore = defineStore('app', () => {
   // App-wide pending approvals, kept live by the gateway push events and a
   // reconnect seed fetch (App.vue). Ordered oldest-first. `approvalCount` is
   // derived from this list once it becomes the source, but `setApprovalCount`
-  // still works for the Approvals page snapshot (back-compat).
+  // still supports snapshot consumers (back-compat).
   const pendingApprovals = ref<PendingApproval[]>([])
   const approvalCountRaw = ref(0)
 
   // True once App.vue has wired the live approval source (push events + seed
   // fetch). While live, `approvalCount` is derived from `pendingApprovals`;
-  // before then it falls back to whatever `setApprovalCount` last wrote so the
-  // Approvals page keeps working in isolation.
+  // before then it falls back to whatever `setApprovalCount` last wrote so
+  // snapshot consumers keep working in isolation.
   const approvalsLive = ref(false)
 
   const approvalCount = computed(() =>
@@ -55,8 +59,17 @@ export const useAppStore = defineStore('app', () => {
     window.matchMedia('(prefers-color-scheme: dark)').matches
   )
 
-  const resolvedTheme = computed<'light' | 'dark'>(() => {
+  // The applied theme id written to data-theme: a value-theme id when one is
+  // chosen, else the OS-resolved light/dark for 'system'.
+  const resolvedTheme = computed<string>(() => {
     if (theme.value !== 'system') return theme.value
+    return systemDark.value ? 'dark' : 'light'
+  })
+
+  const desktopNativeThemeSource = computed<'light' | 'dark'>(() => {
+    const colorScheme = getManifest(resolvedTheme.value)?.capabilities.colorScheme
+    if (colorScheme === 'light') return 'light'
+    if (colorScheme === 'dark') return 'dark'
     return systemDark.value ? 'dark' : 'light'
   })
 
@@ -65,14 +78,37 @@ export const useAppStore = defineStore('app', () => {
   let themeWatchStop: (() => void) | null = null
 
   function applyTheme() {
+    const platform = getPlatform()
     document.documentElement.setAttribute('data-theme', resolvedTheme.value)
+    // Lazily bring in the theme's global "world" layer (structure/type/texture)
+    // if it has one; flat value themes have no world and this is a no-op.
+    void ensureThemeWorld(resolvedTheme.value)
+    void platform.setNativeTheme({ source: desktopNativeThemeSource.value })
   }
 
   function initTheme() {
     try {
-      const saved = localStorage.getItem('opensquilla-theme') as ThemeMode | null
-      if (saved && ['light', 'dark', 'system'].includes(saved)) {
+      const raw = localStorage.getItem('opensquilla-theme')
+      // A choice persisted under an old id (e.g. 'nord'/'phosphor' before the
+      // rename) is normalized to its current canonical id first, so it keeps
+      // applying instead of being dropped as unknown.
+      const saved = raw ? (normalizeThemeId(raw) as ThemeMode) : null
+      // Valid choices come from the theme registry now (any registered value
+      // theme) plus 'system' — not a hardcoded list — so a new value theme is
+      // selectable without editing the store.
+      if (saved && (saved === 'system' || isValueThemeId(saved))) {
         theme.value = saved
+        // Persist the canonical id so the migration happens once, and the
+        // anti-flash script stamps the correct theme on the next cold load.
+        if (saved !== raw) {
+          try { localStorage.setItem('opensquilla-theme', saved) } catch {}
+        }
+      } else if (raw) {
+        // Stale id (theme removed) or corrupt value. The index.html anti-flash
+        // script stamps it verbatim pre-paint, which paints the :root dark
+        // fallback — drop the key so that flash happens at most once instead of
+        // on every cold load.
+        localStorage.removeItem('opensquilla-theme')
       }
     } catch {
       // ignore
@@ -112,8 +148,13 @@ export const useAppStore = defineStore('app', () => {
   }
 
   function cycleTheme() {
-    const order: ThemeMode[] = ['light', 'dark', 'system']
-    const next = order[(order.indexOf(theme.value) + 1) % order.length]
+    // Cycle the basic appearance modes (Light → Dark → System), matching the
+    // topbar menu — custom themes are chosen in Settings → Appearance, not
+    // cycled here. From a custom theme (not in the basic set) the cycle enters
+    // at the first basic mode.
+    const order = themePickerOptions({ scope: 'basic' }).map((o) => o.mode)
+    const idx = order.indexOf(theme.value)
+    const next = order[(idx + 1) % order.length]
     setTheme(next)
   }
 

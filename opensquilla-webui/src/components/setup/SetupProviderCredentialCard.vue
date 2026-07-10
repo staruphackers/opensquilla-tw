@@ -37,10 +37,6 @@ const emit = defineEmits<{
 const showApiKey = ref(false)
 const detailsOpen = ref(false)
 
-watch(() => props.panel.replacing, replacing => {
-  if (!replacing) showApiKey.value = false
-})
-
 const title = computed(() => t('setup.provider.credentialTitle', { provider: props.panel.providerLabel }))
 const statusText = computed(() => (
   props.panel.available
@@ -66,6 +62,21 @@ const displayValue = computed(() => props.panel.revealed || props.panel.masked |
 const showRevealButton = computed(() => props.panel.revealAllowed && Boolean(props.panel.masked))
 const showPublicHint = computed(() => !props.panel.revealAllowed && Boolean(props.panel.masked))
 const showCredentialControls = computed(() => props.panel.providerSelected && props.panel.source !== 'not_required')
+// The masked/readonly display plus the "Replace key" guard only make sense
+// when a saved secret actually exists; an empty credential must be directly
+// typable (first-run setup would otherwise dead-end on a locked input).
+const hasSavedKey = computed(() => Boolean(props.panel.masked))
+const editingCredential = computed(() => props.panel.replacing || !hasSavedKey.value)
+
+// A secret input must always start hidden. The plaintext toggle is local
+// state on a card that stays mounted across saves and provider switches, so
+// reset it whenever the editable input goes away or the card starts showing
+// a different provider's credential — otherwise a toggle made while typing a
+// first key would reopen the next secret in plaintext.
+watch(editingCredential, editing => {
+  if (!editing) showApiKey.value = false
+})
+watch(() => props.panel.providerLabel, () => { showApiKey.value = false })
 const probing = computed(() => props.panel.connection.phase === 'probing')
 
 const FAILURE_SENTENCE_KEYS: Record<string, string> = {
@@ -107,6 +118,28 @@ const connectionPill = computed(() => {
   }
   return null
 })
+
+// Verdict line under the pill: latency, and (when discovery returned live
+// models) the model count plus up to 3 sample ids.
+const latencyText = computed(() => {
+  const ms = props.panel.connection.latencyMs
+  return typeof ms === 'number' && Number.isFinite(ms) ? `${Math.round(ms)}ms` : ''
+})
+
+// Latency shown next to a failure pill (verified latency lives in the verdict line).
+const failureLatencyText = computed(() => {
+  const phase = props.panel.connection.phase
+  return phase === 'key_invalid' || phase === 'unreachable' ? latencyText.value : ''
+})
+
+const verdictModelsText = computed(() => {
+  const connection = props.panel.connection
+  if (connection.phase !== 'verified' || connection.modelSource !== 'live') return ''
+  if (connection.models.length === 0) return ''
+  const joiner = t('setup.provider.verdictSampleJoiner')
+  const samples = connection.models.slice(0, 3).map(model => model.id).join(joiner)
+  return t('setup.provider.verdictModels', { count: connection.models.length, samples })
+})
 </script>
 
 <template>
@@ -120,7 +153,7 @@ const connectionPill = computed(() => {
     </div>
 
     <div class="setup-provider-credential__body">
-      <template v-if="!panel.replacing">
+      <template v-if="!editingCredential">
         <label v-if="showCredentialControls" class="control-row control-row--stack setup-provider-credential__field">
           <div class="control-row__label-block">
             <span class="control-row__label">{{ t('setup.common.apiKey') }}</span>
@@ -154,7 +187,7 @@ const connectionPill = computed(() => {
       </template>
 
       <template v-else>
-        <label class="control-row control-row--stack setup-provider-credential__field">
+        <label v-if="showCredentialControls" class="control-row control-row--stack setup-provider-credential__field">
           <div class="control-row__label-block">
             <span class="control-row__label">{{ t('setup.common.apiKey') }}</span>
           </div>
@@ -165,7 +198,7 @@ const connectionPill = computed(() => {
                 :value="panel.apiKeyValue"
                 name="setup_provider_api_key"
                 :type="showApiKey ? 'text' : 'password'"
-                :placeholder="t('setup.provider.credentialReplacePlaceholder')"
+                :placeholder="panel.replacing ? t('setup.provider.credentialReplacePlaceholder') : t('setup.provider.credentialEnterPlaceholder')"
                 autocomplete="off"
                 @input="emit('updateField', 'api_key', ($event.target as HTMLInputElement).value)"
               >
@@ -180,6 +213,7 @@ const connectionPill = computed(() => {
               </button>
             </div>
             <button
+              v-if="panel.replacing"
               type="button"
               class="btn setup-provider-credential__replace"
               @click="emit('cancelReplace')"
@@ -206,6 +240,13 @@ const connectionPill = computed(() => {
             :class="connectionPill.tone"
             :title="connectionPill.title || undefined"
           >{{ connectionPill.text }}</strong>
+          <span v-if="failureLatencyText" class="setup-connection__latency">· {{ failureLatencyText }}</span>
+        </div>
+        <div class="setup-connection__verdict" aria-live="polite">
+          <template v-if="panel.connection.phase === 'verified'">
+            <span v-if="latencyText" class="setup-connection__latency">· {{ latencyText }}</span>
+            <span v-if="verdictModelsText" class="setup-connection__verdict-models">· {{ verdictModelsText }}</span>
+          </template>
         </div>
         <span
           v-if="panel.connection.phase === 'verified' && panel.connection.discoverError"
@@ -366,6 +407,30 @@ const connectionPill = computed(() => {
 
 @keyframes setup-connection-spin {
   to { transform: rotate(360deg); }
+}
+
+/* Verdict line under the pill: latency + discovered-model summary. The latency
+   figure is tabular mono so successive probes don't jitter the layout. */
+.setup-connection__verdict {
+  color: var(--text-muted);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: var(--fs-xs);
+  gap: var(--sp-1);
+  justify-content: flex-end;
+}
+
+.setup-connection__latency {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.setup-connection__verdict-models {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .setup-provider-credential__error {

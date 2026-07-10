@@ -45,11 +45,11 @@ gemeinsame Turn-Schleife.
 Jeder Einstiegspunkt — Web UI, CLI und Chat-Kanäle — läuft durch
 dieselbe Schleife, sodass sich Tool-Dispatch, Wiederholungsversuche und
 Entscheidungs-Logging überall identisch verhalten. Eine modulare
-Provider-Schicht spricht mit OpenRouter, OpenAI, Anthropic, Ollama,
+Provider-Schicht spricht mit TokenRhythm, OpenRouter, OpenAI, Anthropic, Ollama,
 DeepSeek, Gemini, Qwen/DashScope und über 20 weiteren LLM-Providern —
 ohne Änderung an deinem Code oder deinem Konfigurationsschema.
 
-OpenSquilla 0.5.0 Preview 2 ist die aktuelle Preview-Version.
+OpenSquilla 0.5.0 Preview 3 ist die aktuelle Preview-Version.
 
 Für aufgabenorientierte Produktdokumentation beginnst du am besten mit
 dem [OpenSquilla-Produktleitfaden](README.product.md) oder dem
@@ -73,10 +73,10 @@ Python-Wheel-Installationen verwenden versionsbehaftete Wheel-Dateinamen,
 weil die Installationsprogramme die im Wheel-Dateinamen eingebettete
 Version prüfen.
 
-Für den Desktop-Einsatz von 0.5.0 Preview 2 bevorzugst du die gepackten
+Für den Desktop-Einsatz von 0.5.0 Preview 3 bevorzugst du die gepackten
 Desktop-Installationsprogramme aus dem GitHub-Release:
-`OpenSquilla-0.5.0-rc2-mac-arm64.dmg` unter macOS und
-`OpenSquilla-0.5.0-rc2-win-x64.exe` unter Windows.
+`OpenSquilla-0.5.0-rc3-mac-arm64.dmg` unter macOS und
+`OpenSquilla-0.5.0-rc3-win-x64.exe` unter Windows.
 
 | Weg | Zielgruppe | Wann verwenden |
 | --- | --- | --- |
@@ -125,11 +125,11 @@ Installationslinks: [Git](https://git-scm.com/downloads) ·
 
 ### Desktop-Installationsprogramme
 
-Die 0.5.0-Preview-2-Desktop-Installationsprogramme bündeln die Vue-Steuerkonsole
+Die 0.5.0-Preview-3-Desktop-Installationsprogramme bündeln die Vue-Steuerkonsole
 und die Gateway-Runtime in einer Electron-Hülle.
 
-- macOS Apple Silicon: <https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc2/OpenSquilla-0.5.0-rc2-mac-arm64.dmg>
-- Windows x64: <https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc2/OpenSquilla-0.5.0-rc2-win-x64.exe>
+- macOS Apple Silicon: <https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc3/OpenSquilla-0.5.0-rc3-mac-arm64.dmg>
+- Windows x64: <https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc3/OpenSquilla-0.5.0-rc3-win-x64.exe>
 
 Beende vor dem Upgrade jede laufende OpenSquilla-Desktop-App.
 Vorhandene `~/.opensquilla/config.toml` und Sitzungsdaten werden
@@ -166,7 +166,7 @@ $env:Path = "$env:USERPROFILE\.local\bin;" + $env:Path
 **2. OpenSquilla installieren** — derselbe Befehl auf jeder Plattform.
 
 ```sh
-uv tool install --python 3.12 "opensquilla[recommended] @ https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc2/opensquilla-0.5.0rc2-py3-none-any.whl"
+uv tool install --python 3.12 "opensquilla[recommended] @ https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc3/opensquilla-0.5.0rc3-py3-none-any.whl"
 ```
 
 Damit wird das OpenSquilla-Wheel von der Release-URL installiert;
@@ -194,7 +194,7 @@ opensquilla gateway run
 
 Für eine vollständig festgelegte Installation verwende die
 versionsbehaftete Wheel-URL:
-`https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc2/opensquilla-0.5.0rc2-py3-none-any.whl`.
+`https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc3/opensquilla-0.5.0rc3-py3-none-any.whl`.
 
 <a id="install-from-source"></a>
 
@@ -562,7 +562,18 @@ konfiguriere Token-Authentifizierung, bevor du an `0.0.0.0` bindest.
 
 **Docker**
 
-Der Compose-Weg führt ein `opensquilla:local`-Image aus, das du selbst
+Vorgebaute Multi-Arch-Images (`amd64`/`arm64`) werden mit jedem
+Release-Tag auf `ghcr.io/opensquilla/opensquilla` veröffentlicht —
+[`docs/docker.md`](docs/docker.md) ist der vollständige
+Container-Leitfaden (Heimserver und NAS, LAN-Zugriff mit
+Token-Authentifizierung, Upgrades):
+
+```sh
+OPENSQUILLA_GATEWAY_IMAGE=ghcr.io/opensquilla/opensquilla:latest docker compose up -d
+```
+
+Ohne `OPENSQUILLA_GATEWAY_IMAGE` führt der Compose-Weg ein
+`opensquilla:local`-Image aus, das du selbst
 baust. Baue es aus einem Quellcode-Checkout mit den per Git LFS
 geholten Router-Assets (Klon und `git lfs pull` siehe
 [Aus Quellcode installieren](#install-from-source)):
@@ -676,7 +687,7 @@ Vollständige Hinweise: [`CHANGELOG.md`](CHANGELOG.md) ·
 | --- | --- |
 | **Token-effizientes Routing** | `SquillaRouter` — ein lokaler LightGBM-+-ONNX-Klassifizierer im Extra `recommended` — bewertet jeden Turn nach Länge, Sprache, Code, Stichwörtern und semantischen Embeddings und routet ihn dann über vier Tiers (C0–C3; die alten Namen T0–T3 sind Aliase) zum günstigsten leistungsfähigen Modell. Die Klassifizierung läuft auf dem Gerät; dein Prompt verlässt die Maschine für diese Entscheidung nie. |
 | **Adaptives Reasoning und Prompts** | OpenSquilla fordert erweitertes Reasoning nur für Turns an, die der Router als komplex bewertet, und der System-Prompt skaliert mit der Aufgabenkomplexität — schlank für triviale Turns, vollständige Anweisungen für komplexe. |
-| **Über 20 LLM-Provider** | Die Provider-Registry zielt auf über 20 LLM-Backends — OpenRouter, OpenAI, Anthropic, Ollama, DeepSeek, Gemini, DashScope/Qwen, Moonshot, Mistral, Groq, Zhipu, SiliconFlow, vLLM, LM Studio und mehr — mit Primär-plus-Fallback-Auswahl; das Erst-Onboarding legt die verifizierte Teilmenge offen. |
+| **Über 20 LLM-Provider** | Die Provider-Registry zielt auf über 20 LLM-Backends — TokenRhythm, OpenRouter, OpenAI, Anthropic, Ollama, DeepSeek, Gemini, DashScope/Qwen, Moonshot, Mistral, Groq, Zhipu, SiliconFlow, vLLM, LM Studio und mehr — mit Primär-plus-Fallback-Auswahl; das Erst-Onboarding legt die verifizierte Teilmenge offen. |
 | **Bedarfsgesteuerte Skills und MCP** | 15 gebündelte Skills (Coding, GitHub, Cron, pptx/docx/xlsx/pdf, Zusammenfassung, tmux, Wetter und mehr) werden nur geladen, wenn die Aufgabe sie braucht. OpenSquilla ist ein MCP-Client und kann auch als MCP-Server laufen — `opensquilla mcp-server run` benötigt das Extra `mcp` (installiere `opensquilla[recommended,mcp]`). Skills lassen sich über die CLI erstellen, installieren und veröffentlichen. |
 | **Dauerhaftes lokales Gedächtnis** | Eine kuratierte `MEMORY.md` plus datierte Markdown-Notizen, durchsucht mit SQLite-Volltext-Stichwortsuche und `sqlite-vec`-Semantikabruf. Embeddings laufen über gebündeltes ONNX auf dem Gerät oder wechseln zu OpenAI/Ollama. Optionaler exponentieller Decay und eine aktivierbare „Dream“-Konsolidierung sind verfügbar. |
 | **Geschichtete Sicherheits-Sandbox** | Drei Richtlinien-Tiers (Standard / Strict / Locked) auf einer Berechtigungsmatrix. Bubblewrap isoliert die Codeausführung unter Linux; das macOS-Seatbelt-Backend rendert derzeit nur Profile (Ausführung ausstehend), und unter Windows gibt es noch kein Sandbox-Backend. Ein Denial-Ledger pausiert autonome Läufe nach wiederholten Ablehnungen automatisch, abgelehnte Ausgaben werden verworfen, und Skill-Metadaten sowie Tool-Ergebnisse werden gegen Prompt-Injection XML-escaped. |

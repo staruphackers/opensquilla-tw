@@ -20,7 +20,6 @@ from .embedding import (
     EmbeddingProvider,
     NullEmbeddingProvider,
     _estimate_tokens,
-    _is_cjk,
     chunk_hash,
     chunk_text,
 )
@@ -151,13 +150,13 @@ def _query_embedding_hash(query: str) -> str:
     return hashlib.sha256(f"query\0{query}".encode("utf-8", errors="replace")).hexdigest()
 
 
-def _estimate_embedding_cost_usd(model: str, input_tokens: int) -> float:
+def _estimate_embedding_cost_usd(model: str, input_tokens: int, provider: str = "") -> float:
     if not model or input_tokens <= 0:
         return 0.0
     try:
         from opensquilla.engine.pricing import lookup_price
 
-        price = lookup_price(model)
+        price = lookup_price(model, provider)
         return input_tokens * price.input_per_m / 1_000_000
     except Exception:  # noqa: BLE001
         return 0.0
@@ -240,7 +239,9 @@ class LongTermMemoryStore:
         ) + input_tokens
         self._embedding_usage["cost_usd"] = float(
             self._embedding_usage.get("cost_usd", 0.0) or 0.0
-        ) + _estimate_embedding_cost_usd(self._provider.model, input_tokens)
+        ) + _estimate_embedding_cost_usd(
+            self._provider.model, input_tokens, self._provider.provider_id
+        )
         self._embedding_usage["model"] = self._provider.model
         self._embedding_usage["provider"] = self._provider.provider_id
         self._embedding_usage["cost_source"] = "opensquilla_static_estimate"
@@ -394,6 +395,7 @@ class LongTermMemoryStore:
         await self._db.execute(DDL_CHUNKS)
         await self._db.execute(DDL_EMBEDDING_CACHE)
         await self._db.execute(DDL_META)
+        await self._migrate_schema_version_columns()
 
         # Migrate old external-content FTS to contentless mode
         async with self._db.execute(
@@ -460,6 +462,29 @@ class LongTermMemoryStore:
             (META_KEY, SCHEMA_VERSION),
         )
 
+        await self._db.commit()
+
+    async def _migrate_schema_version_columns(self) -> None:
+        """Idempotently add ``schema_version`` in place on legacy memory tables.
+
+        Databases created before the column existed carry ``files``,
+        ``chunks``, ``embedding_cache``, and ``meta`` without it. The yoyo
+        back-fill (migrations/V004__memory_schema_version.py) only ever runs
+        against the session DB, never against per-agent ``memory.db`` files,
+        so the column must be added here at connect time — otherwise every
+        ``embedding_cache`` INSERT on a legacy database fails with
+        "no column named schema_version" and the cache silently never works.
+        Column DDL matches V004 exactly.
+        """
+        assert self._db is not None
+        for table in ("files", "chunks", "embedding_cache", "meta"):
+            async with self._db.execute(f"PRAGMA table_info({table})") as cur:
+                columns = {row[1] for row in await cur.fetchall()}
+            if not columns or "schema_version" in columns:
+                continue
+            await self._db.execute(
+                f"ALTER TABLE {table} ADD COLUMN schema_version INTEGER NOT NULL DEFAULT 1"
+            )
         await self._db.commit()
 
     async def _probe_vec_extension(self) -> None:
@@ -658,7 +683,24 @@ class LongTermMemoryStore:
         async with self._db.execute("SELECT hash FROM files WHERE path = ?", (path,)) as cur:
             row = await cur.fetchone()
             if row and row[0] == file_hash:
-                return 0  # unchanged
+                # Unchanged content — but if a real embedding provider is now
+                # configured and this file has chunks left un-embedded by a
+                # prior transient failure, re-index so those chunks get vectors
+                # (the embedding cache makes already-embedded chunks free). A
+                # bare hash-match short-circuit stranded them forever.
+                model_now = self._provider.model
+                if model_now != "fts-only" and not isinstance(
+                    self._provider, NullEmbeddingProvider
+                ):
+                    async with self._db.execute(
+                        "SELECT COUNT(*) FROM chunks WHERE path = ? AND embedding IS NULL",
+                        (path,),
+                    ) as cur2:
+                        null_row = await cur2.fetchone()
+                    if not (null_row and int(null_row[0]) > 0):
+                        return 0  # unchanged and fully embedded
+                else:
+                    return 0  # unchanged
 
         # Compute chunks + embeddings BEFORE the transaction (network I/O outside DB lock)
         chunks = chunk_text(content, chunk_tokens, chunk_overlap)
@@ -1256,8 +1298,15 @@ def _fallback_segment_for_fts(text: str) -> str:
 
 
 def _segment_for_fts(text: str) -> str:
-    """Segment CJK text with jieba for FTS5 indexing. Non-CJK text passes through."""
-    if not any(_is_cjk(ch) for ch in text):
+    """Segment ideographic/kana text with jieba for FTS5 indexing.
+
+    Only Han ideographs and Japanese kana need segmentation (they are written
+    without spaces). Hangul and every alphabetic script are space-delimited, so
+    they pass through unchanged — jieba would otherwise shatter Korean words
+    into single syllables. This runs on both the index and query sides, so the
+    two stay symmetric.
+    """
+    if not any(_needs_jieba_segmentation(ch) for ch in text):
         return text
     jieba = _load_jieba()
     if jieba is None:
@@ -1265,16 +1314,38 @@ def _segment_for_fts(text: str) -> str:
     return " ".join(jieba.cut(text))
 
 
+# Han + Japanese kana ranges: the scripts written without word spaces that
+# jieba is meant to segment. Excludes Hangul (alphabetic, space-delimited).
+_JIEBA_SEGMENT_RANGES = (
+    (0x4E00, 0x9FFF),  # CJK Unified Ideographs
+    (0x3040, 0x309F),  # Hiragana
+    (0x30A0, 0x30FF),  # Katakana
+    (0x3400, 0x4DBF),  # CJK Extension A
+    (0xF900, 0xFAFF),  # CJK Compatibility
+)
+
+
+def _needs_jieba_segmentation(ch: str) -> bool:
+    cp = ord(ch)
+    return any(lo <= cp <= hi for lo, hi in _JIEBA_SEGMENT_RANGES)
+
+
 def _build_fts_query(query: str) -> str | None:
     """Convert query to FTS5 OR query with jieba segmentation for CJK."""
     import re
 
     segmented = _segment_for_fts(query)
+    # Unicode-aware token class ([^\W_] = any letter/digit but not underscore),
+    # mirroring what the unicode61 FTS5 tokenizer treats as token characters.
+    # The previous ASCII+Han+kana whitelist silently dropped every Cyrillic,
+    # Hangul, Greek, Hebrew, Arabic, and accented-Latin query, making those
+    # memories unretrievable. A double quote can never match [^\W_], so the
+    # FTS5 query stays injection-safe.
     # Prefer multi-char tokens, which filters common single-character particles.
-    tokens = re.findall(r"[a-zA-Z0-9\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]{2,}", segmented)
+    tokens = re.findall(r"[^\W_]{2,}", segmented, flags=re.UNICODE)
     if not tokens:
         # Fallback: include single chars
-        tokens = re.findall(r"[a-zA-Z0-9\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff]+", segmented)
+        tokens = re.findall(r"[^\W_]+", segmented, flags=re.UNICODE)
     if not tokens:
         return None
     phrases = re.findall(r"[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)+", segmented)

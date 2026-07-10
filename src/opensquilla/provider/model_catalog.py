@@ -30,11 +30,12 @@ SAFE_OPENROUTER_DEFAULT_MAX_TOKENS = 8192
 DEFAULT_CONTEXT_WINDOW = 200_000
 
 # Layer attribution for the ``*_with_source`` resolver variants. "override"
-# is the caller-supplied explicit value (config), "catalog" is any model-
-# metadata layer (live catalog, models.dev snapshot, packaged static
+# is an explicit operator value (caller-supplied for max_tokens, the
+# ``[models.*]`` user-override layer for context windows), "catalog" is any
+# model-metadata layer (live catalog, models.dev snapshot, packaged static
 # fallback), "default" is a hardcoded engine default.
 MaxTokensSource = Literal["override", "catalog", "default"]
-ContextWindowSource = Literal["catalog", "default"]
+ContextWindowSource = Literal["override", "catalog", "default"]
 
 # Local runtimes (Ollama, …) have unqualified model ids that miss the catalog
 # and the packaged corrections, so the 200k cloud default would make the turn
@@ -141,6 +142,35 @@ def _corrections_tables() -> dict[str, dict[str, dict[str, Any]]]:
         log.warning("model_catalog.corrections_unavailable")
         return {}
     return _normalize_corrections(payload)
+
+
+def _provider_corrections_budget(provider_id: str, model_id: str) -> tuple[int, int] | None:
+    """Exact provider-scoped ``(max_output_tokens, context_window)`` correction.
+
+    An exact (non-glob) corrections row keyed by the resolving provider is
+    that provider's hand-authored budget contract, so it outranks the
+    models.dev snapshot in the budget chain — matching ``resolve_entry``'s
+    corrections-above-snapshot order. This is load-bearing for providers
+    with no snapshot table (hosted aggregators like tokenrhythm): without
+    it, the snapshot's cross-provider bare-id merge would serve foreign
+    windows several times larger than the provider's real ones, and
+    over-estimating a window causes silent server-side truncation. A
+    dimension the row does not carry is returned as 0 (callers treat 0 as
+    unknown); glob rows belong to the capability ladder and are never
+    consulted for budgets.
+    """
+    provider_l = (provider_id or "").strip().lower()
+    model_l = (model_id or "").strip().lower()
+    if not provider_l or not model_l:
+        return None
+    entry = _corrections_tables().get(provider_l, {}).get(model_l)
+    if not entry:
+        return None
+    max_output = int(entry.get("max_output_tokens") or 0)
+    window = int(entry.get("context_window") or 0)
+    if max_output <= 0 and window <= 0:
+        return None
+    return max_output, window
 
 
 def _corrections_budget_fallback(model_id: str) -> tuple[int, int] | None:
@@ -318,10 +348,11 @@ class ModelCatalog:
 
     Priority chain for max_tokens:
       1. User config override (>0)
-      2. API-fetched catalog value
-      3. models.dev snapshot value
-      4. Packaged corrections budgets (catalog_overrides.toml)
-      5. DEFAULT_MAX_TOKENS (16384)
+      2. Provider-scoped live ingest (set_live_provider_entries)
+      3. API-fetched catalog value (bare-id OpenRouter cache)
+      4. models.dev snapshot value
+      5. Packaged corrections budgets (catalog_overrides.toml)
+      6. DEFAULT_MAX_TOKENS (16384)
       → then clamp to min(value, context_window)
     """
 
@@ -330,6 +361,14 @@ class ModelCatalog:
         # User-override layer for resolve_entry; keys are lowercased
         # "provider/model" or bare model ids (see set_user_overrides).
         self._user_overrides: dict[str, dict[str, Any]] = {}
+        # Provider-scoped live layer: boot-time ingest of a provider's own
+        # public model listing (see provider/live_catalog.py). Keyed
+        # provider -> lowercased model id -> validated entry fields.
+        # Deliberately separate from the bare-id ``_models`` cache — that
+        # cache is the OpenRouter catalog and its ids are provider-agnostic,
+        # so aggregator rows placed there would leak windows into other
+        # providers' resolutions of the same bare ids.
+        self._live_provider_entries: dict[str, dict[str, dict[str, Any]]] = {}
 
     def __len__(self) -> int:
         return len(self._models)
@@ -397,13 +436,38 @@ class ModelCatalog:
         # the same answer, but the explicit branch keeps the ladder's
         # historical ordering — a live reasoning hit outranks the
         # api.openai.com host guard below.
+        #
         info = self._models.get(model_id)
-        if info and info.supports_reasoning:
+        override_fields = self._user_override_fields(
+            model_id.strip(), (provider_name or "").strip().lower()
+        )
+        override_reasoning = override_fields.get("supports_reasoning")
+        override_reasoning_format = override_fields.get("reasoning_format")
+        # An override that turns reasoning OFF must fall through to
+        # resolve_entry (which ranks user > live) rather than taking the live
+        # reasoning early return. When reasoning stays on, still let the
+        # override correct the tool/vision flags.
+        if (
+            info
+            and info.supports_reasoning
+            and override_reasoning is not False
+            and override_reasoning_format not in ("", "none")
+        ):
+            supports_tools = info.supports_tools
+            supports_vision = info.supports_vision
+            if isinstance(override_fields.get("supports_tools"), bool):
+                supports_tools = override_fields["supports_tools"]
+            if isinstance(override_fields.get("supports_vision"), bool):
+                supports_vision = override_fields["supports_vision"]
             return ModelCapabilities(
                 supports_reasoning=True,
-                supports_tools=info.supports_tools,
-                supports_vision=info.supports_vision,
-                reasoning_format="openrouter",
+                supports_tools=supports_tools,
+                supports_vision=supports_vision,
+                reasoning_format=(
+                    override_reasoning_format
+                    if isinstance(override_reasoning_format, str)
+                    else "openrouter"
+                ),
             )
         model_l = model_id.strip().lower()
         # HOST TRUST (code, not data): only api.openai.com is trusted to
@@ -491,6 +555,54 @@ class ModelCatalog:
                     fields.setdefault(name, value)
         return fields
 
+    def set_live_provider_entries(
+        self, provider_id: str, entries: Mapping[str, Mapping[str, Any]]
+    ) -> None:
+        """Replace one provider's scoped live-layer table.
+
+        ``entries`` maps model ids to ``ModelCatalogEntry`` data-field dicts
+        (the output of a ``provider/live_catalog.py`` parser). Fields are
+        validated via ``coerce_entry_field``; unknown names or mistyped
+        values are logged and DROPPED rather than raised — live data arrives
+        from the network mid-boot, so it degrades like the packaged
+        corrections, it never crashes resolution. The whole provider table
+        is replaced atomically so a re-warm cannot leave stale rows behind.
+        """
+        provider_l = (provider_id or "").strip().lower()
+        if not provider_l:
+            return
+        table: dict[str, dict[str, Any]] = {}
+        for model_key, fields in entries.items():
+            entry: dict[str, Any] = {}
+            for name, value in fields.items():
+                try:
+                    entry[str(name)] = coerce_entry_field(str(name), value)
+                except ValueError as exc:
+                    log.warning(
+                        "model_catalog.live_provider_bad_field",
+                        provider=provider_l,
+                        model=str(model_key),
+                        error=str(exc),
+                    )
+            if entry:
+                table[str(model_key).strip().lower()] = entry
+        self._live_provider_entries[provider_l] = table
+
+    def _live_provider_fields(self, model_id: str, provider_id: str) -> dict[str, Any]:
+        """Scoped live-layer fields for ``(provider, model)``, exact key only.
+
+        Empty when the provider was never ingested — the layer is inert for
+        every provider without live-catalog registry metadata, so bare-id
+        resolutions and other providers' scoped lookups can never see a
+        foreign platform's rows.
+        """
+        if not provider_id or not self._live_provider_entries:
+            return {}
+        table = self._live_provider_entries.get(provider_id.strip().lower())
+        if not table:
+            return {}
+        return dict(table.get(model_id.strip().lower()) or {})
+
     def resolve_entry(self, model: str, *, provider: str = "") -> ModelCatalogEntry:
         """Resolve one typed catalog entry through the layered sources.
 
@@ -498,7 +610,9 @@ class ModelCatalog:
         every higher layer left unset:
 
         1. user overrides (``set_user_overrides``)
-        2. live provider catalog (per-1k costs adapted to per-Mtok)
+        2. live provider catalog — the provider-scoped ingest
+           (``set_live_provider_entries``) first, then the bare-id
+           OpenRouter cache (per-1k costs adapted to per-Mtok)
         3. packaged corrections (``catalog_overrides.toml``, exact then glob)
         4. models.dev snapshot
         5. synthesized fallback — never fails: unknown models yield a
@@ -517,6 +631,7 @@ class ModelCatalog:
         model_id = (model or "").strip()
         layers: tuple[tuple[CatalogSource, dict[str, Any]], ...] = (
             ("user", self._user_override_fields(model_id, provider_id)),
+            ("live", self._live_provider_fields(model_id, provider_id)),
             ("live", _live_layer_fields(self._models.get(model_id))),
             ("corrections", _corrections_layer_fields(provider_id, model_id)),
             ("snapshot", _snapshot_layer_fields(provider_id, model_id)),
@@ -538,7 +653,8 @@ class ModelCatalog:
     def resolve_max_tokens(
         self, model_id: str, user_override: int = 0, provider: str = ""
     ) -> int:
-        """Resolve max_tokens: user > catalog > corrections budgets > default, then clamp."""
+        """Resolve max_tokens: user > scoped live > bare live > provider
+        corrections > snapshot > basename corrections > default, then clamp."""
         return self.resolve_max_tokens_with_source(model_id, user_override, provider)[0]
 
     def resolve_max_tokens_with_source(
@@ -547,9 +663,11 @@ class ModelCatalog:
         """Resolve max_tokens and name the layer that decided the value.
 
         ``override`` = the caller-supplied ``user_override`` (an explicit
-        config value); ``catalog`` = live provider catalog, models.dev
-        snapshot, or the packaged corrections budget rows; ``default`` =
-        :data:`DEFAULT_MAX_TOKENS`. :meth:`resolve_max_tokens` delegates
+        config value); ``catalog`` = provider-scoped live ingest, live
+        provider catalog, exact provider-scoped corrections row, models.dev
+        snapshot, or the provider-agnostic corrections budget fallback (in
+        that order); ``default`` = :data:`DEFAULT_MAX_TOKENS`.
+        :meth:`resolve_max_tokens` delegates
         here (single implementation), so value and attribution can never
         drift apart. The clamp below may lower the number without changing
         the attribution: the source names the layer that supplied the
@@ -557,15 +675,36 @@ class ModelCatalog:
         """
         context_window = self.resolve_context_window(model_id, provider)
         info = self._models.get(model_id)
+        scoped_live = self._live_provider_fields(model_id, provider)
+        scoped_max_output = int(scoped_live.get("max_output_tokens") or 0)
+
+        override_fields = self._user_override_fields(
+            model_id.strip(), (provider or "").strip().lower()
+        )
+        override_max = override_fields.get("max_output_tokens")
 
         using_user_override = user_override > 0
+        provider_budget = _provider_corrections_budget(provider, model_id)
         snapshot_limits = _models_dev_limits(provider, model_id)
         source: MaxTokensSource
         if using_user_override:
             effective = user_override
             source = "override"
+        elif isinstance(override_max, int) and override_max > 0:
+            # A [models.*] operator override is authoritative for budgeting;
+            # treat it like an explicit user override (skip the safe-default
+            # reduction, but keep the context-window clamp).
+            effective = override_max
+            source = "override"
+            using_user_override = True
+        elif scoped_max_output > 0:
+            effective = scoped_max_output
+            source = "catalog"
         elif info and info.max_output_tokens > 0:
             effective = info.max_output_tokens
+            source = "catalog"
+        elif provider_budget is not None and provider_budget[0] > 0:
+            effective = provider_budget[0]
             source = "catalog"
         elif snapshot_limits is not None and snapshot_limits[0] > 0:
             effective = snapshot_limits[0]
@@ -593,23 +732,53 @@ class ModelCatalog:
         return effective, source
 
     def resolve_context_window(self, model_id: str, provider: str = "") -> int:
-        """Resolve context window: catalog > models.dev > corrections budgets > local/default."""
+        """Resolve context window: user override > scoped live > bare live >
+        provider corrections > snapshot > basename corrections > default."""
         return self.resolve_context_window_with_source(model_id, provider)[0]
+
+    def user_context_window_override(self, model_id: str, provider: str = "") -> int | None:
+        """Positive ``[models.*]`` context_window override for the model, else None.
+
+        Zero/negative override values are not usable as a budgeting window,
+        so they report None (the layered chain resolves as if unset).
+        """
+        fields = self._user_override_fields(
+            (model_id or "").strip(), (provider or "").strip().lower()
+        )
+        value = fields.get("context_window")
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+        return None
 
     def resolve_context_window_with_source(
         self, model_id: str, provider: str = ""
     ) -> tuple[int, ContextWindowSource]:
         """Resolve the context window and name the layer that decided it.
 
-        ``catalog`` = live provider catalog, models.dev snapshot, or the
-        packaged corrections budget rows; ``default`` = the local-runtime or
-        cloud default window. :meth:`resolve_context_window` delegates here
-        (single implementation), so value and attribution can never drift
-        apart.
+        ``override`` = a positive ``[models.*]`` user-override value
+        (``set_user_overrides``); ``catalog`` = provider-scoped live ingest,
+        live provider catalog, exact provider-scoped corrections row,
+        models.dev snapshot, or the provider-agnostic corrections budget
+        fallback (in that order); ``default`` = the local-runtime or cloud
+        default window.
+        :meth:`resolve_context_window` delegates here (single
+        implementation), so value and attribution can never drift apart.
+        The remaining chain deliberately keeps its own layer order rather
+        than delegating to :meth:`resolve_entry` (parity tests pin it).
         """
+        override = self.user_context_window_override(model_id, provider)
+        if override is not None:
+            return override, "override"
+        scoped_live = self._live_provider_fields(model_id, provider)
+        scoped_window = int(scoped_live.get("context_window") or 0)
+        if scoped_window > 0:
+            return scoped_window, "catalog"
         info = self._models.get(model_id)
         if info and info.context_window > 0:
             return info.context_window, "catalog"
+        provider_budget = _provider_corrections_budget(provider, model_id)
+        if provider_budget is not None and provider_budget[1] > 0:
+            return provider_budget[1], "catalog"
         snapshot_limits = _models_dev_limits(provider, model_id)
         if snapshot_limits is not None and snapshot_limits[1] > 0:
             return snapshot_limits[1], "catalog"
@@ -619,6 +788,40 @@ class ModelCatalog:
         if provider and provider.strip().lower() in LOCAL_RUNTIME_PROVIDERS:
             return _LOCAL_CONTEXT_WINDOW, "default"
         return DEFAULT_CONTEXT_WINDOW, "default"
+
+
+def resolve_effective_context_window(
+    catalog: Any, model_id: str, provider: str = "", global_override: int = 0
+) -> tuple[int, str]:
+    """Resolve the effective context window with the full layered precedence.
+
+    Single implementation of the rule "per-model ``[models.*]`` override >
+    global ``llm.context_window_tokens`` (``global_override``) > catalog >
+    default". Sources returned: ``"override"`` | ``"config"`` | ``"catalog"``
+    | ``"default"``.
+
+    ``catalog`` is duck-typed: override detection and catalog/default
+    attribution use ``resolve_context_window_with_source`` when present
+    (never reporting ``"override"`` without it, so the global config value
+    still applies), while the catalog-layer value itself comes from the
+    plain ``resolve_context_window`` — the canonical value API, which
+    catalog-shaped stand-ins may implement alone. Junk/non-positive
+    ``global_override`` values count as unset.
+    """
+    with_source = getattr(catalog, "resolve_context_window_with_source", None)
+    source = "catalog"
+    if callable(with_source):
+        window, raw_source = with_source(model_id, provider=provider)
+        source = str(raw_source)
+        if source == "override":
+            return int(window), "override"
+    try:
+        global_window = int(global_override)
+    except (TypeError, ValueError):
+        global_window = 0
+    if global_window > 0:
+        return global_window, "config"
+    return int(catalog.resolve_context_window(model_id, provider=provider)), source
 
 
 # ---------------------------------------------------------------------------

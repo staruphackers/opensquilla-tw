@@ -24,6 +24,8 @@ from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+import structlog
+
 if TYPE_CHECKING:
     from opensquilla.engine.runtime import TurnRunner
 
@@ -45,6 +47,8 @@ from opensquilla.gateway.scopes import (
     resolve_required_scope,
 )
 from opensquilla.gateway.session_services import get_session_storage
+
+log = structlog.get_logger(__name__)
 
 # Handler type: (params, context) -> payload or raises
 RpcHandlerFn = Callable[[Any, "RpcContext"], Coroutine[Any, Any, Any]]
@@ -85,6 +89,7 @@ class RpcContext:
     heartbeat_loop: Any = None  # Background heartbeat loop (injected at boot)
     agent_registry: Any = None  # AgentRegistry instance (injected at boot)
     diagnostics_state: Any = None  # DiagnosticsState instance (injected at boot)
+    provider_stats: Any = None  # ProviderStatsStore instance (injected at boot)
     memory_managers: dict[str, Any] = field(default_factory=dict)
     memory_stores: dict[str, Any] = field(default_factory=dict)
     memory_retrievers: dict[str, Any] = field(default_factory=dict)
@@ -242,6 +247,12 @@ class RpcRegistry:
         except KeyError as exc:
             return make_error_res(req_id, "NOT_FOUND", str(exc))
         except Exception as exc:
+            log.error(
+                "rpc.dispatch_failed",
+                method=method,
+                error=str(exc),
+                exc_info=True,
+            )
             return make_error_res(req_id, "INTERNAL_ERROR", str(exc))
 
 
@@ -267,7 +278,9 @@ async def _status(params: Any, ctx: RpcContext) -> dict[str, Any]:
     uptime = now - _boot_time_ms if _boot_time_ms > 0 else 0
 
     provider_name = None
-    if ctx.provider_selector is not None:
+    if ctx.provider_selector is not None and getattr(
+        ctx.provider_selector, "is_configured", True
+    ):
         # Configured provider id (e.g. "openrouter"), not the OpenAI-compatible
         # backend class physically serving it. See app.api_system_status.
         provider_name = getattr(ctx.provider_selector, "active_provider_id", None)

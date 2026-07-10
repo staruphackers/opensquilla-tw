@@ -40,9 +40,7 @@ from opensquilla.attachment_refs import (
 from opensquilla.attachment_workspace import (
     AttachmentWorkspaceMaterializer,
     render_attachment_material_marker,
-)
-from opensquilla.attachment_workspace import (
-    is_materializable_attachment_mime as _attachment_workspace_is_materializable_attachment_mime,
+    workspace_attachment_budget_from_config,
 )
 from opensquilla.bootstrap_types import BootstrapFileReport
 from opensquilla.contracts.attachments import (
@@ -53,6 +51,9 @@ from opensquilla.contracts.attachments import (
 )
 from opensquilla.contracts.attachments import (
     EMAIL_ATTACHMENT_MIMES as _EMAIL_ATTACHMENT_MIMES,
+)
+from opensquilla.contracts.attachments import (
+    IMAGE_ATTACHMENT_MIMES as _IMAGE_ATTACHMENT_MIMES,
 )
 from opensquilla.contracts.attachments import (
     MAX_ATTACHMENTS as _MAX_ATTACHMENT_COUNT,
@@ -67,6 +68,9 @@ from opensquilla.contracts.attachments import (
     OFFICE_ATTACHMENT_MIMES as _OFFICE_ATTACHMENT_MIMES,
 )
 from opensquilla.contracts.attachments import (
+    OPAQUE_MIME as _OPAQUE_MIME,
+)
+from opensquilla.contracts.attachments import (
     PPTX_MIME as _PPTX_MIME,
 )
 from opensquilla.contracts.attachments import (
@@ -77,6 +81,12 @@ from opensquilla.contracts.attachments import (
 )
 from opensquilla.contracts.attachments import (
     attachment_size_limit_for_mime as _attachment_size_limit_for_mime,
+)
+from opensquilla.contracts.attachments import (
+    can_stage_attachment_mime as _can_stage_attachment_mime,
+)
+from opensquilla.contracts.attachments import (
+    normalize_attachment_mime as _normalize_attachment_mime,
 )
 from opensquilla.engine.agent import Agent, ToolHandler
 from opensquilla.engine.agent_injection import PendingInputProvider
@@ -180,6 +190,7 @@ from opensquilla.provider import (
     classify_provider_error,
     decide_recovery_action,
 )
+from opensquilla.provider.model_catalog import resolve_effective_context_window
 from opensquilla.provider.types import (
     EnsembleProgressEvent as ProviderEnsembleProgressEvent,
 )
@@ -222,7 +233,11 @@ from opensquilla.session.keys import (
     is_subagent_key,
     normalize_agent_id,
 )
-from opensquilla.session.terminal_reply import build_terminal_reply, sanitize_agent_error
+from opensquilla.session.terminal_reply import (
+    append_error_ref,
+    build_terminal_reply,
+    sanitize_agent_error,
+)
 from opensquilla.tools.types import CallerKind, ToolContext
 
 if TYPE_CHECKING:
@@ -256,23 +271,16 @@ _IMAGE_GENERATION_TOOL_NAMES: Final[frozenset[str]] = frozenset({"image_generate
 _ARTIFACT_DELIVERY_FAILURE_MARKER: Final[str] = "File delivery failed:"
 _ARTIFACT_DELIVERY_TOOL_NAME: Final[str] = "publish_artifact"
 _ARTIFACT_DELIVERY_FAILURE_MAX_CHARS: Final[int] = 360
-_MATERIALIZABLE_ATTACHMENT_MIMES: Final[frozenset[str]] = frozenset(
-    {
-        "application/pdf",
-        *_ENGINE_TEXT_FAMILY_MIMES,
-        *_OFFICE_ATTACHMENT_MIMES,
-        *_EMAIL_ATTACHMENT_MIMES,
-    }
-)
-
 _HOOKS_FEATURE_ENV: Final[str] = "OPENSQUILLA_HOOKS"
 
 
 def _is_materializable_attachment_mime(mime: Any) -> bool:
-    return _attachment_workspace_is_materializable_attachment_mime(
-        mime,
-        _MATERIALIZABLE_ATTACHMENT_MIMES,
-    )
+    # Everything except rendered images lands in the workspace so the agent's
+    # tools can reach it; rendered images travel to the provider as vision
+    # blocks instead. Non-rendered image labels (image/tiff, image/svg+xml…)
+    # are opaque, so their only representation is the workspace copy.
+    normalized = _normalize_attachment_mime(mime)
+    return normalized is not None and normalized not in _IMAGE_ATTACHMENT_MIMES
 
 
 def collect_invoked_skills(
@@ -2081,6 +2089,136 @@ def _claims_image_without_tool_use(
     return any(p.lower() in lowered for p in _IMAGE_CLAIM_PATTERNS)
 
 
+def _resolve_identity_prompt_mode(config: object) -> str:
+    """Resolve the identity/system prompt mode from gateway config.
+
+    ``auto`` preserves the historical behavior: full prompt by default, with
+    memory-only tool surfaces using the minimal prompt. Any explicit prompt
+    mode overrides that compatibility logic.
+    """
+    allowed_modes = {
+        "auto",
+        "full",
+        "minimal",
+        "none",
+        "headless_source_edit",
+        "headless_repo_coding_scaffold",
+    }
+    env_prompt_mode = os.environ.get("OPENSQUILLA_PROMPT_MODE", "").strip()
+    if env_prompt_mode:
+        if env_prompt_mode not in allowed_modes:
+            raise ValueError(
+                "OPENSQUILLA_PROMPT_MODE must be one of: "
+                + ", ".join(sorted(allowed_modes))
+            )
+        return env_prompt_mode
+
+    prompt_cfg = getattr(config, "prompt", None)
+    prompt_mode = str(getattr(prompt_cfg, "mode", "auto") or "auto")
+    if prompt_mode not in allowed_modes:
+        raise ValueError(
+            "prompt.mode must be one of: " + ", ".join(sorted(allowed_modes))
+        )
+    if prompt_mode != "auto":
+        return prompt_mode
+
+    tools_cfg = getattr(config, "tools", None)
+    if getattr(tools_cfg, "profile", None) == "memory_only":
+        return "minimal"
+    return "full"
+
+
+_PATCH_EVIDENCE_PROTOCOL_ENV = "OPENSQUILLA_PATCH_EVIDENCE_PROTOCOL"
+_PATCH_EVIDENCE_PROTOCOL_ON = {"on", "1", "true", "yes"}
+_PATCH_EVIDENCE_PROTOCOL_OFF = {"off", "0", "false", "no"}
+
+
+def _resolve_patch_evidence_protocol(config: object) -> bool:
+    """Resolve the opt-in Patch Evidence Protocol prompt flag.
+
+    ``OPENSQUILLA_PATCH_EVIDENCE_PROTOCOL`` ("on"/"off") overrides
+    ``prompt.patch_evidence_protocol`` from gateway config; default is off.
+    Unrecognized env values raise instead of being silently ignored so a
+    run manifest cannot record an override the run did not actually apply.
+    """
+    env_value = os.environ.get(_PATCH_EVIDENCE_PROTOCOL_ENV, "").strip().lower()
+    if env_value:
+        if env_value in _PATCH_EVIDENCE_PROTOCOL_ON:
+            return True
+        if env_value in _PATCH_EVIDENCE_PROTOCOL_OFF:
+            return False
+        raise ValueError(
+            f"{_PATCH_EVIDENCE_PROTOCOL_ENV} must be one of: "
+            + ", ".join(
+                sorted(_PATCH_EVIDENCE_PROTOCOL_ON | _PATCH_EVIDENCE_PROTOCOL_OFF)
+            )
+        )
+
+    prompt_cfg = getattr(config, "prompt", None)
+    return bool(getattr(prompt_cfg, "patch_evidence_protocol", False))
+
+
+_FINALIZE_EVIDENCE_GATE_ENV = "OPENSQUILLA_FINALIZE_EVIDENCE_GATE"
+_FINALIZE_EVIDENCE_GATE_ON = {"on", "1", "true", "yes"}
+_FINALIZE_EVIDENCE_GATE_OFF = {"off", "0", "false", "no"}
+
+
+def _resolve_finalize_evidence_gate(config: object) -> bool:
+    """Resolve the opt-in finalize-time red-evidence gate prompt flag.
+
+    ``OPENSQUILLA_FINALIZE_EVIDENCE_GATE`` ("on"/"off") overrides
+    ``prompt.finalize_evidence_gate`` from gateway config; default is off.
+    The same env var also enables the loop-side gate (see
+    engine.turn_runner.agent_bootstrap_stage). Unrecognized env values raise
+    instead of being silently ignored so a run manifest cannot record an
+    override the run did not actually apply.
+    """
+    env_value = os.environ.get(_FINALIZE_EVIDENCE_GATE_ENV, "").strip().lower()
+    if env_value:
+        if env_value in _FINALIZE_EVIDENCE_GATE_ON:
+            return True
+        if env_value in _FINALIZE_EVIDENCE_GATE_OFF:
+            return False
+        raise ValueError(
+            f"{_FINALIZE_EVIDENCE_GATE_ENV} must be one of: "
+            + ", ".join(
+                sorted(_FINALIZE_EVIDENCE_GATE_ON | _FINALIZE_EVIDENCE_GATE_OFF)
+            )
+        )
+
+    prompt_cfg = getattr(config, "prompt", None)
+    return bool(getattr(prompt_cfg, "finalize_evidence_gate", False))
+
+
+_LEGACY_PROMPT_STYLE_ENV = "OPENSQUILLA_LEGACY_PROMPT_STYLE"
+_LEGACY_PROMPT_STYLE_ON = {"on", "1", "true", "yes"}
+_LEGACY_PROMPT_STYLE_OFF = {"off", "0", "false", "no"}
+
+
+def _resolve_legacy_prompt_style(config: object) -> bool:
+    """Resolve the opt-in legacy prompt style flag.
+
+    ``OPENSQUILLA_LEGACY_PROMPT_STYLE`` ("on"/"off") overrides
+    ``prompt.legacy_prompt_style`` from gateway config; default is off and
+    keeps the current prompt wording byte-identical. Unrecognized env values
+    raise instead of being silently ignored so a run manifest cannot record
+    an override the run did not actually apply.
+    """
+    env_value = os.environ.get(_LEGACY_PROMPT_STYLE_ENV, "").strip().lower()
+    if env_value:
+        if env_value in _LEGACY_PROMPT_STYLE_ON:
+            return True
+        if env_value in _LEGACY_PROMPT_STYLE_OFF:
+            return False
+        raise ValueError(
+            f"{_LEGACY_PROMPT_STYLE_ENV} must be one of: "
+            + ", ".join(sorted(_LEGACY_PROMPT_STYLE_ON | _LEGACY_PROMPT_STYLE_OFF))
+        )
+
+    prompt_cfg = getattr(config, "prompt", None)
+    return bool(getattr(prompt_cfg, "legacy_prompt_style", False))
+
+
 class TurnRunner:
     """Orchestrates a complete agent turn: provider → tools → prompt → pipeline → Agent.
 
@@ -2123,6 +2261,8 @@ class TurnRunner:
         turn_hooks: Sequence[TurnHook] | None = None,
         compaction_hooks: Sequence[CompactionHook] | None = None,
         meta_run_writer: MetaRunWriter | None = None,
+        turn_error_writer: Any | None = None,
+        provider_call_observer: Callable[..., None] | None = None,
     ) -> None:
         self._provider_selector = provider_selector
         self._tool_registry = tool_registry
@@ -2138,6 +2278,11 @@ class TurnRunner:
         self._session_flush_service = session_flush_service
         self._diagnostics_state = diagnostics_state
         self._meta_run_writer = meta_run_writer
+        self._turn_error_writer = turn_error_writer
+        # Optional gateway-injected provider-call observer (latency/health
+        # sampling). Threaded onto AgentConfig via AgentBootstrapStage; None
+        # keeps the engine gateway-agnostic.
+        self._provider_call_observer = provider_call_observer
         self._router_control_hold_store = RouterControlHoldStore()
         # TurnHook surface. The default trace hook reproduces the inline trace
         # event behavior while keeping the event sink replaceable at construction.
@@ -2205,6 +2350,7 @@ class TurnRunner:
             agent_config_builder=_TurnRunnerAgentConfigBuilderAdapter(self),
             memory_snapshot=_TurnRunnerMemorySnapshotAdapter(self),
             agent_factory=_TurnRunnerAgentFactoryAdapter(self),
+            provider_call_observer=self._provider_call_observer,
         )
         # TurnRunner stage decomposition CompactionAndHistoryStage instance. Holds no
         # per-turn state. Active unconditionally as of.
@@ -2374,6 +2520,8 @@ class TurnRunner:
             session_key=session_key,
             artifact_media_root=str(media_root),
             artifact_session_id=session_id,
+            tool_result_store_dir=str(media_root / "tool-results"),
+            tool_result_store_session_id=session_id,
             workspace_file_writes=[],
             artifact_max_bytes=getattr(attachments_cfg, "artifact_max_bytes", None),
             artifact_disk_budget_bytes=getattr(
@@ -2740,6 +2888,11 @@ class TurnRunner:
         turn_segments: list[dict] = []
         turn_artifacts: list[dict[str, Any]] = []
         artifact_delivery_failures: list[str] = []
+        # current_text_parts holds text streamed since the last tool boundary;
+        # hoisted here (passed by reference into _StreamState) so the
+        # CancelledError handler can flush a trailing text segment the same way
+        # the normal-completion path does.
+        current_text_parts: list[str] = []
         self._emit_turn_event(
             "turn_start",
             trace_context,
@@ -2832,6 +2985,7 @@ class TurnRunner:
                     model=model,
                     history_has_persisted_user=history_has_persisted_user,
                     persist_input=persist_input,
+                    bound_user_message_id=bound_user_message_id,
                     fresh_user_session=(
                         fresh_user_session
                         if fresh_user_session is not None
@@ -2973,12 +3127,17 @@ class TurnRunner:
             if model:
                 compaction_model = model
                 if self._model_catalog is not None:
-                    compaction_context_window_tokens = (
-                        self._model_catalog.resolve_context_window(
-                            model,
-                            provider=active_provider_id,
-                        )
+                    # Same precedence as the harness catalog adapter: a
+                    # per-model [models.*] override beats the global
+                    # llm.context_window_tokens value, which beats the catalog.
+                    llm_cfg = getattr(self._config, "llm", None) if self._config else None
+                    window, _window_source = resolve_effective_context_window(
+                        self._model_catalog,
+                        model,
+                        provider=active_provider_id,
+                        global_override=getattr(llm_cfg, "context_window_tokens", 0) or 0,
                     )
+                    compaction_context_window_tokens = window
             ch_outcome = await self._compaction_and_history_stage.run(
                 CompactionAndHistoryStageInput(
                     agent=agent,
@@ -3025,7 +3184,6 @@ class TurnRunner:
             # artifact_delivery_failures) stay declared in this scope and
             # are PASSED BY REFERENCE into _StreamState so the
             # CancelledError handler below still sees them.
-            current_text_parts: list[str] = []
             error_message: str | None = None
             pending_error_event: ErrorEvent | None = None
             done_event: DoneEvent | None = None
@@ -3090,6 +3248,7 @@ class TurnRunner:
                     session_intent=session_intent,
                     semantic_message=semantic_message,
                     pending_input_provider=pending_input_provider,
+                    bound_user_message_id=bound_user_message_id,
                     run_kind=run_kind,
                     heartbeat_ack_max_chars=heartbeat_ack_max_chars,
                     bootstrap_context_mode=bootstrap_context_mode,
@@ -3113,6 +3272,7 @@ class TurnRunner:
             # fired (it is the last action of the stage body).
             if current_text_parts:
                 turn_segments.append({"type": "text", "text": "".join(current_text_parts)})
+                current_text_parts.clear()
 
             # 10. Persist assistant response (filter sentinel tokens).
             # TurnFinalizerStage owns the slice. The four side effects
@@ -3218,6 +3378,12 @@ class TurnRunner:
                 trace_id=trace_context.trace_id if trace_context is not None else None,
                 skills_invoked=collect_invoked_skills(turn_segments),
             )
+            self._emit_router_train_sample(
+                agent_id=agent_id,
+                session_key=session_key,
+                turn_obj=turn_obj,
+                message=message,
+            )
             if pending_error_event is not None:
                 yield pending_error_event
 
@@ -3227,6 +3393,15 @@ class TurnRunner:
             # transcript with an orphan user message. Marker `[interrupted]`
             # lets future turns (and users reading history) recognise the
             # response is incomplete.
+            # Flush trailing text streamed since the last tool boundary into
+            # turn_segments, mirroring the normal-completion path — otherwise a
+            # tool-using turn cancelled mid-answer persists segments with no
+            # text and the UI (which renders reloaded turns from the segment
+            # timeline) drops the visible partial answer.
+            trailing = "".join(current_text_parts)
+            if trailing:
+                turn_segments.append({"type": "text", "text": trailing})
+                current_text_parts.clear()
             partial_text = "".join(final_text_parts).rstrip()
             if (
                 partial_text or turn_segments or turn_artifacts
@@ -3307,18 +3482,47 @@ class TurnRunner:
                 error=str(exc),
                 exc_info=True,
             )
+            fallback_hops = 0
+            if turn_obj is not None:
+                try:
+                    fallback_hops = int(
+                        (getattr(turn_obj, "metadata", None) or {}).get(
+                            "router_fallback_hops", 0
+                        )
+                    )
+                except (TypeError, ValueError):
+                    fallback_hops = 0
+            error_id = self._record_turn_error(
+                session_key=session_key,
+                turn_id=turn_id,
+                session_id=session_id_for_log,
+                surface=input_mode or "unknown",
+                error_class=error_code or type(exc).__name__,
+                message=error_message,
+                exc=exc,
+                provider=(
+                    type(provider_for_log).__name__
+                    if provider_for_log is not None
+                    else None
+                ),
+                model=resolved_model or None,
+                fallback_hops=fallback_hops,
+            )
             if self._session_manager is not None:
                 if event_code == "provider_output_truncated":
-                    transcript_message = build_terminal_reply(
-                        {
-                            "status": "failed",
-                            "terminal_reason": "output_truncated",
-                            "error_class": event_code,
-                            "error_message": error_message,
-                        }
+                    transcript_message = append_error_ref(
+                        build_terminal_reply(
+                            {
+                                "status": "failed",
+                                "terminal_reason": "output_truncated",
+                                "error_class": event_code,
+                                "error_message": error_message,
+                            }
+                        ),
+                        error_id,
                     )
                 else:
-                    transcript_message = f"Error: {error_message}"
+                    transcript_message = f"Error: {append_error_ref(error_message, error_id)}"
                 await self._append_session_message(
                     session_key, role="system", content=transcript_message
                 )
@@ -3345,7 +3549,7 @@ class TurnRunner:
                         "error_chars": len(str(exc)),
                     },
                 )
-            yield ErrorEvent(message=error_message, code=event_code)
+            yield ErrorEvent(message=error_message, code=event_code, error_id=error_id or "")
 
     @staticmethod
     def _write_trace_event(
@@ -3480,11 +3684,73 @@ class TurnRunner:
         """Clone the selector and resolve provider (no shared state mutation)."""
         if self._provider_selector is None:
             return None, None
+        # A gateway can boot with a selector that has no usable primary yet
+        # (no API key configured); treat it like "no provider" so the turn
+        # fails with the same clean no_provider error instead of raising.
+        # getattr default True keeps duck-typed test selectors working.
+        if not getattr(self._provider_selector, "is_configured", True):
+            return None, None
         cloned = self._provider_selector.clone()
         return cloned.resolve(), cloned
 
     def _handle_runtime_warning(self, event: WarningEvent) -> WarningEvent:
         return event
+
+    def _record_turn_error(
+        self,
+        *,
+        session_key: str,
+        turn_id: str | None,
+        session_id: str | None,
+        surface: str,
+        error_class: str | None,
+        message: str,
+        exc: BaseException | None,
+        provider: str | None,
+        model: str | None,
+        fallback_hops: int,
+    ) -> str | None:
+        """Best-effort durable error record; returns the error_id or None.
+
+        Never raises: a persistence failure must not mask the turn error
+        being recorded.
+        """
+        if self._turn_error_writer is None:
+            return None
+        try:
+            from opensquilla.persistence.turn_error_writer import new_error_id
+
+            error_id = new_error_id()
+            traceback_text = None
+            if exc is not None:
+                import traceback as _traceback
+
+                traceback_text = "".join(
+                    _traceback.format_exception(type(exc), exc, exc.__traceback__)
+                )
+            recorded = self._turn_error_writer.record_error(
+                {
+                    "error_id": error_id,
+                    "turn_id": turn_id,
+                    "session_key": session_key,
+                    "session_id": session_id,
+                    "surface": surface,
+                    "error_class": error_class,
+                    "message": message,
+                    "traceback": traceback_text,
+                    "provider": provider,
+                    "model": model,
+                    "fallback_hops": fallback_hops,
+                }
+            )
+            return error_id if recorded else None
+        except Exception as record_exc:  # noqa: BLE001 - must not mask the turn error
+            log.warning(
+                "turn_runner.error_record_failed",
+                session_key=session_key,
+                error=str(record_exc),
+            )
+            return None
 
     async def _persist_turn_error(
         self,
@@ -3509,6 +3775,20 @@ class TurnRunner:
             if error_code in {"provider_request_too_large", "provider_output_truncated"}
             else event.code
         )
+        # When the event already carries an error_id from the catch-all, no
+        # second turn_errors row is written — getattr short-circuits.
+        error_id = getattr(event, "error_id", "") or self._record_turn_error(
+            session_key=session_key,
+            turn_id=None,
+            session_id=None,
+            surface="unknown",
+            error_class=event_code,
+            message=message,
+            exc=None,
+            provider=None,
+            model=None,
+            fallback_hops=0,
+        )
         outcome_details = turn_outcome_details(
             outcome_from_error(
                 code=event_code,
@@ -3517,16 +3797,19 @@ class TurnRunner:
             )
         )
         if event_code == "provider_output_truncated":
-            transcript_message = build_terminal_reply(
-                {
-                    "status": "failed",
-                    "terminal_reason": "output_truncated",
-                    "error_class": event_code,
-                    "error_message": message,
-                }
+            transcript_message = append_error_ref(
+                build_terminal_reply(
+                    {
+                        "status": "failed",
+                        "terminal_reason": "output_truncated",
+                        "error_class": event_code,
+                        "error_message": message,
+                    }
+                ),
+                error_id,
             )
         else:
-            transcript_message = f"Error: {message}"
+            transcript_message = f"Error: {append_error_ref(message, error_id)}"
         try:
             if event_code == "current_turn_context_exhausted":
                 compact = getattr(self._session_manager, "compact", None)
@@ -4417,10 +4700,10 @@ class TurnRunner:
         )
         if agent_name is None and identity_fields is not None:
             agent_name = identity_fields.name
-        prompt_mode = "full"
-        tools_cfg = getattr(self._config, "tools", None)
-        if getattr(tools_cfg, "profile", None) == "memory_only":
-            prompt_mode = "minimal"
+        prompt_mode = _resolve_identity_prompt_mode(self._config)
+        patch_evidence_protocol = _resolve_patch_evidence_protocol(self._config)
+        finalize_evidence_gate = _resolve_finalize_evidence_gate(self._config)
+        legacy_prompt_style = _resolve_legacy_prompt_style(self._config)
 
         agent_profile = AgentProfile(
             agent_id=agent_id,
@@ -4435,6 +4718,9 @@ class TurnRunner:
             agents_doc=agents_doc,
             workspace_files=workspace_files,
             prompt_mode=prompt_mode,
+            patch_evidence_protocol=patch_evidence_protocol,
+            finalize_evidence_gate=finalize_evidence_gate,
+            legacy_prompt_style=legacy_prompt_style,
         )
         os_name = os.uname().sysname if hasattr(os, "uname") else platform.system()
         runtime_info = {
@@ -4848,6 +5134,9 @@ class TurnRunner:
                 initial_metadata["session_estimated_cost_usd"] = float(
                     getattr(budget_session, "estimated_cost_usd", 0.0) or 0.0
                 )
+                initial_metadata["session_cost_source"] = str(
+                    getattr(budget_session, "cost_source", "") or ""
+                )
 
         turn = TurnContext(
             message=message,
@@ -4902,8 +5191,11 @@ class TurnRunner:
         ensemble_cfg = getattr(self._config, "llm_ensemble", None)
         if provider is not None and getattr(ensemble_cfg, "enabled", False):
             from opensquilla.provider.ensemble import (
+                CUSTOM_B5_SELECTION_MODE,
                 build_ensemble_provider_from_config,
-                static_openrouter_b5_credential_available,
+                custom_b5_lineup_ready,
+                static_b5_credential_available,
+                static_b5_profile,
             )
 
             current_provider_config = (
@@ -4912,6 +5204,14 @@ class TurnRunner:
                 else None
             )
             selection_mode = str(getattr(ensemble_cfg, "selection_mode", "") or "")
+            # Gate against the same inherited config the builder will use, so
+            # the readiness check can never disagree with the actual members.
+            custom_b5_ready, custom_b5_reason = (
+                custom_b5_lineup_ready(self._config, current_provider_config)
+                if selection_mode == CUSTOM_B5_SELECTION_MODE
+                and current_provider_config is not None
+                else (True, "")
+            )
             if current_provider_config is None:
                 log.warning(
                     "llm_ensemble.wrap_skipped",
@@ -4926,22 +5226,34 @@ class TurnRunner:
                     "llm_ensemble.wrap_skipped",
                     reason="incomplete_provider_selector_current_config",
                 )
-            elif selection_mode == "static_openrouter_b5" and not (
-                static_openrouter_b5_credential_available(
+            elif static_b5_profile(selection_mode) is not None and not (
+                static_b5_credential_available(
                     self._config,
                     current_provider_config,
+                    selection_mode,
                 )
             ):
-                # Without an OpenRouter credential the static-B5 members can
-                # never succeed; wrapping would still post the conversation to
-                # OpenRouter with an empty bearer token on every turn. Keep the
-                # single-model provider instead.
+                # Without a credential for the static profile's provider the
+                # members can never succeed; wrapping would still post the
+                # conversation upstream with an empty bearer token on every
+                # turn. Keep the single-model provider instead.
                 log.warning(
                     "llm_ensemble.wrap_skipped",
-                    reason="static_openrouter_b5_no_credential",
+                    reason=f"{selection_mode}_no_credential",
                 )
                 turn.metadata["ensemble_wrap_skipped_reason"] = (
-                    "static_openrouter_b5_no_credential"
+                    f"{selection_mode}_no_credential"
+                )
+            elif not custom_b5_ready:
+                # Same empty-bearer protection for the explicit custom
+                # lineup: a member whose provider resolves no key can never
+                # succeed, and a lineup without proposers cannot fuse.
+                log.warning(
+                    "llm_ensemble.wrap_skipped",
+                    reason=f"{selection_mode}_not_ready:{custom_b5_reason}",
+                )
+                turn.metadata["ensemble_wrap_skipped_reason"] = (
+                    f"{selection_mode}_not_ready:{custom_b5_reason}"
                 )
             else:
                 turn.metadata["ensemble_enabled"] = True
@@ -4962,6 +5274,7 @@ class TurnRunner:
         session_key: str,
         *,
         exclude_last_user: bool = False,
+        bound_user_message_id: str | None = None,
     ) -> dict[str, Any]:
         """Return transcript context for the V4 router, excluding the current user turn."""
         if self._session_manager is None:
@@ -4977,12 +5290,27 @@ class TurnRunner:
             log.debug("turn_runner.router_context_failed", session_key=session_key)
             return {}
         entries = list(transcript or [])
+        # When the turn is bound to a specific user message id (queued-sends
+        # path), exclude the bound current prompt AND every later user entry
+        # (still-queued future prompts persisted at ingress), mirroring
+        # _load_history's id-bound slice. The positional exclude_last_user
+        # fallback only handles the simple no-queue case and misclassifies the
+        # current/queued prompts as history under queued sends.
+        bound_index: int | None = None
+        if bound_user_message_id is not None:
+            for idx, entry in enumerate(entries):
+                if getattr(entry, "message_id", None) == bound_user_message_id:
+                    bound_index = idx
+                    break
         user_texts: list[str] = []
         user_contents: list[str] = []
         for index, entry in enumerate(entries):
             if getattr(entry, "role", None) != "user":
                 continue
-            if exclude_last_user and index == len(entries) - 1:
+            if bound_index is not None and index >= bound_index:
+                # The bound current prompt and any later (queued) user entry.
+                continue
+            if bound_index is None and exclude_last_user and index == len(entries) - 1:
                 continue
             content = getattr(entry, "content", None)
             if not isinstance(content, str) or not content.strip():
@@ -5181,13 +5509,15 @@ class TurnRunner:
             # Flush the staged router decision record (V017 router_decisions)
             # with executed facts: executed_kind/ensemble_profile/fallback_hops
             # are only knowable now that the provider ran. Best-effort — the
-            # hook never raises and no-ops when nothing was staged.
+            # hook never raises and no-ops when nothing was staged. The SQLite
+            # insert is scheduled onto a worker thread (fire-and-forget) so a
+            # contended WAL commit can never stall the event loop.
             if turn_obj is not None:
                 from opensquilla.engine.steps.router_decision_record import (
-                    flush_router_decision,
+                    schedule_router_decision_flush,
                 )
 
-                flush_router_decision(
+                schedule_router_decision_flush(
                     turn_obj.metadata,
                     ensemble_trace=(
                         getattr(done_event, "ensemble_trace", None)
@@ -5501,6 +5831,53 @@ class TurnRunner:
         except Exception as exc:  # pragma: no cover — observability must not break turns
             log.warning("decision_log.write_failed", error=str(exc))
 
+    def _emit_router_train_sample(
+        self,
+        *,
+        agent_id: str,
+        session_key: str,
+        turn_obj: Any | None,
+        message: str,
+    ) -> None:
+        """Append one self-learning sample for this turn (best-effort).
+
+        Opt-in (``squilla_router.self_learning.{enabled,capture_enabled}``) and
+        kill-switched. Writes the float16 feature vectors the model produced plus
+        the routing decision; never raw prompt text (unless the audit sidecar is
+        explicitly enabled). Must never break turn execution.
+        """
+
+        try:
+            if turn_obj is None:
+                return
+            router_cfg = getattr(self._config, "squilla_router", None)
+            sl = getattr(router_cfg, "self_learning", None)
+            if sl is None or not getattr(sl, "enabled", False):
+                return
+            if not getattr(sl, "capture_enabled", True):
+                return
+
+            from opensquilla.squilla_router.self_learning import (
+                self_learning_disabled_by_env,
+                write_sample,
+            )
+            from opensquilla.squilla_router.self_learning.capture import build_train_sample
+
+            if self_learning_disabled_by_env():
+                return
+
+            sample = build_train_sample(
+                session_key=session_key,
+                metadata=turn_obj.metadata,
+                store_audit_summary=bool(getattr(sl, "store_audit_summary", False)),
+                message=message,
+            )
+            if sample is None:
+                return
+            write_sample(sample, agent_id)
+        except Exception as exc:  # pragma: no cover — capture must not break turns
+            log.warning("router_self_learning.capture_failed", error=str(exc))
+
     async def _maybe_compact_on_t3_upgrade(
         self,
         session_key: str,
@@ -5588,9 +5965,16 @@ class TurnRunner:
                 compaction_config=configured_compaction,
             )
 
-        from opensquilla.session.compaction import CompactionConfig, estimate_entry_replay_tokens
+        from opensquilla.session.compaction import (
+            CompactionConfig,
+            estimate_entry_model_replay_tokens,
+        )
 
-        total_tokens = sum(estimate_entry_replay_tokens(e) for e in transcript)
+        # Measure what the model actually replays (full tool_calls JSON), the
+        # same estimator preflight uses. The summarized estimator undercounts
+        # tool-heavy transcripts, so a within-budget "handled" verdict computed
+        # from it would suppress the correct-estimator preflight fallback.
+        total_tokens = sum(estimate_entry_model_replay_tokens(e) for e in transcript)
         safety_margin = float(
             getattr(compaction_config or CompactionConfig(), "safety_margin", 1.2) or 1.2
         )
@@ -6579,35 +6963,18 @@ class TurnRunner:
         session_key: str,
         message_id: str,
     ) -> bool:
-        """Remove the ingress-persisted user prompt for a zero-output cancel.
+        """Keep the ingress-persisted user prompt for a zero-output cancel.
 
-        Returns whether a message was removed. Best-effort: a failure is logged
-        and swallowed so it can never mask the cancellation being handled.
+        WebUI Stop can happen before any assistant output exists. The user still
+        needs the submitted question to remain visible and reloadable from
+        history, so cancellation no longer rolls back this transcript row.
         """
-        if self._session_manager is None:
-            return False
-        remove_message = getattr(self._session_manager, "remove_message", None)
-        if not callable(remove_message):
-            return False
-        try:
-            removed = remove_message(session_key, message_id)
-            if inspect.isawaitable(removed):
-                removed = await removed
-            if removed:
-                log.info(
-                    "turn_runner.cancelled_prompt_rolled_back",
-                    session_key=session_key,
-                    message_id=message_id,
-                )
-            return bool(removed)
-        except Exception:  # pragma: no cover — never mask the cancel
-            log.warning(
-                "turn_runner.cancelled_prompt_rollback_failed",
-                session_key=session_key,
-                message_id=message_id,
-                exc_info=True,
-            )
-            return False
+        log.info(
+            "turn_runner.cancelled_prompt_retained",
+            session_key=session_key,
+            message_id=message_id,
+        )
+        return False
 
     async def _load_history(
         self,
@@ -6713,6 +7080,7 @@ class TurnRunner:
                 for index, entry in enumerate(transcript)
                 if getattr(entry, "role", None) == "user"
                 and index != current_user_entry_index
+                and index not in bound_skip_indexes
                 and isinstance(getattr(entry, "content", None), str)
                 and bool(str(getattr(entry, "content", "")).strip())
             ]
@@ -6726,6 +7094,16 @@ class TurnRunner:
             if attachment_replay_session_id is None:
                 attachment_replay_session_id = session_key
         last_entry_was_user = False
+        history_materializer: AttachmentWorkspaceMaterializer | None = None
+        if materialize_historical_attachments and workspace_dir and attachment_replay_session_id:
+            # One instance per history load so first-materialization replays
+            # pay for a single workspace-tree budget scan, not one per entry.
+            history_materializer = AttachmentWorkspaceMaterializer(
+                media_root=self._attachment_media_root(),
+                workspace_dir=workspace_dir,
+                materializable_mimes=None,
+                disk_budget_bytes=workspace_attachment_budget_from_config(self._config),
+            )
         for entry_index, entry in enumerate(transcript):
             if entry_index in bound_skip_indexes:
                 # The bound current prompt (re-appended by the caller) and any
@@ -6753,6 +7131,7 @@ class TurnRunner:
                     media_root=self._attachment_media_root(),
                     session_id=attachment_replay_session_id,
                     workspace_dir=workspace_dir,
+                    historical_materializer=history_materializer,
                 )
             elif raw_content and entry.role == "assistant":
                 content = self._maybe_unpack_assistant_artifacts(raw_content)
@@ -6914,6 +7293,8 @@ class TurnRunner:
         media_root: Path | None = None,
         session_id: str | None = None,
         workspace_dir: str | Path | None = None,
+        workspace_attachment_budget_bytes: int | None = None,
+        historical_materializer: AttachmentWorkspaceMaterializer | None = None,
     ) -> Any:
         """Reduce persisted attachment envelopes to text-only history.
 
@@ -6948,6 +7329,18 @@ class TurnRunner:
         omitted: list[str] = []
         replay_blocks: list[Any] = []
         preserved_image = False
+        if not materialize_historical_attachments:
+            historical_materializer = None
+        elif historical_materializer is None and session_id and workspace_dir:
+            # Fallback for direct callers: the history loader passes one
+            # shared instance per load so the whole transcript shares a
+            # single budget scan instead of re-walking the tree per entry.
+            historical_materializer = AttachmentWorkspaceMaterializer(
+                media_root=media_root or Path("."),
+                workspace_dir=workspace_dir,
+                materializable_mimes=None,
+                disk_budget_bytes=workspace_attachment_budget_bytes,
+            )
         if preserve_image_attachments and text:
             from opensquilla.provider.types import ContentBlockText
 
@@ -6956,7 +7349,7 @@ class TurnRunner:
             if not isinstance(att, dict):
                 continue
             media_type = att.get("type") or att.get("mime") or att.get("media_type")
-            if not (isinstance(media_type, str) and media_type in _ALLOWED_ENGINE_MEDIA_TYPES):
+            if not isinstance(media_type, str):
                 continue
             # Persisted attachment envelope: ``sha256_ref`` indicates the bytes live on
             # disk under media/transcripts/<session>/<sha>. Text routes keep
@@ -6973,7 +7366,7 @@ class TurnRunner:
             name = att.get("name")
             fallback = "image" if media_type.startswith("image/") else "attachment"
             label = name if isinstance(name, str) and name.strip() else fallback
-            if preserve_image_attachments and media_type.startswith("image/"):
+            if preserve_image_attachments and media_type in _IMAGE_ATTACHMENT_MIMES:
                 from opensquilla.provider.types import ContentBlockImage
 
                 if isinstance(data, str) and data:
@@ -7012,16 +7405,11 @@ class TurnRunner:
                         preserved_image = True
                     continue
             if (
-                materialize_historical_attachments
+                historical_materializer is not None
                 and session_id
-                and workspace_dir
                 and _is_materializable_attachment_mime(media_type)
             ):
-                materializer = AttachmentWorkspaceMaterializer(
-                    media_root=media_root or Path("."),
-                    workspace_dir=workspace_dir,
-                    materializable_mimes=_MATERIALIZABLE_ATTACHMENT_MIMES,
-                )
+                materializer = historical_materializer
                 result = None
                 if isinstance(sha_ref, str) and sha_ref and media_root is not None:
                     raw_size = att.get("size")
@@ -7105,6 +7493,7 @@ class TurnRunner:
         media_root: Path | None = None,
         workspace_dir: str | Path | None = None,
         session_id: str | None = None,
+        workspace_attachment_budget_bytes: int | None = None,
     ) -> list | None:
         """Build a multimodal user message that carries the attachments.
 
@@ -7132,6 +7521,16 @@ class TurnRunner:
 
         prompt_block = ContentBlockText(text=message)
         attachment_blocks: list[Any] = []
+        turn_materializer: AttachmentWorkspaceMaterializer | None = None
+        if workspace_dir:
+            # One instance per turn so the attachment batch shares a single
+            # budget scan instead of re-walking the tree per attachment.
+            turn_materializer = AttachmentWorkspaceMaterializer(
+                media_root=media_root or Path("."),
+                workspace_dir=workspace_dir,
+                materializable_mimes=None,
+                disk_budget_bytes=workspace_attachment_budget_bytes,
+            )
         for index, att in enumerate(attachments, start=1):
             att_type = att.get("type")
             media_type: str | None = att_type if isinstance(att_type, str) else None
@@ -7140,7 +7539,16 @@ class TurnRunner:
                 if isinstance(mime, str) and mime in _ALLOWED_ENGINE_MEDIA_TYPES:
                     media_type = mime
             if media_type is None or media_type not in _ALLOWED_ENGINE_MEDIA_TYPES:
-                raise ValueError(f"attachments[{index}] media type {att_type!r} is not allowed")
+                # Not a rendered family. Normalization resolves parameterized
+                # rendered claims ("text/plain; charset=utf-8"); anything else
+                # is an opaque attachment carried under its normalized label.
+                normalized = _normalize_attachment_mime(
+                    media_type or att.get("mime") or att.get("media_type")
+                )
+                if normalized in _ALLOWED_ENGINE_MEDIA_TYPES:
+                    media_type = normalized
+                else:
+                    media_type = normalized or _OPAQUE_MIME
             if is_attachment_ref(att):
                 missing_ref_marker = ""
                 if media_root is None:
@@ -7166,7 +7574,10 @@ class TurnRunner:
                     raise ValueError(f"attachments[{index}].data must be valid base64") from exc
             max_bytes = _attachment_size_limit_for_mime(
                 media_type,
-                staged=media_type == "application/pdf" and att.get("_was_staged") is True,
+                staged=(
+                    att.get("_was_staged") is True
+                    and _can_stage_attachment_mime(media_type)
+                ),
             )
             if len(raw_bytes) > max_bytes:
                 raise ValueError(f"attachments[{index}] exceeds the {max_bytes} byte limit")
@@ -7175,14 +7586,10 @@ class TurnRunner:
             filename = _sanitize_attachment_filename(name_raw)
             material_marker = ""
             if (
-                workspace_dir
+                turn_materializer is not None
                 and _is_materializable_attachment_mime(media_type)
             ):
-                materializer = AttachmentWorkspaceMaterializer(
-                    media_root=media_root or Path("."),
-                    workspace_dir=workspace_dir,
-                    materializable_mimes=_MATERIALIZABLE_ATTACHMENT_MIMES,
-                )
+                materializer = turn_materializer
                 if is_attachment_ref(att):
                     result = materializer.materialize(att, session_id=session_id)
                 else:
@@ -7208,7 +7615,7 @@ class TurnRunner:
                 attachment_blocks.append(ContentBlockText(text=wrapped))
                 continue
 
-            if media_type.startswith("image/"):
+            if media_type in _IMAGE_ATTACHMENT_MIMES:
                 attachment_blocks.append(ContentBlockImage(media_type=media_type, data=data))
             elif media_type == "application/pdf":
                 try:
@@ -7293,8 +7700,22 @@ class TurnRunner:
                     decoded_text = "\n\n".join([decoded_text, material_marker])
                 wrapped = _render_file_context_block(filename, media_type, decoded_text)
                 attachment_blocks.append(ContentBlockText(text=wrapped))
-            else:  # pragma: no cover - guarded by allow-list above
-                raise ValueError(f"attachments[{index}] media type {media_type!r} is not handled")
+            else:
+                # Opaque attachment: the raw bytes never reach the provider.
+                # The model gets an escaped metadata envelope plus the
+                # workspace marker so it can act on the file with tools.
+                sha = att.get("sha256") or att.get("sha256_ref")
+                details = f"[opaque attachment: {media_type}, {len(raw_bytes)} bytes"
+                if isinstance(sha, str) and sha:
+                    details += f", sha256 {sha}"
+                details += (
+                    "; content is not inlined. Inspect or convert the workspace "
+                    "copy with filesystem, shell, or code tools.]"
+                )
+                if material_marker:
+                    details = "\n\n".join([details, material_marker])
+                wrapped = _render_file_context_block(filename, media_type, details)
+                attachment_blocks.append(ContentBlockText(text=wrapped))
 
         return [
             Message(

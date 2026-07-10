@@ -83,6 +83,13 @@ class ProviderSpec:
     # (merged in order; first source of a model id wins). Empty for
     # local/self-hosted or OAuth-only providers with no public catalog.
     catalog_source: tuple[str, ...] = ()
+    # Keyless public model-listing endpoint + payload shape for the
+    # boot-time provider-scoped live catalog ingest (see
+    # provider/live_catalog.py). Set only for hosted aggregators whose
+    # platform publishes per-model windows/limits without auth; the
+    # OpenRouter live cache keeps its bespoke authenticated fetch.
+    live_catalog_url: str = ""
+    live_catalog_shape: str = ""
 
     def requires_api_key(self) -> bool:
         """True if onboarding must collect an API key for this provider."""
@@ -121,6 +128,8 @@ def _spec(
     auth_header_style: AuthHeaderStyle = "bearer",
     context_profile: ProviderContextProfile | None = None,
     catalog_source: tuple[str, ...] = (),
+    live_catalog_url: str = "",
+    live_catalog_shape: str = "",
 ) -> ProviderSpec:
     if required_fields is None:
         required_fields = frozenset({"api_key", "model"}) if env_key else frozenset({"model"})
@@ -139,6 +148,8 @@ def _spec(
         auth_header_style=auth_header_style,
         context_profile=context_profile,
         catalog_source=catalog_source,
+        live_catalog_url=live_catalog_url,
+        live_catalog_shape=live_catalog_shape,
     )
 
 
@@ -242,6 +253,24 @@ for _provider_spec in [
         catalog_source=("moonshotai",),
     ),
     _spec(
+        "kimi_coding_openai",
+        "openai_compat",
+        "moonshot",
+        "KIMI_CODING_API_KEY",
+        "https://api.kimi.com/coding/v1",
+        capabilities=frozenset({"chat", "coding_plan"}),
+    ),
+    _spec(
+        "kimi_coding_anthropic",
+        "anthropic",
+        "moonshot",
+        "KIMI_CODING_API_KEY",
+        "https://api.kimi.com/coding",
+        failure_family="anthropic",
+        auth_header_style="bearer",
+        capabilities=frozenset({"chat", "coding_plan"}),
+    ),
+    _spec(
         "minimax",
         "anthropic",
         "minimax",
@@ -256,7 +285,27 @@ for _provider_spec in [
         "openai_compat",
         "minimax",
         "MINIMAX_API_KEY",
+        "https://api.minimax.io/v1",
+        catalog_source=("minimax",),
+    ),
+    _spec(
+        "minimax_coding_openai",
+        "openai_compat",
+        "minimax",
+        "MINIMAX_CODING_API_KEY",
         "https://api.minimaxi.com/v1",
+        capabilities=frozenset({"chat", "coding_plan"}),
+        catalog_source=("minimax",),
+    ),
+    _spec(
+        "minimax_coding_anthropic",
+        "anthropic",
+        "minimax",
+        "MINIMAX_CODING_API_KEY",
+        "https://api.minimaxi.com/anthropic",
+        failure_family="anthropic",
+        auth_header_style="bearer",
+        capabilities=frozenset({"chat", "coding_plan"}),
         catalog_source=("minimax",),
     ),
     _spec(
@@ -278,6 +327,24 @@ for _provider_spec in [
         failure_family="anthropic",
         auth_header_style="bearer",
         catalog_source=("minimax",),
+    ),
+    _spec(
+        "mimo_openai",
+        "openai_compat",
+        "mimo",
+        "MIMO_API_KEY",
+        "https://token-plan-cn.xiaomimimo.com/v1",
+        capabilities=frozenset({"chat", "coding_plan"}),
+    ),
+    _spec(
+        "mimo_anthropic",
+        "anthropic",
+        "mimo",
+        "MIMO_API_KEY",
+        "https://token-plan-cn.xiaomimimo.com/anthropic",
+        failure_family="anthropic",
+        auth_header_style="bearer",
+        capabilities=frozenset({"chat", "coding_plan"}),
     ),
     _spec(
         "mistral",
@@ -343,6 +410,87 @@ for _provider_spec in [
         "https://ark.ap-southeast.bytepluses.com/api/v3",
         catalog_source=("byteplus",),
     ),
+    # Tencent TokenHub — the current home of the Hunyuan hy3 family (the
+    # legacy api.hunyuan.cloud.tencent.com platform is sunsetting and never
+    # received hy3). Mainland endpoint; keys come from the CN TokenHub
+    # console and use plain Bearer auth on the OpenAI protocol.
+    _spec(
+        "tencent_tokenhub",
+        "openai_compat",
+        "tencent_tokenhub",
+        "TENCENT_TOKENHUB_API_KEY",
+        "https://tokenhub.tencentmaas.com/v1",
+        catalog_source=("tencent-tokenhub",),
+    ),
+    # TokenHub's Anthropic-compatible Messages endpoint lives on the bare
+    # host (POST /v1/messages) and, unlike MiniMax's, signs with x-api-key.
+    _spec(
+        "tencent_tokenhub_anthropic",
+        "anthropic",
+        "tencent_tokenhub",
+        "TENCENT_TOKENHUB_API_KEY",
+        "https://tokenhub.tencentmaas.com",
+        failure_family="anthropic",
+        auth_header_style="x-api-key",
+        catalog_source=("tencent-tokenhub",),
+    ),
+    # International TokenHub (Singapore). A separate Tencent Cloud account
+    # and key system from the CN site — hence its own env key — and a
+    # different model list (no hy3 there yet), so no catalog_source.
+    _spec(
+        "tencent_tokenhub_intl",
+        "openai_compat",
+        "tencent_tokenhub",
+        "TENCENT_TOKENHUB_INTL_API_KEY",
+        "https://tokenhub-intl.tencentcloudmaas.com/v1",
+    ),
+    # Tencent Token Plan (personal edition) — the CN subscription that
+    # carries hy3/hy3-preview (plus the General-plan third-party models on
+    # the same key, routed by model id). Dedicated sk-tp keys, not
+    # interchangeable with pay-as-you-go TokenHub keys; chat completions
+    # only (no Responses API), and Tencent's terms restrict plan keys to
+    # interactive AI-tool use.
+    _spec(
+        "tencent_token_plan",
+        "openai_compat",
+        "tencent_tokenhub",
+        "TENCENT_TOKEN_PLAN_API_KEY",
+        "https://api.lkeap.cloud.tencent.com/plan/v3",
+        capabilities=frozenset({"chat", "coding_plan"}),
+        catalog_source=("tencent-token-plan",),
+    ),
+    # The Token Plan's Anthropic Messages endpoint. Tencent's own tool
+    # guides authenticate it with a bearer token (ANTHROPIC_AUTH_TOKEN),
+    # like MiniMax and unlike the pay-as-you-go TokenHub host.
+    _spec(
+        "tencent_token_plan_anthropic",
+        "anthropic",
+        "tencent_tokenhub",
+        "TENCENT_TOKEN_PLAN_API_KEY",
+        "https://api.lkeap.cloud.tencent.com/plan/anthropic",
+        failure_family="anthropic",
+        auth_header_style="bearer",
+        capabilities=frozenset({"chat", "coding_plan"}),
+        catalog_source=("tencent-token-plan",),
+    ),
+    # TokenRhythm — hosted aggregator relaying the DeepSeek/GLM/MiniMax/
+    # Kimi/MiMo/Qwen families behind one OpenAI-protocol host (Bearer auth,
+    # chat completions only — no Responses API). Every served model streams
+    # DeepSeek-style reasoning_content. Not on models.dev, so no
+    # catalog_source; instead the platform's keyless public listing is
+    # ingested at boot into the provider-scoped live layer (windows,
+    # output limits, prices), with the catalog_overrides.toml rows as the
+    # offline fallback beneath it.
+    _spec(
+        "tokenrhythm",
+        "openai_compat",
+        "tokenrhythm",
+        "TOKENRHYTHM_API_KEY",
+        "https://tokenrhythm.studio/v1",
+        reasoning_shape="deepseek",
+        live_catalog_url="https://tokenrhythm.studio/api/models",
+        live_catalog_shape="tokenrhythm",
+    ),
     # First-class id for any self-hosted or otherwise unlisted
     # OpenAI-compatible endpoint (vLLM, SGLang, TGI, llama.cpp server, a
     # bespoke proxy, ...). Pure registry metadata — the openai_compat backend
@@ -371,21 +519,39 @@ for _provider_spec in [
     ),
     _spec(
         "volcengine_coding_plan",
-        "openai_compat",
-        "openai",
+        "openai_responses",
+        "volcengine_coding_plan",
         "VOLCENGINE_API_KEY",
         "https://ark.cn-beijing.volces.com/api/coding/v3",
-        runtime_supported=False,
-        capabilities=frozenset({"coding_plan"}),
+        capabilities=frozenset({"chat", "coding_plan", "responses"}),
+    ),
+    _spec(
+        "volcengine_coding_plan_anthropic",
+        "anthropic",
+        "volcengine_coding_plan_anthropic",
+        "VOLCENGINE_API_KEY",
+        "https://ark.cn-beijing.volces.com/api/coding",
+        failure_family="anthropic",
+        auth_header_style="bearer",
+        capabilities=frozenset({"chat", "coding_plan"}),
     ),
     _spec(
         "byteplus_coding_plan",
-        "openai_compat",
-        "openai",
+        "openai_responses",
+        "byteplus_coding_plan",
         "BYTEPLUS_API_KEY",
         "https://ark.ap-southeast.bytepluses.com/api/coding/v3",
-        runtime_supported=False,
-        capabilities=frozenset({"coding_plan"}),
+        capabilities=frozenset({"chat", "coding_plan", "responses"}),
+    ),
+    _spec(
+        "byteplus_coding_plan_anthropic",
+        "anthropic",
+        "byteplus_coding_plan_anthropic",
+        "BYTEPLUS_API_KEY",
+        "https://ark.ap-southeast.bytepluses.com/api/coding",
+        failure_family="anthropic",
+        auth_header_style="bearer",
+        capabilities=frozenset({"chat", "coding_plan"}),
     ),
     _spec(
         "openai_codex",

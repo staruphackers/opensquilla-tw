@@ -1,5 +1,5 @@
 <template>
-  <div class="tool-timeline" :class="{ 'tool-timeline--checklist': variant === 'checklist' }">
+  <div ref="traceRoot" class="tool-timeline" :class="{ 'tool-timeline--checklist': variant === 'checklist' }">
   <section
     v-if="summary"
     class="run-trace__summary control-stat-grid control-stat-grid--fixed"
@@ -154,6 +154,9 @@ import { useI18n } from 'vue-i18n'
 import type { ChatToolCallRenderItem } from '@/types/chat'
 
 const SECTION_PREVIEW_LIMIT = 200
+const COMPACT_SECTION_CHAR_LIMIT = 360
+const COMPACT_SECTION_LINE_LIMIT = 6
+const COMPACT_SNIPPET_LIMIT = 150
 
 function parseToolResultRecord(raw: string): Record<string, unknown> | null {
   const text = String(raw || '').trim()
@@ -176,6 +179,125 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function asNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function contentLineCount(value: string): number {
+  if (!value) return 0
+  return value.split(/\r\n|\r|\n/).length
+}
+
+function shouldCompactSection(full: string, preview: string): boolean {
+  const text = full || preview || ''
+  return text.length > COMPACT_SECTION_CHAR_LIMIT || contentLineCount(text) > COMPACT_SECTION_LINE_LIMIT
+}
+
+function truncateInline(value: string, limit = COMPACT_SNIPPET_LIMIT): string {
+  const text = value.replace(/\s+/g, ' ').trim()
+  return text.length > limit ? `${text.slice(0, limit).trimEnd()}...` : text
+}
+
+function firstNonEmptyLine(value: string): string {
+  return value.split(/\r\n|\r|\n/).find(line => line.trim()) || ''
+}
+
+function compactJsonValue(value: unknown, limit = 44): string {
+  if (typeof value === 'string') return truncateInline(value, limit)
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (value === null) return 'null'
+  if (Array.isArray(value)) return `[${value.length} items]`
+  const record = asRecord(value)
+  if (record) {
+    const entries = Object.entries(record)
+      .slice(0, 2)
+      .map(([key, entry]) => `${key}: ${compactJsonValue(entry, 32)}`)
+    return entries.length ? `{ ${entries.join(', ')}${Object.keys(record).length > 2 ? ', ...' : ''} }` : '{}'
+  }
+  return truncateInline(String(value), limit)
+}
+
+function jsonObjectSnippet(record: Record<string, unknown>): string {
+  const pairs = Object.entries(record)
+    .slice(0, 4)
+    .map(([key, entry]) => `${key}: ${compactJsonValue(entry)}`)
+  return pairs.length ? truncateInline(pairs.join(', ')) : ''
+}
+
+function shellCommandFromRecord(record: Record<string, unknown> | null): string {
+  return typeof record?.command === 'string' ? record.command : ''
+}
+
+function shellResultBlock(lines: string[], key: string): string {
+  const start = lines.findIndex(line => line.trimStart().startsWith(key))
+  if (start < 0) return ''
+
+  const block = [lines[start].trimStart().slice(key.length)]
+  for (const line of lines.slice(start + 1)) {
+    if (/^(exit_code|stdout|stderr|timed_out|duration|stdout_truncated|stderr_truncated)=/.test(line.trimStart())) {
+      break
+    }
+    block.push(line)
+  }
+  return block.join('\n').trim()
+}
+
+function shellResultSnippet(value: string): string {
+  const lines = value.split(/\r\n|\r|\n/)
+  const exitLineIndex = lines.findIndex(line => line.trim())
+  const exitLine = exitLineIndex >= 0 ? lines[exitLineIndex].trim() : ''
+  if (!/^exit_code=/.test(exitLine)) return ''
+
+  let outputLabel = 'stdout'
+  let output = shellResultBlock(lines, 'stdout=')
+  if (!output && exitLineIndex >= 0) {
+    outputLabel = 'output'
+    output = lines.slice(exitLineIndex + 1).join('\n').trim()
+  }
+
+  const parts = [exitLine]
+  if (output) {
+    const outputRecord = parseToolResultRecord(output)
+    const outputPreview = outputRecord
+      ? jsonObjectSnippet(outputRecord)
+      : truncateInline(firstNonEmptyLine(output) || output, 90)
+    if (outputPreview) parts.push(`${outputLabel}: ${outputPreview}`)
+  }
+  return truncateInline(parts.join(', '))
+}
+
+function compactKind(value: string): string {
+  const text = value.trim()
+  if (!text) return 'text'
+  const record = parseToolResultRecord(text)
+  if (shellCommandFromRecord(record)) return 'shell command'
+  if (shellResultSnippet(text)) return 'shell result'
+  if (text.startsWith('{') || text.startsWith('[')) return 'JSON'
+  return 'text'
+}
+
+function compactSnippet(value: string): string {
+  const text = value.trim()
+  if (!text) return ''
+  const record = parseToolResultRecord(text)
+  const command = shellCommandFromRecord(record)
+  if (command) return truncateInline(`command: ${command}`)
+  if (record) return jsonObjectSnippet(record)
+
+  const shellSnippet = shellResultSnippet(text)
+  if (shellSnippet) return shellSnippet
+
+  return truncateInline(firstNonEmptyLine(text) || text)
+}
+
+function compactMeta(value: string): string {
+  const command = shellCommandFromRecord(parseToolResultRecord(value.trim()))
+  const measured = command || value
+  const chars = measured.length
+  const lines = contentLineCount(measured)
+  const kind = compactKind(value)
+  const parts = [kind]
+  if (lines > 1) parts.push(`${lines} lines`)
+  parts.push(`${chars.toLocaleString()} chars`)
+  return parts.join(' | ')
 }
 
 function webDiagnosticsSummary(raw: string): string {
@@ -230,10 +352,17 @@ const ToolRowSections = defineComponent({
       const sections = []
       if (call.inputPreview) {
         const fullInput = call.inputRaw || ''
+        const inputContent = fullInput || call.inputPreview
+        const compact = shouldCompactSection(inputContent, call.inputPreview)
         sections.push(h('section', { class: 'tool-row-section' }, [
           h('div', { class: 'tool-row-section__label' }, t('shared.runTrace.sectionInput')),
-          h('pre', { class: 'tool-row-section__pre' }, call.inputPreview),
-          fullInput.length > SECTION_PREVIEW_LIMIT
+          compact
+            ? h('div', { class: 'tool-row-section__compact' }, [
+                h('span', { class: 'tool-row-section__compact-meta' }, compactMeta(inputContent)),
+                h('span', { class: 'tool-row-section__compact-snippet' }, compactSnippet(inputContent)),
+              ])
+            : h('pre', { class: 'tool-row-section__pre' }, call.inputPreview),
+          fullInput.length > SECTION_PREVIEW_LIMIT || compact
             ? h('button', {
                 type: 'button',
                 class: 'step-view-btn',
@@ -256,12 +385,19 @@ const ToolRowSections = defineComponent({
         const kindLabel = call.isError
           ? t('shared.runTrace.sectionError')
           : t('shared.runTrace.sectionResult')
+        const resultContent = call.result || call.resultPreview
+        const compact = shouldCompactSection(resultContent, call.resultPreview)
         sections.push(h('section', {
           class: ['tool-row-section', { 'tool-row-section--error': call.isError }],
         }, [
           h('div', { class: 'tool-row-section__label' }, kindLabel),
-          h('pre', { class: 'tool-row-section__pre' }, call.resultPreview),
-          call.result.length > SECTION_PREVIEW_LIMIT
+          compact
+            ? h('div', { class: 'tool-row-section__compact' }, [
+                h('span', { class: 'tool-row-section__compact-meta' }, compactMeta(resultContent)),
+                h('span', { class: 'tool-row-section__compact-snippet' }, compactSnippet(resultContent)),
+              ])
+            : h('pre', { class: 'tool-row-section__pre' }, call.resultPreview),
+          call.result.length > SECTION_PREVIEW_LIMIT || compact
             ? h('button', {
                 type: 'button',
                 class: 'step-view-btn',
@@ -282,7 +418,7 @@ export default { components: { ToolRowSections } }
 </script>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import Icon from '@/components/Icon.vue'
 import type {
   ChatStreamTimelineItem,
@@ -297,6 +433,7 @@ import {
 } from '@/utils/chat/toolDisplay'
 import { toolState } from '@/utils/chat/toParts'
 import { composeTree, statusVisual, type StatusVisual } from '@/components/run/runTrace'
+import { copyTextWithFallback } from '@/utils/browser'
 
 const { t } = useI18n()
 
@@ -342,8 +479,101 @@ const emit = defineEmits<{
   showResult: [content: string, title: string]
 }>()
 
+const traceRoot = ref<HTMLElement | null>(null)
 const showAllRows = ref(false)
 
+function codeText(pre: HTMLPreElement): string {
+  const code = pre.querySelector('code')
+  return code?.textContent || ''
+}
+
+function hasCodeCopyButton(pre: HTMLPreElement): boolean {
+  return Array.from(pre.children).some(child => child.classList.contains('code-copy-btn'))
+}
+
+function setCodeCopyButtonState(button: HTMLButtonElement, state: 'idle' | 'copied' | 'error') {
+  const label = state === 'copied'
+    ? t('chat.copied')
+    : state === 'error'
+      ? t('chat.toast.copyFailed')
+      : t('chat.copy')
+  button.replaceChildren(createCodeCopyIcon(state))
+  button.title = label
+  button.setAttribute('aria-label', label)
+}
+
+function createCodeCopyIcon(state: 'idle' | 'copied' | 'error'): SVGSVGElement {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+  svg.setAttribute('viewBox', '0 0 24 24')
+  svg.setAttribute('width', '15')
+  svg.setAttribute('height', '15')
+  svg.setAttribute('aria-hidden', 'true')
+  svg.setAttribute('focusable', 'false')
+  svg.setAttribute('fill', 'none')
+  svg.setAttribute('stroke', 'currentColor')
+  svg.setAttribute('stroke-width', '2')
+  svg.setAttribute('stroke-linecap', 'round')
+  svg.setAttribute('stroke-linejoin', 'round')
+
+  if (state === 'copied') {
+    svg.appendChild(svgNode('polyline', { points: '20 6 9 17 4 12' }))
+    return svg
+  }
+  if (state === 'error') {
+    svg.appendChild(svgNode('path', { d: 'M18 6 6 18' }))
+    svg.appendChild(svgNode('path', { d: 'm6 6 12 12' }))
+    return svg
+  }
+
+  svg.appendChild(svgNode('rect', { width: '14', height: '14', x: '8', y: '8', rx: '2', ry: '2' }))
+  svg.appendChild(svgNode('path', { d: 'M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2' }))
+  return svg
+}
+
+function svgNode(tag: string, attrs: Record<string, string>): SVGElement {
+  const node = document.createElementNS('http://www.w3.org/2000/svg', tag)
+  for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value)
+  return node
+}
+
+function decorateCodeBlocks() {
+  const root = traceRoot.value
+  if (!root) return
+  for (const pre of root.querySelectorAll<HTMLPreElement>('.msg-ai-text pre')) {
+    if (hasCodeCopyButton(pre)) continue
+    const text = codeText(pre)
+    if (!text) continue
+
+    pre.classList.add('code-block')
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'code-copy-btn'
+    setCodeCopyButtonState(button, 'idle')
+    button.addEventListener('click', async event => {
+      event.preventDefault()
+      event.stopPropagation()
+      try {
+        await copyTextWithFallback(codeText(pre))
+        setCodeCopyButtonState(button, 'copied')
+        button.classList.add('is-copied')
+        window.setTimeout(() => {
+          if (!button.isConnected) return
+          setCodeCopyButtonState(button, 'idle')
+          button.classList.remove('is-copied')
+        }, 1600)
+      } catch {
+        setCodeCopyButtonState(button, 'error')
+        button.classList.add('is-error')
+        window.setTimeout(() => {
+          if (!button.isConnected) return
+          setCodeCopyButtonState(button, 'idle')
+          button.classList.remove('is-error')
+        }, 1600)
+      }
+    })
+    pre.appendChild(button)
+  }
+}
 // Chat passes `items` (proven group data); non-chat surfaces pass flat steps,
 // which compose into the same tool-group timeline shape so the markup never
 // branches on input source.
@@ -416,6 +646,24 @@ const visibleItems = computed<TimelineRenderItem[]>(() => {
   }
   return out
 })
+
+const codeBlockDecorationSignature = computed(() => visibleItems.value
+  .map(item => item.type === 'text' ? `${item.key}:${item.html}` : item.key)
+  .join('|'))
+
+onMounted(async () => {
+  await nextTick()
+  decorateCodeBlocks()
+})
+
+watch(
+  codeBlockDecorationSignature,
+  async () => {
+    await nextTick()
+    decorateCodeBlocks()
+  },
+  { flush: 'post' },
+)
 
 function operationKey(call: ChatToolCallRenderItem): string {
   return toolOperationKey(call.name)
@@ -571,6 +819,60 @@ function fmtTok(n?: number | null): string {
   padding: 0.625rem;
   overflow-x: auto;
   margin: 0.375rem 0;
+}
+.msg-ai-text :deep(pre.code-block) {
+  position: relative;
+  padding-top: 1.9rem;
+}
+
+.msg-ai-text :deep(pre.code-block > .code-lang) {
+  right: 2.75rem;
+}
+
+.msg-ai-text :deep(.code-copy-btn) {
+  position: absolute;
+  top: 0.375rem;
+  right: 0.375rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  opacity: 0.78;
+  cursor: pointer;
+  transition: color var(--transition), background var(--transition), opacity var(--transition);
+}
+
+.msg-ai-text :deep(.code-copy-btn svg) {
+  display: block;
+  width: 0.9375rem;
+  height: 0.9375rem;
+}
+
+.msg-ai-text :deep(.code-copy-btn:hover) {
+  color: var(--text);
+  opacity: 1;
+  background: var(--bg-hover);
+}
+
+.msg-ai-text :deep(.code-copy-btn:focus-visible) {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+.msg-ai-text :deep(.code-copy-btn.is-copied) {
+  color: var(--ok);
+  opacity: 1;
+}
+
+.msg-ai-text :deep(.code-copy-btn.is-error) {
+  color: var(--danger);
+  opacity: 1;
 }
 .msg-ai-text :deep(pre code) {
   background: transparent;
@@ -1001,6 +1303,30 @@ function fmtTok(n?: number | null): string {
   max-height: 100px;
   overflow-y: auto;
   margin: 0;
+}
+
+.tool-row-section__compact {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.tool-row-section__compact-meta {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  line-height: 1.35;
+}
+
+.tool-row-section__compact-snippet {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 0.71875rem;
+  line-height: 1.45;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .step-view-btn {
