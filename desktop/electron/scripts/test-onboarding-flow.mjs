@@ -118,8 +118,16 @@ try {
   await page.locator('#providerGrid [data-provider="qianfan"]').click()
   assert.equal(await page.locator('#modelRoutingMode').inputValue(), 'direct')
   assert.equal(await page.locator('#routerMode').inputValue(), 'disabled')
-  assert.equal(await page.locator('#model').inputValue(), '', 'direct-only providers without a default model should not inherit the previous provider model')
-  assert.equal(await page.locator('#endpointToggle').getAttribute('aria-expanded'), 'true', 'direct-only providers that need a model should open the endpoint panel')
+  assert.equal(
+    await page.locator('#model').inputValue(),
+    'ernie-4.5-turbo-128k',
+    'Qianfan should use its verified direct-model default',
+  )
+  assert.equal(
+    await page.locator('#endpointToggle').getAttribute('aria-expanded'),
+    'false',
+    'direct providers with a default model should keep the endpoint panel closed',
+  )
   await page.locator('#apiKey').fill('test-qianfan-key')
   await page.locator('[data-screen="1"].active .next-button').click()
   await page.locator('[data-screen="2"].active').waitFor({ state: 'visible', timeout: 5_000 })
@@ -128,8 +136,9 @@ try {
   assert.equal(await page.locator('[data-model-routing-mode="llm_ensemble"]').isDisabled(), true)
   assert.equal(await page.locator('[data-step-label="3"]').isVisible(), false, 'route-excluded tier step should be hidden from the progress rail')
   await page.locator('[data-screen="2"].active .next-button').click()
+  await page.locator('[data-screen="4"].active').waitFor({ state: 'visible', timeout: 5_000 })
+  await page.locator('[data-screen="4"].active .back-button').click()
   await page.locator('[data-screen="2"].active').waitFor({ state: 'visible', timeout: 5_000 })
-  assert.match(await page.locator('#error').innerText(), /Direct model is required/)
   await page.locator('[data-screen="2"].active .back-button').click()
   await page.locator('[data-screen="1"].active').waitFor({ state: 'visible', timeout: 5_000 })
 
