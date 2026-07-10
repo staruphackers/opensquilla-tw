@@ -401,8 +401,9 @@ async def discover_selectable_provider_models(
 
     A trusted provider id is not enough on its own: an operator-supplied
     OpenAI-compatible re-host can serve a completely different model set.
-    Live selection is therefore allowed only when the effective base URL is
-    the provider's allowlisted official host (or one of its subdomains).
+    Live selection is therefore allowed only when the effective base URL uses
+    HTTPS and the provider's allowlisted official host (or one of its
+    subdomains).
     """
     provider_id = (provider_id or "").strip()
     spec = get_provider_spec(provider_id)  # raises UnknownProviderError(ValueError)
@@ -413,8 +414,14 @@ async def discover_selectable_provider_models(
         return ProviderModelsDiscoverResult(ok=True, provider_id=provider_id)
 
     effective_base_url = base_url.strip() or spec.default_base_url
-    if not spec.compat.official_host or not is_provider_app_host(
-        effective_base_url, spec.compat.official_host
+    try:
+        uses_https = httpx.URL(effective_base_url).scheme == "https"
+    except httpx.InvalidURL:
+        uses_https = False
+    if (
+        not uses_https
+        or not spec.compat.official_host
+        or not is_provider_app_host(effective_base_url, spec.compat.official_host)
     ):
         return ProviderModelsDiscoverResult(ok=True, provider_id=provider_id)
 

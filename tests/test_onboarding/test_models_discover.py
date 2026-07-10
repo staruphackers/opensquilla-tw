@@ -151,6 +151,31 @@ def test_selectable_discovery_rejects_non_official_base_url_before_raw_discovery
     assert result == ProviderModelsDiscoverResult(ok=True, provider_id=provider_id)
 
 
+@pytest.mark.parametrize(
+    ("provider_id", "base_url"),
+    [
+        ("openrouter", "http://openrouter.ai/api/v1"),
+        ("tokenrhythm", "http://tokenrhythm.studio/v1"),
+    ],
+)
+def test_selectable_discovery_rejects_plain_http_before_credentials_or_raw_discovery(
+    monkeypatch: Any, provider_id: str, base_url: str
+) -> None:
+    def _unexpected(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("plain HTTP must not resolve credentials or discover models")
+
+    monkeypatch.setattr(probe_module, "_resolve_probe_api_key", _unexpected)
+    monkeypatch.setattr(probe_module, "discover_provider_models", _unexpected)
+
+    result = _discover_selectable(
+        provider_id=provider_id,
+        api_key="synthetic-key",
+        base_url=base_url,
+    )
+
+    assert result == ProviderModelsDiscoverResult(ok=True, provider_id=provider_id)
+
+
 def test_selectable_discovery_still_validates_unsupported_provider() -> None:
     with pytest.raises(ValueError, match="no runtime support"):
         _discover_selectable(provider_id="github_copilot")
