@@ -698,6 +698,7 @@ def test_windows_high_risk_job_uses_subset_until_full_ci() -> None:
     text = (WORKFLOW_DIR / "ci.yml").read_text(encoding="utf-8")
 
     assert windows_full["name"] == "Windows high-risk/full tests (conditional)"
+    assert windows_full["timeout-minutes"] == 45
     assert windows_full["steps"][0]["with"]["lfs"] == (
         "${{ needs.classify-changes.outputs.full_required == 'true' }}"
     )
