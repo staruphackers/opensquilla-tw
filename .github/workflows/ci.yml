@@ -394,7 +394,16 @@ jobs:
         shell: bash
         run: uv sync --extra dev --extra recommended --extra mcp --frozen
 
+      - name: Collect all Windows full failures
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          markers="not llm and not live_search and not live_channel and not webui_browser and not tui_real_terminal and not local_golden and not agent_context_boundary and not llm_router_acc"
+          uv run pytest tests -q -m "${markers}" --durations=50
+
       - name: Test
+        if: ${{ github.event_name != 'workflow_dispatch' }}
         shell: bash
         run: |
           set -euo pipefail
