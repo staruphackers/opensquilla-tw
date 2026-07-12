@@ -926,7 +926,9 @@ def test_overwrite_publish_failure_restores_complete_original_target(
     def fail_staging_publish(src: str, dst: str) -> None:
         source_path = Path(src)
         destination_path = Path(dst)
-        if source_path.name.startswith(".opensquilla-import-") and destination_path == target:
+        if source_path.name.startswith(".opensquilla-import-") and destination_path == Path(
+            migration_module._ext(target)
+        ):
             raise OSError("synthetic publish failure")
         original_replace(src, dst)
 
