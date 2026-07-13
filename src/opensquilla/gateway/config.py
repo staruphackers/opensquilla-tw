@@ -160,7 +160,7 @@ class ControlUiConfig(BaseSettings):
                 # hyphen- or underscore-separated) route to Traditional;
                 # zh-Hans / zh-CN / zh-SG and every other zh* stays on the
                 # conservative Simplified fallback.
-                if re.match(r"^zh[-_]hant(?:[-_]|$)", s) or re.match(r"^zh[-_](?:tw|hk|mo)(?:[-_]|$)", s):
+                if re.match(r"^zh[-_](?:hant|tw|hk|mo)(?:[-_]|$)", s):
                     return "zh-Hant"
                 return "zh-Hans"
             for code in ("ja", "fr", "de", "es"):
