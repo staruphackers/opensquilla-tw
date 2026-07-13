@@ -188,6 +188,49 @@ def test_delete_current_profile_with_state_but_no_legacy_lock_completes(
     assert not primary.exists()
 
 
+def test_cleanup_revision_ignores_only_coordination_ancestor_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import opensquilla.recovery.cleanup as cleanup_module
+
+    user_data = tmp_path / "user-data"
+    user_data.mkdir()
+    monkeypatch.setenv("OPENSQUILLA_USER_STATE_DIR", str(tmp_path / "lock-state"))
+    primary = _desktop_primary(user_data)
+    state = primary / "state"
+    state.mkdir()
+    (state / "gateway.pid.lock").write_bytes(b"synthetic lock authority\n")
+
+    before = cleanup_module._build_plan(
+        user_data,
+        mode="delete-current-profile",
+        profile_kind="primary",
+        recovery_id=None,
+    )
+    home_stat = primary.stat()
+    os.utime(
+        primary,
+        ns=(home_stat.st_atime_ns, home_stat.st_mtime_ns + 1_000_000_000),
+    )
+    metadata_only = cleanup_module._build_plan(
+        user_data,
+        mode="delete-current-profile",
+        profile_kind="primary",
+        recovery_id=None,
+    )
+    assert metadata_only.revision == before.revision
+
+    (state / "sessions.db").write_bytes(b"new user data\n")
+    changed = cleanup_module._build_plan(
+        user_data,
+        mode="delete-current-profile",
+        profile_kind="primary",
+        recovery_id=None,
+    )
+    assert changed.revision != before.revision
+
+
 def test_reset_current_settings_preserves_config_workspace_and_sessions(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

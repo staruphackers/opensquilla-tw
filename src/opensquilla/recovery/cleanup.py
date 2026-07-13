@@ -883,7 +883,27 @@ def _build_plan(
     coordination_parent_paths: set[str] = set()
     for profile_home in profile_homes:
         for state_root in effective_state_roots(profile_home):
-            coordination_parent_paths.add(_lexical_normalized(state_root))
+            # Creating or touching gateway.pid.lock can update directory
+            # metadata all the way up the containing tree on Windows. Ignore
+            # size/mtime only for those known ancestors; every child entry and
+            # each ancestor's device/inode/mode remain part of the CAS
+            # signature, so unrelated additions, removals, mutations, or path
+            # swaps still change the revision.
+            ancestor = _absolute(state_root)
+            root_key = _lexical_normalized(root)
+            while _lexical_normalized(ancestor) != root_key:
+                try:
+                    if os.path.commonpath(
+                        (_lexical_normalized(ancestor), root_key)
+                    ) != root_key:
+                        break
+                except ValueError:
+                    break
+                coordination_parent_paths.add(_lexical_normalized(ancestor))
+                parent = ancestor.parent
+                if parent == ancestor:
+                    break
+                ancestor = parent
             coordination_lock_paths.add(
                 _lexical_normalized(state_root / "gateway.pid.lock")
             )
@@ -1096,7 +1116,13 @@ def _fsync_directory(path: Path) -> None:
 
 
 def _write_bytes_no_replace(path: Path, data: bytes, *, sync_parent: bool = True) -> None:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
     flags |= getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags, 0o600)
     try:
