@@ -9,6 +9,7 @@ import sys
 import tomllib
 from pathlib import Path
 
+import pytest
 import yaml
 
 CURRENT_VERSION = "0.5.0rc3"
@@ -112,17 +113,6 @@ fi
     )
     fake_gh.chmod(0o755)
     env = os.environ.copy()
-    env["TEST_PYTHON"] = sys.executable
-    shell_prefix = 'python() { "$TEST_PYTHON" "$@"; }\n'
-    if os.name == "nt":
-        env["FAKE_GH_DIR"] = str(fake_bin)
-        shell_prefix = (
-            'export TEST_PYTHON="$(cygpath -u "$TEST_PYTHON")"\n'
-            'export PATH="$(cygpath -u "$FAKE_GH_DIR"):$PATH"\n'
-            'python() { "$TEST_PYTHON" "$@"; }\n'
-        )
-    else:
-        env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
     env.update(
         {
             "FAKE_GH_LOG": str(call_log),
@@ -131,11 +121,15 @@ fi
             ),
             "GH_REPO": "opensquilla/opensquilla",
             "GH_TOKEN": "synthetic-test-token",
+            "PATH": (
+                f"{fake_bin}{os.pathsep}{Path(sys.executable).parent}"
+                f"{os.pathsep}{env['PATH']}"
+            ),
             "TAG": tag,
         }
     )
     result = subprocess.run(
-        ["bash", "-c", shell_prefix + _release_upload_script()],
+        ["bash", "-c", _release_upload_script()],
         cwd=Path.cwd(),
         env=env,
         capture_output=True,
@@ -146,6 +140,10 @@ fi
     return result, calls
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="The release upload Bash step runs in the required Ubuntu packaging job.",
+)
 def test_release_upload_refuses_to_mutate_an_existing_public_release(tmp_path: Path) -> None:
     result, calls = _run_release_upload_with_fake_gh(
         tmp_path,
@@ -165,6 +163,10 @@ def test_release_upload_refuses_to_mutate_an_existing_public_release(tmp_path: P
         assert mutating_call not in calls
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="The release upload Bash step runs in the required Ubuntu packaging job.",
+)
 def test_release_upload_derives_preview_state_from_each_tag(tmp_path: Path) -> None:
     stable_result, stable_calls = _run_release_upload_with_fake_gh(
         tmp_path / "stable",
