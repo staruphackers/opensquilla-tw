@@ -147,7 +147,7 @@ def test_delete_current_primary_preserves_recovery_profiles_and_backups(
         confirm_user_data=user_data,
     )
 
-    assert result.outcome == "complete"
+    assert result.outcome == "complete", result.stable_code
     assert not primary.exists()
     assert not (user_data / "desktop-credential.json").exists()
     assert not (user_data / "logs").exists()
@@ -184,7 +184,7 @@ def test_delete_current_profile_with_state_but_no_legacy_lock_completes(
         confirm_user_data=user_data,
     )
 
-    assert result.outcome == "complete"
+    assert result.outcome == "complete", result.stable_code
     assert not primary.exists()
 
 
@@ -227,7 +227,7 @@ def test_reset_current_settings_preserves_config_workspace_and_sessions(
         confirm_user_data=user_data,
     )
 
-    assert result.outcome == "complete"
+    assert result.outcome == "complete", result.stable_code
     assert not (user_data / "desktop-credential.json").exists()
     assert not (user_data / "migration-provider-setup.json").exists()
     assert not (user_data / "migration-last-result.json").exists()
@@ -309,7 +309,7 @@ def test_delete_current_recovery_preserves_primary_other_recovery_and_backups(
         confirm_user_data=user_data,
     )
 
-    assert result.outcome == "complete"
+    assert result.outcome == "complete", result.stable_code
     assert not selected.exists()
     assert primary.is_dir()
     assert other.is_dir()
@@ -714,6 +714,7 @@ def test_cleanup_releases_legacy_handles_before_deleting_profile_tombstone(
     tmp_path: Path,
 ) -> None:
     import opensquilla.recovery.cleanup as cleanup_module
+    import opensquilla.recovery.locking as locking_module
 
     user_data = tmp_path / "user-data"
     user_data.mkdir()
@@ -726,6 +727,11 @@ def test_cleanup_releases_legacy_handles_before_deleting_profile_tombstone(
         user_data,
         mode="delete-current-profile",
         profile_kind="primary",
+    )
+    monkeypatch.setattr(
+        locking_module,
+        "_windows_requires_legacy_lock_handoff",
+        lambda: True,
     )
     real_acquire = cleanup_module.acquire_legacy_gateway_locks
     captured_locks = []
@@ -759,7 +765,7 @@ def test_cleanup_releases_legacy_handles_before_deleting_profile_tombstone(
         confirm_user_data=user_data,
     )
 
-    assert result.outcome == "complete"
+    assert result.outcome == "complete", result.stable_code
     assert observed_tombstone_delete is True
     assert captured_locks
     assert not primary.exists()
