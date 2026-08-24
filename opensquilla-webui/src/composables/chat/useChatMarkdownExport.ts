@@ -2,16 +2,19 @@ import type { Ref } from 'vue'
 import type { ChatRenderedMessage } from '@/types/chat'
 import { downloadText } from '@/utils/browser'
 import { artifactMeta, artifactName } from '@/utils/chat/artifacts'
+import { sanitizeAssistantPresentationText } from '@/utils/chat/silentSentinels'
 
 export interface UseChatMarkdownExportOptions {
   messages: Readonly<Ref<ChatRenderedMessage[]>>
   currentTitle: Readonly<Ref<string>>
+  aiGeneratedLabel: Readonly<Ref<string>>
 }
 
 export interface BuildChatMarkdownOptions {
   messages: readonly ChatRenderedMessage[]
   title: string
   exportedAt: string
+  aiGeneratedLabel: string
 }
 
 function markdownFilename(title: string): string {
@@ -59,10 +62,16 @@ export function buildChatMarkdown(options: BuildChatMarkdownOptions): string {
     if (!['user', 'assistant', 'system', 'subagent', 'error'].includes(message.displayRole || message.role)) continue
     lines.push(`## ${message.roleLabel || message.displayRole || message.role}`)
     if (message.timeStr) lines.push(`_${message.timeStr}_`)
-    if (message.text) {
+    const presentationText = message.displayRole === 'assistant'
+      ? sanitizeAssistantPresentationText(message.text, {
+          inputMode: message.turnInputMode,
+          runKind: message.turnRunKind,
+        })
+      : message.text
+    if (presentationText) {
       const body = message.displayRole === 'subagent'
-        ? subagentCompletionMarkdown(message.text)
-        : markdownEscape(message.text)
+        ? subagentCompletionMarkdown(presentationText)
+        : markdownEscape(presentationText)
       if (body) lines.push('', body)
     }
     if (message.artifacts?.length) {
@@ -74,6 +83,7 @@ export function buildChatMarkdown(options: BuildChatMarkdownOptions): string {
     }
     lines.push('')
   }
+  lines.push('---', '', `> ${markdownEscape(options.aiGeneratedLabel)}`, '')
   return lines.join('\n')
 }
 
@@ -83,6 +93,7 @@ export function useChatMarkdownExport(options: UseChatMarkdownExportOptions) {
       title: options.currentTitle.value,
       exportedAt: new Date().toISOString(),
       messages: options.messages.value,
+      aiGeneratedLabel: options.aiGeneratedLabel.value,
     })
     downloadText(markdownFilename(options.currentTitle.value), 'text/markdown;charset=utf-8', markdown)
   }

@@ -17,6 +17,30 @@ log = structlog.get_logger(__name__)
 _retriever: HybridRetriever | None = None
 _retriever_lock = threading.Lock()
 _elig_ctx = EligibilityContext.auto()
+_elig_ctx_lock = threading.RLock()
+_elig_catalog_key: tuple[int, int] | None = None
+
+
+def invalidate_skill_eligibility_cache() -> None:
+    """Forget runtime bin/env probes after a dependency mutation succeeds."""
+    with _elig_ctx_lock:
+        _elig_ctx.has_bin_cache.clear()
+        _elig_ctx.env_cache.clear()
+
+
+def _sync_skill_eligibility_generation(catalog: Any) -> None:
+    """Re-probe environment requirements when a new catalog is published."""
+    generation = getattr(catalog, "generation", None)
+    if not isinstance(generation, int):
+        return
+    key = (id(catalog), generation)
+    global _elig_catalog_key
+    with _elig_ctx_lock:
+        if key == _elig_catalog_key:
+            return
+        _elig_ctx.has_bin_cache.clear()
+        _elig_ctx.env_cache.clear()
+        _elig_catalog_key = key
 
 
 def _get_retriever(skills_cfg: Any) -> HybridRetriever:
@@ -91,16 +115,19 @@ def _deterministic_gate(
     """Pure-Python gate: eligibility, requires_tools, fallback, visibility."""
     ctx_elig = elig_ctx or _elig_ctx
     gated: list[SkillSpec] = []
-    for s in skills:
-        if s.disable_model_invocation:
-            continue
-        if not check_eligibility(s, ctx_elig):
-            continue
-        if s.requires_tools and not all(t in available_tools for t in s.requires_tools):
-            continue
-        if s.fallback_for_toolsets and any(t in available_tools for t in s.fallback_for_toolsets):
-            continue
-        gated.append(s)
+    with _elig_ctx_lock:
+        for s in skills:
+            if s.disable_model_invocation:
+                continue
+            if not check_eligibility(s, ctx_elig):
+                continue
+            if s.requires_tools and not all(t in available_tools for t in s.requires_tools):
+                continue
+            if s.fallback_for_toolsets and any(
+                t in available_tools for t in s.fallback_for_toolsets
+            ):
+                continue
+            gated.append(s)
     return gated
 
 
@@ -115,10 +142,6 @@ async def filter_skills(ctx: TurnContext) -> TurnContext:
     ``meta_invoke(name=...)`` for it. The hinted skill is pinned below
     to defend against retrieval filters dropping it on noisy turns.
     """
-    skill_loader = ctx.metadata.get("skill_loader")
-    if skill_loader is None:
-        return ctx
-
     tools_cfg = getattr(ctx.config, "tools", None) if ctx.config else None
     if getattr(tools_cfg, "profile", None) == "memory_only":
         ctx.metadata["filtered_skill_ids"] = []
@@ -127,7 +150,15 @@ async def filter_skills(ctx: TurnContext) -> TurnContext:
         log.debug("skills_filter.skipped", reason="memory_only")
         return ctx
 
-    all_skills = skill_loader.load_all()
+    catalog = getattr(ctx, "skill_catalog", None)
+    if catalog is not None:
+        _sync_skill_eligibility_generation(catalog)
+        all_skills = list(getattr(catalog, "skills", ()))
+    else:
+        skill_loader = ctx.metadata.get("skill_loader")
+        if skill_loader is None:
+            return ctx
+        all_skills = skill_loader.load_all()
     if not all_skills:
         return ctx
 
@@ -189,7 +220,10 @@ async def filter_skills(ctx: TurnContext) -> TurnContext:
     filter_enabled = getattr(skills_cfg, "filter_enabled", False) if skills_cfg else False
     max_chars = getattr(skills_cfg, "max_skills_prompt_chars", 8000)
     injection_mode = getattr(skills_cfg, "injection_mode", "system")
-    semantic_message = getattr(ctx, "semantic_message", None)
+    routing_hint = getattr(ctx, "routing_hint", None)
+    semantic_message = routing_hint
+    if semantic_message is None:
+        semantic_message = getattr(ctx, "semantic_message", None)
     if semantic_message is None:
         semantic_message = getattr(ctx, "raw_message", None)
     if semantic_message is None:
@@ -291,9 +325,13 @@ async def filter_skills(ctx: TurnContext) -> TurnContext:
         mode=injection_mode,
         strategy=getattr(skills_cfg, "filter_strategy", "lexical") if filter_enabled else "off",
         query_preview=(
-            semantic_message[:60] + "..."
-            if isinstance(semantic_message, str) and len(semantic_message) > 60
-            else semantic_message
+            "[goal objective]"
+            if routing_hint is not None
+            else (
+                semantic_message[:60] + "..."
+                if isinstance(semantic_message, str) and len(semantic_message) > 60
+                else semantic_message
+            )
         ),
         pinned_skills=pinned_ids,
         filtered_skills=filtered_ids,

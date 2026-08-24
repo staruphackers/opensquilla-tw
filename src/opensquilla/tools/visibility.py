@@ -9,6 +9,7 @@ from enum import StrEnum
 import structlog
 
 from opensquilla.provider.types import ToolDefinition
+from opensquilla.tools.plan_access import plan_access_allows
 from opensquilla.tools.policy_runtime import (
     ToolSurfaceCapabilities,
     resolve_runtime_tool_surface,
@@ -56,17 +57,6 @@ _CHANNEL_DEFAULT_ALLOW: frozenset[str] = frozenset(
         "create_pdf_report",
         "create_pptx",
         "create_xlsx",
-        "feishu_doc_create",
-        "feishu_doc_list_blocks",
-        "feishu_doc_read_raw",
-        "feishu_drive_meta",
-        "feishu_drive_search",
-        "feishu_drive_upload_artifact",
-        "feishu_media_upload_artifact",
-        "feishu_scopes_status",
-        "feishu_wiki_get_node",
-        "feishu_wiki_list_nodes",
-        "feishu_wiki_list_spaces",
         "read_file",
         "session_status",
         "sessions_history",
@@ -92,6 +82,39 @@ _CHANNEL_HARD_DENY_NON_OWNER: frozenset[str] = frozenset(
         "write_file",
     }
 )
+
+GUEST_SAFE_BASE_TOOL_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        "read_file",
+        "read_source",
+        "read_spreadsheet",
+        "write_file",
+        "create_source",
+        "edit_file",
+        "edit_source",
+        "list_dir",
+        "glob_search",
+        "source_symbols",
+        "grep_search",
+        "apply_patch",
+        "http_request",
+        "web_fetch",
+        "web_search",
+        "web_discover",
+    }
+)
+
+
+def guest_safe_tool_allowlist() -> frozenset[str]:
+    """Return the trusted, default-deny model tool surface for Web guests."""
+
+    return GUEST_SAFE_BASE_TOOL_ALLOWLIST
+
+
+def guest_safe_tool_allowed(ctx: ToolContext | None, tool_name: str) -> bool:
+    if ctx is None or not ctx.guest_safe:
+        return True
+    return tool_name in guest_safe_tool_allowlist()
 
 
 def filter_by_profile(
@@ -252,6 +275,12 @@ def effective_tool_context(
 
 
 def is_tool_visible(rt: RegisteredTool, ctx: ToolContext | None = None) -> bool:
+    if not plan_access_allows(rt.spec, ctx):
+        log.debug("tool_filtered", tool=rt.spec.name, reason="plan_mode_denied")
+        return False
+    if not guest_safe_tool_allowed(ctx, rt.spec.name):
+        log.debug("tool_filtered", tool=rt.spec.name, reason="guest_safe_not_allowed")
+        return False
     explicitly_allowed = (
         ctx is not None and ctx.allowed_tools is not None and rt.spec.name in ctx.allowed_tools
     )
@@ -278,6 +307,9 @@ def is_tool_visible(rt: RegisteredTool, ctx: ToolContext | None = None) -> bool:
     ):
         return False
     if ctx is not None:
+        if ctx.exclusive_tools is not None and rt.spec.name not in ctx.exclusive_tools:
+            log.debug("tool_filtered", tool=rt.spec.name, reason="exclusive_ceiling")
+            return False
         if rt.spec.owner_only and not ctx.is_owner:
             log.debug("tool_filtered", tool=rt.spec.name, reason="owner_only")
             return False
@@ -288,6 +320,27 @@ def is_tool_visible(rt: RegisteredTool, ctx: ToolContext | None = None) -> bool:
             log.debug("tool_filtered", tool=rt.spec.name, reason="denied")
             return False
     return True
+
+
+def apply_exclusive_tool_ceiling(ctx: ToolContext) -> ToolContext:
+    """Apply the final, non-widenable tool ceiling after all policy layers.
+
+    Visibility and dispatch also consult ``exclusive_tools`` directly as
+    defense in depth. This final intersection keeps ``allowed_tools`` truthful
+    for downstream diagnostics and callers that inspect the resolved context.
+    """
+
+    if ctx.exclusive_tools is None:
+        return ctx
+    ceiling = set(ctx.exclusive_tools)
+    ctx.allowed_tools = (
+        ceiling
+        if ctx.allowed_tools is None
+        else set(ctx.allowed_tools) & ceiling
+    )
+    if ctx.surfaced_tools is not None:
+        ctx.surfaced_tools = set(ctx.surfaced_tools) & ceiling
+    return ctx
 
 
 def visible_registered_tools(

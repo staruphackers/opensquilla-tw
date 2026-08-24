@@ -14,13 +14,41 @@ import type {
  * by `appendFrame` as a monotonic append index (seq-less frames are ordered
  * by arrival), used only for ordering/dedup — never for gating.
  */
-export type Frame =
-  | { kind: 'text'; seq: number; text: string }
+type FrameBody =
+  | {
+      kind: 'text'
+      seq: number
+      text: string
+      presentation?: 'intermediate' | 'answer'
+    }
   | { kind: 'tool-start'; seq: number; toolId: string; name: string; input: string; at: number }
   | { kind: 'tool-delta'; seq: number; toolId: string; fragment: string }
   | { kind: 'tool-result'; seq: number; toolId: string; name: string; result: string; isError: boolean; input: string; at: number }
   | { kind: 'artifact'; seq: number; artifact: ArtifactPayload }
-  | { kind: 'thinking'; seq: number; text: string; at: number }
+  | {
+      kind: 'thinking-start'
+      seq: number
+      blockId: string
+      blockIndex: number
+      at: number
+      contentKind?: 'summary' | 'reasoning'
+    }
+  | {
+      kind: 'thinking'
+      seq: number
+      text: string
+      at: number
+      blockId?: string
+      blockIndex?: number
+    }
+  | {
+      kind: 'thinking-end'
+      seq: number
+      blockId: string
+      blockIndex: number
+      status: ReasoningBlockStatus
+      at: number
+    }
   | { kind: 'final-text'; seq: number; text: string }
   | {
       kind: 'interrupt'
@@ -50,7 +78,19 @@ export type Frame =
       action: string   // stable phase key (streamActivity.key)
       label: string    // human label (streamActivity.label)
       at: number       // phase startedAt
+      id?: string
+      category?: 'phase' | 'maintenance'
+      state?: 'running' | 'completed' | 'skipped' | 'stale' | 'cancelled' | 'failed'
+      source?: string
+      durability?: string
+      detail?: string
+      reason?: string
     }
+
+export type Frame = FrameBody & {
+  /** Authoritative Gateway stream position for cross-refresh chronology. */
+  activityOrder?: number
+}
 
 /** A frame as emitted by a mutator; `appendFrame` stamps the `seq` index. */
 export type FrameInput =
@@ -59,8 +99,24 @@ export type FrameInput =
   | Omit<Extract<Frame, { kind: 'tool-delta' }>, 'seq'>
   | Omit<Extract<Frame, { kind: 'tool-result' }>, 'seq'>
   | Omit<Extract<Frame, { kind: 'artifact' }>, 'seq'>
+  | Omit<Extract<Frame, { kind: 'thinking-start' }>, 'seq'>
   | Omit<Extract<Frame, { kind: 'thinking' }>, 'seq'>
+  | Omit<Extract<Frame, { kind: 'thinking-end' }>, 'seq'>
   | Omit<Extract<Frame, { kind: 'final-text' }>, 'seq'>
   | Omit<Extract<Frame, { kind: 'interrupt' }>, 'seq'>
   | Omit<Extract<Frame, { kind: 'interrupt-resolved' }>, 'seq'>
   | Omit<Extract<Frame, { kind: 'status' }>, 'seq'>
+
+export type ReasoningBlockStatus = 'streaming' | 'completed' | 'interrupted' | 'error'
+
+export interface ReasoningBlock {
+  id: string
+  index: number
+  text: string
+  status: ReasoningBlockStatus
+  startedAt: number
+  endedAt?: number
+  contentKind: 'summary' | 'reasoning'
+  /** First accepted event position for interleaving with phases and tools. */
+  activityOrder?: number
+}

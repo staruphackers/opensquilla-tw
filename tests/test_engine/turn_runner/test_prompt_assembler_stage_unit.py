@@ -28,6 +28,8 @@ from opensquilla.engine.turn_runner.prompt_assembler_stage import (
     SessionIdResolverPort,
 )
 from opensquilla.observability.prompt_report import PromptReport
+from opensquilla.session.goals import GoalTurnContext
+from opensquilla.tools.types import CallerKind, ToolContext
 
 # ---------------------------------------------------------------------------
 # Recording fakes (one per port)
@@ -52,6 +54,7 @@ class _RecordingPromptAssembler:
         prompt_metadata,
         bootstrap_context_mode,
         fresh_user_session=False,
+        workspace_dir=None,
     ):
         self.calls += 1
         self.last_kwargs = dict(
@@ -62,6 +65,7 @@ class _RecordingPromptAssembler:
             extra_context=extra_context,
             bootstrap_context_mode=bootstrap_context_mode,
             fresh_user_session=fresh_user_session,
+            workspace_dir=workspace_dir,
         )
         prompt_metadata.update(self.metadata_to_emit)
         return self.base_prompt
@@ -72,12 +76,20 @@ class _RecordingRouterContext:
     context: dict[str, Any] = field(default_factory=dict)
     calls: list[tuple[str, bool]] = field(default_factory=list)
     bound_user_message_ids: list[str | None] = field(default_factory=list)
+    transcript_snapshots: list[Any | None] = field(default_factory=list)
 
     async def fetch_router_context(
-        self, session_key, *, exclude_last_user, bound_user_message_id=None
+        self,
+        session_key,
+        *,
+        exclude_last_user,
+        bound_user_message_id=None,
+        include_capacity=False,
+        transcript_snapshot=None,
     ):
         self.calls.append((session_key, exclude_last_user))
         self.bound_user_message_ids.append(bound_user_message_id)
+        self.transcript_snapshots.append(transcript_snapshot)
         return dict(self.context)
 
 
@@ -222,6 +234,8 @@ def _make_input(
     bound_user_message_id=None,
     ingress_pipeline_steps=None,
     input_provenance=None,
+    skill_catalog=None,
+    transcript_snapshot=None,
 ):
     return PromptAssemblerStageInput(
         runtime_message=runtime_message,
@@ -244,6 +258,8 @@ def _make_input(
         bound_user_message_id=bound_user_message_id,
         ingress_pipeline_steps=ingress_pipeline_steps,
         input_provenance=input_provenance,
+        skill_catalog=skill_catalog,
+        transcript_snapshot=transcript_snapshot,
     )
 
 
@@ -299,6 +315,33 @@ async def test_case01_plain_user_turn() -> None:
 
 
 @pytest.mark.asyncio
+async def test_provider_name_uses_selector_registry_identity_not_adapter_family() -> None:
+    selector = _StubSelector("selector")
+    selector.active_provider_id = "dashscope"
+    adapter = _StubProvider(name="adapter", provider_name="openai")
+    executor = _RecordingPipelineExecutor(turn=_make_turn(), provider=adapter)
+
+    out = await _make_stage(executor=executor).run(
+        _make_input(cloned_selector=selector)
+    )
+
+    assert out.output.provider_name == "dashscope"
+
+
+@pytest.mark.asyncio
+async def test_provider_name_uses_direct_adapter_configured_identity() -> None:
+    adapter = _StubProvider(name="adapter", provider_name="anthropic")
+    adapter.provider_id = "minimax"
+    executor = _RecordingPipelineExecutor(turn=_make_turn(), provider=adapter)
+
+    out = await _make_stage(executor=executor).run(
+        _make_input(provider=adapter, cloned_selector=None)
+    )
+
+    assert out.output.provider_name == "minimax"
+
+
+@pytest.mark.asyncio
 async def test_prompt_assembler_forwards_fresh_user_session_flag():
     prompt_assembler = _RecordingPromptAssembler()
     stage = _make_stage(assembler=prompt_assembler)
@@ -306,6 +349,83 @@ async def test_prompt_assembler_forwards_fresh_user_session_flag():
     await stage.run(_make_input(fresh_user_session=True))
 
     assert prompt_assembler.last_kwargs["fresh_user_session"] is True
+
+
+@pytest.mark.asyncio
+async def test_prompt_assembler_uses_effective_tool_workspace() -> None:
+    prompt_assembler = _RecordingPromptAssembler()
+    stage = _make_stage(assembler=prompt_assembler)
+
+    await stage.run(
+        _make_input(
+            effective_tool_context=ToolContext(
+                workspace_dir="D:\\lrk\\opensquilla",
+            )
+        )
+    )
+
+    assert prompt_assembler.last_kwargs["workspace_dir"] == "D:\\lrk\\opensquilla"
+
+
+@pytest.mark.asyncio
+async def test_restricted_tool_boundary_suppresses_workspace_prompt_inputs() -> None:
+    prompt_assembler = _RecordingPromptAssembler(
+        metadata_to_emit={"injected_workspace_files_count": 0}
+    )
+    executor = _RecordingPipelineExecutor(
+        turn=_make_turn(
+            metadata={
+                "skill_count": 0,
+                "skills_rendered_count": 0,
+                "skills_prompt_chars": 0,
+            }
+        ),
+        provider=_StubProvider(),
+    )
+    builder = _RecordingPromptReportBuilder()
+    stage = _make_stage(
+        assembler=prompt_assembler,
+        executor=executor,
+        builder=builder,
+    )
+    skill_catalog = object()
+
+    await stage.run(
+        _make_input(
+            extra_prompt_context={"project": "/secret/workspace"},
+            bootstrap_context_mode="full",
+            effective_tool_context=ToolContext(
+                workspace_dir="/secret/workspace",
+                exclusive_tools={"artifact_reader"},
+            ),
+            skill_catalog=skill_catalog,
+        )
+    )
+
+    assert prompt_assembler.last_kwargs["workspace_dir"] is None
+    assert prompt_assembler.last_kwargs["extra_context"] is None
+    assert (
+        prompt_assembler.last_kwargs["bootstrap_context_mode"]
+        == "restricted_tool_boundary"
+    )
+    assert executor.requests[0].skill_catalog is None
+    assert builder.last_kwargs["metadata"]["injected_workspace_files_count"] == 0
+    assert builder.last_kwargs["metadata"]["skill_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_ordinary_turn_preserves_skill_catalog_projection() -> None:
+    executor = _RecordingPipelineExecutor(turn=_make_turn(), provider=_StubProvider())
+    skill_catalog = object()
+
+    await _make_stage(executor=executor).run(
+        _make_input(
+            effective_tool_context=ToolContext(workspace_dir="/project"),
+            skill_catalog=skill_catalog,
+        )
+    )
+
+    assert executor.requests[0].skill_catalog is skill_catalog
 
 
 async def test_prompt_assembler_forwards_bound_user_message_id_to_router_context():
@@ -319,6 +439,32 @@ async def test_prompt_assembler_forwards_bound_user_message_id_to_router_context
 
 
 @pytest.mark.asyncio
+async def test_prompt_assembler_forwards_turn_transcript_snapshot() -> None:
+    router_context = _RecordingRouterContext()
+    stage = _make_stage(router=router_context)
+    transcript_snapshot = SimpleNamespace()
+
+    await stage.run(_make_input(transcript_snapshot=transcript_snapshot))
+
+    assert router_context.transcript_snapshots == [transcript_snapshot]
+
+
+@pytest.mark.asyncio
+async def test_attachment_context_missing_capacity_proof_is_incomplete() -> None:
+    executor = _RecordingPipelineExecutor(turn=_make_turn(), provider=_StubProvider())
+    stage = _make_stage(
+        router=_RecordingRouterContext(context={}),
+        executor=executor,
+    )
+
+    await stage.run(
+        _make_input(attachments=[{"type": "text/plain", "data": "synthetic"}])
+    )
+
+    assert executor.requests[0].history_capacity_estimate_complete is False
+
+
+@pytest.mark.asyncio
 async def test_case02_with_tool_ctx_threads_into_pipeline() -> None:
     sentinel = object()
     executor = _RecordingPipelineExecutor(turn=_make_turn(), provider=_StubProvider())
@@ -329,6 +475,108 @@ async def test_case02_with_tool_ctx_threads_into_pipeline() -> None:
     )
     await stage.run(inp)
     assert executor.requests[0].tool_context is sentinel
+
+
+@pytest.mark.asyncio
+async def test_automatic_goal_objective_is_only_an_ephemeral_routing_hint() -> None:
+    objective = "Inspect the database migration and repair every failing contract."
+    goal_context = GoalTurnContext(
+        session_id="session-id",
+        epoch=3,
+        goal_id="goal-id",
+        objective_revision=2,
+        objective_snapshot=objective,
+        task_id="task-id",
+        continuation_seq=4,
+        automatic=True,
+    )
+    executor = _RecordingPipelineExecutor(turn=_make_turn(), provider=_StubProvider())
+    assembler = _RecordingPromptAssembler()
+    stage = _make_stage(executor=executor, assembler=assembler)
+
+    await stage.run(
+        _make_input(
+            runtime_message="Continue working on the active Goal.",
+            semantic_input="Continue working on the active Goal.",
+            effective_tool_context=ToolContext(
+                agent_id="worker",
+                goal_context=goal_context.as_task_detail(),
+            ),
+        )
+    )
+
+    request = executor.requests[0]
+    assert request.routing_hint == objective
+    assert request.semantic_message == "Continue working on the active Goal."
+    assert request.flags_text_override == "Continue working on the active Goal."
+    assert assembler.last_kwargs["semantic_message"] == "Continue working on the active Goal."
+    assert objective not in repr(request)
+
+
+@pytest.mark.parametrize(
+    "context_overrides",
+    [
+        {"collaboration_mode": "review"},
+        {"caller_kind": CallerKind.SUBAGENT, "subagent_depth": 1},
+        {"caller_kind": CallerKind.CRON},
+    ],
+)
+@pytest.mark.asyncio
+async def test_non_root_or_non_default_goal_context_cannot_change_routing_hint(
+    context_overrides: dict[str, object],
+) -> None:
+    goal_context = GoalTurnContext(
+        session_id="session-id",
+        epoch=3,
+        goal_id="goal-id",
+        objective_revision=2,
+        objective_snapshot="Do not use this leaked routing hint.",
+        task_id="task-id",
+        continuation_seq=4,
+        automatic=True,
+    )
+    executor = _RecordingPipelineExecutor(turn=_make_turn(), provider=_StubProvider())
+    tool_context_values: dict[str, object] = {
+        "goal_context": goal_context.as_task_detail(),
+        **context_overrides,
+    }
+
+    await _make_stage(executor=executor).run(
+        _make_input(
+            runtime_message="Continue the ordinary task.",
+            semantic_input="Continue the ordinary task.",
+            effective_tool_context=ToolContext(**tool_context_values),  # type: ignore[arg-type]
+        )
+    )
+
+    assert executor.requests[0].routing_hint is None
+
+
+@pytest.mark.asyncio
+async def test_explicit_goal_turn_does_not_override_user_routing_text() -> None:
+    goal_context = GoalTurnContext(
+        session_id="session-id",
+        epoch=0,
+        goal_id="goal-id",
+        objective_revision=1,
+        objective_snapshot="Frozen Goal objective",
+        task_id="task-id",
+        automatic=False,
+    )
+    executor = _RecordingPipelineExecutor(turn=_make_turn(), provider=_StubProvider())
+
+    await _make_stage(executor=executor).run(
+        _make_input(
+            semantic_input="Newest explicit user follow-up",
+            effective_tool_context=ToolContext(
+                goal_context=goal_context.as_task_detail(),
+            ),
+        )
+    )
+
+    request = executor.requests[0]
+    assert request.routing_hint is None
+    assert request.semantic_message == "Newest explicit user follow-up"
 
 
 @pytest.mark.asyncio
@@ -392,6 +640,32 @@ async def test_case04_squilla_router_fires_overrides_model() -> None:
     assert inner is provider_after_pipeline
     assert out.output.resolved_model == "claude-sonnet-4.5"
     assert out.output.squilla_router_tier == "premium"
+
+
+@pytest.mark.asyncio
+async def test_blocked_cross_provider_route_resolves_primary_selector_model() -> None:
+    selector = _StubSelector("primary", current_model="qwen3.7-plus")
+    executor = _RecordingPipelineExecutor(
+        turn=_make_turn(
+            metadata={
+                "routed_provider": "volcengine",
+                "routed_model": "doubao-seed-1-6-251015",
+                "routed_provider_blocked": "missing_credential",
+                "executed_provider": "dashscope",
+                "executed_model": "qwen3.7-plus",
+            },
+            model="doubao-seed-1-6-251015",
+        ),
+        provider=_StubProvider("dashscope-primary"),
+    )
+
+    out = await _make_stage(executor=executor).run(
+        _make_input(cloned_selector=selector)
+    )
+
+    assert out.output.turn.model == "doubao-seed-1-6-251015"
+    assert out.output.selector_model == "qwen3.7-plus"
+    assert out.output.resolved_model == "qwen3.7-plus"
 
 
 @pytest.mark.asyncio
@@ -588,6 +862,17 @@ async def test_no_cloned_selector_skips_selector_block() -> None:
     # Provider is the post-pipeline provider unchanged (no wrap)
     assert type(out.output.provider).__name__ == "_StubProvider"
     assert out.output.selector_model == ""
+
+
+@pytest.mark.asyncio
+async def test_skill_catalog_is_forwarded_to_pipeline_unchanged() -> None:
+    catalog = object()
+    executor = _RecordingPipelineExecutor(turn=_make_turn(), provider=_StubProvider("pp"))
+    stage = _make_stage(executor=executor)
+
+    await stage.run(_make_input(skill_catalog=catalog))
+
+    assert executor.requests[0].skill_catalog is catalog
 
 
 def test_run_pipeline_request_is_frozen() -> None:

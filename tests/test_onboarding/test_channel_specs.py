@@ -8,6 +8,7 @@ from opensquilla.gateway.config import (
     DingTalkChannelEntry,
     DiscordChannelEntry,
     FeishuChannelEntry,
+    GatewayConfig,
     MatrixChannelEntry,
     QQChannelEntry,
     SlackChannelEntry,
@@ -24,8 +25,14 @@ from opensquilla.onboarding.channel_specs import (
 # msteams is intentionally absent: the adapter is text-only and hidden
 # from runtime catalog surfaces until first-class support lands.
 ALL_TYPES = {
-    "slack", "feishu", "discord", "dingtalk", "wecom", "qq",
-    "matrix", "telegram",
+    "slack",
+    "feishu",
+    "discord",
+    "dingtalk",
+    "wecom",
+    "qq",
+    "matrix",
+    "telegram",
 }
 
 ENTRY_MODELS = {
@@ -52,7 +59,97 @@ def test_catalog_includes_all_channels():
 def test_each_channel_has_common_fields(type_name: str):
     spec = get_channel_setup_spec(type_name)
     names = {f.name for f in spec.fields}
-    assert {"name", "enabled", "agent_id"} <= names
+    assert {
+        "name",
+        "enabled",
+        "agent_id",
+        "group_session_scope",
+        "busy_input_mode",
+    } <= names
+
+
+@pytest.mark.parametrize("type_name", sorted(ALL_TYPES))
+def test_each_channel_exposes_safe_session_and_busy_policy(type_name: str):
+    fields = {field.name: field for field in get_channel_setup_spec(type_name).fields}
+
+    group_scope = fields["group_session_scope"]
+    assert group_scope.default == "per_sender"
+    assert group_scope.choices == ("per_sender", "shared_room")
+    assert group_scope.advanced is True
+    assert group_scope.help
+
+    busy_mode = fields["busy_input_mode"]
+    assert busy_mode.default == "followup"
+    assert busy_mode.choices == ("followup", "queue", "steer", "interrupt")
+    assert busy_mode.advanced is True
+    assert busy_mode.help
+
+    dm_access = fields["dm_access"]
+    assert dm_access.default == "pairing"
+    assert dm_access.choices == ("pairing", "open", "allowlist")
+    assert dm_access.advanced is True
+    assert fields["allowed_senders"].show_when == {"dm_access": "allowlist"}
+
+
+@pytest.mark.parametrize("type_name", sorted(ALL_TYPES))
+def test_safe_defaulted_identity_fields_fold_into_advanced(type_name: str):
+    """The first-time add form is credentials plus a name: the safe-defaulted
+    identity plumbing (agent routing, the enable switch) folds into the
+    Advanced disclosure on EVERY channel, while the identity key itself stays
+    front and required. Positive assertions so the posture cannot silently
+    drift back to an eight-row default view."""
+    fields = {field.name: field for field in get_channel_setup_spec(type_name).fields}
+
+    assert fields["agent_id"].advanced is True
+    assert fields["agent_id"].default == "main"
+    assert fields["enabled"].advanced is True
+    assert fields["enabled"].default is True
+
+    assert fields["name"].required is True
+    assert fields["name"].advanced is False
+
+
+# Per-channel default-view posture: safe-defaulted optional fields fold into
+# Advanced; the fields that stay front are the credentials plus the genuine
+# decisions (transports, region). Positive pins per channel so a spec edit
+# that re-expands the default view fails loudly.
+ADVANCED_FOLDED_FIELDS = {
+    "dingtalk": {"cool_app_code"},
+    "discord": {"application_id", "default_channel_id", "gateway_url", "intents"},
+    "feishu": {"default_chat_id", "connection_mode", "webhook_path"},
+    "matrix": {"device_id", "encryption"},
+    "slack": {"slack_channel_id", "reply_in_thread"},
+    "telegram": {
+        "default_chat_id",
+        "api_base",
+        "drop_pending_updates",
+        "poll_timeout_s",
+        "poll_limit",
+        "poll_idle_sleep_s",
+    },
+    "wecom": {"webhook_path"},
+}
+
+
+@pytest.mark.parametrize("type_name", sorted(ADVANCED_FOLDED_FIELDS))
+def test_safe_defaulted_channel_fields_fold_into_advanced(type_name: str):
+    fields = {field.name: field for field in get_channel_setup_spec(type_name).fields}
+    for name in ADVANCED_FOLDED_FIELDS[type_name]:
+        assert fields[name].advanced is True, f"{type_name}.{name} should fold into Advanced"
+        assert fields[name].required is False
+        assert fields[name].default is not None
+
+
+def test_required_fields_never_fold_into_advanced():
+    """A required field hidden in the Advanced fold blocks Save with no
+    visible blank to fill (the historical slack signing_secret bug: required
+    whenever connection_mode=webhook — the default — yet folded away)."""
+    for spec in list_channel_setup_specs():
+        for field in spec.fields:
+            if field.required:
+                assert field.advanced is False, (
+                    f"{spec.type}.{field.name} is required but folded into Advanced"
+                )
 
 
 @pytest.mark.parametrize("type_name", sorted(ALL_TYPES))
@@ -110,6 +207,32 @@ def test_dingtalk_stream_credentials_are_marked_correctly():
     assert fields["client_id"].secret is False
     assert fields["client_secret"].required is True
     assert fields["client_secret"].secret is True
+    assert fields["robot_code"].required is True
+    assert fields["robot_code"].secret is False
+    assert "not the application Client ID" in fields["robot_code"].description
+    assert fields["cool_app_code"].required is False
+    assert fields["cool_app_code"].default == ""
+    assert fields["cool_app_code"].advanced is True
+
+
+def test_dingtalk_legacy_stream_config_keeps_artifact_fields_optional():
+    config = GatewayConfig(
+        channels={
+            "channels": [
+                {
+                    "type": "dingtalk",
+                    "name": "legacy-dingtalk",
+                    "client_id": "legacy-client-id",
+                    "client_secret": "legacy-client-secret",
+                }
+            ]
+        }
+    )
+    entry = config.channels.channels[0]
+
+    assert isinstance(entry, DingTalkChannelEntry)
+    assert entry.robot_code == ""
+    assert entry.cool_app_code == ""
 
 
 def test_feishu_webhook_secrets_are_marked_secret():
@@ -125,6 +248,10 @@ def test_feishu_connection_mode_choices():
     assert field.field_type == "select"
     assert field.default == "websocket"
     assert field.choices == ("webhook", "websocket")
+
+
+def test_matrix_transport_matches_client_sync_runtime():
+    assert get_channel_setup_spec("matrix").transport == "http_sync"
 
 
 def test_slack_connection_mode_choices():
@@ -218,6 +345,14 @@ def test_channel_catalog_payload_exposes_ui_metadata():
     assert fields["app_secret"]["placeholder"]
     assert fields["webhook_path"]["showWhen"] == {"connection_mode": "webhook"}
     assert fields["encrypt_key"]["advanced"] is True
+    assert fields["group_session_scope"]["default"] == "per_sender"
+    assert fields["group_session_scope"]["help"]
+    assert fields["busy_input_mode"]["choices"] == [
+        "followup",
+        "queue",
+        "steer",
+        "interrupt",
+    ]
     assert feishu["blocking"] is False
     assert feishu["whatYouNeed"]
     slack = next(c for c in payload if c["type"] == "slack")
@@ -349,8 +484,7 @@ def test_advertised_minimal_setup_passes_model_validation(type_name: str):
         if not field.required or field.name == "name":
             continue
         if field.show_when and any(
-            str(defaults.get(key, "")) != expected
-            for key, expected in field.show_when.items()
+            str(defaults.get(key, "")) != expected for key, expected in field.show_when.items()
         ):
             continue
         if field.field_type == "select":
@@ -361,3 +495,13 @@ def test_advertised_minimal_setup_passes_model_validation(type_name: str):
     model = ENTRY_MODELS[type_name]
     validated = model(**entry)
     assert validated.name == "test-entry"
+
+
+def test_can_probe_reflects_adapter_probe_support():
+    catalog = {c["type"]: c for c in channel_catalog_payload()}
+    # Adapters without a non-mutating probe_connection are honestly flagged.
+    assert catalog["matrix"]["canProbe"] is False
+    assert catalog["qq"]["canProbe"] is False
+    # Adapters that implement probe_connection stay probeable.
+    assert catalog["slack"]["canProbe"] is True
+    assert catalog["telegram"]["canProbe"] is True

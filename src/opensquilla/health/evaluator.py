@@ -14,6 +14,14 @@ from opensquilla.router_runtime_diagnostics import (
     classify_router_runtime_error,
     router_runtime_hint,
 )
+from opensquilla.router_tiers import (
+    CUSTOM_B5_SELECTION_MODE,
+    ROUTER_DYNAMIC_SELECTION_MODE,
+    static_b5_profile,
+)
+from opensquilla.router_tiers import (
+    ROUTER_TIER_ENSEMBLE_SELECTION_MODES as _ENSEMBLE_SELECTION_MODES,
+)
 
 _LEGACY_PROVIDER_REPLACEMENTS = {
     "zai": "zhipu",
@@ -89,6 +97,26 @@ def _channel_last_error(row: dict[str, Any]) -> dict[str, Any] | None:
         return None
     last_error = diagnostics.get("last_error")
     return last_error if isinstance(last_error, dict) else None
+
+
+def _channel_outbox_unknown(row: dict[str, Any]) -> dict[str, Any] | None:
+    """The outbox 'unknown' bucket for a channel row, if it has entries."""
+    diagnostics = row.get("diagnostics")
+    if not isinstance(diagnostics, dict):
+        return None
+    delivery = diagnostics.get("delivery")
+    if not isinstance(delivery, dict):
+        return None
+    outbox = delivery.get("outbox")
+    if not isinstance(outbox, dict):
+        return None
+    unknown = outbox.get("unknown")
+    if not isinstance(unknown, dict):
+        return None
+    count = unknown.get("count")
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return None
+    return unknown
 
 
 def evaluate_provider(payload: dict[str, Any]) -> list[HealthFinding]:
@@ -330,16 +358,60 @@ def evaluate_provider(payload: dict[str, Any]) -> list[HealthFinding]:
                 )
             )
         else:
-            findings.append(
-                HealthFinding(
-                    id="provider.active.ready",
-                    severity="ok",
-                    surface="provider",
-                    title="Active provider ready",
-                    detail=f"{provider_id} is configured and buildable.",
-                    evidence={"providerId": provider_id, "model": active_row.get("model")},
+            probe = active_row.get("modelProbe")
+            attempted = isinstance(probe, dict) and bool(probe.get("attempted"))
+            probe_status = str(probe.get("status") or "") if isinstance(probe, dict) else ""
+            if attempted and probe_status in {"error", "degraded"}:
+                failure_kind = str(probe.get("failureKind") or "unknown")
+                blocking = failure_kind in {"auth_invalid", "insufficient_credits"}
+                findings.append(
+                    HealthFinding(
+                        id=f"provider.active.probe.{failure_kind}",
+                        severity="error" if blocking else "warn",
+                        readiness_impact="blocks_ready" if blocking else "degrades",
+                        surface="provider",
+                        title="Active provider probe failed",
+                        detail=str(
+                            probe.get("error")
+                            or "The provider model-list probe did not succeed."
+                        ),
+                        evidence={
+                            "providerId": provider_id,
+                            "failureKind": failure_kind,
+                            "probeStatus": probe_status,
+                        },
+                        fix_steps=[
+                            FixStep(
+                                label="Inspect provider probe",
+                                command=(
+                                    "opensquilla providers status "
+                                    f"{provider_id} --probe-models"
+                                ),
+                            ),
+                            FixStep(
+                                label="Reconfigure provider",
+                                command=(
+                                    "opensquilla providers configure "
+                                    f"{provider_id} --api-key {_API_KEY_PLACEHOLDER}"
+                                ),
+                            ),
+                        ],
+                    )
                 )
-            )
+            else:
+                findings.append(
+                    HealthFinding(
+                        id="provider.active.ready",
+                        severity="ok",
+                        surface="provider",
+                        title="Active provider ready",
+                        detail=f"{provider_id} is configured and buildable.",
+                        evidence={
+                            "providerId": provider_id,
+                            "model": active_row.get("model"),
+                        },
+                    )
+                )
     return findings
 
 
@@ -553,6 +625,8 @@ def evaluate_search(payload: dict[str, Any]) -> list[HealthFinding]:
     requires_api_key = bool(payload.get("requiresApiKey"))
     api_key_configured = bool(payload.get("apiKeyConfigured"))
     api_key_env = str(payload.get("apiKeyEnv") or "")
+    network_ready = payload.get("networkReady")
+    network_blocked_reason = str(payload.get("networkBlockedReason") or "")
     evidence = {
         "provider": provider,
         "activeProvider": payload.get("activeProvider"),
@@ -566,6 +640,10 @@ def evaluate_search(payload: dict[str, Any]) -> list[HealthFinding]:
         "useEnvProxy": payload.get("useEnvProxy"),
         "diagnostics": payload.get("diagnostics"),
     }
+    if "networkReady" in payload:
+        evidence["networkReady"] = network_ready
+    if "networkBlockedReason" in payload:
+        evidence["networkBlockedReason"] = network_blocked_reason or None
     configure_command = f"opensquilla configure search --search-provider {provider}"
     if requires_api_key:
         configure_command = f"{configure_command} --api-key {_API_KEY_PLACEHOLDER}"
@@ -701,6 +779,30 @@ def evaluate_search(payload: dict[str, Any]) -> list[HealthFinding]:
                     FixStep(label="Restart gateway", command="opensquilla gateway restart"),
                 ],
                 restart_required=True,
+            )
+        ]
+    if network_ready is False or network_blocked_reason:
+        reason = network_blocked_reason or (
+            "The current sandbox network posture blocks in-process search queries."
+        )
+        return [
+            HealthFinding(
+                id="search.provider.network_blocked",
+                severity="warn",
+                surface="search",
+                title="Search queries are blocked by the network posture",
+                detail=f"{provider} is configured and buildable, but {reason}",
+                evidence=evidence,
+                fix_steps=[
+                    FixStep(
+                        label="Inspect search status",
+                        command=f"opensquilla search status {provider} --json",
+                    ),
+                    FixStep(
+                        label="Inspect sandbox status",
+                        command="opensquilla sandbox status --json",
+                    ),
+                ],
             )
         ]
     return [
@@ -1322,6 +1424,7 @@ def evaluate_channels(payload: dict[str, Any]) -> list[HealthFinding]:
                     ),
                     evidence={
                         "name": name,
+                        "channelName": name,
                         "status": status,
                         "type": row.get("type"),
                         "errorClass": "auth_invalid",
@@ -1352,7 +1455,12 @@ def evaluate_channels(payload: dict[str, Any]) -> list[HealthFinding]:
                     surface="channels",
                     title=f"Channel {name} is disabled",
                     detail="The channel is configured but disabled on disk.",
-                    evidence={"name": name, "status": status, "type": row.get("type")},
+                    evidence={
+                        "name": name,
+                        "channelName": name,
+                        "status": status,
+                        "type": row.get("type"),
+                    },
                     fix_steps=[
                         FixStep(
                             label="Enable channel",
@@ -1372,7 +1480,12 @@ def evaluate_channels(payload: dict[str, Any]) -> list[HealthFinding]:
                     surface="channels",
                     title=f"Channel {name} is {status}",
                     detail="The configured channel is not able to receive or send messages.",
-                    evidence={"name": name, "status": status, "type": row.get("type")},
+                    evidence={
+                        "name": name,
+                        "channelName": name,
+                        "status": status,
+                        "type": row.get("type"),
+                    },
                     fix_steps=[
                         FixStep(
                             label="Restart channel",
@@ -1393,7 +1506,12 @@ def evaluate_channels(payload: dict[str, Any]) -> list[HealthFinding]:
                     surface="channels",
                     title=f"Channel {name} is stopped",
                     detail="The channel is configured and enabled but is not connected.",
-                    evidence={"name": name, "status": status, "type": row.get("type")},
+                    evidence={
+                        "name": name,
+                        "channelName": name,
+                        "status": status,
+                        "type": row.get("type"),
+                    },
                     fix_steps=[
                         FixStep(
                             label="Inspect channels",
@@ -1414,7 +1532,12 @@ def evaluate_channels(payload: dict[str, Any]) -> list[HealthFinding]:
                     surface="channels",
                     title=f"Channel {name} is restarting",
                     detail="The channel is recovering after dispatch errors.",
-                    evidence={"name": name, "status": status, "type": row.get("type")},
+                    evidence={
+                        "name": name,
+                        "channelName": name,
+                        "status": status,
+                        "type": row.get("type"),
+                    },
                     fix_steps=[
                         FixStep(
                             label="Inspect channels",
@@ -1434,7 +1557,12 @@ def evaluate_channels(payload: dict[str, Any]) -> list[HealthFinding]:
                         f"The channel reported status {status}, which is not recognized "
                         "as a ready state."
                     ),
-                    evidence={"name": name, "status": status, "type": row.get("type")},
+                    evidence={
+                        "name": name,
+                        "channelName": name,
+                        "status": status,
+                        "type": row.get("type"),
+                    },
                     fix_steps=[
                         FixStep(
                             label="Inspect channels",
@@ -1443,6 +1571,91 @@ def evaluate_channels(payload: dict[str, Any]) -> list[HealthFinding]:
                         FixStep(
                             label="Restart channel",
                             command=f"opensquilla channels restart {name_arg} --yes",
+                        ),
+                    ],
+                )
+            )
+        # Action items ride alongside the status finding: a connected channel
+        # can still be silently gating senders or losing replies, and "ready"
+        # must not paper over either.
+        pending_pairings = row.get("pendingPairings")
+        if (
+            isinstance(pending_pairings, int)
+            and not isinstance(pending_pairings, bool)
+            and pending_pairings > 0
+        ):
+            findings.append(
+                HealthFinding(
+                    id=f"channel.{name}.pending_pairings",
+                    severity="warn",
+                    # Awaiting a human decision, not a malfunction: surface it
+                    # without downgrading overall readiness.
+                    readiness_impact="optional",
+                    surface="channels",
+                    title=f"Channel {name} has pairing requests awaiting approval",
+                    detail=(
+                        f"{pending_pairings} sender(s) asked to pair and were told to "
+                        "wait for operator approval. Until someone approves or revokes "
+                        "the requests, their messages get no replies."
+                    ),
+                    evidence={
+                        "name": name,
+                        "channelName": name,
+                        "pendingPairings": pending_pairings,
+                    },
+                    fix_steps=[
+                        FixStep(
+                            label="Review pending pairings",
+                            command=f"opensquilla channels pairings list {name_arg}",
+                            detail=(
+                                "Approve or revoke each request from this list or "
+                                "the control console Channels page."
+                            ),
+                        ),
+                        FixStep(
+                            label="Inspect channels",
+                            command=f"opensquilla channels status {name_arg} --json",
+                        ),
+                    ],
+                )
+            )
+        outbox_unknown = _channel_outbox_unknown(row)
+        if outbox_unknown is not None:
+            unknown_count = int(outbox_unknown["count"])
+            findings.append(
+                HealthFinding(
+                    id=f"channel.{name}.sends_unknown_outcome",
+                    severity="warn",
+                    # Unknown-outcome rows are terminal until a human resolves
+                    # them; letting them degrade readiness would flag the
+                    # channel forever after a single lost send.
+                    readiness_impact="optional",
+                    surface="channels",
+                    title=f"Channel {name} has sends with unknown outcome",
+                    detail=(
+                        f"{unknown_count} outbound send(s) raised mid-delivery, so "
+                        "whether they reached the recipient is unknown. These rows "
+                        "are kept for a human decision; nothing retries them "
+                        "automatically."
+                    ),
+                    evidence={
+                        "name": name,
+                        "channelName": name,
+                        "unknownSends": unknown_count,
+                        "oldestAt": outbox_unknown.get("oldest_at"),
+                    },
+                    fix_steps=[
+                        FixStep(
+                            label="Inspect channels",
+                            command=f"opensquilla channels status {name_arg} --json",
+                        ),
+                        FixStep(
+                            label="Confirm delivery with the recipient",
+                            detail=(
+                                "Check the conversation on the provider side; the "
+                                "outbox diagnostics carry an error class per "
+                                "affected send."
+                            ),
                         ),
                     ],
                 )
@@ -1548,28 +1761,201 @@ def evaluate_sandbox(payload: dict[str, Any]) -> list[HealthFinding]:
     ]
 
 
-# selection_mode → (member-provider label, env-key fallback) for the static
-# B5 profiles. Payload-driven mirror of the gateway's static-B5 mode table.
-_STATIC_B5_MODE_DETAILS = {
-    "static_openrouter_b5": ("OpenRouter", "OPENROUTER_API_KEY"),
-    "static_tokenrhythm_b5": ("TokenRhythm", "TOKENRHYTHM_API_KEY"),
-}
-
-
 def evaluate_llm_ensemble(payload: dict[str, Any]) -> list[HealthFinding]:
+    tier_statuses = payload.get("tierEnsembleStatuses")
+    if isinstance(tier_statuses, dict) and tier_statuses:
+        # The aggregate row describes the global plan, while retained legacy
+        # tier plans can choose a different profile at runtime. Diagnose those
+        # rows independently so a healthy global lineup cannot hide the plan
+        # that a routed C3 turn will actually execute.
+        aggregate = dict(payload)
+        aggregate.pop("tierEnsembleStatuses", None)
+        findings: list[HealthFinding] = []
+        if bool(payload.get("globalEnabled")):
+            findings.extend(evaluate_llm_ensemble(aggregate))
+        for tier, raw_status in tier_statuses.items():
+            if not isinstance(raw_status, dict):
+                continue
+            tier_payload = dict(raw_status)
+            tier_payload.setdefault("activationSource", "router_tier")
+            tier_payload.setdefault("activationTiers", [str(tier)])
+            findings.extend(evaluate_llm_ensemble(tier_payload))
+        return findings
+
     enabled = bool(payload.get("enabled"))
     selection_mode = str(payload.get("selectionMode") or "")
-    if enabled and selection_mode == "custom_b5":
-        return _evaluate_custom_b5_ensemble(payload)
-    mode_details = _STATIC_B5_MODE_DETAILS.get(selection_mode)
-    if not enabled or mode_details is None:
-        return []
-    provider_label, env_key_fallback = mode_details
+    activation_source = str(payload.get("activationSource") or "global")
+    activation_tiers = [
+        str(tier).upper()
+        for tier in payload.get("activationTiers", [])
+        if str(tier).strip()
+    ]
+    tier_managed = activation_source == "router_tier"
+    tier_label = ", ".join(activation_tiers) or "the configured router tier"
+    policy_findings: list[HealthFinding] = []
+    if not enabled:
+        return policy_findings
+    # Every active plan has one physical safety net: the configured
+    # fixed/direct deployment. Diagnose that boundary before lineup-specific
+    # checks so a missing fixed model is never misreported as a member API-key
+    # problem (and never described as a safe fallback).
+    if payload.get("fixedFallbackReady") is False:
+        fixed_provider = str(payload.get("fixedFallbackProvider") or "")
+        fixed_model = str(payload.get("fixedFallbackModel") or "")
+        reason = str(
+            payload.get("fixedFallbackBlockedReason")
+            or payload.get("blockedReason")
+            or "missing_fixed_fallback"
+        )
+        return [
+            HealthFinding(
+                id="llm_ensemble.fixed_fallback.not_ready",
+                severity="error",
+                surface="llm_ensemble",
+                title="LLM ensemble fixed fallback is not ready",
+                detail=(
+                    f"Multi-model fusion for router tier {tier_label} requires a "
+                    "runnable fixed/direct provider and model for wrapper skips and "
+                    "all-failed fallback. Configure that deployment before sending "
+                    "requests; the runtime otherwise blocks the turn before fusion starts."
+                    if tier_managed
+                    else "Multi-model fusion requires a runnable fixed/direct provider "
+                    "and model for wrapper skips and all-failed fallback. Configure that "
+                    "deployment before sending requests; the runtime otherwise blocks "
+                    "the turn before fusion starts."
+                ),
+                evidence={
+                    "enabled": True,
+                    "globalEnabled": bool(payload.get("globalEnabled", enabled)),
+                    "selectionMode": selection_mode,
+                    "activationSource": activation_source,
+                    "activationTiers": activation_tiers,
+                    "fixedFallbackReady": False,
+                    "fixedFallbackProvider": fixed_provider,
+                    "fixedFallbackModel": fixed_model,
+                    "fixedFallbackBlockedReason": reason,
+                },
+                fix_steps=[
+                    FixStep(
+                        label="Configure the fixed model",
+                        detail=(
+                            "Open Settings → Model services and configure a provider, "
+                            "credential, and non-empty fixed/direct model."
+                        ),
+                    ),
+                    (
+                        FixStep(
+                            label="Review the router tier",
+                            detail=(
+                                "Open Settings → Model routing and switch the affected "
+                                "tier to a single model, or repair its shared fusion plan."
+                            ),
+                        )
+                        if tier_managed
+                        else FixStep(
+                            label="Disable the ensemble",
+                            command="opensquilla config set llm_ensemble.enabled false",
+                        )
+                    ),
+                ],
+                restart_required=False,
+            ),
+            *policy_findings,
+        ]
+    if selection_mode not in _ENSEMBLE_SELECTION_MODES:
+        return [
+            HealthFinding(
+                id="llm_ensemble.unknown_selection_mode",
+                severity="warn",
+                surface="llm_ensemble",
+                title="LLM ensemble selection mode is unsupported",
+                detail=(
+                    f"The configured selection mode {selection_mode or '<empty>'!r} "
+                    "is not supported, so ensemble execution is blocked and OpenSquilla "
+                    "uses the configured fixed/direct fallback model. Choose a supported "
+                    "mode or disable the ensemble."
+                ),
+                evidence={
+                    "enabled": True,
+                    "selectionMode": selection_mode,
+                    "blockedReason": payload.get("blockedReason")
+                    or "unknown_selection_mode",
+                },
+                fix_steps=[
+                    FixStep(
+                        label="Choose a supported selection mode",
+                        detail=(
+                            "Use custom_b5, router_dynamic, static_openrouter_b5, "
+                            "or static_tokenrhythm_b5."
+                        ),
+                    ),
+                    FixStep(
+                        label="Disable the ensemble",
+                        command="opensquilla config set llm_ensemble.enabled false",
+                    ),
+                ],
+            ),
+            *policy_findings,
+        ]
+    if enabled and selection_mode == CUSTOM_B5_SELECTION_MODE:
+        return [*_evaluate_custom_b5_ensemble(payload), *policy_findings]
+    if (
+        selection_mode == ROUTER_DYNAMIC_SELECTION_MODE
+        and str(payload.get("runtimeStatus") or "") == "blocked"
+    ):
+        reason = str(payload.get("blockedReason") or "dynamic_member_unavailable")
+        return [
+            HealthFinding(
+                id=f"llm_ensemble.{ROUTER_DYNAMIC_SELECTION_MODE}.not_ready",
+                severity="warn",
+                surface="llm_ensemble",
+                title="Dynamic LLM ensemble is not ready",
+                detail=(
+                    "At least one required Router member deployment is unavailable, so "
+                    "the dynamic wrapper is skipped and requests use the configured "
+                    "fixed/direct fallback. Repair the affected tier deployment or "
+                    "choose a fixed lineup."
+                ),
+                evidence={
+                    "enabled": True,
+                    "selectionMode": selection_mode,
+                    "runtimeStatus": "blocked",
+                    "blockedReason": reason,
+                    "blockedTierCandidates": payload.get("blockedTierCandidates") or [],
+                },
+                fix_steps=[
+                    FixStep(
+                        label="Repair Router member deployments",
+                        detail=(
+                            "Open Settings → Model routing and verify each tier's "
+                            "provider credential and endpoint."
+                        ),
+                    ),
+                    FixStep(
+                        label="Choose a fixed lineup",
+                        detail=(
+                            "Open Settings → Multi-model fusion and choose a static "
+                            "or custom lineup whose providers are configured."
+                        ),
+                    ),
+                ],
+                restart_required=False,
+            ),
+            *policy_findings,
+        ]
+    static_profile = static_b5_profile(selection_mode)
+    if static_profile is None:
+        return policy_findings
+    provider_label = static_profile.label
+    env_key_fallback = static_profile.api_key_env
     api_key_env = str(payload.get("apiKeyEnv") or env_key_fallback)
     credential_available = bool(payload.get("credentialAvailable"))
     evidence = {
         "enabled": enabled,
+        "globalEnabled": bool(payload.get("globalEnabled", enabled)),
         "selectionMode": selection_mode,
+        "activationSource": activation_source,
+        "activationTiers": activation_tiers,
         "activeProvider": payload.get("activeProvider"),
         "apiKeyEnv": api_key_env,
         "credentialAvailable": credential_available,
@@ -1583,24 +1969,49 @@ def evaluate_llm_ensemble(payload: dict[str, Any]) -> list[HealthFinding]:
                 title="LLM ensemble ready",
                 detail=(
                     f"The static {provider_label} B5 ensemble resolves a "
+                    f"{provider_label} credential and is active for router tier "
+                    f"{tier_label}."
+                    if tier_managed
+                    else f"The static {provider_label} B5 ensemble resolves a "
                     f"{provider_label} credential and is active for turns."
                 ),
                 evidence=evidence,
-            )
+            ),
+            *policy_findings,
         ]
+    if tier_managed:
+        detail = (
+            f"The static {provider_label} B5 ensemble configured for router tier "
+            f"{tier_label} cannot resolve a {provider_label} credential. Those "
+            "requests safely use the configured fixed/direct fallback model. Set "
+            f"{api_key_env}, or repair the shared multi-model plan."
+        )
+        disable_step = FixStep(
+            label="Review the router tier",
+            detail=(
+                "Open Settings → Model routing and switch the affected tier to "
+                "a single model, or configure the shared multi-model plan."
+            ),
+        )
+    else:
+        detail = (
+            f"LLM ensemble (static {provider_label} B5) is enabled but no "
+            f"{provider_label} credential resolves — the ensemble is inactive and "
+            "every turn uses the configured fixed/direct fallback model. Set "
+            f"{api_key_env}, switch llm_ensemble.selection_mode, or disable the "
+            "ensemble."
+        )
+        disable_step = FixStep(
+            label="Disable the ensemble",
+            command="opensquilla config set llm_ensemble.enabled false",
+        )
     return [
         HealthFinding(
             id=f"llm_ensemble.{selection_mode}.credentials.missing",
             severity="warn",
             surface="llm_ensemble",
             title="LLM ensemble is enabled but cannot run",
-            detail=(
-                f"LLM ensemble (static {provider_label} B5) is enabled but no "
-                f"{provider_label} credential resolves — the ensemble is inactive and "
-                f"every turn falls back to the single configured provider. Set "
-                f"{api_key_env}, switch llm_ensemble.selection_mode, or disable the "
-                "ensemble."
-            ),
+            detail=detail,
             evidence=evidence,
             fix_steps=[
                 FixStep(
@@ -1610,14 +2021,12 @@ def evaluate_llm_ensemble(payload: dict[str, Any]) -> list[HealthFinding]:
                         "the gateway."
                     ),
                 ),
-                FixStep(
-                    label="Disable the ensemble",
-                    command="opensquilla config set llm_ensemble.enabled false",
-                ),
+                disable_step,
                 FixStep(label="Restart gateway", command="opensquilla gateway restart"),
             ],
             restart_required=True,
-        )
+        ),
+        *policy_findings,
     ]
 
 
@@ -1633,7 +2042,7 @@ def _evaluate_custom_b5_ensemble(payload: dict[str, Any]) -> list[HealthFinding]
     reason = str(payload.get("lineupBlockedReason") or "")
     evidence = {
         "enabled": True,
-        "selectionMode": "custom_b5",
+        "selectionMode": CUSTOM_B5_SELECTION_MODE,
         "activeProvider": payload.get("activeProvider"),
         "lineupReady": ready,
         "lineupBlockedReason": reason,
@@ -1641,7 +2050,7 @@ def _evaluate_custom_b5_ensemble(payload: dict[str, Any]) -> list[HealthFinding]
     if ready:
         return [
             HealthFinding(
-                id="llm_ensemble.custom_b5.ready",
+                id=f"llm_ensemble.{CUSTOM_B5_SELECTION_MODE}.ready",
                 severity="ok",
                 surface="llm_ensemble",
                 title="LLM ensemble ready",
@@ -1657,24 +2066,24 @@ def _evaluate_custom_b5_ensemble(payload: dict[str, Any]) -> list[HealthFinding]
         detail = (
             "LLM ensemble (custom lineup) is enabled but the "
             f"{provider_id} member resolves no API key — the ensemble is "
-            "inactive and every turn falls back to the single configured "
-            "provider. Set the provider key, remove the member, or disable "
-            "the ensemble."
+            "inactive and every turn uses the configured fixed/direct fallback "
+            "model. Set the provider key, remove the member, or disable the ensemble."
         )
     elif reason == "no_proposers":
         detail = (
             "LLM ensemble (custom lineup) is enabled but has no enabled "
-            "proposer candidates — add candidates or disable the ensemble."
+            "proposer candidates, so requests use the configured fixed/direct "
+            "fallback model. Add candidates or disable the ensemble."
         )
     else:
         detail = (
             "LLM ensemble (custom lineup) is enabled but cannot run "
-            f"({reason or 'unknown reason'}) — every turn falls back to the "
-            "single configured provider."
+            f"({reason or 'unknown reason'}) — every turn uses the configured "
+            "fixed/direct fallback model."
         )
     return [
         HealthFinding(
-            id="llm_ensemble.custom_b5.not_ready",
+            id=f"llm_ensemble.{CUSTOM_B5_SELECTION_MODE}.not_ready",
             severity="warn",
             surface="llm_ensemble",
             title="LLM ensemble is enabled but cannot run",
@@ -1768,58 +2177,5 @@ def evaluate_squilla_router_runtime(payload: dict[str, Any]) -> list[HealthFindi
             evidence=evidence,
             fix_steps=fix_steps,
             restart_required=True,
-        )
-    ]
-
-
-def evaluate_legacy_home(payload: dict[str, Any]) -> list[HealthFinding]:
-    """Advisory finding when importable legacy OpenSquilla data is detected.
-
-    Detection is a read-only path scan and safe under a running gateway; the
-    import itself needs a quiesced gateway, so the fix steps hand the operator
-    the exact CLI invocations instead of offering any in-gateway action. No
-    candidate detected → no findings, matching how the other advisory
-    surfaces (``evaluate_llm_ensemble``, ``evaluate_squilla_router_runtime``)
-    express absence: they stay silent when there is nothing to report.
-    """
-    if not bool(payload.get("detected")):
-        return []
-    path = str(payload.get("path") or "")
-    if not path:
-        return []
-    kind = str(payload.get("kind") or "cli-home")
-    target_fresh = bool(payload.get("targetFresh"))
-    # The collector supplies the ready-quoted command so this package never
-    # imports the migration machinery (health stays cycle-free in the package
-    # import graph); the inline form is a display-only fallback.
-    preview_command = str(
-        payload.get("command") or f"opensquilla migrate opensquilla --kind {kind} --source {path}"
-    )
-    if target_fresh:
-        detail = (
-            f"A legacy OpenSquilla home ({kind}) was found at {path}, and this "
-            "install holds no session data yet. Stop the gateway and run the "
-            "migrate command to import it; the preview is a dry run that "
-            "changes nothing."
-        )
-    else:
-        detail = (
-            f"A legacy OpenSquilla home ({kind}) was found at {path}. Stop the "
-            "gateway and run the migrate command to import it; the preview is "
-            "a dry run that changes nothing."
-        )
-    return [
-        HealthFinding(
-            id="migration.legacy_home_detected",
-            severity="warn",
-            surface="migration",
-            title=f"Legacy OpenSquilla data found at {path}",
-            detail=detail,
-            evidence={"path": path, "kind": kind, "target_fresh": target_fresh},
-            fix_steps=[
-                FixStep(label="Preview the import", command=preview_command),
-                FixStep(label="Apply the import", command=f"{preview_command} --apply"),
-            ],
-            restart_required=False,
         )
     ]

@@ -1,11 +1,18 @@
 import { test, expect } from '@playwright/test'
 
 const CONTROL_URL = '/control/'
-// Backend-config sections carry a readiness/status dot; Connection is the first
-// entry (live socket state). Appearance, Keyboard, and Advanced are client-only.
-// (Runtime exists too, but it is desktop-only so the web rail hides it.)
-const SECTIONS = ['Connection', 'Model Service', 'Model Routing', 'Capabilities', 'Channels', 'Behavior', 'Privacy']
-const CLIENT_SECTIONS = ['Appearance', 'Keyboard', 'Advanced']
+// Pages participating in the shared setup catalog expose live/save status in
+// their accessible tab names. The remaining destinations do not.
+const SECTIONS = [
+  'Gateway',
+  'Model Service',
+  'Model Routing',
+  'Capabilities',
+  'General',
+  'Security & Privacy',
+  'Advanced',
+]
+const STATUSLESS_SECTIONS = ['Interface', 'Shortcuts', 'Memory & Export']
 
 const settingsRow = (page: import('@playwright/test').Page) =>
   page.locator('.sidebar-foot button')
@@ -14,7 +21,7 @@ const dialog = (page: import('@playwright/test').Page) =>
   page.getByRole('dialog', { name: 'Settings' })
 
 const railTab = (page: import('@playwright/test').Page, name: string) =>
-  dialog(page).getByRole('tab', { name: new RegExp(`^${name}:`) })
+  dialog(page).getByRole('tab', { name: new RegExp(`^${name}(?::|$)`) })
 
 async function openFromSidebar(page: import('@playwright/test').Page) {
   await page.goto(CONTROL_URL)
@@ -24,20 +31,24 @@ async function openFromSidebar(page: import('@playwright/test').Page) {
 }
 
 test.describe('Settings modal', () => {
+  test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => localStorage.setItem('opensquilla-locale', 'en'))
+  })
+
   test('opens from the sidebar with the curated section rail and readiness banner', async ({ page }) => {
     await openFromSidebar(page)
 
     // Dialog a11y: focus moves into the modal on open, before any interaction.
     await expect(page.getByRole('button', { name: 'Close' })).toBeFocused()
 
-    // Rail has the backend-config sections (each with a readiness/status dot)
-    // plus the client-only sections.
+    // Rail has setup-catalog sections with readiness/save status, plus
+    // destinations that intentionally expose no shared catalog status.
     const tabs = dialog(page).getByRole('tab')
-    await expect(tabs).toHaveCount(SECTIONS.length + CLIENT_SECTIONS.length)
+    await expect(tabs).toHaveCount(SECTIONS.length + STATUSLESS_SECTIONS.length)
     for (const name of SECTIONS) {
       await expect(railTab(page, name)).toBeVisible()
     }
-    for (const name of CLIENT_SECTIONS) {
+    for (const name of STATUSLESS_SECTIONS) {
       await expect(dialog(page).getByRole('tab', { name, exact: true })).toBeVisible()
     }
 
@@ -89,13 +100,34 @@ test.describe('Settings modal', () => {
     await railTab(page, 'Model Routing').click()
     await expect(railTab(page, 'Model Routing')).toHaveAttribute('aria-selected', 'true')
     await expect(page).toHaveURL(/\/settings\/modelStrategy$/)
-    await expect(dialog(page).getByRole('heading', { name: 'Model routing', exact: true })).toBeVisible()
+    await expect(dialog(page).getByRole('radiogroup', { name: 'Model routing', exact: true })).toBeVisible()
 
     // Section navigation uses replace, so a single Back exits Settings rather
     // than walking section history.
     await page.goBack()
     await expect(dialog(page)).toBeHidden()
     await expect(page).not.toHaveURL(/\/settings/)
+  })
+
+  test('opens Memory & Export directly and canonicalizes the old profile-import route', async ({ page }) => {
+    await openFromSidebar(page)
+
+    const memoryTab = railTab(page, 'Memory & Export')
+    await memoryTab.click()
+
+    await expect(memoryTab).toHaveAttribute('aria-selected', 'true')
+    await expect(page).toHaveURL(/\/settings\/memory$/)
+    await expect(
+      dialog(page).getByRole('heading', { name: 'Import memory from another AI' }),
+    ).toBeVisible()
+    await expect(dialog(page).locator('[data-testid="settings-memory-panel"]')).toBeVisible()
+    await expect(memoryTab).toHaveAttribute('aria-selected', 'true')
+    await expect(dialog(page).locator('.settings-dirtybar')).toBeHidden()
+
+    await page.goto(CONTROL_URL + 'settings/profileImport')
+    await expect(page).toHaveURL(/\/settings\/memory$/)
+    await expect(dialog(page).locator('[data-testid="settings-memory-panel"]')).toBeVisible()
+    await expect(railTab(page, 'Memory & Export')).toHaveAttribute('aria-selected', 'true')
   })
 
   test('keeps the SettingsDialog mounted when routing from default settings to a section', async ({ page }) => {
@@ -266,12 +298,13 @@ test.describe('Settings modal', () => {
     await expect(page.getByLabel('Message to send')).toBeVisible()
   })
 
-  test('cold deep link to /settings/connection closes home and moves focus to the sidebar', async ({ page }) => {
+  test('legacy /settings/connection deep link opens Gateway and preserves its subsection', async ({ page }) => {
     // Land directly on a section with no in-app invoker.
     await page.goto(CONTROL_URL + 'settings/connection')
     await page.waitForSelector('.conn-pill', { timeout: 10000 })
     await expect(dialog(page)).toBeVisible()
-    await expect(railTab(page, 'Connection')).toHaveAttribute('aria-selected', 'true')
+    await expect(railTab(page, 'Gateway')).toHaveAttribute('aria-selected', 'true')
+    await expect(page).toHaveURL(/\/settings\/gateway#connection$/)
     // Connection renders even before/without a loaded config gate.
     await expect(dialog(page).getByRole('heading', { name: 'Connection' })).toBeVisible()
 
@@ -326,11 +359,11 @@ test.describe('Settings modal', () => {
     await expect(dirtybar).toBeVisible()
     await expect(dirtybar).toContainText('Unsaved changes in Capabilities')
 
-    // Closing with unsaved edits raises the themed confirm; declining keeps the modal.
+    // Closing with unsaved edits offers save or discard; Escape keeps the modal open.
     await page.keyboard.press('Escape')
-    const confirm = page.getByRole('dialog', { name: 'Discard unsaved changes?' })
+    const confirm = page.getByRole('dialog', { name: 'Unsaved changes' })
     await expect(confirm).toBeVisible()
-    await confirm.getByRole('button', { name: 'Cancel' }).click()
+    await page.keyboard.press('Escape')
     await expect(confirm).toBeHidden()
     await expect(dialog(page)).toBeVisible()
 
@@ -355,9 +388,9 @@ test.describe('Settings modal', () => {
     // router-level guard must raise the same confirm. Declining cancels the
     // navigation and restores the /settings URL.
     await page.goBack()
-    const confirm = page.getByRole('dialog', { name: 'Discard unsaved changes?' })
+    const confirm = page.getByRole('dialog', { name: 'Unsaved changes' })
     await expect(confirm).toBeVisible()
-    await confirm.getByRole('button', { name: 'Cancel' }).click()
+    await page.keyboard.press('Escape')
     await expect(confirm).toBeHidden()
     await expect(dialog(page)).toBeVisible()
     await expect(page).toHaveURL(/\/settings\/capabilities$/)
@@ -366,7 +399,7 @@ test.describe('Settings modal', () => {
     // Accepting the discard lets the same Back proceed and close the overlay.
     await page.goBack()
     await expect(confirm).toBeVisible()
-    await confirm.getByRole('button', { name: 'Discard' }).click()
+    await confirm.getByRole('button', { name: 'Discard changes' }).click()
     await expect(dialog(page)).toBeHidden()
     await expect(page).not.toHaveURL(/\/settings/)
     await expect(settingsRow(page)).toBeFocused()
@@ -385,39 +418,40 @@ test.describe('Settings modal', () => {
     expect(behaviors).toEqual(['none', 'none'])
   })
 
-  test('live save round-trip persists a harmless Capabilities toggle', async ({ page }) => {
+  test('live save round-trip persists the Advanced conversation-capture toggle', async ({ page }) => {
     test.setTimeout(90000)
     await openFromSidebar(page)
 
     // memory.auto_capture_enabled is hot-applied via the config.patch path.
-    const capture = () => dialog(page).locator('input[name="setup_memory_auto_capture"]')
-    const saveMemory = () => dialog(page).getByRole('button', { name: 'Save memory embedding' })
+    const capture = () => dialog(page).locator('input[name="memory_auto_capture"]')
+    const dirtybar = () => dialog(page).locator('.settings-dirtybar')
 
-    await railTab(page, 'Capabilities').click()
+    await railTab(page, 'Advanced').click()
     await expect(capture()).toBeVisible()
     const initial = await capture().isChecked()
 
     await capture().setChecked(!initial)
-    await saveMemory().click()
-    await expect(page.locator('.toast', { hasText: /Memory/ }).first()).toBeVisible()
-    await expect(dialog(page).locator('.settings-dirtybar')).toBeHidden({ timeout: 10000 })
+    await expect(dirtybar()).toContainText('Unsaved changes in Advanced')
+    await dirtybar().getByRole('button', { name: 'Save', exact: true }).click()
+    await expect(page.locator('.toast', { hasText: 'Conversation capture saved.' }).first()).toBeVisible()
+    await expect(dirtybar()).toBeHidden({ timeout: 10000 })
 
     // Reload: the persisted value must survive a fresh modal.
     await page.reload()
     await page.waitForSelector('.conn-pill', { timeout: 10000 })
     await expect(dialog(page)).toBeVisible()
-    await railTab(page, 'Capabilities').click()
+    await railTab(page, 'Advanced').click()
     await expect(capture()).toBeVisible()
     expect(await capture().isChecked()).toBe(!initial)
 
     // Restore the original value.
     await capture().setChecked(initial)
-    await saveMemory().click()
-    await expect(dialog(page).locator('.settings-dirtybar')).toBeHidden({ timeout: 10000 })
+    await dirtybar().getByRole('button', { name: 'Save', exact: true }).click()
+    await expect(dirtybar()).toBeHidden({ timeout: 10000 })
     await page.reload()
     await page.waitForSelector('.conn-pill', { timeout: 10000 })
     await expect(dialog(page)).toBeVisible()
-    await railTab(page, 'Capabilities').click()
+    await railTab(page, 'Advanced').click()
     await expect(capture()).toBeVisible()
     expect(await capture().isChecked()).toBe(initial)
   })
@@ -443,9 +477,9 @@ test.describe('Settings modal', () => {
 
   test('boolean settings render as the canonical control-switch and keep checkbox semantics', async ({ page }) => {
     await openFromSidebar(page)
-    await railTab(page, 'Capabilities').click()
+    await railTab(page, 'Advanced').click()
 
-    const capture = dialog(page).locator('input[name="setup_memory_auto_capture"]')
+    const capture = dialog(page).locator('input[name="memory_auto_capture"]')
     await expect(capture).toBeVisible()
 
     // It carries the shared switch primitive, not a raw browser checkbox, and
@@ -508,17 +542,46 @@ test.describe('Settings modal', () => {
     await expect.poll(() => page.evaluate(() => document.documentElement.getAttribute('data-theme'))).toBe('light')
     expect(await page.evaluate(() => localStorage.getItem('opensquilla-theme'))).toBe('light')
 
-    // The router visual-effects toggle is NOT duplicated here — it stays in the
-    // chat composer where its live state belongs.
-    await expect(dialog(page).locator('input[name="appearance_visual_effects"]')).toHaveCount(0)
+    // Visual effects are a low-frequency browser preference and live here
+    // instead of adding another popover to the chat composer.
+    const visualEffects = dialog(page).getByRole('switch', { name: 'Visual effects' })
+    await expect(visualEffects).toBeVisible()
+    await visualEffects.click()
+    await expect(visualEffects).not.toBeChecked()
+    expect(await page.evaluate(() => (
+      JSON.parse(localStorage.getItem('opensquilla.routerFx') || '{}').enabled
+    ))).toBe(false)
 
     // Client-only: theme changes never raise the settings dirty bar.
     await expect(dialog(page).locator('.settings-dirtybar')).toBeHidden()
   })
 
-  test('Advanced section surfaces homeless flags, applies instantly without a dirty bar', async ({ page }) => {
+  test('Appearance persists the tool-detail default without a save step', async ({ page }) => {
     await openFromSidebar(page)
-    const advTab = dialog(page).getByRole('tab', { name: 'Advanced' })
+    await dialog(page).getByRole('tab', { name: 'Appearance' }).click()
+
+    const auto = dialog(page).getByRole('radio', { name: 'Auto', exact: true })
+    const compact = dialog(page).getByRole('radio', { name: 'Compact', exact: true })
+    await expect(auto).toBeChecked()
+
+    await compact.click()
+    await expect(compact).toBeChecked()
+    await expect(dialog(page).locator('.settings-dirtybar')).toBeHidden()
+    expect(await page.evaluate(() => (
+      localStorage.getItem('opensquilla.appearance.toolDetails.v1')
+    ))).toBe('compact')
+
+    await page.reload()
+    await page.waitForSelector('.conn-pill', { timeout: 10000 })
+    await expect(dialog(page)).toBeVisible()
+    await expect(dialog(page).getByRole('radio', { name: 'Compact', exact: true })).toBeChecked()
+
+    await dialog(page).getByRole('radio', { name: 'Auto', exact: true }).click()
+  })
+
+  test('Advanced client experiments still apply instantly without a dirty bar', async ({ page }) => {
+    await openFromSidebar(page)
+    const advTab = railTab(page, 'Advanced')
     await expect(advTab).toBeVisible()
     await advTab.click()
     await expect(advTab).toHaveAttribute('aria-selected', 'true')
@@ -539,7 +602,16 @@ test.describe('Settings modal', () => {
     await max.blur()
     expect(await page.evaluate(() => localStorage.getItem('opensquilla.chat.answerReveal'))).toBe('1000,3000')
 
-    // Client-only: none of this raises the settings dirty bar.
+    // These client-only experiment edits do not raise the settings dirty bar;
+    // the Gateway-backed conversation-capture row above still does.
     await expect(dialog(page).locator('.settings-dirtybar')).toBeHidden()
+
+    // Long-lived Agent management is available only from this advanced escape
+    // hatch; routing through Vue preserves the /control base path.
+    await dialog(page).getByRole('button', { name: 'Open: Agent configuration (advanced)' }).click()
+    await expect(page).toHaveURL(/\/agents$/)
+    await expect(dialog(page)).toHaveCount(0)
+    await expect(page.locator('.agents-view, .agents-page, .ag-stage').first()).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Agents', level: 1 })).toBeFocused()
   })
 })

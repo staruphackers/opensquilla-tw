@@ -67,6 +67,27 @@ def test_cold_instance_synthesizes_unknown_model() -> None:
     assert entry.quality_prior is None
 
 
+def test_artifact_tool_capability_requires_an_explicit_catalog_fact() -> None:
+    catalog = ModelCatalog()
+    assert not catalog.tool_capability_is_verified(
+        "unknown-writer-model",
+        provider_name="custom",
+    )
+
+    catalog.set_user_overrides(
+        {
+            "custom/unknown-writer-model": {
+                "supports_tools": True,
+            }
+        }
+    )
+
+    assert catalog.tool_capability_is_verified(
+        "unknown-writer-model",
+        provider_name="custom",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Per-field authority merging
 # ---------------------------------------------------------------------------
@@ -269,6 +290,7 @@ def test_packaged_corrections_file_parses_with_expected_tables() -> None:
         "qianfan",
         "tencent_tokenhub",
         "tencent_token_plan",
+        "qwen_token_plan",
         "tokenrhythm",
         "kimi_coding_openai",
         "kimi_coding_anthropic",

@@ -1,4 +1,4 @@
-import type { SessionEventPayload } from '@/types/rpc'
+import type { SessionEventPayload, StreamEventEnvelope } from '@/types/rpc'
 
 export interface StreamSeqDecision {
   accepted: boolean
@@ -9,17 +9,22 @@ export type NormalizeRunStatus = (status: string) => string
 
 export const PENDING_STREAM_TASK_ID = '__opensquilla_pending_stream_task__'
 export const STOPPED_STREAM_TASK_ID = '__opensquilla_stopped_stream_task__'
+// Tombstone left after a terminal event closes the live turn. Unlike an empty
+// task id (which deliberately keeps legacy/untagged events lenient), this makes
+// late task-tagged heartbeats/state changes fail the identity guard instead of
+// reopening an empty work card after the answer has already completed.
+export const FINISHED_STREAM_TASK_ID = '__opensquilla_finished_stream_task__'
 
-export function payloadSessionKey(payload: SessionEventPayload | null | undefined): string {
+export function payloadSessionKey(payload: StreamEventEnvelope | null | undefined): string {
   return payload?.key || payload?.session_key || payload?.sessionKey || ''
 }
 
-export function isCurrentSessionPayload(payload: SessionEventPayload | null | undefined, sessionKey: string): boolean {
+export function isCurrentSessionPayload(payload: StreamEventEnvelope | null | undefined, sessionKey: string): boolean {
   const key = payloadSessionKey(payload)
   return !key || !sessionKey || key === sessionKey
 }
 
-export function payloadTaskId(payload: SessionEventPayload | null | undefined): string {
+export function payloadTaskId(payload: StreamEventEnvelope | null | undefined): string {
   const record = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>
   const direct = record.task_id ?? record.taskId
   if (typeof direct === 'string') return direct
@@ -39,7 +44,7 @@ export function payloadTaskId(payload: SessionEventPayload | null | undefined): 
 // with no task_id (non-TaskRuntime events: approvals, task groups, router…)
 // always passes, so only positively-mismatched TaskRuntime events are dropped.
 export function isCurrentTaskPayload(
-  payload: SessionEventPayload | null | undefined,
+  payload: StreamEventEnvelope | null | undefined,
   activeTaskId: string,
 ): boolean {
   if (!activeTaskId) return true
@@ -48,14 +53,14 @@ export function isCurrentTaskPayload(
   return taskId === activeTaskId
 }
 
-export function isStaleEpoch(payload: SessionEventPayload | null | undefined, currentEpoch: number): boolean {
+export function isStaleEpoch(payload: StreamEventEnvelope | null | undefined, currentEpoch: number): boolean {
   const ep = payload?.epoch
   if (typeof ep !== 'number' || !Number.isFinite(ep)) return false
   return ep < currentEpoch
 }
 
 export function acceptStreamSeq(
-  payload: SessionEventPayload | null | undefined,
+  payload: StreamEventEnvelope | null | undefined,
   sessionKey: string,
   lastStreamSeq: number,
 ): StreamSeqDecision {
@@ -103,14 +108,31 @@ export function taskTerminalStatus(event: string): string {
 }
 
 export function taskTerminalAsSessionEvent(event: string, payload: SessionEventPayload | null | undefined) {
+  // session.event.done is the rich terminal receipt (final text + usage), but
+  // TaskRuntime also emits task.succeeded after its handler returns. Treat that
+  // lifecycle event as a terminal fallback so a missing done frame cannot leave
+  // the client spinning forever on an otherwise completed turn.
+  if (event === 'task.succeeded') {
+    return { event: 'session.event.done', payload: { ...(payload || {}), reason: 'completed' } }
+  }
   if (event === 'task.cancelled') {
     return { event: 'session.event.done', payload: { ...(payload || {}), reason: 'aborted' } }
   }
   if (!['task.failed', 'task.timeout', 'task.abandoned'].includes(event)) return null
   const status = event.replace('task.', '')
+  const outcome = payload?.turn_outcome && typeof payload.turn_outcome === 'object'
+    ? payload.turn_outcome as Record<string, unknown>
+    : {}
+  const rawCode = payload?.code ?? payload?.error_class ?? outcome.error_class
+  const payloadCode = typeof rawCode === 'string' ? rawCode.trim().toLowerCase() : ''
+  const rawReason = payload?.terminal_reason
+  const terminalReason = typeof rawReason === 'string' ? rawReason.trim().toLowerCase() : ''
+  const code = /^[a-z][a-z0-9_.-]*$/.test(payloadCode)
+    ? payloadCode
+    : /^[a-z][a-z0-9_.-]*$/.test(terminalReason) ? terminalReason : status
   return {
     event: 'session.event.error',
-    payload: { ...(payload || {}), message: taskTerminalMessage(status, payload), code: status },
+    payload: { ...(payload || {}), message: taskTerminalMessage(status, payload), code },
   }
 }
 

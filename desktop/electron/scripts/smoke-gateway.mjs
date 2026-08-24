@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { createServer } from 'node:net'
 import { mkdtemp, mkdir, readdir, rm, writeFile } from 'node:fs/promises'
 import { statSync } from 'node:fs'
@@ -17,6 +17,19 @@ const deadlineMs = Number.parseInt(process.env.OPENSQUILLA_GATEWAY_SMOKE_TIMEOUT
 const pollIntervalMs = 250
 const killGraceMs = 3_000
 const maxTailLines = 80
+const caProbeSuccessPattern = /\bopensquilla-desktop-ca-store-ok x509_ca=(\d+)\b/
+const strippedTlsEnvironmentKeys = new Set([
+  'ALL_PROXY',
+  'CURL_CA_BUNDLE',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'NODE_EXTRA_CA_CERTS',
+  'NODE_TLS_REJECT_UNAUTHORIZED',
+  'NO_PROXY',
+  'REQUESTS_CA_BUNDLE',
+  'SSL_CERT_DIR',
+  'SSL_CERT_FILE',
+])
 
 function appendTail(tail, chunk) {
   const lines = chunk
@@ -112,10 +125,11 @@ async function selectRuntimeGateway() {
   return sourceRuntimeGatewayDir
 }
 
-function smokeEnv(tempHome, stateDir, config) {
+function smokeEnv(tempHome, config, runtimeGatewayDir) {
   const env = {}
   for (const [key, value] of Object.entries(process.env)) {
     if (key.startsWith('OPENSQUILLA_')) continue
+    if (strippedTlsEnvironmentKeys.has(key.toUpperCase())) continue
     env[key] = value
   }
 
@@ -125,11 +139,70 @@ function smokeEnv(tempHome, stateDir, config) {
     USERPROFILE: tempHome,
     OPENSQUILLA_DESKTOP: '1',
     OPENSQUILLA_INSTALL_METHOD: 'desktop',
-    OPENSQUILLA_STATE_DIR: stateDir,
+    // The Desktop contract treats OPENSQUILLA_STATE_DIR as the profile root H.
+    // Runtime databases still live below H/state; config must remain at H/config.toml.
+    OPENSQUILLA_STATE_DIR: tempHome,
     OPENSQUILLA_GATEWAY_CONFIG_PATH: config,
+    OPENSQUILLA_CONTROL_UI_DIST: join(runtimeGatewayDir, 'control-ui-dist'),
     PYTHONUNBUFFERED: '1',
     PYTHONUTF8: '1',
     PYTHONIOENCODING: 'utf-8:replace',
+  }
+}
+
+function verifyGatewayCaStore(gatewayBinary, env) {
+  const result = spawnSync(gatewayBinary, ['--_desktop-ca-probe'], {
+    cwd: dirname(gatewayBinary),
+    env,
+    encoding: 'utf8',
+    windowsHide: true,
+  })
+  if (result.error) throw result.error
+  const match = result.stdout.match(caProbeSuccessPattern)
+  const caCertificateCount = match ? Number.parseInt(match[1], 10) : 0
+  if (result.status !== 0 || caCertificateCount <= 0) {
+    throw new Error(
+      `Packaged gateway TLS trust probe failed with exit ${result.status ?? 'null'}.` +
+        formatTail(
+          result.stdout ? result.stdout.trim().split(/\r?\n/) : [],
+          result.stderr ? result.stderr.trim().split(/\r?\n/) : [],
+        )
+    )
+  }
+}
+
+function verifyGatewayFilesystemWorker(gatewayBinary, env, targetPath) {
+  const payload = JSON.stringify({
+    kind: 'read_file',
+    path: targetPath,
+    displayPath: targetPath,
+  })
+  const result = spawnSync(gatewayBinary, ['--internal-child', 'filesystem-worker', '-'], {
+    cwd: dirname(gatewayBinary),
+    env,
+    input: payload,
+    encoding: 'utf8',
+    windowsHide: true,
+  })
+  if (result.error) throw result.error
+  let response = null
+  try {
+    response = JSON.parse(result.stdout)
+  } catch {
+    response = null
+  }
+  if (
+    result.status !== 0
+    || typeof response?.message !== 'string'
+    || !response.message.includes('synthetic packaged gateway smoke')
+  ) {
+    throw new Error(
+      `Packaged gateway filesystem worker probe failed with exit ${result.status ?? 'null'}.`
+        + formatTail(
+          result.stdout ? result.stdout.trim().split(/\r?\n/) : [],
+          result.stderr ? result.stderr.trim().split(/\r?\n/) : [],
+        ),
+    )
   }
 }
 
@@ -337,6 +410,7 @@ async function main() {
   const tempHome = await mkdtemp(join(tmpdir(), 'opensquilla-gateway-smoke-'))
   const config = join(tempHome, 'config.toml')
   const stateDir = join(tempHome, 'state')
+  const workspaceDir = join(tempHome, 'workspace')
   let child = null
   const stdoutTail = []
   const stderrTail = []
@@ -345,6 +419,8 @@ async function main() {
 
   try {
     await mkdir(stateDir, { recursive: true })
+    await mkdir(workspaceDir, { recursive: true })
+    await writeFile(join(workspaceDir, 'SOUL.md'), 'synthetic packaged gateway smoke\n', 'utf8')
     await writeFile(
       config,
       [
@@ -355,10 +431,14 @@ async function main() {
       'utf8'
     )
 
+    const env = smokeEnv(tempHome, config, runtimeGatewayDir)
+    verifyGatewayCaStore(gatewayBinary, env)
+    verifyGatewayFilesystemWorker(gatewayBinary, env, join(workspaceDir, 'SOUL.md'))
+
     const port = await findFreePort()
     child = spawn(gatewayBinary, ['gateway', 'run', '--port', String(port), '--bind', '127.0.0.1', '--config', config], {
       cwd: dirname(gatewayBinary),
-      env: smokeEnv(tempHome, stateDir, config),
+      env,
       windowsHide: true,
     })
 

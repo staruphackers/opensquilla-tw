@@ -8,17 +8,14 @@ is a data change (a new matcher row), not a new branch.
 
 from __future__ import annotations
 
-import math
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from email.utils import parsedate_to_datetime
 from enum import StrEnum
 
 import structlog
 
-from opensquilla.redaction import redact_error_text
+from opensquilla.http_retry import parse_retry_after
 
 from .registry import UnknownProviderError, get_provider_spec
 
@@ -179,6 +176,36 @@ _MODEL_UNAVAILABLE_SUBSTRINGS = (
 
 # Family-independent kinds checked before any family table.
 _SHARED_PRE_MATCHERS: tuple[FailureMatcher, ...] = (
+    # Provider-specific adapters use several raw spellings for exhausted
+    # credits.  Normalize them once here so every runtime consumer (including
+    # Goal settlement) observes the same failure taxonomy.
+    FailureMatcher(
+        ProviderFailureKind.INSUFFICIENT_CREDITS,
+        status_codes=frozenset({402}),
+    ),
+    FailureMatcher(
+        ProviderFailureKind.INSUFFICIENT_CREDITS,
+        raw_codes=frozenset(
+            {
+                "billing_hard_limit",
+                "insufficient_quota",
+                "provider_quota_exceeded",
+                "usage_limit",
+                "usage_limit_reached",
+                "usage_limited",
+            }
+        ),
+    ),
+    # Local composite-provider validation.  This must classify before a
+    # provider-family "does not support" matcher can turn it into
+    # UNSUPPORTED_FEATURE: that kind deliberately hops to a fallback provider,
+    # which would bypass Ensemble's text-only contract.
+    FailureMatcher(
+        ProviderFailureKind.BAD_REQUEST,
+        raw_codes=frozenset(
+            {"ensemble_multimodal_unsupported", "image_input_unsupported"}
+        ),
+    ),
     FailureMatcher(
         ProviderFailureKind.CONTEXT_OVERFLOW,
         message_substrings=(
@@ -306,10 +333,38 @@ _SHARED_TAIL_MATCHERS: tuple[FailureMatcher, ...] = (
     FailureMatcher(ProviderFailureKind.RATE_LIMITED, status_codes=frozenset({429})),
     FailureMatcher(ProviderFailureKind.RATE_LIMITED, message_substrings=("rate limit",)),
     FailureMatcher(
+        ProviderFailureKind.RATE_LIMITED,
+        raw_codes=frozenset({"provider_retry_after_deadline"}),
+    ),
+    FailureMatcher(
         ProviderFailureKind.PROVIDER_OVERLOADED,
         status_codes=_GATEWAY_TRANSIENT_STATUS_CODES,
     ),
     FailureMatcher(ProviderFailureKind.PROVIDER_OVERLOADED, predicate=_is_gateway_transient),
+    FailureMatcher(
+        ProviderFailureKind.MALFORMED_RESPONSE,
+        raw_codes=frozenset({"invalid_stream_frame", "invalid_stream_order"}),
+    ),
+    # Adapter-synthesized terminal-evidence codes: the stream ended without a
+    # finish signal, or a native tool call arrived without usable arguments.
+    # Both are transient from the runtime's point of view — a retry (and then
+    # a fallback provider) can succeed where surfacing a terminal error
+    # cannot. Must precede the "malformed" substring row: some adapters phrase
+    # incomplete tool calls as "malformed tool calls", and MALFORMED_RESPONSE
+    # would downgrade recovery to SURFACE.
+    FailureMatcher(
+        ProviderFailureKind.TRANSPORT_TRANSIENT,
+        raw_codes=frozenset(
+            {
+                "incomplete_stream",
+                "incomplete_tool_call",
+                "incomplete_tool_stream",
+                "provider_pretext_buffer_exhausted",
+                "request_error",
+                "response_incomplete",
+            }
+        ),
+    ),
     FailureMatcher(
         ProviderFailureKind.MALFORMED_RESPONSE,
         message_substrings=("malformed", "invalid json"),
@@ -350,47 +405,10 @@ def classify_provider_error(
         provider=provider,
         failure_family=family,
         status_code=status_code,
-        raw_code=raw_code,
-        message_head=redact_error_text(message),
+        raw_code_chars=len(raw_code or ""),
+        message_chars=len(message or ""),
     )
     return ProviderFailureKind.UNKNOWN
-
-
-def parse_retry_after(
-    value: str | None,
-    *,
-    now_utc: datetime | None = None,
-) -> float | None:
-    """Parse a ``Retry-After`` header value into non-negative seconds.
-
-    Accepts both RFC 9110 forms: delta-seconds (``"120"``; fractional values
-    are tolerated) and HTTP-date (``"Wed, 21 Oct 2026 07:28:00 GMT"``, resolved
-    against ``now_utc`` — wall clock — at parse time so the caller can keep
-    working in relative/monotonic seconds afterwards). Returns ``None`` for a
-    missing, empty, negative, non-finite, or unparseable value; a past
-    HTTP-date parses to ``0.0``.
-    """
-    if value is None:
-        return None
-    text = value.strip()
-    if not text:
-        return None
-    try:
-        seconds = float(text)
-    except ValueError:
-        seconds = None
-    if seconds is not None:
-        if not math.isfinite(seconds) or seconds < 0:
-            return None
-        return seconds
-    try:
-        when = parsedate_to_datetime(text)
-    except (TypeError, ValueError):
-        return None
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=UTC)
-    reference = now_utc if now_utc is not None else datetime.now(UTC)
-    return max(0.0, (when - reference).total_seconds())
 
 
 def retry_after_from_headers(

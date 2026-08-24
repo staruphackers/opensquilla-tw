@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-import os
+import secrets
 import threading
 import time
 from collections.abc import Callable
@@ -13,6 +13,7 @@ from typing import Any
 import structlog
 
 from opensquilla.provider.credentials import Credential, CredentialPool, NoCredentialsAvailable
+from opensquilla.provider.environment import environment_value
 from opensquilla.provider.failures import ProviderFailureKind
 
 log = structlog.get_logger(__name__)
@@ -42,7 +43,93 @@ class LlmRuntimeConfig:
     proxy: str
     provider_routing: dict[str, str]
     api_key_from_env: bool = False
+    api_key_env_name: str = ""
     base_url_from_env: bool = False
+
+
+@dataclass(frozen=True)
+class ResolvedLlmCredential:
+    """One primary credential plus secret-free source provenance."""
+
+    api_key: str = field(default="", repr=False)
+    source: str = "none"
+    env_name: str = ""
+
+
+def resolve_llm_credential(
+    config: Any,
+    *,
+    registry_env_key: str = "",
+    include_runtime_cache: bool = True,
+) -> ResolvedLlmCredential:
+    """Resolve the primary key exactly as a fresh settings load would.
+
+    ``LlmProviderConfig`` reads the two ``OPENSQUILLA_LLM_*`` settings
+    variables when it is constructed.  Hot config mutations do not reconstruct
+    that model, so consult those external inputs explicitly as well.  Stored
+    config still wins. An explicitly configured env-name is authoritative: if
+    it is missing, resolution fails closed instead of substituting another
+    source. Otherwise settings/registry env names precede the generic settings
+    key. Runtime callers may retain an already-materialized environment secret;
+    observability and reveal surfaces disable that cache so they describe only
+    currently inspectable sources.
+    """
+
+    llm = getattr(config, "llm", None)
+    if llm is None:
+        return ResolvedLlmCredential()
+
+    runtime_secret_paths: set[str] = getattr(config, "_runtime_secret_paths", set())
+    stored_api_key = str(getattr(llm, "api_key", "") or "")
+    explicit_api_key = (
+        "" if "llm.api_key" in runtime_secret_paths else stored_api_key
+    )
+    configured_env_name = str(getattr(llm, "api_key_env", "") or "").strip()
+    settings_env_name = environment_value("OPENSQUILLA_LLM_API_KEY_ENV").strip()
+    env_name = configured_env_name or settings_env_name or str(registry_env_key or "").strip()
+
+    if explicit_api_key:
+        return ResolvedLlmCredential(
+            api_key=explicit_api_key,
+            source="explicit",
+            env_name=env_name,
+        )
+
+    named_env_key = environment_value(env_name) if env_name else ""
+    if named_env_key:
+        return ResolvedLlmCredential(
+            api_key=named_env_key,
+            source="env",
+            env_name=env_name,
+        )
+
+    if configured_env_name:
+        return ResolvedLlmCredential(env_name=configured_env_name)
+
+    settings_api_key = environment_value("OPENSQUILLA_LLM_API_KEY")
+    if settings_api_key:
+        return ResolvedLlmCredential(
+            api_key=settings_api_key,
+            source="env",
+            env_name="OPENSQUILLA_LLM_API_KEY",
+        )
+
+    # With no authoritative configured reference, a value materialized from
+    # the environment earlier in this process may remain usable after its
+    # source variable is removed. Keep its runtime provenance instead of
+    # misclassifying that cached secret as explicit.
+    if (
+        include_runtime_cache
+        and stored_api_key
+        and "llm.api_key" in runtime_secret_paths
+    ):
+        return ResolvedLlmCredential(
+            api_key=stored_api_key,
+            source="env",
+            env_name=env_name,
+        )
+
+    return ResolvedLlmCredential(env_name=env_name)
 
 
 def provider_base_url_env_name(provider: str) -> str:
@@ -112,16 +199,64 @@ def resolve_llm_runtime_config(config: Any) -> LlmRuntimeConfig:
     except UnknownProviderError as exc:
         log.warning("llm_runtime.unknown_provider", provider=provider, error=str(exc))
         spec = None
-    runtime_secret_paths: set[str] = getattr(config, "_runtime_secret_paths", set())
-    explicit_api_key = llm.api_key if "llm.api_key" not in runtime_secret_paths else ""
     spec_env_key = spec.env_key if spec is not None else ""
-    api_key_env_name = (
-        "" if explicit_api_key else (getattr(llm, "api_key_env", "") or spec_env_key)
-    )
+    credential = resolve_llm_credential(config, registry_env_key=spec_env_key)
     base_url_env_name = provider_base_url_env_name(provider) if spec is not None else ""
-    env_api_key = os.environ.get(api_key_env_name, "") if api_key_env_name else ""
-    env_base_url = os.environ.get(base_url_env_name, "") if base_url_env_name else ""
-    api_key = explicit_api_key or env_api_key or llm.api_key
+    env_base_url = environment_value(base_url_env_name) if base_url_env_name else ""
+    api_key = credential.api_key
+    resolution_getter = getattr(config, "provider_resolution", None)
+    resolution = resolution_getter() if callable(resolution_getter) else {}
+    provider_resolution_blocked = bool(resolution.get("action_required", False))
+    from opensquilla.provider.credentials import (
+        credential_provider_hint,
+        endpoint_provider_hint,
+    )
+
+    credential_hint = credential_provider_hint(
+        api_key,
+        api_key_env=credential.env_name or getattr(llm, "api_key_env", ""),
+    )
+    credential_mismatch = bool(credential_hint and credential_hint != provider)
+    if provider_resolution_blocked or credential_mismatch:
+        reason_code = (
+            "credential_provider_mismatch"
+            if credential_mismatch
+            else str(resolution.get("reason_code") or "provider_resolution_blocked")
+        )
+        log.warning(
+            "llm_runtime.credential_withheld",
+            provider=provider,
+            credential_provider_hint=credential_hint or None,
+            reason_code=reason_code,
+        )
+        # Preserve an explicitly stored value across unrelated sparse saves,
+        # but remove it from every runtime-facing config path before any
+        # provider or ensemble can construct an Authorization header.
+        if (
+            api_key
+            and credential.source == "explicit"
+            and hasattr(config, "record_runtime_override")
+        ):
+            config.record_runtime_override(
+                "llm.api_key",
+                str(getattr(llm, "api_key", "") or ""),
+                "",
+            )
+        api_key = ""
+        setter = getattr(config, "set_provider_resolution", None)
+        if (
+            callable(setter)
+            and credential_mismatch
+            and not provider_resolution_blocked
+        ):
+            setter(
+                status="conflict",
+                effective_provider=provider,
+                source="credential_shape",
+                reason_code=reason_code,
+                action_required=True,
+                action_recommended=True,
+            )
     # Explicit config > derived env > spec default, mirroring the api_key
     # rule (#484): a base_url the operator chose must not be overridden by
     # OPENAI_BASE_URL-style vars on the next boot/reload. Derived stored
@@ -137,8 +272,44 @@ def resolve_llm_runtime_config(config: Any) -> LlmRuntimeConfig:
         base_url = stored_base_url
     else:
         base_url = env_base_url or (spec.default_base_url if spec else stored_base_url)
+    endpoint_hint = endpoint_provider_hint(base_url)
+    credential_endpoint_mismatch = bool(
+        api_key
+        and credential_hint
+        and endpoint_hint
+        and credential_hint != endpoint_hint
+    )
+    if credential_endpoint_mismatch:
+        reason_code = "credential_endpoint_provider_mismatch"
+        log.warning(
+            "llm_runtime.credential_withheld",
+            provider=provider,
+            credential_provider_hint=credential_hint,
+            endpoint_provider_hint=endpoint_hint,
+            reason_code=reason_code,
+        )
+        if (
+            credential.source == "explicit"
+            and hasattr(config, "record_runtime_override")
+        ):
+            config.record_runtime_override(
+                "llm.api_key",
+                str(getattr(llm, "api_key", "") or ""),
+                "",
+            )
+        api_key = ""
+        setter = getattr(config, "set_provider_resolution", None)
+        if callable(setter):
+            setter(
+                status="conflict",
+                effective_provider=provider,
+                source="credential_endpoint",
+                reason_code=reason_code,
+                action_required=True,
+                action_recommended=True,
+            )
     base_url_from_env = bool(env_base_url) and base_url == env_base_url
-    proxy = os.environ.get("OPENSQUILLA_LLM_PROXY", "") or getattr(llm, "proxy", "")
+    proxy = environment_value("OPENSQUILLA_LLM_PROXY") or getattr(llm, "proxy", "")
 
     # Record runtime provenance BEFORE mutating the live model: values
     # resolved from the environment (or spec defaults) here must never be
@@ -156,7 +327,7 @@ def resolve_llm_runtime_config(config: Any) -> LlmRuntimeConfig:
     llm.api_key = api_key
     llm.base_url = base_url
     llm.proxy = proxy
-    if env_api_key and hasattr(config, "mark_runtime_secret"):
+    if credential.source == "env" and hasattr(config, "mark_runtime_secret"):
         config.mark_runtime_secret("llm.api_key")
 
     return LlmRuntimeConfig(
@@ -169,7 +340,8 @@ def resolve_llm_runtime_config(config: Any) -> LlmRuntimeConfig:
             provider,
             getattr(llm, "provider_routing", {}),
         ),
-        api_key_from_env=bool(env_api_key),
+        api_key_from_env=credential.source == "env",
+        api_key_env_name=credential.env_name,
         base_url_from_env=base_url_from_env,
     )
 
@@ -208,14 +380,24 @@ def masked_key_id(secret: str) -> str:
 class PooledCredential:
     """A pool-resolved profile credential.
 
-    ``env_name`` (the credential id) and ``key_id`` are safe to log;
-    ``api_key`` is the live secret and is excluded from ``repr``.
+    ``env_name`` (the credential id) and ``key_id`` are safe to log.
+    ``api_key`` is the live secret; ``lease_token`` is the opaque authority
+    to report its failure. Both stay parent-process-only and out of ``repr``.
     """
 
     provider_id: str
     env_name: str
     key_id: str
     api_key: str = field(default="", repr=False)
+    lease_token: str = field(default="", repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class _CredentialPin:
+    """One session's exact, parent-process-only credential lease."""
+
+    cred_id: str
+    lease_token: str = field(repr=False, compare=False)
 
 
 class ProfileCredentialPools:
@@ -251,7 +433,7 @@ class ProfileCredentialPools:
         self._pool_fingerprints: dict[str, tuple[str, ...]] = {}
         self._creds_by_id: dict[str, dict[str, Credential]] = {}
         self._key_ids: dict[str, dict[str, str]] = {}
-        self._pins: dict[str, dict[str, str]] = {}
+        self._pins: dict[str, dict[str, _CredentialPin]] = {}
 
     def acquire_for_session(
         self,
@@ -276,9 +458,9 @@ class ProfileCredentialPools:
                 return None
 
             pins = self._pins.setdefault(provider_id, {})
-            pinned_id = pins.get(session_key)
-            if pinned_id is not None and pool.available(pinned_id):
-                cred = self._creds_by_id[provider_id][pinned_id]
+            pin = pins.get(session_key)
+            if pin is not None and pool.available(pin.cred_id):
+                cred = self._creds_by_id[provider_id][pin.cred_id]
                 log.debug(
                     "credential_pool.pin_reused",
                     provider=provider_id,
@@ -286,10 +468,18 @@ class ProfileCredentialPools:
                     env_name=cred.cred_id,
                     key_id=self._key_ids[provider_id][cred.cred_id],
                 )
-                return self._pooled_locked(provider_id, cred)
+                return self._pooled_locked(
+                    provider_id,
+                    cred,
+                    lease_token=pin.lease_token,
+                )
 
             cred = pool.acquire()  # may raise NoCredentialsAvailable
-            pins[session_key] = cred.cred_id
+            pin = _CredentialPin(
+                cred_id=cred.cred_id,
+                lease_token=secrets.token_urlsafe(32),
+            )
+            pins[session_key] = pin
             log.info(
                 "credential_pool.rotation",
                 provider=provider_id,
@@ -298,7 +488,11 @@ class ProfileCredentialPools:
                 key_id=self._key_ids[provider_id][cred.cred_id],
                 pool_size=len(pool),
             )
-            return self._pooled_locked(provider_id, cred)
+            return self._pooled_locked(
+                provider_id,
+                cred,
+                lease_token=pin.lease_token,
+            )
 
     def report_failure(
         self,
@@ -321,41 +515,168 @@ class ProfileCredentialPools:
         with self._lock:
             pool = self._pools.get(provider_id)
             pins = self._pins.get(provider_id, {})
-            cred_id = pins.pop(session_key, None)
-            if pool is None or cred_id is None:
+            pin = pins.pop(session_key, None)
+            if pool is None or pin is None:
                 return
-            if kind is ProviderFailureKind.AUTH_INVALID:
-                cooldown = float("inf")
-            elif kind is ProviderFailureKind.INSUFFICIENT_CREDITS:
-                cooldown = INSUFFICIENT_CREDITS_COOLDOWN_SECONDS
-            else:
-                cooldown = (
-                    retry_after_seconds
-                    if retry_after_seconds is not None and retry_after_seconds >= 0
-                    else RATE_LIMITED_COOLDOWN_SECONDS
-                )
-            pool.report_429(cred_id, cooldown_seconds=cooldown)
-            # Drop every other session pinned to the now-parked key so they
-            # rotate on their next turn instead of failing the same way.
-            for other_session in [s for s, c in pins.items() if c == cred_id]:
-                pins.pop(other_session, None)
-            log.warning(
-                "credential_pool.cooldown",
-                provider=provider_id,
-                session_key=session_key,
-                env_name=cred_id,
-                key_id=self._key_ids.get(provider_id, {}).get(cred_id, ""),
-                failure_kind=str(kind),
-                cooldown_seconds=cooldown,
-                permanent=cooldown == float("inf"),
+            self._park_credential_locked(
+                provider_id,
+                session_key,
+                pin.cred_id,
+                kind,
+                retry_after_seconds=retry_after_seconds,
             )
 
-    def _pooled_locked(self, provider_id: str, cred: Credential) -> PooledCredential:
+    def report_failure_for_lease(
+        self,
+        provider_id: str,
+        session_key: str,
+        lease_token: str,
+        kind: ProviderFailureKind,
+        *,
+        retry_after_seconds: float | None = None,
+    ) -> bool:
+        """Park only the credential represented by the exact active lease.
+
+        A late result from a previous request must never park a credential
+        that the same session acquired later.  The opaque token is generated
+        per session pin, never derived from key material, and compared while
+        holding the pool lock. Empty, stale, or fabricated tokens are a
+        fail-closed no-op. Generic provider paths retain ``report_failure``
+        for compatibility; paid media must use this exact API.
+        """
+
+        if kind not in _REPORTABLE_FAILURE_KINDS or not lease_token:
+            return False
+        provider_id = (provider_id or "").strip().lower()
+        with self._lock:
+            pool = self._pools.get(provider_id)
+            pins = self._pins.get(provider_id, {})
+            pin = pins.get(session_key)
+            if (
+                pool is None
+                or pin is None
+                or not secrets.compare_digest(pin.lease_token, lease_token)
+            ):
+                return False
+            pins.pop(session_key, None)
+            self._park_credential_locked(
+                provider_id,
+                session_key,
+                pin.cred_id,
+                kind,
+                retry_after_seconds=retry_after_seconds,
+            )
+            return True
+
+    def _park_credential_locked(
+        self,
+        provider_id: str,
+        session_key: str,
+        cred_id: str,
+        kind: ProviderFailureKind,
+        *,
+        retry_after_seconds: float | None,
+    ) -> None:
+        """Park ``cred_id`` and invalidate every lease that named it."""
+
+        pool = self._pools[provider_id]
+        pins = self._pins.get(provider_id, {})
+        if kind is ProviderFailureKind.AUTH_INVALID:
+            cooldown = float("inf")
+        elif kind is ProviderFailureKind.INSUFFICIENT_CREDITS:
+            cooldown = INSUFFICIENT_CREDITS_COOLDOWN_SECONDS
+        else:
+            cooldown = (
+                retry_after_seconds
+                if retry_after_seconds is not None and retry_after_seconds >= 0
+                else RATE_LIMITED_COOLDOWN_SECONDS
+            )
+        pool.report_429(cred_id, cooldown_seconds=cooldown)
+        # Drop every other session pinned to the now-parked key so they
+        # rotate on their next turn instead of failing the same way. This
+        # also invalidates their lease tokens before they can report late.
+        for other_session in [
+            session for session, other_pin in pins.items() if other_pin.cred_id == cred_id
+        ]:
+            pins.pop(other_session, None)
+        log.warning(
+            "credential_pool.cooldown",
+            provider=provider_id,
+            session_key=session_key,
+            env_name=cred_id,
+            key_id=self._key_ids.get(provider_id, {}).get(cred_id, ""),
+            failure_kind=str(kind),
+            cooldown_seconds=cooldown,
+            permanent=cooldown == float("inf"),
+        )
+
+    def peek_available(
+        self,
+        provider_id: str,
+        env_pool: list[str],
+    ) -> PooledCredential | None:
+        """Return one currently runnable credential without mutating pool state.
+
+        Status/readiness surfaces use this instead of ``acquire_for_session``:
+        it observes the same process-wide parked state but never advances the
+        cursor, increments acquisition counts, creates a session pin, or
+        rebuilds a pool.  When the configured name list has not been seen by
+        the runtime yet (or has changed), a direct environment inspection
+        predicts the next rebuild without performing it.
+        """
+
+        provider_id = (provider_id or "").strip().lower()
+        names = tuple(dict.fromkeys(n.strip() for n in env_pool if n and n.strip()))
+        if not provider_id or not names:
+            return None
+        with self._lock:
+            if self._pool_fingerprints.get(provider_id) != names:
+                for env_name in names:
+                    secret = environment_value(env_name).strip()
+                    if secret:
+                        return PooledCredential(
+                            provider_id=provider_id,
+                            env_name=env_name,
+                            key_id=masked_key_id(secret),
+                            api_key=secret,
+                        )
+                return None
+
+            pool = self._pools.get(provider_id)
+            if pool is None:
+                return None
+            for env_name in names:
+                if not pool.available(env_name):
+                    continue
+                cred = self._creds_by_id[provider_id][env_name]
+                return self._pooled_locked(provider_id, cred)
+            raise NoCredentialsAvailable("all credentials in cooldown")
+
+    def discard_provider(self, provider_id: str) -> None:
+        """Forget one profile's resolved secrets, cooldowns and session pins."""
+        provider = (provider_id or "").strip().lower()
+        if not provider:
+            return
+        with self._lock:
+            self._pools.pop(provider, None)
+            self._pool_fingerprints.pop(provider, None)
+            self._creds_by_id.pop(provider, None)
+            self._key_ids.pop(provider, None)
+            self._pins.pop(provider, None)
+
+    def _pooled_locked(
+        self,
+        provider_id: str,
+        cred: Credential,
+        *,
+        lease_token: str = "",
+    ) -> PooledCredential:
         return PooledCredential(
             provider_id=provider_id,
             env_name=cred.cred_id,
             key_id=self._key_ids[provider_id][cred.cred_id],
             api_key=cred.secret,
+            lease_token=lease_token,
         )
 
     def _ensure_pool_locked(
@@ -371,7 +692,7 @@ class ProfileCredentialPools:
         credentials: list[Credential] = []
         key_ids: dict[str, str] = {}
         for env_name in names:
-            secret = os.environ.get(env_name, "").strip()
+            secret = environment_value(env_name).strip()
             if not secret:
                 log.warning(
                     "credential_pool.env_unset",
@@ -427,6 +748,11 @@ def reset_profile_credential_pools(
         return _profile_pools
 
 
+def discard_profile_credential_pool(provider_id: str) -> None:
+    """Purge one profile's process-local resolved credential state."""
+    profile_credential_pools().discard_provider(provider_id)
+
+
 __all__ = [
     "INSUFFICIENT_CREDITS_COOLDOWN_SECONDS",
     "OPENROUTER_DEFAULT_PROVIDER_ROUTING",
@@ -435,9 +761,12 @@ __all__ = [
     "NoCredentialsAvailable",
     "PooledCredential",
     "ProfileCredentialPools",
+    "ResolvedLlmCredential",
+    "discard_profile_credential_pool",
     "masked_key_id",
     "profile_credential_pools",
     "provider_base_url_env_name",
     "reset_profile_credential_pools",
+    "resolve_llm_credential",
     "resolve_llm_runtime_config",
 ]

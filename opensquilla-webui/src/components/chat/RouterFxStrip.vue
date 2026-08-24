@@ -4,98 +4,150 @@
     :data-source="message.routerSource"
     :data-observe="message.routerObserve ? 'true' : undefined"
     :data-static="message.routerStatic ? 'true' : undefined"
-    :data-settled="message.routerSettled ? 'true' : undefined"
+    :data-settled="routerDataSettled"
     :data-panel="message.routerPanel || 'real-candidates'"
+    :data-phase="showsRouterStage ? motionPhase : undefined"
+    :aria-label="routerAriaLabel"
+    :aria-busy="showsRouterStage ? motionPhase === 'scanning' ? 'true' : 'false' : undefined"
+    :role="showsRouterStage ? 'group' : undefined"
   >
-    <template v-if="isEnsemblePanel">
-      <button
-        class="router-fx-ensemble"
-        type="button"
-        :aria-label="ensembleButtonLabel"
-        :aria-expanded="inspectorOpen ? 'true' : 'false'"
-        :aria-controls="inspectorId"
-        :disabled="!hasInspector"
-        data-testid="router-ensemble-toggle"
-        @click="toggleInspector"
-      >
-        <span :class="['router-fx-ensemble__dot', { done: isEnsembleDone, pending: !hasEnsembleModels }]" aria-hidden="true"></span>
-        <span class="router-fx-ensemble__label">{{ ensembleStatusLabel }}</span>
-        <span class="router-fx-ensemble__meta">{{ ensembleMetaLabel }}</span>
-        <span v-if="!isEnsembleDone" class="router-fx-ensemble__scan" aria-hidden="true"></span>
-      </button>
-
-      <div
-        v-if="inspectorOpen && hasInspector"
-        :id="inspectorId"
-        class="router-fx-inspector"
-        data-testid="router-ensemble-inspector"
-      >
-        <div class="router-fx-inspector__head">
-          <span class="router-fx-inspector__title">{{ t('chat.routerFx.ensembleTraceTitle') }}</span>
-          <span class="router-fx-inspector__mode">{{ ensembleInspectorMeta }}</span>
-        </div>
-        <div class="router-fx-inspector__rows">
-          <div
-            v-for="model in ensembleModels"
-            :key="`${model.role}:${model.provider}:${model.model}`"
-            class="router-fx-inspector__row"
-            :class="{ 'router-fx-inspector__row--running': model.status === 'running' }"
-            :data-status="model.status || undefined"
-          >
-            <span class="router-fx-inspector__role">{{ model.role }}</span>
-            <span class="router-fx-inspector__model" :title="model.model">{{ model.modelShort }}</span>
-            <span class="router-fx-inspector__usage">
-              <span
-                v-if="model.status === 'running'"
-                class="router-fx-inspector__spin"
-                aria-hidden="true"
-              ></span>
-              <template v-else>{{ ensembleModelUsage(model) }}</template>
-            </span>
-          </div>
-          <div
-            v-if="!hasEnsembleModels"
-            class="router-fx-inspector__row router-fx-inspector__row--empty"
-            data-testid="router-ensemble-detail-unavailable"
-          >
-            <span class="router-fx-inspector__empty">{{ emptyTraceLabel }}</span>
-          </div>
-        </div>
-        <div class="router-fx-inspector__foot">
-          <span>{{ fallbackLabel }}</span>
-          <span>{{ t('chat.routerFx.ensembleRouterPoolHidden') }}</span>
-        </div>
-      </div>
-    </template>
-
-    <template v-else>
+    <template v-if="showsRouterStage">
       <div class="router-fx-header">
         <span class="glyph">&#8592;</span>
         <span class="title">{{ t('chat.aiModelRouter') }}</span>
         <span class="glyph">&#8594;</span>
       </div>
-      <div class="router-fx-grid" :style="gridStyle">
+      <div ref="gridElement" class="router-fx-grid" :style="gridStyle">
         <div
-          v-for="(cell, cellIndex) in gridCells"
-          :key="cell.tiers?.join(':') || `${cell.displayName}-${cellIndex}`"
+          v-for="(cell, cellIndex) in visualGridCells"
+          :key="cell.tiers?.join(':') || `${cell.visualName}-${cellIndex}`"
           class="router-fx-cell"
           :data-cell-idx="cellIndex"
-          :class="{ win: cellIndex === message.winnerIdx }"
+          :data-scan-active="cellIndex === scanIndex ? 'true' : undefined"
+          :class="{
+            win: cellIndex === visibleWinnerIndex,
+            'scan-active': cellIndex === scanIndex,
+          }"
         >
-          <span class="nm" :title="cell.displayName" :aria-label="cell.displayName">
-            <span class="nm-base">{{ cell.displayName }}</span>
-            <span class="nm-win" aria-hidden="true">{{ cell.displayName }}</span>
+          <span class="nm" :title="cell.visualName" :aria-label="cell.visualName">
+            <span class="nm-base">{{ cell.visualName }}</span>
+            <span class="nm-win" aria-hidden="true">{{ cell.visualName }}</span>
           </span>
         </div>
+        <span
+          v-if="motionPhase === 'scanning'"
+          class="router-fx-selector"
+          :class="{ visible: selectorVisible }"
+          :style="selectorStyle"
+          aria-hidden="true"
+        ></span>
       </div>
+      <span
+        class="router-fx-sr-only"
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >{{ resultAnnouncement }}</span>
     </template>
+
+    <Transition name="router-fx-stage" :css="!prefersReducedMotion">
+      <div
+        v-if="showsEnsembleStage && ensembleStageReady"
+        class="router-fx-ensemble-stage"
+        data-testid="router-ensemble-stage"
+      >
+        <div
+          v-if="isCombinedPanel"
+          class="router-fx-handoff"
+          data-testid="router-ensemble-handoff"
+          aria-hidden="true"
+        >
+          <span></span>
+        </div>
+
+        <button
+          class="router-fx-ensemble"
+          type="button"
+          :aria-label="ensembleButtonLabel"
+          :aria-expanded="inspectorOpen ? 'true' : 'false'"
+          :aria-controls="inspectorId"
+          :aria-busy="!isEnsembleDone ? 'true' : 'false'"
+          :disabled="!hasInspector"
+          data-testid="router-ensemble-toggle"
+          @click="toggleInspector"
+        >
+          <span :class="['router-fx-ensemble__dot', { done: isEnsembleDone, pending: !hasEnsembleModels }]" aria-hidden="true"></span>
+          <span class="router-fx-ensemble__label" role="status" aria-live="polite">{{ ensembleStatusLabel }}</span>
+          <span class="router-fx-ensemble__meta">{{ ensembleMetaLabel }}</span>
+          <span v-if="!isEnsembleDone" class="router-fx-ensemble__scan" aria-hidden="true"></span>
+        </button>
+
+        <div
+          v-if="inspectorOpen && hasInspector"
+          :id="inspectorId"
+          class="router-fx-inspector"
+          data-testid="router-ensemble-inspector"
+        >
+          <div class="router-fx-inspector__head">
+            <span class="router-fx-inspector__title">{{ t('chat.routerFx.ensembleTraceTitle') }}</span>
+            <span class="router-fx-inspector__mode">{{ ensembleInspectorMeta }}</span>
+          </div>
+          <div class="router-fx-inspector__rows">
+            <div
+              v-for="model in ensembleModels"
+              :key="`${model.role}:${model.provider}:${model.model}:${model.sampleIndex || 0}`"
+              class="router-fx-inspector__row"
+              :class="{
+                'router-fx-inspector__row--running': model.status === 'running',
+                'router-fx-inspector__row--failed': model.status === 'failed',
+                'router-fx-inspector__row--skipped': model.status === 'skipped',
+              }"
+              :data-status="model.status || undefined"
+            >
+              <span class="router-fx-inspector__role">
+                {{ ensembleMemberRoleLabel(model.role) }} <span aria-hidden="true">·</span>
+              </span>
+              <span class="router-fx-inspector__model" :title="model.model">{{ model.modelShort }}</span>
+              <span class="router-fx-inspector__usage" :title="ensembleModelTitle(model)">
+                <span
+                  v-if="model.status === 'running'"
+                  class="router-fx-inspector__spin"
+                  aria-hidden="true"
+                ></span>
+                <template v-else-if="model.status === 'skipped'">{{ ensembleModelSkipped(model) }}</template>
+                <template v-else-if="model.status === 'failed'">{{ ensembleModelFailure(model) }}</template>
+                <template v-else>{{ ensembleModelUsage(model) }}</template>
+              </span>
+            </div>
+            <div
+              v-if="!hasEnsembleModels"
+              class="router-fx-inspector__row router-fx-inspector__row--empty"
+              data-testid="router-ensemble-detail-unavailable"
+            >
+              <span class="router-fx-inspector__empty">{{ emptyTraceLabel }}</span>
+            </div>
+          </div>
+          <div class="router-fx-inspector__foot">
+            <span>{{ fallbackLabel }}</span>
+            <span>{{ t('chat.routerFx.ensembleRouterPoolHidden') }}</span>
+          </div>
+        </div>
+      </div>
+    </Transition>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useMediaQuery } from '@/composables/chat/useMediaQuery'
 import type { ChatEnsembleMetaModel, ChatRenderedMessage } from '@/types/chat'
+import { ensembleMemberRoleLabel } from '@/utils/ensembleRoles'
+
+const ROUTER_FX_SCAN_STEP_MS = 190
+const ROUTER_FX_SCAN_WINDOW_MS = 600
+
+type RouterFxMotionPhase = 'idle' | 'scanning' | 'locked' | 'static'
 
 const { t } = useI18n()
 
@@ -104,31 +156,81 @@ const props = defineProps<{
 }>()
 
 const inspectorOpen = ref(false)
+const motionPhase = ref<RouterFxMotionPhase>('idle')
+const scanIndex = ref(-1)
+const resultAnnouncement = ref('')
+const selectorVisible = ref(false)
+const selectorStyle = ref<Record<string, string>>({})
+const gridElement = ref<HTMLElement | null>(null)
 const gridCells = computed(() => props.message.gridCells || [])
+const visualGridCells = computed(() => gridCells.value.map(cell => ({
+  ...cell,
+  visualName: cell.executionKind === 'ensemble'
+    ? t('chat.routerFx.ensembleModel')
+    : cell.displayName,
+})))
 const ensemble = computed(() => props.message.ensemble)
 const ensembleModels = computed(() => ensemble.value?.models || [])
 const isEnsemblePanel = computed(() => props.message.routerPanel === 'llm-ensemble')
+const isCombinedPanel = computed(() => props.message.routerPanel === 'router-ensemble-sequence')
+const showsRouterStage = computed(() => !isEnsemblePanel.value)
+const showsEnsembleStage = computed(() => isEnsemblePanel.value || isCombinedPanel.value)
+const ensembleStageReady = computed(() =>
+  !isCombinedPanel.value || motionPhase.value === 'locked' || motionPhase.value === 'static',
+)
+const prefersReducedMotion = useMediaQuery('(prefers-reduced-motion: reduce)')
+const realCandidateIndices = computed(() => gridCells.value.flatMap((cell, index) => cell.kind === 'real' ? [index] : []))
+const winnerIndex = computed(() => {
+  const index = Number(props.message.winnerIdx ?? -1)
+  if (!Number.isInteger(index) || index < 0 || index >= gridCells.value.length) return -1
+  return gridCells.value[index]?.kind === 'real' ? index : -1
+})
+const winnerName = computed(() => winnerIndex.value >= 0 ? visualGridCells.value[winnerIndex.value]?.visualName || '' : '')
+const visibleWinnerIndex = computed(() => {
+  return motionPhase.value === 'locked' || motionPhase.value === 'static' ? winnerIndex.value : -1
+})
+const routerDataSettled = computed(() => {
+  if (!showsRouterStage.value) return props.message.routerSettled ? 'true' : undefined
+  return motionPhase.value === 'static' ? 'true' : undefined
+})
+const routerAriaLabel = computed(() => {
+  if (!showsRouterStage.value) return undefined
+  if (visibleWinnerIndex.value >= 0 && winnerName.value) {
+    return t('chat.routerFx.selectedModel', { model: winnerName.value })
+  }
+  return t('chat.aiModelRouter')
+})
+const animationIdentity = computed(() => [
+  props.message.messageId || props.message.id || props.message.ts || '',
+  props.message.routerPanel || 'real-candidates',
+  gridCells.value.map(cell => `${cell.kind}:${cell.executionKind || 'single_model'}:${cell.displayName}:${cell.tiers?.join(',') || ''}`).join('|'),
+].join('::'))
 const hasEnsembleModels = computed(() => ensembleModels.value.length > 0)
 const isEnsembleHandoff = computed(() => props.message.routerState === 'handoff' && !hasEnsembleModels.value)
 // Ensemble strips are trace surfaces, not only animations: keep them openable
 // even while candidate details are still unknown so the empty/pending state is
 // visible instead of looking broken.
 const hasInspector = computed(() =>
-  isEnsemblePanel.value || hasEnsembleModels.value || (ensemble.value?.modelCount || 0) > 0,
+  showsEnsembleStage.value || hasEnsembleModels.value || (ensemble.value?.modelCount || 0) > 0,
 )
-// Synthesizing is "done" once the turn settles OR every revealed member has
-// finished. The latter freezes the strip (green dot, no scan) while the
-// aggregator/tools keep running below, instead of animating for the whole turn.
-const allMembersDone = computed(() =>
-  hasEnsembleModels.value && ensembleModels.value.every(member => member.status === 'done'),
-)
+// Member terminal states only finish their own physical calls. In particular,
+// a failed aggregator can hand off to a fixed fallback that is still streaming.
+// The turn-level settlement is the only authoritative completion signal.
 const isEnsembleDone = computed(
-  () => allMembersDone.value || (Boolean(ensemble.value) && props.message.routerSettled === true),
+  () => Boolean(ensemble.value) && props.message.routerSettled === true,
 )
 const isLegacyGrid = computed(() => props.message.routerPanel === 'legacy-grid')
 const gridColumnCount = computed(() => isLegacyGrid.value ? 5 : Math.min(4, Math.max(2, gridCells.value.length)))
 const mobileGridColumnCount = computed(() => isLegacyGrid.value ? 3 : (gridCells.value.length > 2 ? 2 : Math.max(1, gridCells.value.length)))
-const candidateCount = computed(() => ensemble.value?.modelCount || ensembleModels.value.length)
+// The terminal breakdown contains the aggregator as a model row, while the
+// router label describes proposer candidates. Prefer the trace's explicit
+// candidate count and otherwise exclude the aggregator row.
+const candidateCount = computed(() => {
+  const traced = Number(ensemble.value?.totalCandidates || 0)
+  if (traced > 0) return traced
+  const proposers = ensembleModels.value.filter(member => member.role !== 'aggregator').length
+  return proposers || ensemble.value?.modelCount || ensembleModels.value.length
+})
 const totalCandidates = computed(() => ensemble.value?.totalCandidates || 0)
 const hasKnownCandidateCount = computed(() => candidateCount.value > 0)
 const emptyTraceLabel = computed(() =>
@@ -171,6 +273,163 @@ const fallbackLabel = computed(() => {
     : t('chat.routerFx.ensembleFallbackUsed')
 })
 
+let scanStepTimer: ReturnType<typeof setTimeout> | null = null
+let scanFinishTimer: ReturnType<typeof setTimeout> | null = null
+let selectorFrame: number | null = null
+let scanCursor = -1
+let mounted = false
+
+function clearMotionTimers() {
+  if (scanStepTimer !== null) {
+    clearTimeout(scanStepTimer)
+    scanStepTimer = null
+  }
+  if (scanFinishTimer !== null) {
+    clearTimeout(scanFinishTimer)
+    scanFinishTimer = null
+  }
+  if (selectorFrame !== null) {
+    cancelAnimationFrame(selectorFrame)
+    selectorFrame = null
+  }
+}
+
+function selectedAnnouncement(): string {
+  return winnerName.value
+    ? t('chat.routerFx.selectedModel', { model: winnerName.value })
+    : ''
+}
+
+function shouldAnimate(): boolean {
+  return showsRouterStage.value
+    && winnerIndex.value >= 0
+    && realCandidateIndices.value.length > 1
+    && props.message.routerStatic !== true
+    && props.message.routerObserve !== true
+    && props.message.routerSettled !== true
+    && prefersReducedMotion.value !== true
+}
+
+function settleStatic(announce = false) {
+  clearMotionTimers()
+  scanIndex.value = -1
+  selectorVisible.value = false
+  selectorStyle.value = {}
+  motionPhase.value = 'static'
+  resultAnnouncement.value = announce ? selectedAnnouncement() : ''
+}
+
+function lockWinner() {
+  clearMotionTimers()
+  scanIndex.value = -1
+  selectorVisible.value = false
+  selectorStyle.value = {}
+  motionPhase.value = winnerIndex.value >= 0 ? 'locked' : 'static'
+  resultAnnouncement.value = selectedAnnouncement()
+}
+
+function nextCandidateIndex(): number {
+  const candidates = realCandidateIndices.value
+  if (!candidates.length) return -1
+  scanCursor = (scanCursor + 1) % candidates.length
+  return candidates[scanCursor]
+}
+
+function syncSelectorPosition() {
+  if (motionPhase.value !== 'scanning' || scanIndex.value < 0) return
+  void nextTick(() => {
+    const grid = gridElement.value
+    const cell = grid?.querySelector<HTMLElement>(`.router-fx-cell[data-cell-idx="${scanIndex.value}"]`)
+    if (!grid || !cell || motionPhase.value !== 'scanning') return
+    const gridRect = grid.getBoundingClientRect()
+    const cellRect = cell.getBoundingClientRect()
+    selectorStyle.value = {
+      width: `${cellRect.width}px`,
+      height: `${cellRect.height}px`,
+      transform: `translate(${cellRect.left - gridRect.left}px, ${cellRect.top - gridRect.top}px) rotate(${scanIndex.value % 2 ? '-1.4deg' : '1.4deg'})`,
+    }
+    if (selectorVisible.value) return
+    selectorFrame = requestAnimationFrame(() => {
+      selectorFrame = null
+      if (motionPhase.value === 'scanning') selectorVisible.value = true
+    })
+  })
+}
+
+function scheduleScanStep() {
+  scanStepTimer = setTimeout(() => {
+    scanStepTimer = null
+    if (motionPhase.value !== 'scanning') return
+    scanIndex.value = nextCandidateIndex()
+    syncSelectorPosition()
+    scheduleScanStep()
+  }, ROUTER_FX_SCAN_STEP_MS)
+}
+
+function startScanning() {
+  clearMotionTimers()
+  resultAnnouncement.value = ''
+  selectorVisible.value = false
+  selectorStyle.value = {}
+  scanCursor = -1
+  motionPhase.value = 'scanning'
+  scanIndex.value = nextCandidateIndex()
+  syncSelectorPosition()
+  scheduleScanStep()
+  scanFinishTimer = setTimeout(lockWinner, ROUTER_FX_SCAN_WINDOW_MS)
+}
+
+function initializeMotion() {
+  if (!showsRouterStage.value) return
+  if (shouldAnimate()) {
+    startScanning()
+    return
+  }
+  const shouldAnnounce = winnerIndex.value >= 0
+    && props.message.routerStatic !== true
+    && props.message.routerObserve !== true
+  settleStatic(shouldAnnounce)
+}
+
+watch(animationIdentity, () => {
+  if (mounted) initializeMotion()
+})
+
+watch(winnerIndex, (next, previous) => {
+  if (!mounted || next < 0 || next === previous) return
+  if (motionPhase.value === 'idle') {
+    initializeMotion()
+    return
+  }
+  if (motionPhase.value === 'locked') startScanning()
+})
+
+watch(
+  () => [
+    props.message.routerStatic === true,
+    props.message.routerObserve === true,
+    props.message.routerSettled === true,
+    prefersReducedMotion.value,
+  ],
+  ([routerStatic, routerObserve, routerSettled, reduceMotion]) => {
+    if (!mounted || (!routerStatic && !routerObserve && !routerSettled && !reduceMotion)) return
+    const shouldAnnounce = winnerIndex.value >= 0 && !routerStatic && !routerObserve
+    settleStatic(shouldAnnounce)
+  },
+)
+
+onMounted(() => {
+  mounted = true
+  window.addEventListener('resize', syncSelectorPosition)
+  initializeMotion()
+})
+
+onBeforeUnmount(() => {
+  mounted = false
+  window.removeEventListener('resize', syncSelectorPosition)
+  clearMotionTimers()
+})
+
 function toggleInspector() {
   if (!hasInspector.value) return
   inspectorOpen.value = !inspectorOpen.value
@@ -178,7 +437,35 @@ function toggleInspector() {
 
 function ensembleModelUsage(model: ChatEnsembleMetaModel): string {
   const total = model.input + model.output
-  return total > 0 ? t('chat.routerFx.ensembleTokens', { count: total }) : t('chat.routerFx.ensembleUsed')
+  const usage = total > 0 ? t('chat.routerFx.ensembleTokens', { count: total }) : t('chat.routerFx.ensembleUsed')
+  const elapsed = ensembleModelElapsed(model)
+  return elapsed ? `${usage} · ${elapsed}` : usage
+}
+
+function ensembleModelFailure(model: ChatEnsembleMetaModel): string {
+  const failed = t('chat.routerFx.ensembleFailed')
+  const elapsed = ensembleModelElapsed(model)
+  return elapsed ? `${failed} · ${elapsed}` : failed
+}
+
+function ensembleModelSkipped(model: ChatEnsembleMetaModel): string {
+  const skipped = t('chat.routerFx.ensembleQuorumSkipped')
+  const elapsed = ensembleModelElapsed(model)
+  return elapsed ? `${skipped} · ${elapsed}` : skipped
+}
+
+function ensembleModelTitle(model: ChatEnsembleMetaModel): string | undefined {
+  if (model.status === 'skipped' && model.errorCode === 'quorum_cancelled') {
+    return t('chat.routerFx.ensembleQuorumSkippedDetail')
+  }
+  return model.error || undefined
+}
+
+function ensembleModelElapsed(model: ChatEnsembleMetaModel): string {
+  const elapsedMs = Number(model.elapsedMs || 0)
+  if (!Number.isFinite(elapsedMs) || elapsedMs <= 0) return ''
+  const seconds = elapsedMs / 1000
+  return `${seconds >= 10 ? Math.round(seconds) : Number(seconds.toFixed(1))}s`
 }
 </script>
 
@@ -273,6 +560,84 @@ function ensembleModelUsage(model: ChatEnsembleMetaModel): string {
   transition: transform var(--dur-base) var(--ease-out), background var(--dur-base) var(--ease-out), color var(--dur-base) var(--ease-out), border-color var(--dur-base) var(--ease-out), box-shadow var(--dur-base) var(--ease-out);
 }
 
+.router-fx-cell.scan-active {
+  z-index: 3;
+  border-color: color-mix(in srgb, var(--router-accent) 56%, var(--router-hairline));
+  animation: router-fx-candidate-scan var(--dur-base) var(--ease-spring) both;
+}
+
+.router-fx-selector {
+  position: absolute;
+  z-index: 2;
+  top: 0;
+  left: 0;
+  box-sizing: border-box;
+  border: 2px solid color-mix(in srgb, var(--router-accent) 82%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--router-accent) 6%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--router-accent) 16%, transparent);
+  pointer-events: none;
+  opacity: 0;
+  transform: translate(0, 0);
+  transition: transform var(--dur-fast) var(--ease-spring), opacity var(--dur-fast) var(--ease-out);
+  will-change: transform;
+}
+
+.router-fx-selector.visible {
+  opacity: 1;
+}
+
+@keyframes router-fx-candidate-scan {
+  0%, 100% {
+    transform: translateY(0) scale(1);
+    background: var(--router-cell-bg);
+  }
+  42% {
+    transform: translateY(-2px) scale(1.045);
+    background: color-mix(in srgb, var(--router-accent) 12%, var(--router-bg));
+  }
+}
+
+.router-fx-ensemble-stage {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.router-fx-handoff {
+  display: flex;
+  justify-content: center;
+  height: 16px;
+}
+
+.router-fx-handoff span {
+  position: relative;
+  width: 1px;
+  height: 12px;
+  background: color-mix(in srgb, var(--router-accent) 52%, var(--router-hairline));
+}
+
+.router-fx-handoff span::after {
+  content: '';
+  position: absolute;
+  bottom: -1px;
+  left: 50%;
+  width: 5px;
+  height: 5px;
+  border-right: 1px solid var(--router-accent);
+  border-bottom: 1px solid var(--router-accent);
+  transform: translateX(-50%) rotate(45deg);
+}
+
+.router-fx-stage-enter-active {
+  transition: opacity var(--dur-enter) var(--ease-out), transform var(--dur-enter) var(--ease-out);
+}
+
+.router-fx-stage-enter-from {
+  opacity: 0;
+  transform: translateY(-5px);
+}
+
 .router-fx-ensemble {
   position: relative;
   display: flex;
@@ -343,9 +708,8 @@ function ensembleModelUsage(model: ChatEnsembleMetaModel): string {
 .router-fx-ensemble__meta {
   flex: 0 0 auto;
   color: var(--router-muted);
-  font-family: var(--font-mono);
-  font-size: 9px;
-  text-transform: uppercase;
+  font-size: 12.5px;
+  font-weight: 400;
   white-space: nowrap;
 }
 
@@ -417,7 +781,7 @@ function ensembleModelUsage(model: ChatEnsembleMetaModel): string {
 
 .router-fx-inspector__row {
   display: grid;
-  grid-template-columns: 74px minmax(0, 1fr) 64px;
+  grid-template-columns: 74px minmax(0, 1fr) minmax(64px, max-content);
   align-items: center;
   gap: 7px;
   min-height: 24px;
@@ -433,7 +797,6 @@ function ensembleModelUsage(model: ChatEnsembleMetaModel): string {
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--router-muted);
-  text-transform: uppercase;
   white-space: nowrap;
 }
 
@@ -466,6 +829,16 @@ function ensembleModelUsage(model: ChatEnsembleMetaModel): string {
   color: var(--router-accent);
 }
 
+.router-fx-inspector__row--failed .router-fx-inspector__model,
+.router-fx-inspector__row--failed .router-fx-inspector__usage {
+  color: var(--danger);
+}
+
+.router-fx-inspector__row--skipped .router-fx-inspector__model,
+.router-fx-inspector__row--skipped .router-fx-inspector__usage {
+  color: var(--router-muted);
+}
+
 .router-fx-inspector__spin {
   display: inline-block;
   width: 8px;
@@ -496,6 +869,18 @@ function ensembleModelUsage(model: ChatEnsembleMetaModel): string {
   min-width: 0;
 }
 
+.router-fx-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 /* Normal and bold name variants are stacked from first paint so the winner
    reveal is a pure opacity crossfade: the cell never reflows text. */
 .router-fx-cell .nm-base,
@@ -513,6 +898,7 @@ function ensembleModelUsage(model: ChatEnsembleMetaModel): string {
 }
 
 .router-fx-cell.win {
+  z-index: 4;
   font-style: normal;
   animation: router-fx-winner-reveal var(--dur-enter) var(--ease-out) both;
 }
@@ -540,7 +926,22 @@ function ensembleModelUsage(model: ChatEnsembleMetaModel): string {
   border-radius: 50%;
   background: var(--router-accent);
   opacity: 1;
-  animation: router-fx-winner-dot-reveal var(--dur-enter) var(--ease-out) both;
+  box-shadow: 0 0 8px color-mix(in srgb, var(--router-accent) 72%, transparent);
+  animation: router-fx-winner-dot-locked var(--dur-pulse) var(--ease-out) infinite;
+}
+
+.router-fx-cell.win::before {
+  content: '';
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--router-accent) 92%, transparent), transparent);
+  pointer-events: none;
+  opacity: 0;
+  animation: router-fx-winner-scan calc(var(--dur-enter) * 2.5) var(--ease-standard) both;
 }
 
 .router-fx[data-source="fallback"] .router-fx-cell.win {
@@ -549,10 +950,16 @@ function ensembleModelUsage(model: ChatEnsembleMetaModel): string {
 
 .router-fx[data-source="fallback"] .router-fx-cell.win::after {
   background: var(--router-danger);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--router-danger) 72%, transparent);
+}
+
+.router-fx[data-source="fallback"] .router-fx-cell.win::before {
+  background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--router-danger) 92%, transparent), transparent);
 }
 
 .router-fx[data-settled="true"] .router-fx-cell,
 .router-fx[data-settled="true"] .router-fx-cell.win,
+.router-fx[data-settled="true"] .router-fx-cell.win::before,
 .router-fx[data-settled="true"] .router-fx-cell.win::after,
 .router-fx[data-settled="true"] .router-fx-cell .nm-base,
 .router-fx[data-settled="true"] .router-fx-cell .nm-win,
@@ -589,7 +996,10 @@ function ensembleModelUsage(model: ChatEnsembleMetaModel): string {
     background: color-mix(in srgb, var(--router-accent) 9%, var(--router-bg));
     border-color: var(--router-accent);
     transform: translateY(-1px);
-    box-shadow: 0 1px 0 color-mix(in srgb, var(--router-accent) 35%, transparent);
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--router-accent) 28%, transparent),
+      0 8px 20px -12px color-mix(in srgb, var(--router-accent) 66%, transparent),
+      inset 0 1px 0 color-mix(in srgb, var(--router-accent) 32%, transparent);
   }
 }
 
@@ -604,7 +1014,10 @@ function ensembleModelUsage(model: ChatEnsembleMetaModel): string {
     background: color-mix(in srgb, var(--router-danger) 9%, var(--router-bg));
     border-color: var(--router-danger);
     transform: translateY(-1px);
-    box-shadow: 0 1px 0 color-mix(in srgb, var(--router-danger) 35%, transparent);
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--router-danger) 28%, transparent),
+      0 8px 20px -12px color-mix(in srgb, var(--router-danger) 66%, transparent),
+      inset 0 1px 0 color-mix(in srgb, var(--router-danger) 32%, transparent);
   }
 }
 
@@ -618,9 +1031,16 @@ function ensembleModelUsage(model: ChatEnsembleMetaModel): string {
   100% { opacity: 1; }
 }
 
-@keyframes router-fx-winner-dot-reveal {
-  0% { opacity: 0.72; }
-  100% { opacity: 1; }
+@keyframes router-fx-winner-dot-locked {
+  0%, 100% { opacity: 0.82; transform: scale(0.86); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+@keyframes router-fx-winner-scan {
+  0% { top: 0; opacity: 0; }
+  18% { top: 10%; opacity: 1; }
+  82% { top: 90%; opacity: 0.82; }
+  100% { top: 100%; opacity: 0; }
 }
 
 @keyframes router-fx-ensemble-beat {
@@ -677,6 +1097,8 @@ function ensembleModelUsage(model: ChatEnsembleMetaModel): string {
 }
 
 .router-fx[data-static="true"] .router-fx-cell,
+.router-fx[data-static="true"] .router-fx-cell::before,
+.router-fx[data-static="true"] .router-fx-cell::after,
 .router-fx[data-static="true"] .router-fx-cell .nm-base,
 .router-fx[data-static="true"] .router-fx-cell .nm-win {
   animation: none;
@@ -711,13 +1133,20 @@ function ensembleModelUsage(model: ChatEnsembleMetaModel): string {
 
 @media (prefers-reduced-motion: reduce) {
   .router-fx-cell,
+  .router-fx-cell::before,
+  .router-fx-cell::after,
   .router-fx-cell .nm-base,
   .router-fx-cell .nm-win,
+  .router-fx-selector,
   .router-fx-ensemble__dot,
   .router-fx-ensemble__scan,
   .router-fx-inspector__spin {
     animation: none !important;
     transition: none !important;
+  }
+
+  .router-fx-stage-enter-active {
+    transition: none;
   }
 }
 

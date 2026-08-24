@@ -1,10 +1,9 @@
 """LocalAdapter: run an OpenSquilla agent as a host subprocess.
 
-Unlike the swebench OpenSquillaAdapter (which crosses a Docker boundary via
-``docker exec``), this runs ``opensquilla agent`` directly on the host with
-the repo as the working directory. Provider credentials are inherited from
-the runner's environment — no env-file is needed because there is no
-container boundary to cross (codex review #3).
+This runs ``opensquilla agent`` directly on the host with the repo as the
+working directory. Provider credentials are inherited from the runner's
+environment, so no env-file is needed because there is no container boundary
+to cross (codex review #3).
 """
 
 from __future__ import annotations
@@ -48,6 +47,53 @@ POLL_INTERVAL_SECONDS = 0.5
 
 _JSON_OBJECT_RE = re.compile(r"\{(?:[^{}]|(?:\{[^{}]*\}))*\}")
 StatusCallback = Callable[[dict[str, Any]], None]
+
+# code-task inherits the operator's runtime environment for credentials,
+# proxies, PATH, and packaged-runtime discovery. Persistent/profile-scoped
+# locations are different: a child agent is a separate writer and must never
+# attach itself to the live Desktop/gateway profile that launched the run.
+_PROFILE_SCOPED_CHILD_ENV = frozenset(
+    {
+        "OPENSQUILLA_DESKTOP",
+        "OPENSQUILLA_DESKTOP_PROFILE_KIND",
+        "OPENSQUILLA_PROFILE_KIND",
+        "OPENSQUILLA_HOME",
+        "OPENSQUILLA_PROFILE",
+        "OPENSQUILLA_STATE_DIR",
+        "OPENSQUILLA_GATEWAY_STATE_DIR",
+        "OPENSQUILLA_GATEWAY_WORKSPACE_DIR",
+        "OPENSQUILLA_WORKSPACE_DIR",
+        "OPENSQUILLA_MEMORY_DIR",
+        "OPENSQUILLA_MEMORY_DB",
+        "OPENSQUILLA_SESSION_ARCHIVE_DIR",
+        "OPENSQUILLA_LOG_DIR",
+        "OPENSQUILLA_TURN_CALL_LOG_DIR",
+        "OPENSQUILLA_LLM_TRACE_PATH",
+        "OPENSQUILLA_RUNTIME_EVENTS_PATH",
+        "OPENSQUILLA_PATCH_EVIDENCE_LEDGER_PATH",
+        "OPENSQUILLA_SCHEDULER_DB",
+        "OPENSQUILLA_META_RUNS_DB",
+        "OPENSQUILLA_ROUTER_DECISIONS_DB",
+    }
+)
+
+
+def _agent_access_arguments(bundle: AgentConfigBundle) -> list[str]:
+    """Return child CLI access flags matching the effective sandbox run mode."""
+
+    from opensquilla.gateway.config import GatewayConfig
+    from opensquilla.run_mode import RunMode, normalize_run_mode
+
+    config = GatewayConfig(**copy.deepcopy(bundle.payload))
+    run_mode = normalize_run_mode(config.effective_run_mode)
+    if run_mode is RunMode.FULL:
+        return ["--no-workspace-strict", "--permissions", "full"]
+    return [
+        "--workspace-strict",
+        "--workspace-lockdown",
+        "--permissions",
+        "restricted",
+    ]
 
 
 class LocalAdapter:
@@ -99,6 +145,7 @@ class LocalAdapter:
         if not usage_path.exists():
             usage_path.write_text("{}", encoding="utf-8")
 
+        bundle = self.agent_config or load_agent_config_bundle()
         argv: list[str] = [
             "opensquilla",
             "agent",
@@ -106,10 +153,7 @@ class LocalAdapter:
             prompt,
             "--workspace",
             str(repo),
-            # Read containment to the repo (codex review #9: explicit, not default).
-            "--workspace-strict",
-            # Write containment: writes must stay under workspace or scratch.
-            "--workspace-lockdown",
+            *_agent_access_arguments(bundle),
             "--scratch-dir",
             str(scratch_dir),
             "--stateless",
@@ -130,8 +174,6 @@ class LocalAdapter:
             str(transcript_path),
             "--usage-path",
             str(usage_path),
-            "--permissions",
-            "bypass",
         ]
         if self.model:
             argv += ["--model", self.model]
@@ -164,7 +206,6 @@ class LocalAdapter:
         # media_root_from_config(); tool_result_store_dir = media_root/tool-results.
         run_media_root = scratch_dir.expanduser().resolve() / "media"
         per_run_config = artifact_dir / "agent-config.toml"
-        bundle = self.agent_config or load_agent_config_bundle()
         _cfg = copy.deepcopy(bundle.payload)
         _attachments = _cfg.setdefault("attachments", {})
         if not isinstance(_attachments, dict):
@@ -176,11 +217,11 @@ class LocalAdapter:
         # POSIX mode is honored; a no-op on Windows (best effort). Attempt
         # snapshots preserve the mode (copy2).
         _write_owner_only(per_run_config, tomli_w.dumps(_cfg))
-        agent_env = {
-            **os.environ,
-            **bundle.child_env,
-            "OPENSQUILLA_GATEWAY_CONFIG_PATH": str(per_run_config),
-        }
+        agent_env = _agent_environment(
+            bundle=bundle,
+            per_run_config=per_run_config,
+            scratch_dir=scratch_dir,
+        )
         popen_kwargs: dict[str, Any] = dict(
             cwd=str(repo),
             stdout=subprocess.PIPE,
@@ -276,6 +317,35 @@ class LocalAdapter:
             error=stall_error or None,
             errors=envelope_errors,
         )
+
+
+def _agent_environment(
+    *,
+    bundle: AgentConfigBundle,
+    per_run_config: Path,
+    scratch_dir: Path,
+) -> dict[str, str]:
+    """Build the isolated environment for one code-task child agent.
+
+    The child still acquires the universal writer lock, but for a disposable
+    per-attempt profile under scratch rather than the caller's live profile.
+    Runtime/provider variables remain inherited; only persistent data-root
+    overrides are removed.
+    """
+
+    environment = dict(os.environ)
+    for name in _PROFILE_SCOPED_CHILD_ENV:
+        environment.pop(name, None)
+    environment.update(bundle.child_env)
+    environment.update(
+        {
+            "OPENSQUILLA_STATE_DIR": str(
+                scratch_dir.expanduser().resolve() / "profile"
+            ),
+            "OPENSQUILLA_GATEWAY_CONFIG_PATH": str(per_run_config),
+        }
+    )
+    return environment
 
 
 def _monitor_process(

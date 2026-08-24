@@ -7,6 +7,26 @@ export interface SessionStatusBadge {
   cls: string
 }
 
+export interface SessionAgentIdentity {
+  kind: 'unknown' | 'known' | 'raw' | 'deleted'
+  value: string
+}
+
+/** Only call an agent deleted after one authoritative agents.list succeeded. */
+export function sessionAgentIdentity(
+  id: string | null | undefined,
+  agentNames: ReadonlyMap<string, string>,
+  agentsLoaded: boolean,
+): SessionAgentIdentity {
+  const normalized = String(id || '').trim()
+  if (!normalized || normalized === 'unknown') return { kind: 'unknown', value: '' }
+  const known = agentNames.get(normalized)
+  if (known) return { kind: 'known', value: known }
+  return agentsLoaded
+    ? { kind: 'deleted', value: normalized }
+    : { kind: 'raw', value: normalized }
+}
+
 export type SessionStatusBadgeClasses = Partial<Record<
   'needsInput' | 'running' | 'queued' | 'failed' | 'timeout' | 'interrupted' | 'cancelled',
   string
@@ -89,15 +109,9 @@ export function formatRelativeTime(timestamp: number | null | undefined): string
 /** Back-compat alias; prefer {@link formatRelativeTime} for new call sites. */
 export const sessionRelTime = formatRelativeTime
 
-/**
- * Ledger title for a subagent row: "↳ Subagent · {parent title}" when the
- * parent title is known, otherwise a plain "↳ Subagent" so we never surface a
- * raw key. The arrow + label conveys lineage without rendering UUIDs.
- */
-export function subagentRowTitle(parentTitle: string | null | undefined): string {
+/** Ledger title for a subagent row, preserving its own durable title. */
+export function subagentRowTitle(title: string | null | undefined): string {
   const t = i18n.global.t
-  const parent = (parentTitle || '').trim()
-  return parent
-    ? `↳ ${t('sessions.ledger.subagentWithParent', { parent })}`
-    : `↳ ${t('sessions.ledger.subagent')}`
+  const normalized = (title || '').trim()
+  return normalized ? `↳ ${normalized}` : `↳ ${t('sessions.ledger.subagent')}`
 }

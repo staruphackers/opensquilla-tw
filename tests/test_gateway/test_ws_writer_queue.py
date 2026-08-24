@@ -19,7 +19,18 @@ import pytest
 import structlog
 from starlette.websockets import WebSocketState
 
-from opensquilla.gateway.protocol import make_event
+import opensquilla.gateway.websocket as websocket_module
+from opensquilla.contracts.gateway_transport import (
+    ANSWER_GENERATION_RESET_CAPABILITY,
+    TURN_COMMITTED_CAPABILITY,
+    TURN_COMMITTED_EVENT,
+)
+from opensquilla.gateway.auth import Principal
+from opensquilla.gateway.protocol import (
+    make_event,
+    make_ok_res,
+    project_session_event_for_client,
+)
 from opensquilla.gateway.websocket import (
     _LOSSY_EVENTS,
     _SENTINEL_STOP,
@@ -72,6 +83,164 @@ async def _flush_writer(conn: WsConnection, *, deadline: float = 1.0) -> None:
             await asyncio.sleep(0)
             return
         await asyncio.sleep(0.01)
+
+
+def _turn_committed_payload(**overrides: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "session_key": "agent:main:committed",
+        "task_id": "task-committed",
+        "turn_id": "turn-committed",
+        "status": "succeeded",
+        "terminal_reason": "completed",
+        "finished_at": 1_234,
+        "stream_generation": "generation-committed",
+        "stream_seq": 7,
+        "emitted_at": 1_235,
+        "text": "must not cross the public boundary",
+    }
+    payload.update(overrides)
+    return payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("writer_enabled", [False, True])
+@pytest.mark.parametrize(
+    ("client_capable", "principal_capable", "expected_event"),
+    [
+        (False, True, "session.event.error"),
+        (True, False, "session.event.answer_generation_reset"),
+    ],
+)
+async def test_terminal_reset_projection_uses_connect_caps_at_send_boundary(
+    writer_enabled: bool,
+    client_capable: bool,
+    principal_capable: bool,
+    expected_event: str,
+) -> None:
+    fake = _FakeWebSocket()
+    conn = WsConnection(
+        conn_id="cx-reset-projection",
+        ws=fake,  # type: ignore[arg-type]
+        client_caps=(
+            frozenset({ANSWER_GENERATION_RESET_CAPABILITY})
+            if client_capable
+            else frozenset()
+        ),
+        principal=Principal(
+            role="operator",
+            scopes=frozenset({"operator.read"}),
+            is_owner=False,
+            authenticated=True,
+            capabilities=(
+                frozenset({ANSWER_GENERATION_RESET_CAPABILITY})
+                if principal_capable
+                else frozenset({"host.execute"})
+            ),
+        ),
+    )
+    conn._start_writer(maxsize=8, enabled=writer_enabled)
+    original = {
+        "kind": "answer_generation_reset",
+        "turn_id": "turn-reset",
+        "assistant_message_id": "assistant-reset",
+        "authoritative_text_snapshot": "partial fallback",
+        "terminal": True,
+        "terminal_text_snapshot": "The model could not complete this answer.",
+        "terminal_error_message": "INTERNAL_MESSAGE",
+        "terminal_error_code": "INTERNAL_CODE",
+        "terminal_failure_kind": "INTERNAL_KIND",
+        "session_key": "agent:main:reset",
+        "stream_seq": 17,
+    }
+    payload = dict(original)
+    try:
+        await conn.send_event(
+            "session.event.answer_generation_reset",
+            payload,
+            meta={"replayed": True},
+        )
+        if writer_enabled:
+            await _flush_writer(conn)
+        assert len(fake.sent) == 1
+        frame = json.loads(fake.sent[0])
+        assert frame["event"] == expected_event
+        assert frame["payload"]["stream_seq"] == 17
+        assert frame["meta"] == {"replayed": True}
+        assert "terminal_error_message" not in frame["payload"]
+        assert "terminal_error_code" not in frame["payload"]
+        assert "terminal_failure_kind" not in frame["payload"]
+        if expected_event == "session.event.error":
+            assert frame["payload"]["message"] == original["terminal_text_snapshot"]
+            assert frame["payload"]["code"] == "ensemble_fixed_error"
+        else:
+            assert "message" not in frame["payload"]
+        # Per-client projection must never rewrite the canonical replay payload.
+        assert payload == original
+    finally:
+        await conn._stop_writer()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("writer_enabled", [False, True])
+async def test_turn_committed_is_capability_gated_and_allowlisted(
+    writer_enabled: bool,
+) -> None:
+    payload = _turn_committed_payload()
+    legacy_socket = _FakeWebSocket()
+    legacy = WsConnection(conn_id="committed-legacy", ws=legacy_socket)  # type: ignore[arg-type]
+    capable_socket = _FakeWebSocket()
+    capable = WsConnection(
+        conn_id="committed-capable",
+        ws=capable_socket,  # type: ignore[arg-type]
+        client_caps=frozenset({TURN_COMMITTED_CAPABILITY}),
+    )
+    legacy._start_writer(maxsize=8, enabled=writer_enabled)
+    capable._start_writer(maxsize=8, enabled=writer_enabled)
+    try:
+        await legacy.send_event(TURN_COMMITTED_EVENT, payload)
+        await capable.send_event(TURN_COMMITTED_EVENT, payload)
+        if writer_enabled:
+            await _flush_writer(legacy)
+            await _flush_writer(capable)
+
+        assert legacy_socket.sent == []
+        frame = json.loads(capable_socket.sent[0])
+        assert frame["event"] == TURN_COMMITTED_EVENT
+        assert frame["payload"] == {
+            key: value for key, value in payload.items() if key != "text"
+        }
+    finally:
+        await legacy._stop_writer()
+        await capable._stop_writer()
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("schema_version", None),
+        ("schema_version", True),
+        ("schema_version", 2),
+        ("status", "failed"),
+        ("finished_at", "1234"),
+        ("stream_seq", False),
+    ],
+)
+def test_turn_committed_projection_rejects_invalid_contract_fields(
+    field_name: str,
+    invalid_value: object,
+) -> None:
+    payload = _turn_committed_payload()
+    if invalid_value is None:
+        payload.pop(field_name)
+    else:
+        payload[field_name] = invalid_value
+
+    assert project_session_event_for_client(
+        TURN_COMMITTED_EVENT,
+        payload,
+        client_caps={TURN_COMMITTED_CAPABILITY},
+    ) is None
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +460,92 @@ async def test_kill_switch_disabled_uses_legacy_direct_send() -> None:
     assert len(fake.sent) == 1
     payload = json.loads(fake.sent[0])
     assert payload["seq"] == 1
+
+
+@pytest.mark.asyncio
+async def test_kill_switch_direct_send_timeout_closes_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeWebSocket()
+    fake._send_event = asyncio.Event()
+    fake._send_unblock = asyncio.Event()
+    conn = WsConnection(conn_id="cx-legacy-timeout", ws=fake)  # type: ignore[arg-type]
+    conn._start_writer(maxsize=4, enabled=False)
+    monkeypatch.setattr(websocket_module, "_DIRECT_SEND_TIMEOUT_SECONDS", 0.01)
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(
+            conn.send_event("session.event.text_delta", {"chunk": "x"}),
+            timeout=0.5,
+        )
+
+    assert conn._closing is True
+    assert fake.close_code == 1011
+    assert fake.close_reason == "direct_send_timeout"
+
+
+@pytest.mark.asyncio
+async def test_cancellation_resistant_direct_send_is_bounded_and_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _ShieldedFakeWebSocket()
+    fake._send_event = asyncio.Event()
+    fake._send_unblock = asyncio.Event()
+    conn = WsConnection(conn_id="cx-legacy-shielded", ws=fake)  # type: ignore[arg-type]
+    conn._start_writer(maxsize=4, enabled=False)
+    monkeypatch.setattr(websocket_module, "_DIRECT_SEND_TIMEOUT_SECONDS", 0.01)
+
+    try:
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(
+                conn.send_event("session.event.text_delta", {"chunk": "x"}),
+                timeout=0.5,
+            )
+        elapsed = asyncio.get_running_loop().time() - started
+
+        assert elapsed < 0.5
+        assert conn._closing is True
+        assert fake.close_code == 1011
+
+        # The cancellation-resistant socket still owns the original low-level
+        # send, but the connection is terminal and cannot start a second one.
+        await conn.send_event("session.event.text_delta", {"chunk": "late"})
+        await conn.send_res(make_ok_res("late-response", {"ok": True}))
+        await conn.send_raw_text('{"type":"pong"}')
+        assert fake._send_event.is_set() is True
+        assert fake.sent == []
+    finally:
+        fake._send_unblock.set()
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_raw_pong_uses_the_connection_writer_queue() -> None:
+    fake = _FakeWebSocket()
+    conn = WsConnection(conn_id="cx-raw-pong", ws=fake)  # type: ignore[arg-type]
+    conn._start_writer(maxsize=4, enabled=True)
+    try:
+        await conn.send_raw_text('{"type":"pong"}')
+        await _flush_writer(conn)
+        assert fake.sent == ['{"type":"pong"}']
+    finally:
+        await conn._stop_writer()
+
+
+@pytest.mark.asyncio
+async def test_stopped_writer_refuses_event_response_and_raw_fallback_sends() -> None:
+    fake = _FakeWebSocket()
+    conn = WsConnection(conn_id="cx-stopped", ws=fake)  # type: ignore[arg-type]
+    conn._start_writer(maxsize=4, enabled=True)
+    await conn._stop_writer()
+
+    await conn.send_event("session.event.text_delta", {"chunk": "late"})
+    await conn.send_res(make_ok_res("late-response", {"ok": True}))
+    await conn.send_raw_text('{"type":"pong"}')
+
+    assert conn._closing is True
+    assert fake.sent == []
 
 
 # ---------------------------------------------------------------------------

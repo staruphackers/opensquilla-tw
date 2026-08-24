@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from dataclasses import dataclass
 from enum import StrEnum
@@ -45,6 +46,8 @@ class WindowsSetupSupport:
     acl_api_available: bool
     setup_ready: bool
     proxy_allowlist_enforced: bool
+    identity_ready: bool = True
+    storage_ready: bool = True
 
 
 def _platform_name(platform: str | None = None) -> str:
@@ -140,6 +143,13 @@ async def _windows_setup_status(config: Any) -> SetupResult:
 
 
 async def _ensure_windows_setup(config: Any) -> SetupResult:
+    # Windows setup can wait for UAC consent and for the elevated helper to
+    # finish. Keep that blocking Win32 work off the gateway event loop so
+    # health checks, shutdown, and setup-status RPCs stay responsive.
+    return await asyncio.to_thread(_ensure_windows_setup_sync, config)
+
+
+def _ensure_windows_setup_sync(config: Any) -> SetupResult:
     _ = config
     support = _probe_windows_sandbox_support()
     if support.default_backend_available and support.proxy_allowlist_enforced:
@@ -148,7 +158,12 @@ async def _ensure_windows_setup(config: Any) -> SetupResult:
         support.ctypes_available
         and support.token_api_available
         and support.acl_api_available
-        and (not support.setup_ready or not support.proxy_allowlist_enforced)
+        and (
+            not support.setup_ready
+            or not support.proxy_allowlist_enforced
+            or not support.identity_ready
+            or not support.storage_ready
+        )
     ):
         marker_path = _windows_setup_marker_path()
         if not _windows_process_is_admin():
@@ -220,11 +235,20 @@ def _windows_default_setup_result() -> SetupResult:
         reasons.append("setup=not ready")
     elif not support.proxy_allowlist_enforced:
         reasons.append("network_boundary=not ready")
+    if not support.identity_ready:
+        reasons.append("offline_identity=not ready")
+    if not support.storage_ready:
+        reasons.append("sandbox_storage=not ready")
     recoverable_setup = (
         support.ctypes_available
         and support.token_api_available
         and support.acl_api_available
-        and (not support.setup_ready or not support.proxy_allowlist_enforced)
+        and (
+            not support.setup_ready
+            or not support.proxy_allowlist_enforced
+            or not support.identity_ready
+            or not support.storage_ready
+        )
     )
     return SetupResult(
         state=SandboxSetupState.NOT_SETUP if recoverable_setup else SandboxSetupState.UNAVAILABLE,
@@ -248,6 +272,8 @@ def _probe_windows_sandbox_support() -> WindowsSetupSupport:
         acl_api_available=support.acl_api_available,
         setup_ready=support.setup_ready,
         proxy_allowlist_enforced=support.proxy_allowlist_enforced,
+        identity_ready=support.identity_ready,
+        storage_ready=support.storage_ready,
     )
 
 

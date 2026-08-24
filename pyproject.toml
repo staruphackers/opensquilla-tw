@@ -1,6 +1,6 @@
 [project]
 name = "opensquilla"
-version = "0.5.0rc3"
+version = "0.5.3"
 description = "OpenSquilla — microkernel Python agent runtime with MCP-native tools and multi-channel messaging"
 license = "Apache-2.0"
 readme = "README.md"
@@ -18,6 +18,7 @@ dependencies = [
     "starlette>=0.40",
     "python-multipart>=0.0.20",
     "uvicorn[standard]>=0.30",
+    "watchfiles>=1.1.1",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     "sqlmodel>=0.0.20",
@@ -38,6 +39,7 @@ dependencies = [
     "readability-lxml>=0.8",
     "beautifulsoup4>=4.12",
     "cachetools>=5.3",
+    "certifi>=2024.7.4",
     "pdfplumber>=0.11",
     "pillow>=10.0",
     "croniter>=2.0",
@@ -63,6 +65,7 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+    "pytest-xdist>=3.6",
     "mypy>=1.10",
     "ruff>=0.5",
 ]
@@ -90,21 +93,23 @@ matrix-e2e = ["matrix-nio[e2e]>=0.25,<0.26", "markdown>=3.0"]
 document-extras = [
     "weasyprint>=60.0",
 ]
-swebench = [
-    "datasets>=2.19",
-    "swebench>=4.0",
-]
-
 [project.scripts]
 opensquilla = "opensquilla.cli.main:app"
 gateway = "opensquilla.cli.main:gateway_app"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.31,<2"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.hooks.custom]
+# Standard wheel/sdist builds fail closed unless the generated WebUI matches
+# the current frontend source. Editable installs intentionally skip this hook.
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/opensquilla"]
+# Hatch normally honors .gitignore. This explicit artifact rule lets a
+# verified, generated WebUI bundle enter wheels without tracking it in Git.
+artifacts = ["src/opensquilla/gateway/static/dist/**"]
 exclude = [
     "src/opensquilla/scheduler/templates/*.md",
     "src/opensquilla/skills/bundled/**/THIRD_PARTY_NOTICES.md",
@@ -114,10 +119,18 @@ exclude = [
     "src/opensquilla/skills/bundled/**/references/*.md",
     "src/opensquilla/skills/exp/**",
     "src/opensquilla/skills/meta/META_SKILL_AUTHORING.md",
+    # The core distribution may carry the OpenTUI JavaScript sources for
+    # explicit source-development mode, but never local dependency installs or
+    # compiled platform artifacts. Those belong to opensquilla-tui-host.
+    "src/opensquilla/cli/tui/opentui/package/node_modules/**",
+    "src/opensquilla/cli/tui/opentui/package/bin/**",
+    "src/opensquilla/cli/tui/opentui/package/build/**",
+    "src/opensquilla/cli/tui/opentui/package/dist/**",
 ]
 
 [tool.hatch.build.targets.wheel.force-include]
 "migrations/" = "opensquilla/_migrations/"
+"desktop/electron/runtime/runtime-pack-catalog.json" = "opensquilla/runtime_packs/runtime-pack-catalog.json"
 "src/opensquilla/skills/bundled/html-coder/references/add-css-style.md" = "opensquilla/skills/bundled/html-coder/references/add-css-style.md"
 "src/opensquilla/skills/bundled/html-coder/references/add-javascript.md" = "opensquilla/skills/bundled/html-coder/references/add-javascript.md"
 "src/opensquilla/skills/bundled/html-coder/references/attributes.md" = "opensquilla/skills/bundled/html-coder/references/attributes.md"
@@ -128,11 +141,23 @@ exclude = [
 "src/opensquilla/skills/bundled/pptx/references/pptxgenjs.md" = "opensquilla/skills/bundled/pptx/references/pptxgenjs.md"
 "src/opensquilla/skills/bundled/pptx/references/python_pptx.md" = "opensquilla/skills/bundled/pptx/references/python_pptx.md"
 
+[tool.hatch.build.targets.sdist]
+# Published sdists remain self-contained: downstream wheel builds do not need
+# Node.js because release CI embeds the already-verified WebUI artifact here.
+# Standard sdists deliberately reject ignored personal BGM so an ordinary
+# source-archive build cannot leak private or copyrighted audio. Developers who
+# need a private customized artifact can build a direct local wheel instead.
+artifacts = ["src/opensquilla/gateway/static/dist/**"]
+
+[tool.hatch.build.targets.sdist.force-include]
+"desktop/electron/runtime/runtime-pack-catalog.json" = "desktop/electron/runtime/runtime-pack-catalog.json"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 norecursedirs = ["tests/_private", "tests/fixtures", ".omx", ".codex", ".claude"]
 markers = [
+    "ci_serial: tests that must run outside the parallel CI pytest worker pool",
     "llm: marks tests that make real external model/provider API calls (deselect with '-m \"not llm\"')",
     "llm_smoke: low-cost live LLM smoke tests",
     "llm_costly: slower or more expensive live model/provider tests",
@@ -148,6 +173,7 @@ markers = [
     "tui_real_terminal: real terminal TUI integration tests driven through tmux or PTY",
     "live_channel: marks tests that hit a real channel platform (deselect with '-m \"not live_channel\"')",
     "live_search: marks opt-in tests that hit real search providers (deselect with '-m \"not live_search\"')",
+    "live_skill_hub: marks opt-in tests that fetch a real Community Skill artifact (deselect with '-m \"not live_skill_hub\"')",
 ]
 
 [tool.ruff]
@@ -185,6 +211,8 @@ select = ["E", "F", "I", "N", "W", "UP"]
 
 [tool.mypy]
 python_version = "3.12"
+# Match the canonical full-tree type-check target used by CI on every host.
+platform = "linux"
 warn_return_any = true
 warn_unused_configs = true
 exclude = [
@@ -200,7 +228,6 @@ module = [
     "botbuilder.*",
     "botpy.*",
     "cachetools.*",
-    "datasets.*",
     "dingtalk_stream.*",
     "extract_msg.*",
     "jieba",
@@ -209,7 +236,6 @@ module = [
     "onnxruntime.*",
     "readability.*",
     "src.router.*",
-    "swebench.*",
     "tiktoken.*",
     "tokenizers.*",
     "websockets.*",

@@ -5,17 +5,48 @@ import type {
   ChatStreamTimelineItem,
 } from '@/types/chat'
 import { copyTextWithFallback } from '@/utils/browser'
+import { resolveAssistantAnswer } from '@/utils/chat/assistantActivity'
+import { turnOutcomePresentation } from '@/utils/chat/turnOutcome'
+import {
+  isUsageAccountingBarrierMessage,
+  strictUsageBarrierRetryUserMessageIndex,
+} from '@/utils/chat/usageAccountingFailure'
+import { sanitizeAssistantPresentationSegments } from '@/utils/chat/silentSentinels'
+import type { AssistantPresentationProvenance } from '@/utils/chat/silentSentinels'
 
 export interface UseChatMessageActionsOptions {
   messages: Ref<ChatMessage[]>
   inputText: Ref<string>
   isStreaming: Ref<boolean>
-  sanitizeCopyText: (text: string) => string
+  sanitizeCopyText: (text: string, opts?: {
+    assistantBoundary?: boolean
+    provenance?: AssistantPresentationProvenance
+  }) => string
   stripTimePrefix: (text: string) => string
   autoResizeTextarea: () => void
   sendCurrentInput: () => void
+  sendUsageBarrierReplay: (payload: {
+    text: string
+    forkBeforeMessageId: string
+  }) => Promise<boolean>
   focusComposer: () => void
   pendingForkBeforeMessageId: Ref<string | null>
+  aiGeneratedLabel?: () => string
+  canDeliver?: () => boolean
+  notifyDeliveryBlocked?: () => void
+  /**
+   * User-visible feedback when regenerate/edit cannot run because the anchor
+   * user message has no durable server id yet (chat.send ack lost, or an
+   * older gateway omitted the id). Without it the buttons look dead: the
+   * only trace of the refusal would be a console warning.
+   */
+  notifyMessagePending?: () => void
+  /**
+   * User-visible feedback when edit is clicked while the assistant is still
+   * streaming. The edit button is disabled in that state, but other entry
+   * points (keyboard, future surfaces) must not fail silently either.
+   */
+  notifyEditBlocked?: () => void
 }
 
 export function useChatMessageActions(options: UseChatMessageActionsOptions) {
@@ -26,20 +57,58 @@ export function useChatMessageActions(options: UseChatMessageActionsOptions) {
     if ((message.displayRole || message.role) === 'user') {
       return options.stripTimePrefix(message.text || '').trim()
     }
-    // Tool-bearing turns render text as separate timeline segments; the raw
-    // message text concatenates them without separators, so rebuild from the
-    // segments to keep paragraph boundaries in the copied markdown.
-    const segmentTexts = (message.timelineItems || [])
-      .filter((item): item is Extract<ChatStreamTimelineItem, { type: 'text' }> => item.type === 'text')
-      .map(item => options.sanitizeCopyText(item.rawText || ''))
+    const outcome = turnOutcomePresentation(message.turnOutcome)
+    const answer = resolveAssistantAnswer(
+      message,
+      message.timelineItems ?? [],
+      outcome === 'stopped' || outcome === 'interrupted' || message.interrupted
+        ? 'interrupted'
+        : outcome === 'timeout' || outcome === 'failed' || message.terminalFailure
+          ? 'failed'
+          : message.isStreaming
+            ? 'working'
+            : 'settled',
+    )
+    const provenance: AssistantPresentationProvenance = {
+      inputMode: message.turnInputMode,
+      runKind: message.turnRunKind,
+    }
+    // The same structurally proven PlanRun answer shown outside the collapsed
+    // activity must also be what Copy returns. Otherwise the compact completed
+    // state would silently copy the entire execution narration.
+    if (
+      answer.source === 'terminal-control-boundary'
+      || answer.source === 'terminal-timeline-boundary'
+    ) {
+      return options.sanitizeCopyText(answer.text, { provenance })
+    }
+    // Canonical is the fail-open presentation used by the message body. Keep
+    // its exact paragraph spacing instead of rebuilding it from timeline
+    // chunks, which can insert separators that are not visible on screen.
+    if (answer.source === 'canonical') {
+      return options.sanitizeCopyText(answer.text, { provenance })
+    }
+    // The raw message text can be absent in older history, so rebuild only
+    // that source-less compatibility case from the available segments while
+    // applying the same provenance-aware silent-reply projection as the body.
+    const segmentTexts = sanitizeAssistantPresentationSegments(
+      (message.timelineItems || [])
+        .filter((item): item is Extract<ChatStreamTimelineItem, { type: 'text' }> => item.type === 'text')
+        .map(item => item.rawText || ''),
+      provenance,
+    )
+      .map(text => options.sanitizeCopyText(text, { assistantBoundary: false }))
       .filter(Boolean)
     if (segmentTexts.length) return segmentTexts.join('\n\n')
-    return options.sanitizeCopyText(message.text || '')
+    return options.sanitizeCopyText(message.text || '', { provenance })
   }
 
   async function copyMessage(msg: ChatRenderedMessage): Promise<boolean> {
     try {
-      await copyTextWithFallback(copyableMessageText(msg))
+      const text = copyableMessageText(msg)
+      const isAssistant = (msg.displayRole || msg.role) === 'assistant'
+      const label = isAssistant ? options.aiGeneratedLabel?.().trim() : ''
+      await copyTextWithFallback(label && text ? `${text}\n\n${label}` : text)
       return true
     } catch (err) {
       console.warn('Copy failed:', err instanceof Error ? err.message : String(err))
@@ -65,36 +134,76 @@ export function useChatMessageActions(options: UseChatMessageActionsOptions) {
     return -1
   }
 
-  function regenerateMessage(message: ChatRenderedMessage) {
+  function regenerateMessage(message: ChatRenderedMessage): boolean | Promise<boolean> {
     if (options.isStreaming.value) {
       console.warn('Wait for the current response to finish')
-      return
+      return false
     }
+    const usageBarrierRetry = isUsageAccountingBarrierMessage(message)
     const assistantIndex = sourceMessageIndex(message)
-    const userMsgIndex = previousUserMessageIndex(assistantIndex)
+    const usageBarrierUserIndex = strictUsageBarrierRetryUserMessageIndex(
+      options.messages.value,
+      assistantIndex,
+      message,
+    )
+    if (usageBarrierRetry && usageBarrierUserIndex < 0) {
+      console.warn('Usage accounting retry is missing a safe replay proof or primary user')
+      return false
+    }
+    const userMsgIndex = usageBarrierRetry
+      ? usageBarrierUserIndex
+      : previousUserMessageIndex(assistantIndex)
     if (userMsgIndex < 0) {
       console.warn('No previous message to regenerate')
-      return
+      return false
     }
 
-    const userText = options.messages.value[userMsgIndex]?.text || ''
-    options.pendingForkBeforeMessageId.value = options.messages.value[userMsgIndex]?.messageId || null
+    const userMessage = options.messages.value[userMsgIndex]
+    const forkBeforeMessageId = userMessage?.messageId || ''
+    if (!forkBeforeMessageId) {
+      console.warn('Wait for the message to finish saving before regenerating')
+      options.notifyMessagePending?.()
+      return false
+    }
+    const userText = userMessage?.text || ''
+    if (usageBarrierRetry) {
+      return options.sendUsageBarrierReplay({
+        text: userText,
+        forkBeforeMessageId,
+      })
+    }
+    // Ordinary regenerate remains composer-backed. Fail closed before any of
+    // its local mutations when live delivery cannot receive the resulting turn.
+    if (options.canDeliver && !options.canDeliver()) {
+      options.notifyDeliveryBlocked?.()
+      return false
+    }
+    options.pendingForkBeforeMessageId.value = forkBeforeMessageId
     options.messages.value = options.messages.value.slice(0, userMsgIndex)
     options.inputText.value = userText
     options.autoResizeTextarea()
     nextTick(() => options.sendCurrentInput())
+    return true
   }
 
   function editMessage(message: ChatRenderedMessage) {
     if (options.isStreaming.value) {
       console.warn('Wait for the current response to finish')
+      options.notifyEditBlocked?.()
       return
     }
     const msgIndex = sourceMessageIndex(message)
     if (msgIndex < 0) return
     if (options.messages.value[msgIndex]?.role !== 'user') return
-    const text = options.messages.value[msgIndex].text || ''
-    options.pendingForkBeforeMessageId.value = options.messages.value[msgIndex]?.messageId || null
+    const sourceMessage = options.messages.value[msgIndex]
+    const forkBeforeMessageId = sourceMessage?.messageId || ''
+    if (!forkBeforeMessageId) {
+      console.warn('Wait for the message to finish saving before editing')
+      options.notifyMessagePending?.()
+      return
+    }
+    const text = sourceMessage.text || ''
+    options.pendingForkBeforeMessageId.value = forkBeforeMessageId
     options.messages.value = options.messages.value.slice(0, msgIndex)
     options.inputText.value = text
     options.autoResizeTextarea()

@@ -4,6 +4,19 @@ import type { SessionRow, SortedRow } from '@/types/usage'
 
 const t = i18n.global.t
 
+function nonEmptyText(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function usageRowIdentity(row: SessionRow, sessionKey: string, sessionLabel: string): string {
+  return nonEmptyText(sessionKey)
+    || nonEmptyText(row.sessionId)
+    || nonEmptyText(row.session_id)
+    || nonEmptyText(row.session)
+    || nonEmptyText(row.key)
+    || sessionLabel
+}
+
 export function useUsageSessionRows(options: {
   visibleSessions: ComputedRef<SessionRow[]>
   rangeHiddenHint: ComputedRef<string>
@@ -14,6 +27,7 @@ export function useUsageSessionRows(options: {
   sessionTimestamp: (row: SessionRow) => number | null
   relTime: (timestamp: number | string) => string
   sortVal: (row: SessionRow, key: string) => string | number
+  taskName: (row: SessionRow) => string
 }) {
   const sortedRows = computed((): SortedRow[] => {
     const sorted = [...options.visibleSessions.value].sort((a, b) => {
@@ -26,7 +40,8 @@ export function useUsageSessionRows(options: {
     })
 
     return sorted.map(row => {
-      const sessionKey = (options.rowVal(row, 'session', 'sessionKey', 'key') || '') as string
+      const sessionKey = (options.rowVal(row, 'sessionKey', 'key') || '') as string
+      const sessionLabel = options.taskName(row)
       const cost = options.rowVal(row, 'cost_usd', 'costUsd')
       const timestamp = options.sessionTimestamp(row)
       const modified = timestamp != null ? options.relTime(timestamp) : '-'
@@ -36,6 +51,8 @@ export function useUsageSessionRows(options: {
       return {
         raw: row,
         sessionKey,
+        sessionLabel,
+        rowIdentity: usageRowIdentity(row, sessionKey, sessionLabel),
         modified,
         inputTokens: options.numericRowVal(row, 'input_tokens', 'inputTokens'),
         outputTokens: options.numericRowVal(row, 'output_tokens', 'outputTokens'),

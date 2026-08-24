@@ -20,14 +20,21 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass, field
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import Any
 
 import pytest
 
 from opensquilla.engine.hooks.types import CompactionState
 from opensquilla.engine.runtime import TurnRunner
+from opensquilla.engine.turn_runner import (
+    AttachmentMaterializationStats,
+    AttachmentStageOutput,
+)
+from opensquilla.engine.turn_runner.outcome import StageOutcome
 from opensquilla.engine.types import ErrorEvent
+from opensquilla.provider import Message
+from opensquilla.provider.types import ContentBlockImage
 
 # Reuse upstream patch helpers from's equivalence harness — this
 # stage sits AFTER AgentBootstrapStage's slice so the same upstream
@@ -177,13 +184,35 @@ def _patch_load_history(runner, *, return_value=None, raises=None, calls=None):
 
 
 def _patch_post_slice_probe(runner):
-    """Hook _build_attachment_messages (first call past the slice)."""
+    """Stop at Agent.run_turn, after compaction/history output is installed."""
 
-    def _probe(self, *args, **kwargs):  # noqa: ARG001, ARG002
-        snapshot = _capture_locals_at_post_slice()
-        raise _SliceCapture(snapshot)
+    factory = runner._agent_bootstrap_stage._agent_factory
+    original_build = factory.build
 
-    runner._build_attachment_messages = _probe.__get__(runner, TurnRunner)
+    class _ProbeAgentFactory:
+        def build(self, **kwargs: Any):
+            agent = original_build(**kwargs)
+
+            async def _probe_run_turn(
+                probe_agent: Any,
+                *_args: Any,
+                **_kwargs: Any,
+            ):
+                snapshot = {
+                    "outcome": "success",
+                    "agent_request_context_prompt_after": getattr(
+                        getattr(probe_agent, "config", None),
+                        "request_context_prompt",
+                        None,
+                    ),
+                }
+                raise _SliceCapture(snapshot)
+                yield  # pragma: no cover
+
+            agent.run_turn = MethodType(_probe_run_turn, agent)
+            return agent
+
+    runner._agent_bootstrap_stage._agent_factory = _ProbeAgentFactory()
 
 
 # ---------------------------------------------------------------------------
@@ -451,6 +480,35 @@ async def test_compaction_and_history_stage_snapshot(
         call_log["history"][0]["trim_last_user"]
         is case["history_has_persisted_user"]
     )
+
+
+@pytest.mark.asyncio
+async def test_unknown_vision_capability_does_not_skip_compaction() -> None:
+    case = dict(_CASE_BASE)
+    runner, call_log = _setup_runner(case)
+    image_message = Message(
+        role="user",
+        content=[ContentBlockImage(media_type="image/png", data="c3ludGhldGlj")],
+    )
+
+    async def _attachment_run(_inp: Any) -> StageOutcome[AttachmentStageOutput]:
+        return StageOutcome.success(
+            AttachmentStageOutput(
+                extra_messages=[image_message],
+                turn_input="",
+                stats=AttachmentMaterializationStats(image_count=1),
+            )
+        )
+
+    runner._attachment_stage = SimpleNamespace(run=_attachment_run)
+
+    captured, _yielded, raised = await _drive(runner, case)
+
+    assert raised is None
+    assert captured is not None
+    assert len(call_log["t3"]) == 1
+    assert len(call_log["preflight"]) == 1
+    assert len(call_log["history"]) == 1
 
 
 @pytest.mark.asyncio

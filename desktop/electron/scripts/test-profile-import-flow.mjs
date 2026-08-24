@@ -12,13 +12,12 @@ const packageRoot = resolve(scriptDir, '..')
 const repoRoot = resolve(packageRoot, '../..')
 const SOURCE_IDENTITY = '# Synthetic imported identity\n'
 const TARGET_IDENTITY = '# Synthetic previous Desktop identity\n'
+const importScreenshotDir = String(
+  process.env.OPENSQUILLA_DESKTOP_IMPORT_SCREENSHOT_DIR
+    || (process.env.CI_REPORT_DIR ? join(process.env.CI_REPORT_DIR, 'profile-import-screenshots') : ''),
+).trim()
 const SOURCE_CHAT = 'synthetic imported chat survives whole-profile transfer'
-// A replace import performs two independently bounded receipt-verifier CLI
-// calls (60 seconds each) around the mutating import. Windows CI cold starts
-// can legitimately approach both bounds, so the E2E timeout must cover the
-// product's advertised "few minutes" operation without becoming unbounded.
-const PROFILE_IMPORT_APPLY_TIMEOUT_MS = 180_000
-
+const PROFILE_FIXTURE_TIMEOUT_MS = 120_000
 async function waitFor(check, label, timeoutMs = 90_000) {
   const startedAt = Date.now()
   let lastError
@@ -39,9 +38,17 @@ function runPython(source, args) {
     cwd: repoRoot,
     encoding: 'utf8',
     env: { ...process.env, UV_CACHE_DIR: join(tmpdir(), 'opensquilla-profile-import-uv-cache') },
+    timeout: PROFILE_FIXTURE_TIMEOUT_MS,
+    killSignal: 'SIGTERM',
+    maxBuffer: 4 * 1024 * 1024,
   })
-  if (result.status !== 0) {
-    throw new Error(`Python fixture command failed: ${result.stderr || result.stdout}`)
+  if (result.error || result.signal || result.status !== 0) {
+    const outcome = result.error?.code === 'ETIMEDOUT'
+      ? `timed out after ${PROFILE_FIXTURE_TIMEOUT_MS}ms`
+      : `status=${result.status ?? 'null'} signal=${result.signal ?? 'null'}`
+    throw new Error(
+      `Python fixture command failed (${outcome}): ${result.stderr || result.stdout}`,
+    )
   }
   return result.stdout.trim()
 }
@@ -179,6 +186,9 @@ function launchEnvironment(isolatedHome, port) {
     ...inherited,
     HOME: isolatedHome,
     USERPROFILE: isolatedHome,
+    LOCALAPPDATA: join(isolatedHome, 'LocalAppData'),
+    TEMP: join(isolatedHome, 'Temp'),
+    TMP: join(isolatedHome, 'Temp'),
     OPENSQUILLA_DESKTOP_REPO_ROOT: repoRoot,
     OPENSQUILLA_DESKTOP_SECRET_STORAGE: 'plain',
     OPENSQUILLA_USER_STATE_DIR: join(isolatedHome, 'user-state'),
@@ -201,6 +211,8 @@ function launchEnvironment(isolatedHome, port) {
 }
 
 async function launchDesktop(userData, isolatedHome, port) {
+  await mkdir(join(isolatedHome, 'LocalAppData'), { recursive: true })
+  await mkdir(join(isolatedHome, 'Temp'), { recursive: true })
   return await electron.launch({
     args: ['--use-mock-keychain', `--user-data-dir=${userData}`, packageRoot],
     env: launchEnvironment(isolatedHome, port),
@@ -218,15 +230,29 @@ async function onboardingPage(app) {
   }, 'Desktop onboarding')
 }
 
-async function recoveryPage(app) {
-  return await waitFor(async () => {
-    for (const page of app.windows()) {
-      if (page.isClosed()) continue
-      await page.waitForLoadState('domcontentloaded', { timeout: 5_000 }).catch(() => {})
-      if (await page.locator('#recoveryPanel.visible').count().catch(() => 0)) return page
-    }
-    return null
-  }, 'recovery profile confirmation page')
+async function captureOnboarding(app, path) {
+  const base64 = await app.evaluate(async ({ BrowserWindow }) => {
+    const window = BrowserWindow.getAllWindows().find((candidate) => (
+      candidate.webContents.getURL().startsWith('data:text/html')
+    ))
+    if (!window) throw new Error('Onboarding window not found for screenshot')
+    window.show()
+    window.focus()
+    await window.webContents.executeJavaScript(`
+      new Promise((resolve) => {
+        const root = document.documentElement;
+        root.style.display = 'none';
+        void root.offsetHeight;
+        root.style.display = '';
+        requestAnimationFrame(() => requestAnimationFrame(resolve));
+      })
+    `)
+    window.webContents.invalidate()
+    await new Promise((resolve) => setTimeout(resolve, 120))
+    const image = await window.capturePage()
+    return image.toPNG().toString('base64')
+  })
+  await writeFile(path, Buffer.from(base64, 'base64'))
 }
 
 async function controlPage(app) {
@@ -236,155 +262,144 @@ async function controlPage(app) {
       await page.waitForLoadState('domcontentloaded', { timeout: 5_000 }).catch(() => {})
       let pathname = ''
       try { pathname = new URL(page.url()).pathname } catch { pathname = '' }
-      if (!['/control/chat', '/control/chat/new'].includes(pathname)) continue
+      if (!page.url().startsWith('opensquilla-app://desktop/')) continue
+      if (!['/chat', '/chat/new'].includes(pathname)) continue
+      const connection = await page.evaluate(
+        () => window.opensquillaDesktop?.getGatewayConnection?.(),
+      ).catch(() => null)
+      if (connection?.status !== 'ready') continue
       if (await page.locator('.chat-textarea').count().catch(() => 0)) return page
     }
     return null
-  }, 'Desktop Control UI', 120_000)
+  }, 'Desktop renderer', 120_000)
+}
+
+async function selectOllamaAndCompleteOnboarding(page) {
+  await page.locator('[data-screen="1"].active').waitFor({ state: 'visible' })
+  if (await page.locator('#provider').inputValue() !== 'ollama') {
+    await page.locator('#providerSelectToggle').click()
+    await page.locator('[data-provider-option="ollama"]').click()
+  }
+  if (!(await page.locator('#model').inputValue()).trim()) {
+    await page.locator('#model').fill('synthetic-local-model')
+  }
+  await page.locator('#finish').click()
+}
+
+function readSyntheticChat(home) {
+  return runPython(`
+import sqlite3, sys
+from pathlib import Path
+with sqlite3.connect(Path(sys.argv[1]) / "state" / "sessions.db") as connection:
+    row = connection.execute("SELECT body FROM synthetic_import_chat WHERE id = ?", ("session-1",)).fetchone()
+    print(row[0] if row else "")
+`, [home])
 }
 
 const root = await realpath(await mkdtemp(join(tmpdir(), 'opensquilla-profile-import-e2e-')))
 let app = null
 try {
-  // A single detected CLI profile remains unselected, and skipping performs no import.
-  const skipHome = join(root, 'skip-home')
-  const skipSource = join(skipHome, '.opensquilla')
-  const skipDesktopSource = join(root, 'skip-desktop-source')
-  const skipUserData = join(root, 'skip-user-data')
-  seedProfile(skipSource, SOURCE_IDENTITY, SOURCE_CHAT)
-  seedProfile(skipDesktopSource, '# Synthetic alternate Desktop identity\n', 'alternate chat')
-  const skipSourceBefore = await snapshotTree(skipSource)
-  const skipDesktopSourceBefore = await snapshotTree(skipDesktopSource)
-  app = await launchDesktop(skipUserData, skipHome, 18921)
+  if (importScreenshotDir) await mkdir(importScreenshotDir, { recursive: true })
+
+  // CLI data never triggers first-run transfer on any platform. It remains an
+  // explicit Settings source, including on Windows.
+  const cliOnlyHome = join(root, 'cli-only-home')
+  const cliOnlySource = join(cliOnlyHome, '.opensquilla')
+  const cliOnlyUserData = join(root, 'cli-only-user-data')
+  seedProfile(cliOnlySource, SOURCE_IDENTITY, SOURCE_CHAT)
+  const cliOnlySourceBefore = await snapshotTree(cliOnlySource)
+  app = await launchDesktop(cliOnlyUserData, cliOnlyHome, 18921)
   let page = await onboardingPage(app)
-  await page.locator('[data-screen="5"].active').waitFor({ state: 'visible' })
-  assert.equal(await page.locator('#migrationSource').inputValue(), '')
-  assert.equal(await page.locator('#migrationSource option').count(), 2)
-  assert.equal(await page.locator('#migrationPreview').isDisabled(), true)
-  await app.evaluate(({ dialog }, selectedPath) => {
-    dialog.showOpenDialog = async () => ({ canceled: false, filePaths: [selectedPath] })
-  }, skipDesktopSource)
-  await page.locator('#migrationSourceKind').selectOption('desktop-home')
-  await page.locator('#migrationBrowse').click()
-  await waitFor(async () => (
-    await page.locator('#migrationSource option').count() === 3
-  ), 'second explicitly browsed candidate')
-  assert.equal(await page.locator('#migrationSource').inputValue(), skipDesktopSource)
-  await page.locator('#migrationSource').selectOption('')
-  assert.equal(await page.locator('#migrationPreview').isDisabled(), true)
-  await page.locator('#migrationSkip').click()
-  await page.locator('[data-screen="0"].active').waitFor({ state: 'visible' })
-  assert.deepEqual(await snapshotTree(skipSource), skipSourceBefore)
-  assert.deepEqual(await snapshotTree(skipDesktopSource), skipDesktopSourceBefore)
-  assert.notEqual(
-    await readFile(join(skipUserData, 'opensquilla', 'workspace', 'IDENTITY.md'), 'utf8').catch(() => ''),
-    SOURCE_IDENTITY,
-  )
+  await page.locator('[data-screen="1"].active').waitFor({ state: 'visible' })
+  assert.equal(await page.locator('[data-screen="0"]').count(), 0)
+  assert.equal(await page.locator('[data-screen="5"]').count(), 0)
+  assert.deepEqual(await snapshotTree(cliOnlySource), cliOnlySourceBefore)
   await app.close()
   app = null
 
-  // A non-empty Desktop target is backed up and replaced as one profile; source stays read-only.
+  if (process.platform === 'win32') {
+    const portableHome = join(root, 'portable-home')
+    const localPortable = join(
+      portableHome,
+      'LocalAppData',
+      'OpenSquilla',
+      'portable',
+      'portable-local',
+    )
+    const tempPortable = join(
+      portableHome,
+      'Temp',
+      'OpenSquilla',
+      'portable',
+      'portable-temp',
+    )
+    seedProfile(localPortable, SOURCE_IDENTITY, SOURCE_CHAT)
+    seedProfile(tempPortable, '# Synthetic second Portable identity\n', 'second portable chat')
+    const localPortableBefore = await snapshotTree(localPortable)
+    const tempPortableBefore = await snapshotTree(tempPortable)
+
+    // Portable candidates never interrupt first-run setup. They are discovered
+    // only after the user opens the Settings migration surface.
+    const settingsOnlyUserData = join(root, 'portable-settings-only-user-data')
+    app = await launchDesktop(settingsOnlyUserData, portableHome, 18925)
+    page = await onboardingPage(app)
+    await page.locator('[data-screen="1"].active').waitFor({ state: 'visible' })
+    assert.equal(await page.locator('[data-screen="0"]').count(), 0)
+    assert.equal(await page.locator('[data-screen="5"]').count(), 0)
+    assert.equal(await page.locator('[data-migration-candidate]').count(), 0)
+    await selectOllamaAndCompleteOnboarding(page)
+    const portableControl = await controlPage(app)
+    const portableSources = await portableControl.evaluate(async () => (
+      await window.opensquillaDesktop.migrationSummary()
+    ))
+    assert.equal(portableSources.ok, true, JSON.stringify(portableSources))
+    assert.equal(portableSources.requiresSelection, true)
+    assert.equal(portableSources.candidates.length, 2)
+    assert.equal(
+      portableSources.candidates.some((candidate) => candidate.path === localPortable),
+      true,
+    )
+    assert.equal(
+      portableSources.candidates.some((candidate) => candidate.path === tempPortable),
+      true,
+    )
+    await app.close()
+    app = null
+    assert.deepEqual(await snapshotTree(localPortable), localPortableBefore)
+    assert.deepEqual(await snapshotTree(tempPortable), tempPortableBefore)
+
+  }
+
+  // A usable non-empty Desktop target is an upgrade/current-profile flow, not
+  // first-run import. The other installation remains available from Settings.
   const importHome = join(root, 'import-home')
   const source = join(importHome, '.opensquilla')
   const userData = join(root, 'import-user-data')
   const target = join(userData, 'opensquilla')
   seedProfile(source, SOURCE_IDENTITY, SOURCE_CHAT)
   seedProfile(target, TARGET_IDENTITY, 'synthetic previous Desktop chat')
-  const sourceBefore = await snapshotTree(source)
+  const targetWorkspaceBefore = await snapshotTree(join(target, 'workspace'))
+  const targetSessionsBefore = await readFile(join(target, 'state', 'sessions.db'))
+  const targetConfigBefore = await readFile(join(target, 'config.toml'))
   app = await launchDesktop(userData, importHome, 18922)
   page = await onboardingPage(app)
-  await page.locator('[data-screen="5"].active').waitFor({ state: 'visible' })
-  assert.equal(await page.locator('#migrationSource').inputValue(), '')
-  await page.locator('#migrationSource').selectOption(source)
-  await waitFor(async () => !(await page.locator('#migrationPreview').isDisabled()), 'explicit source selection')
-  await page.locator('#migrationPreview').click()
-  try {
-    await waitFor(async () => !(await page.locator('#migrationImport').isDisabled()), 'whole-replace preview')
-  } catch (error) {
-    const diagnostics = await page.evaluate(() => ({
-      error: document.getElementById('error')?.textContent || '',
-      summary: document.getElementById('migrationSummary')?.textContent || '',
-      source: document.getElementById('migrationSource')?.value || '',
-    }))
-    throw new Error(`${error.message}; diagnostics=${JSON.stringify(diagnostics)}`)
+  await page.locator('[data-screen="1"].active').waitFor({ state: 'visible' })
+  assert.equal(await page.locator('[data-screen="0"]').count(), 0)
+  assert.equal(await page.locator('[data-screen="5"]').count(), 0)
+  if (importScreenshotDir) {
+    await page.locator('#onboardingLocale').selectOption('zh-Hans')
+    await page.waitForTimeout(220)
+    await captureOnboarding(app, join(importScreenshotDir, '04-existing-profile-no-import.png'))
   }
-  await app.evaluate(({ dialog }) => {
-    dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false })
-  })
-  await page.locator('#migrationImport').click()
-  try {
-    await page.locator('#migrationDoneNote').waitFor({
-      state: 'visible',
-      timeout: PROFILE_IMPORT_APPLY_TIMEOUT_MS,
-    })
-  } catch (error) {
-    const renderer = await page.evaluate(() => ({
-      error: document.getElementById('error')?.textContent || '',
-      statusVisible: !document.getElementById('migrationStatus')?.hidden,
-      summaryVisible: !document.getElementById('migrationSummary')?.hidden,
-    })).catch(() => ({ error: '', statusVisible: false, summaryVisible: false }))
-    const pendingPhase = await readFile(
-      join(userData, 'migration-provider-setup.json'),
-      'utf8',
-    ).then((raw) => JSON.parse(raw)?.phase || '').catch(() => '')
-    const receiptCount = await readdir(join(target, 'migration', 'opensquilla'))
-      .then((entries) => entries.length)
-      .catch(() => 0)
-    const backupCount = await readdir(userData)
-      .then((entries) => entries.filter((name) => name.startsWith('opensquilla.backup.')).length)
-      .catch(() => 0)
-    const migrationResult = await readFile(
-      join(userData, 'migration-last-result.json'),
-      'utf8',
-    ).then((raw) => {
-      const value = JSON.parse(raw)
-      return {
-        ok: value?.ok === true,
-        migrationApplied: value?.migrationApplied === true,
-        restartOk: value?.restartOk === true,
-        requiresProviderSetup: value?.requiresProviderSetup === true,
-        detail: typeof value?.detail === 'string' ? value.detail : '',
-      }
-    }).catch(() => null)
-    const diagnostics = {
-      renderer,
-      pendingPhase,
-      receiptCount,
-      backupCount,
-      migrationResult,
-      importedIdentityPresent: await readFile(
-        join(target, 'workspace', 'IDENTITY.md'),
-        'utf8',
-      ).then((value) => value === SOURCE_IDENTITY).catch(() => false),
-    }
-    const reportDir = process.env.CI_REPORT_DIR
-    if (reportDir) {
-      await mkdir(reportDir, { recursive: true })
-      await writeFile(
-        join(reportDir, 'profile-import-timeout.json'),
-        `${JSON.stringify(diagnostics, null, 2)}\n`,
-        'utf8',
-      )
-    }
-    throw new Error(`${error.message}; diagnostics=${JSON.stringify(diagnostics)}`)
-  }
-  assert.match(await page.locator('#migrationDoneNote').innerText(), /Import complete/i)
-
-  assert.deepEqual(await snapshotTree(source), sourceBefore, 'source bytes and permissions changed')
-  assert.equal(await readFile(join(source, '.opensquilla-imported.json'), 'utf8').catch(() => null), null)
-  assert.equal(await readFile(join(target, 'workspace', 'IDENTITY.md'), 'utf8'), SOURCE_IDENTITY)
-  const importedChat = runPython(`
-import sqlite3, sys
-with sqlite3.connect('file:' + sys.argv[1] + '?mode=ro', uri=True) as connection:
-    print(connection.execute('SELECT body FROM synthetic_import_chat WHERE id = ?', ('session-1',)).fetchone()[0])
-`, [join(target, 'state', 'sessions.db')])
-  assert.equal(importedChat, SOURCE_CHAT)
-  const backups = (await readdir(userData)).filter((name) => name.startsWith('opensquilla.backup.'))
-  assert.equal(backups.length, 1)
-  assert.equal(
-    await readFile(join(userData, backups[0], 'workspace', 'IDENTITY.md'), 'utf8'),
-    TARGET_IDENTITY,
-  )
+  assert.equal(await readFile(join(target, 'workspace', 'IDENTITY.md'), 'utf8'), TARGET_IDENTITY)
+  assert.equal(await readFile(join(target, 'workspace', 'USER.md'), 'utf8'), '# Synthetic user\n')
+  assert.equal(await readFile(join(target, 'workspace', 'SOUL.md'), 'utf8'), '# Synthetic soul\n')
+  assert.equal(await readFile(join(target, 'workspace', 'MEMORY.md'), 'utf8'), '# Synthetic memory\n')
+  assert.equal(readSyntheticChat(target), 'synthetic previous Desktop chat')
+  assert.deepEqual(await readFile(join(target, 'config.toml')), targetConfigBefore)
+  assert.deepEqual(await readFile(join(target, 'state', 'sessions.db')), targetSessionsBefore)
+  assert.deepEqual(await snapshotTree(join(target, 'workspace')), targetWorkspaceBefore)
+  assert.equal((await readdir(userData)).some((name) => name.startsWith('opensquilla.backup.')), false)
   await app.close()
   app = null
 
@@ -410,6 +425,7 @@ with sqlite3.connect('file:' + sys.argv[1] + '?mode=ro', uri=True) as connection
     'OPENAI_API_KEY="synthetic-source-env-key"\r\nTRAILING_VALUE=keep\r\n\r\n',
   )
   await writeFile(join(settingsSource, '.env'), importedEnvBytes)
+  const settingsSourceBefore = await snapshotTree(settingsSource)
   await writeProviderProfileConfig(settingsTarget, {
     provider: 'openai',
     model: 'synthetic-old-target-model',
@@ -445,11 +461,6 @@ with sqlite3.connect('file:' + sys.argv[1] + '?mode=ro', uri=True) as connection
   }, { previewId: settingsPreview.previewId })
 
   const requiredKeyOnboarding = await onboardingPage(app)
-  await requiredKeyOnboarding.locator('[data-screen="0"].active').waitFor({
-    state: 'visible',
-    timeout: 90_000,
-  })
-  await requiredKeyOnboarding.locator('[data-screen="0"].active .next-button').click()
   await requiredKeyOnboarding.locator('[data-screen="1"].active').waitFor({
     state: 'visible',
     timeout: 90_000,
@@ -464,8 +475,6 @@ with sqlite3.connect('file:' + sys.argv[1] + '?mode=ro', uri=True) as connection
     /disable_network_observability = true/,
   )
   await requiredKeyOnboarding.locator('#apiKey').fill('synthetic-new-imported-key')
-  await requiredKeyOnboarding.locator('[data-screen="1"].active .next-button').click()
-  await requiredKeyOnboarding.locator('[data-screen="4"].active').waitFor({ state: 'visible' })
   await requiredKeyOnboarding.locator('#finish').click()
 
   const adopted = await waitFor(async () => {
@@ -494,6 +503,18 @@ with sqlite3.connect('file:' + sys.argv[1] + '?mode=ro', uri=True) as connection
     importedEnvBytes,
     'provider adoption rewrote imported .env bytes',
   )
+  assert.deepEqual(
+    await snapshotTree(settingsSource),
+    settingsSourceBefore,
+    'settings import changed source bytes or permissions',
+  )
+  const settingsBackups = (await readdir(settingsUserData))
+    .filter((name) => name.startsWith('opensquilla.backup.'))
+  assert.equal(settingsBackups.length, 1)
+  assert.equal(
+    await readFile(join(settingsUserData, settingsBackups[0], 'workspace', 'IDENTITY.md'), 'utf8'),
+    TARGET_IDENTITY,
+  )
   const credentialBackup = join(
     settingsUserData,
     `desktop-credential.import-backup.${adopted.importTransactionId}.json`,
@@ -505,34 +526,16 @@ with sqlite3.connect('file:' + sys.argv[1] + '?mode=ro', uri=True) as connection
   await app.close()
   app = null
 
-  // A selected recovery H can use the app, but it cannot import another profile.
-  const recoveryHome = join(root, 'recovery-home')
-  const recoveryUserData = join(root, 'recovery-user-data')
-  const recoveryId = '12345678-1234-4234-8234-123456789abc'
-  await mkdir(join(recoveryUserData, 'recovery-profiles', recoveryId, 'opensquilla'), { recursive: true })
-  await writeFile(join(recoveryUserData, 'desktop-profile-context.json'), JSON.stringify({
-    schema_version: 1,
-    active_profile_kind: 'recovery',
-    active_recovery_id: recoveryId,
-    attention_acknowledgement: null,
-    updated_at: new Date().toISOString(),
-  }, null, 2))
-  app = await launchDesktop(recoveryUserData, recoveryHome, 18923)
-  page = await recoveryPage(app)
-  const rejected = await page.evaluate(() => window.opensquillaDesktop.migrationSummary())
-  assert.equal(rejected.ok, false)
-  assert.match(rejected.raw, /primary profile/i)
-
   console.log(JSON.stringify({
-    explicitSelectionAndSkip: true,
-    multipleCandidates: true,
+    cliDoesNotTriggerOnboardingTransfer: true,
+    windowsPortableSettingsOnlyTested: process.platform === 'win32',
+    multiplePortableCandidates: process.platform === 'win32',
     wholeReplacement: true,
     sourceUnchanged: true,
-    identityAndChatImported: true,
     settingsRequiredKeyCompleted: true,
     importedConfigPreserved: true,
     previousCredentialBackedUp: true,
-    recoveryProfileRejected: true,
+    primaryOnly: true,
   }, null, 2))
 } finally {
   if (app) await app.close().catch(() => {})

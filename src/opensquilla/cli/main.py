@@ -153,7 +153,6 @@ from opensquilla.cli.sandbox_cmd import sandbox_app  # noqa: E402
 from opensquilla.cli.search_cmd import search_app  # noqa: E402
 from opensquilla.cli.sessions_cmd import app as sessions_app  # noqa: E402
 from opensquilla.cli.skills_cmd import skills_app  # noqa: E402
-from opensquilla.cli.swebench_cmd import swebench_app  # noqa: E402
 from opensquilla.cli.uninstall_cmd import uninstall_command  # noqa: E402
 from opensquilla.observability.cli_logging import configure_cli_structlog  # noqa: E402
 
@@ -203,7 +202,6 @@ app.add_typer(sandbox_app, name="sandbox")
 app.add_typer(search_app, name="search")
 app.add_typer(sessions_app, name="sessions")
 app.add_typer(skills_app, name="skills")
-app.add_typer(swebench_app, name="swebench")
 app.add_typer(codetask_app, name="code-task")
 
 app.command("init")(init_command)
@@ -237,8 +235,13 @@ def _build_cli_dream(agent: str, *, force: bool = False, need_provider: bool = T
 
     from opensquilla.gateway.config import GatewayConfig
     from opensquilla.memory.dream_factory import build_dream_factory
+    from opensquilla.provider.tokenrhythm_correlation import (
+        prewarm_tokenrhythm_install_id,
+    )
 
     gw = GatewayConfig.load(os.environ.get("OPENSQUILLA_GATEWAY_CONFIG_PATH"))
+    if need_provider:
+        prewarm_tokenrhythm_install_id(config=gw)
 
     dream = build_dream_factory(
         config=gw,
@@ -686,6 +689,8 @@ gateway_app = typer.Typer(
 )
 app.add_typer(gateway_app, name="gateway")
 
+GATEWAY_PROFILE_IN_USE_MARKER = "OPENSQUILLA_PROFILE_IN_USE"
+
 
 @gateway_app.command("run")
 def gateway_run(
@@ -716,18 +721,49 @@ def gateway_run(
     opt-in only — the gateway's default auth assumes loopback scope.
     """
     from opensquilla.cli.gateway_cmd import run_gateway
-    from opensquilla.recovery import guarded_desktop_profile
+    from opensquilla.gateway.desktop_ownership import (
+        release_active_desktop_gateway_ownership,
+    )
+    from opensquilla.recovery import (
+        LegacyGatewayRunningError,
+        ProfileLockBusyError,
+        guarded_desktop_profile,
+    )
 
     # The child that owns the gateway retains both the RC4 profile lock and
-    # the legacy gateway lease for its complete write-capable lifetime.
-    with guarded_desktop_profile():
-        run_gateway(
-            port=port,
-            bind=bind,
-            listen=listen,
-            debug=debug,
-            config_path=config_path,
-        )
+    # the legacy gateway lease for its complete write-capable lifetime. The
+    # bounded wait lets a predecessor still releasing its lease (an app
+    # restart, a finishing cron tick) resolve on its own instead of failing
+    # startup with OPENSQUILLA_PROFILE_IN_USE immediately.
+    try:
+        try:
+            with guarded_desktop_profile(lock_timeout=5.0):
+                run_gateway(
+                    port=port,
+                    bind=bind,
+                    listen=listen,
+                    debug=debug,
+                    config_path=config_path,
+                )
+        except (ProfileLockBusyError, LegacyGatewayRunningError):
+            # This marker is consumed by the Desktop launcher. Keep both lines
+            # independent of the profile path carried by the lock exception: paths
+            # may contain user names, and an actionable startup failure does not
+            # need to expose them or a traceback.
+            typer.echo(GATEWAY_PROFILE_IN_USE_MARKER)
+            typer.echo(
+                "Gateway could not start: Another OpenSquilla process is still using "
+                "this profile. Quit every OpenSquilla app or terminal using it, then "
+                "try again; if no process will exit, restart the computer. Do not "
+                "delete profile lock files."
+            )
+            raise typer.Exit(code=1) from None
+    finally:
+        # The record remains available throughout shutdown and disappears only
+        # after guarded_desktop_profile has released the profile writer lease.
+        # A permanent sidecar lock serializes exact-record comparison/removal
+        # with a successor's atomic replacement in the handoff window.
+        release_active_desktop_gateway_ownership()
 
 
 @gateway_app.command("start")
@@ -977,6 +1013,11 @@ def agent(
         "", "--transcript-path", help="Write benchmark-compatible JSONL transcript"
     ),
     usage_path: str = typer.Option("", "--usage-path", help="Write usage JSON to this file"),
+    event_stream_stderr: bool = typer.Option(
+        False,
+        "--event-stream-stderr",
+        help="Write stable v1 progress event JSONL to stderr",
+    ),
     session_db_path: str = typer.Option(
         ":memory:",
         "--session-db-path",
@@ -1027,45 +1068,66 @@ def agent(
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON"),
 ) -> None:
     """Run a single agent turn for automation."""
-    from opensquilla.recovery import guarded_desktop_profile
+    from opensquilla.cli.output import emit_error
+    from opensquilla.recovery import ProfileLockBusyError, guarded_desktop_profile
 
-    with guarded_desktop_profile():
-        run_agent_command(
-            message=message,
-            agent_id=agent_id,
-            session_id=session_id,
-            model=model,
-            workspace=workspace,
-            workspace_strict=workspace_strict,
-            workspace_lockdown=workspace_lockdown,
-            workspace_lockdown_deny_paths=workspace_lockdown_deny_paths,
-            scratch_dir=scratch_dir,
-            thinking=thinking,
-            timeout=timeout,
-            max_iterations=max_iterations,
-            iteration_timeout_seconds=iteration_timeout_seconds,
-            tool_timeout_seconds=tool_timeout_seconds,
-            request_timeout_seconds=request_timeout_seconds,
-            max_provider_retries=max_provider_retries,
-            length_capped_continuations=length_capped_continuations,
-            transcript_path=transcript_path,
-            usage_path=usage_path,
-            session_db_path=session_db_path,
-            no_memory_capture=no_memory_capture,
-            file_paths=file_paths,
-            unattended=unattended,
-            stateless=stateless,
-            clean_room=clean_room,
-            stateless_keep_project_rules=stateless_keep_project_rules,
-            permissions=permissions,
+    try:
+        with guarded_desktop_profile():
+            run_agent_command(
+                message=message,
+                agent_id=agent_id,
+                session_id=session_id,
+                model=model,
+                workspace=workspace,
+                workspace_strict=workspace_strict,
+                workspace_lockdown=workspace_lockdown,
+                workspace_lockdown_deny_paths=workspace_lockdown_deny_paths,
+                scratch_dir=scratch_dir,
+                thinking=thinking,
+                timeout=timeout,
+                max_iterations=max_iterations,
+                iteration_timeout_seconds=iteration_timeout_seconds,
+                tool_timeout_seconds=tool_timeout_seconds,
+                request_timeout_seconds=request_timeout_seconds,
+                max_provider_retries=max_provider_retries,
+                length_capped_continuations=length_capped_continuations,
+                transcript_path=transcript_path,
+                usage_path=usage_path,
+                event_stream_stderr=event_stream_stderr,
+                session_db_path=session_db_path,
+                no_memory_capture=no_memory_capture,
+                file_paths=file_paths,
+                unattended=unattended,
+                stateless=stateless,
+                clean_room=clean_room,
+                stateless_keep_project_rules=stateless_keep_project_rules,
+                permissions=permissions,
+                json_output=json_output,
+            )
+    except ProfileLockBusyError:
+        emit_error(
+            "This profile is already in use by another OpenSquilla writer. "
+            "The standalone 'opensquilla agent' command cannot share a profile with "
+            "another writer, including an active Desktop Gateway. To use a running "
+            "Gateway, use a Gateway-backed command such as 'opensquilla chat' (set "
+            "OPENSQUILLA_GATEWAY_URL and OPENSQUILLA_GATEWAY_TOKEN when needed); "
+            "otherwise, set both OPENSQUILLA_STATE_DIR and "
+            "OPENSQUILLA_GATEWAY_STATE_DIR to isolated directories for this agent run.",
             json_output=json_output,
+            code="profile_lock_busy",
         )
+        raise typer.Exit(code=1) from None
 
 
 @app.command("chat")
 def chat(
     model: str = typer.Option("", "--model", "-m", help="Model override"),
     session_id: str = typer.Option("", "--session", "-s", help="Resume session"),
+    ui: str | None = typer.Option(
+        None,
+        "--ui",
+        help="Chat UI: auto, tui, or plain (default: auto)",
+    ),
     standalone: bool = typer.Option(False, "--standalone", help="Direct Agent without gateway"),
     workspace: str = typer.Option("", "--workspace", help="Workspace root for standalone tools"),
     workspace_strict: bool | None = typer.Option(
@@ -1087,6 +1149,7 @@ def chat(
             run_chat(
                 model=model,
                 session_id=session_id,
+                ui=ui,
                 standalone=True,
                 workspace=workspace,
                 workspace_strict=workspace_strict,
@@ -1099,6 +1162,7 @@ def chat(
     run_chat(
         model=model,
         session_id=session_id,
+        ui=ui,
         standalone=False,
         workspace=workspace,
         workspace_strict=workspace_strict,

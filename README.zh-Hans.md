@@ -30,7 +30,11 @@
 
 ## 最新动态
 
-- 📢 **2026-07-03** —— 我们的技术报告 **[Agentic Routing: The Harness-Native Data Flywheel](docs/releases/agentic_routing_v0.pdf)**（预览版）已发布，随 OpenSquilla **0.5.0 Preview 1** 一同放出。报告详细介绍了 harness 原生路由如何把日常 Agent 流量转化为自我改进的数据飞轮。
+- 📢 **2026-08-22** —— 技术报告英文版已登陆 aiXiv：[aixiv.260822.000001](https://aixiv.science/abs/aixiv.260822.000001)。如何引用 OpenSquilla 请见[引用](#引用)。
+
+- 📢 **2026-08-21** —— 技术报告的 PDF 版本现已收录在本仓库中：[English](docs/report/opensquilla-report-en.pdf) · [中文](docs/report/opensquilla-report-zh.pdf)。
+
+- 📢 **2026-07-14** —— 我们的技术报告 **[Agentic Routing: The Harness-Native Data Flywheel](https://arxiv.org/abs/2607.11399)** 已登陆 arXiv。报告展示了 harness 原生路由如何把日常 Agent 流量转化为自我改进的数据飞轮，以及**多模型集成路由如何超越 Fable 5**。
 
 ---
 
@@ -43,7 +47,7 @@ OpenSquilla 是一个高效利用 Token 的微内核 AI Agent。本地模型路�
 Ollama、DeepSeek、Gemini、Qwen/DashScope 等 20 多个 LLM 提供商，无需改动你的代码或
 配置结构。
 
-OpenSquilla 0.5.0 Preview 3 是当前预览发布版本。
+OpenSquilla 0.5.3 是当前正式发布版本。
 
 如需面向任务的产品文档，请从
 [OpenSquilla 产品指南](README.product.md)或[文档索引](docs/README.md)开始。
@@ -54,13 +58,13 @@ OpenSquilla 0.5.0 Preview 3 是当前预览发布版本。
 
 OpenSquilla 可运行于 Windows、macOS 和 Linux。请选择与你的使用场景匹配的安装方式。
 
-桌面安装包和终端快速安装会直接给你一个预构建的**发布版**，无需 Git。另外两种——从源码安装和从源码开发——则需要克隆 Git 仓库后再构建(`git clone` + Git LFS)。
+桌面安装包和终端快速安装会直接给你一个预构建的**发布版**，无需 Git。另外两种——从源码安装和从源码开发——则需要克隆 Git 仓库后再构建(`git clone` + Git LFS)，其中也包括 Vue 控制台。发布 wheel 和桌面安装包已内置控制台，用户无需安装 Node.js 或 npm。
 
 发布版安装命令使用 GitHub 上已发布的 release 资源。Python wheel 安装使用带版本号的 wheel
 文件名，因为安装器会校验嵌入在 wheel 文件名中的版本号。
 
-对于 0.5.0 Preview 3 的桌面使用，建议从 GitHub Release 下载打包桌面安装包:macOS 上为
-`OpenSquilla-0.5.0-rc3-mac-arm64.dmg`，Windows 上为 `OpenSquilla-0.5.0-rc3-win-x64.exe`。
+对于 0.5.3 的桌面使用，建议从 GitHub Release 下载打包桌面安装包:macOS 上为
+`OpenSquilla-0.5.3-mac-arm64.dmg`，Windows 上为 `OpenSquilla-0.5.3-win-x64.exe`。
 
 | 安装方式 | 适合人群 | 何时使用 |
 | --- | --- | --- |
@@ -75,6 +79,7 @@ OpenSquilla 可运行于 Windows、macOS 和 Linux。请选择与你的使用场
 | --- | :---: | :---: | :---: |
 | Python 3.12+ | 通过 `uv` | 通过 `uv` 或系统 | 通过 `uv` |
 | Git + Git LFS | — | 必需 | 必需 |
+| Node.js 22.12+ + npm | — | 构建 Web UI 时必需 | Web UI 和 wheel 构建必需 |
 | `uv` | 缺失则自动安装 | 推荐 | 必需 |
 
 默认的 `recommended` 安装档会安装 **SquillaRouter**——OpenSquilla 的设备端模型路由
@@ -92,19 +97,28 @@ PowerShell 安装器会通过 `winget` 自动装好它；而**终端快速安装
 
 安装链接:[Git](https://git-scm.com/downloads) ·
 [Git LFS](https://git-lfs.com/) ·
+[Node.js](https://nodejs.org/en/download) ·
 [uv](https://docs.astral.sh/uv/getting-started/installation/)。
 
 <a id="desktop-installers"></a>
 
 ### 桌面安装包
 
-0.5.0 Preview 3 桌面安装包将 Vue 控制台和网关运行时打包在一个 Electron 外壳中。
+0.5.3 桌面安装包将 Vue 控制台和网关运行时打包在一个 Electron 外壳中。
 
-- macOS Apple Silicon:<https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc3/OpenSquilla-0.5.0-rc3-mac-arm64.dmg>
-- Windows x64:<https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc3/OpenSquilla-0.5.0-rc3-win-x64.exe>
+- macOS Apple Silicon:<https://github.com/opensquilla/opensquilla/releases/download/v0.5.3/OpenSquilla-0.5.3-mac-arm64.dmg>
+- Windows x64:<https://github.com/opensquilla/opensquilla/releases/download/v0.5.3/OpenSquilla-0.5.3-win-x64.exe>
 
-升级前请退出任何正在运行的 OpenSquilla 桌面应用。已有的
-`~/.opensquilla/config.toml` 和会话数据会被复用。
+中国大陆下载可直接使用 OSS 的固定安装包链接：
+
+- macOS Apple Silicon：<https://opensquilla-releases.oss-cn-beijing.aliyuncs.com/releases/latest/OpenSquilla-mac-arm64.dmg>
+- Windows x64：<https://opensquilla-releases.oss-cn-beijing.aliyuncs.com/releases/latest/OpenSquilla-win-x64.exe>
+
+这两个链接仅会在更新且符合条件的 Release 通过镜像校验后向前更新；需要固定版本时，请使用上方的 GitHub Release 版本化链接。
+
+升级前请退出任何正在运行的 OpenSquilla 桌面应用。桌面安装版会继续使用平台应用数据
+目录中的现有 Desktop profile。终端安装版的 `~/.opensquilla` 是另一套独立数据；如需
+使用，请在设置中主动转移。
 
 在 Windows 上从 RC3 升级到 RC4 或更高版本时，请直接运行新安装包覆盖现有安装。
 请勿先卸载 RC3：RC3 的卸载程序可能会删除桌面端用户数据。升级前请备份
@@ -136,7 +150,7 @@ $env:Path = "$env:USERPROFILE\.local\bin;" + $env:Path
 **2. 安装 OpenSquilla**——所有平台命令相同。
 
 ```sh
-uv tool install --python 3.12 "opensquilla[recommended] @ https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc3/opensquilla-0.5.0rc3-py3-none-any.whl"
+uv tool install --python 3.12 "opensquilla[recommended] @ https://github.com/opensquilla/opensquilla/releases/download/v0.5.3/opensquilla-0.5.3-py3-none-any.whl"
 ```
 
 这会从 release URL 安装 OpenSquilla wheel，再由 `uv` 下载所选 extra 所声明的依赖。
@@ -157,7 +171,7 @@ opensquilla gateway run
 > PATH 设置命令。
 
 如需完全锁定版本的安装，请使用带版本号的 wheel URL:
-`https://github.com/opensquilla/opensquilla/releases/download/v0.5.0rc3/opensquilla-0.5.0rc3-py3-none-any.whl`。
+`https://github.com/opensquilla/opensquilla/releases/download/v0.5.3/opensquilla-0.5.3-py3-none-any.whl`。
 
 <a id="install-from-source"></a>
 
@@ -190,10 +204,17 @@ opensquilla gateway run
    powershell -ExecutionPolicy Bypass -File ./scripts/install_source.ps1
    ```
 
-   该脚本会用 `uv tool install` 把 `.[recommended]`(SquillaRouter + 记忆 +
-   本地模型)装进一个专用的用户环境；如果 `uv` 不可用，就退回到
+   该脚本会先在 `opensquilla-webui` 中执行 `npm ci` 和 `npm run build`，
+   再用 `uv tool install` 把 `.[recommended]`(SquillaRouter + 记忆 +
+   本地模型)装进一个专用的用户环境。每次源码重装都会用 `npm ci` 重建
+   `node_modules` 并重新构建控制台；首次运行通常下载量最大，后续可利用 npm
+   缓存减少网络流量，但仍会产生构建时间和磁盘写入；如果 `uv` 不可用，就退回到
    `python -m pip install --user`。如果安装后 `opensquilla` 不在 `PATH` 上，请打开
    一个新终端。
+
+   直接执行 `pip install .`、`uv tool install .` 或通过 VCS URL 安装，属于底层的
+   源码构建方式，不能替代上述安装器。本地 checkout 必须先构建 Web UI；VCS URL
+   checkout 没有生成产物，会被门禁明确拒绝。请改用此源码安装器或官方 release wheel。
 
 3. **（可选）安装进阶 extra。** 大多数渠道——Feishu（飞书）、Telegram、DingTalk（钉钉）、
    QQ、WeCom（企业微信）、Slack 和 Discord——在基础安装下即可使用。可选的 extra 有:
@@ -215,13 +236,14 @@ opensquilla gateway run
 <details>
 <summary>从源码安装——终端前置条件与安装器选项</summary>
 
-**从终端安装前置条件(Git、Git LFS、uv)**
+**从终端安装前置条件(Git、Git LFS、Node.js 22.12+ 与 npm、uv)**
 
 Windows PowerShell:
 
 ```powershell
 winget install --id Git.Git -e
 winget install --id GitHub.GitLFS -e
+winget install --id OpenJS.NodeJS.LTS -e
 powershell -ExecutionPolicy Bypass -c "irm https://astral.sh/uv/install.ps1 | iex"
 git lfs install
 ```
@@ -229,20 +251,23 @@ git lfs install
 macOS(Homebrew):
 
 ```sh
-brew install git git-lfs uv
+brew install git git-lfs node uv
 git lfs install
 ```
 
 Debian / Ubuntu:
 
 ```sh
-sudo apt update && sudo apt install -y git git-lfs
+sudo apt update && sudo apt install -y git git-lfs curl
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt install -y nodejs
 curl -LsSf https://astral.sh/uv/install.sh | sh
 git lfs install
 ```
 
 在 Fedora 上使用 `sudo dnf install -y git git-lfs`；在 Arch 上使用
-`sudo pacman -S --needed git git-lfs`；然后用上面的 `curl` 命令安装 `uv`。这些安装器
+`sudo pacman -S --needed git git-lfs`；另请从发行版或 nodejs.org 安装 Node.js
+22.12+ 与 npm，然后用上面的 `curl` 命令安装 `uv`。这些安装器
 对 PATH 的修改会在新的终端会话中生效。
 
 **安装器环境变量与 PATH 检查**
@@ -267,9 +292,16 @@ OPENSQUILLA_INSTALL_DRY_RUN=1      bash scripts/install_source.sh   # 仅打印�
 `uv sync` 会创建一个仓库本地的 `.venv`，而 `uv run` 会针对此检出中的文件执行命令。
 
 ```sh
+cd opensquilla-webui
+npm ci
+npm run build
+cd ..
 uv sync --extra recommended --extra dev
 uv run opensquilla --help
 ```
+
+修改 Web UI 源码后需要重新执行 `npm run build`。标准 wheel 构建会拒绝缺失或
+过期的控制台产物；后端开发所用的 editable `uv sync` 仍然可用。
 
 `recommended` extra 在开发时也包含 SquillaRouter;`dev` extra 会安装测试、lint 和
 类型检查工具。把额外的 extra 安装到你运行的同一个环境中:
@@ -305,23 +337,33 @@ opensquilla uninstall --purge-all      # 全部（会要求你输入确认）
 
 ## 安装隐私
 
-OpenSquilla 使用匿名安装遥测来估算安装数量、版本采纳情况和运行时兼容性。数据只在网关
-首次启动时上报，并且每个 OpenSquilla 版本只上报一次。OpenSquilla 也可能执行被动更新
-检查，包括桌面启动时的自动更新检查。上传设了很短的超时，绝不会阻塞启动。
+OpenSquilla 使用伪匿名安装遥测来估算安装数量、版本采纳情况和运行时兼容性。数据只在网关
+首次启动时上报，并且每个 OpenSquilla 版本只上报一次。它还会在本地按 UTC 日期汇总已完成
+的顶层对话次数和 token 用量，并在启动时及此后每小时尝试向遥测服务上报待发送的 UTC
+当日累计快照。OpenSquilla 也可能执行被动更新检查，包括桌面启动时以及应用持续运行期间
+最多每日一次的自动更新检查。上传设了很短的超时，绝不会阻塞启动。
 
 发送的内容:
 
 - schema 版本
 - 本地生成的稳定 `install_id` 摘要
 - OpenSquilla 版本
-- 事件类型(`install` 或 `version_seen`)
+- 事件类型(`install`、`version_seen` 或 `daily_usage`)
 - 安装方式(`pip`、`source`、`docker`、`desktop` 或 `unknown`)
 - 操作系统、系统版本、CPU 架构，以及 Python 主/次版本号
 - 首次见到与发送的时间戳
 - CI/测试环境标记(`ci_environment`)
+- 每日用量事件中的 UTC 日期、完成对话次数及 input/output/cache/cache-write token 汇总
 
 `install_id` 是一个本地单向 SHA-256 摘要，由可用的 MAC 地址派生；无 MAC 时使用本地 IP
 地址，并以一个随机持久化值兜底。原始 MAC/IP 值不会被上传。
+
+默认情况下，直接发往 TokenRhythm 官方 HTTPS API 的请求还可能通过可选的
+`X-OpenSquilla-Install-Id` 请求头携带同一个跨会话伪匿名安装标识。只有端口 443 上严格匹配
+`tokenrhythm.studio` 和 `api.tokenrhythm.studio` 的 HTTPS 主机才符合条件；自定义代理、
+OpenRouter、其他提供商、浏览器页面、重定向后的非官方目标，以及返回的图片/CDN 下载均不
+携带该请求头。原始 MAC/IP 值绝不会发送。若后台解析尚未完成或失败，请求头会被省略，API
+请求仍会正常继续。
 
 不发送的内容:用户名、主机名、路径、API key、提供商配置、聊天/会话/记忆/Agent 内容、
 文件名或文件内容。源 IP 在传输层可能会被 HTTP 服务器看到，但它不在上传的数据内。
@@ -339,7 +381,11 @@ OPENSQUILLA_PRIVACY_DISABLE_NETWORK_OBSERVABILITY=true
 disable_network_observability = true
 ```
 
-这个统一开关覆盖自动安装遥测、被动更新检查和桌面启动自动更新检查。用户主动触发的操作仍可能在明确意图后访问网络服务，例如手动发布/下载/更新检查，以及已配置的提供商、搜索或渠道。
+这个统一开关覆盖自动安装遥测、每日汇总用量遥测、被动更新检查、桌面启动时和应用持续
+运行期间的自动更新检查，以及 TokenRhythm 安装标识请求头。只要统一或兼容退出开关仍启用，
+用户显式触发的更新可用性检查也不会绕过它。CI 和测试环境也会自动抑制安装标识请求头与
+安装遥测。其他用户主动操作仍可能在明确意图后访问网络服务，例如打开发布页、下载发布
+资产，以及使用已配置的提供商、搜索或渠道。
 
 旧环境变量仍兼容:
 
@@ -348,7 +394,12 @@ OPENSQUILLA_TELEMETRY_DISABLED=true
 OPENSQUILLA_UPDATE_CHECK_DISABLED=true
 ```
 
-进阶部署可以使用自己的端点:
+旧遥测退出开关会抑制 TokenRhythm 安装标识请求头；仅启用更新检查退出开关则不会。
+TokenRhythm 必须将此请求头视为可选且不可信，不得将其用于认证、授权、计费、限流或反滥用
+决策。完整的目标校验与数据处理规则见
+[`PRIVACY.md`](PRIVACY.md#tokenrhythm-installation-identifier)。
+
+进阶部署可以使用自己的安装遥测端点:
 
 ```sh
 OPENSQUILLA_TELEMETRY_ENDPOINT=https://example.com/v1/install
@@ -663,3 +714,23 @@ OpenSquilla 的灵感来自
 
 [行为准则](CODE_OF_CONDUCT.md) · [安全](SECURITY.md) ·
 [支持](SUPPORT.md) · [许可证](LICENSE)（Apache-2.0）
+
+---
+
+## 引用
+
+如果你在研究中使用了 OpenSquilla，请引用我们的技术报告：
+
+```bibtex
+@misc{opensquilla2026,
+  title         = {OpenSquilla: Token-Efficient Agent = Models + Routing Harness},
+  author        = {{TokenRhythm Technologies}},
+  year          = {2026},
+  month         = aug,
+  eprint        = {aixiv.260822.000001},
+  archivePrefix = {aiXiv},
+  howpublished  = {aiXiv preprint},
+  url           = {https://aixiv.science/abs/aixiv.260822.000001},
+  note          = {Version 1.0, under review}
+}
+```

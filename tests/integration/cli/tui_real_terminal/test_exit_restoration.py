@@ -14,7 +14,11 @@ from tui_real_terminal.driver import (
     probe_terminal_capabilities,
 )
 from tui_real_terminal.evidence import EvidenceBundle
-from tui_real_terminal.targets import TargetContext, build_tui_target
+from tui_real_terminal.targets import (
+    TargetContext,
+    build_tui_target,
+    opentui_host_capability_gate,
+)
 
 pytestmark = pytest.mark.tui_real_terminal
 
@@ -25,6 +29,7 @@ def test_exit_restores_primary_screen_and_shell(
     artifact_root: Path,
     tui_backend: str,
     tui_driver: str,
+    pytestconfig: pytest.Config,
 ) -> None:
     """/exit must hand a usable terminal back: primary screen, live shell, echo.
 
@@ -38,8 +43,9 @@ def test_exit_restores_primary_screen_and_shell(
     if tui_driver == "pty":
         pytest.skip("exit-restoration requires tmux, not PTY")
     if not probe_terminal_capabilities().tmux_available:
+        if pytestconfig.getoption("--tui-require-capabilities"):
+            pytest.fail("required real-terminal capability is unavailable: tmux")
         pytest.skip("exit-restoration requires tmux")
-
     evidence = EvidenceBundle.create(
         artifact_root,
         scenario_id="exit_restoration",
@@ -53,6 +59,10 @@ def test_exit_restores_primary_screen_and_shell(
             scenario_id="exit_restoration",
             size=TerminalSize(cols=100, rows=30),
         ),
+    )
+    opentui_host_capability_gate(
+        target.env,
+        require_capabilities=bool(pytestconfig.getoption("--tui-require-capabilities")),
     )
     shell_script = (
         f"{shlex.join(target.command)}; "
@@ -69,9 +79,7 @@ def test_exit_restores_primary_screen_and_shell(
     )
     session.start()
     try:
-        ready = session.wait_for_text(
-            "OPEN_SQUILLA_TUI_READY", timeout_s=15.0, checkpoint="ready"
-        )
+        ready = session.wait_for_text("OPEN_SQUILLA_TUI_READY", timeout_s=15.0, checkpoint="ready")
         evidence.record_frame(ready)
         assert session.alternate_screen_active(), (
             "the opentui host should run on the alternate screen"
@@ -103,9 +111,7 @@ def test_exit_restores_primary_screen_and_shell(
     # runtime hands /exit to the app, which acknowledges before shutting down).
     app_events = [
         json.loads(line)
-        for line in (evidence.run_dir / "opentui-app.log")
-        .read_text(encoding="utf-8")
-        .splitlines()
+        for line in (evidence.run_dir / "opentui-app.log").read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
     assert any(event["event"] == "exit" for event in app_events)

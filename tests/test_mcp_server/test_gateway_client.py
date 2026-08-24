@@ -3,9 +3,14 @@ from __future__ import annotations
 import json
 import sys
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
+from opensquilla.contracts.gateway_transport import (
+    GATEWAY_CLIENT_MAX_MESSAGE_BYTES,
+    GATEWAY_CLIENT_MAX_QUEUE,
+)
 from opensquilla.gateway_client import GatewayRPCClient, normalize_gateway_url
 
 
@@ -44,14 +49,53 @@ async def test_gateway_rpc_call_times_out_and_clears_pending_request() -> None:
 
 
 @pytest.mark.asyncio
+async def test_session_history_supports_optional_cursors_without_changing_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = GatewayRPCClient()
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    async def fake_call(method: str, params: dict[str, object]) -> dict[str, object]:
+        calls.append((method, params))
+        return {"messages": []}
+
+    monkeypatch.setattr(client, "call", fake_call)
+
+    await client.session_history("agent:main:test", limit=5)
+    await client.session_history(
+        "agent:main:test",
+        limit=25,
+        before="12|12",
+        include_canonical=True,
+        include_summaries=False,
+    )
+
+    assert calls == [
+        ("chat.history", {"sessionKey": "agent:main:test", "limit": 5}),
+        (
+            "chat.history",
+            {
+                "sessionKey": "agent:main:test",
+                "limit": 25,
+                "before": "12|12",
+                "includeCanonical": True,
+                "includeSummaries": False,
+            },
+        ),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_gateway_connect_closes_socket_after_bad_handshake(monkeypatch) -> None:
     class BadHandshakeWebSocket(_SilentWebSocket):
         async def recv(self) -> str:
             return json.dumps({"type": "event", "event": "unexpected"})
 
     ws = BadHandshakeWebSocket()
+    observed_connect: dict[str, Any] = {}
 
-    async def connect(_url: str):
+    async def connect(url: str, **kwargs: Any):
+        observed_connect.update({"url": url, **kwargs})
         return ws
 
     monkeypatch.setitem(sys.modules, "websockets", SimpleNamespace(connect=connect))
@@ -62,3 +106,8 @@ async def test_gateway_connect_closes_socket_after_bad_handshake(monkeypatch) ->
 
     assert ws.closed is True
     assert client._ws is None
+    assert observed_connect == {
+        "url": "ws://127.0.0.1:18791/ws",
+        "max_size": GATEWAY_CLIENT_MAX_MESSAGE_BYTES,
+        "max_queue": GATEWAY_CLIENT_MAX_QUEUE,
+    }

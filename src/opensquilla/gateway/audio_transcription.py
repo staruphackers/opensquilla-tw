@@ -12,10 +12,11 @@ from starlette.routing import Route
 
 from opensquilla.gateway.config import GatewayConfig
 from opensquilla.gateway.origin_guard import forbidden_origin_response, request_origin_allowed
-from opensquilla.gateway.uploads import _extract_authorization_token
+from opensquilla.gateway.uploads import _authorization_token_matches
 from opensquilla.provider.audio import (
     ElevenLabsAudioProductionProvider,
     ElevenLabsSpeechToTextRequest,
+    resolve_elevenlabs_api_key_env,
 )
 
 _MAX_TRANSCRIPTION_BYTES = 30 * 1024 * 1024
@@ -25,7 +26,7 @@ def _default_provider_factory(config: GatewayConfig) -> ElevenLabsAudioProductio
     provider_cfg = config.audio.providers.elevenlabs
     return ElevenLabsAudioProductionProvider(
         api_key=getattr(provider_cfg, "api_key", ""),
-        api_key_env=getattr(provider_cfg, "api_key_env", "ELEVENLABS_API_KEY"),
+        api_key_env=resolve_elevenlabs_api_key_env(provider_cfg),
         base_url=getattr(provider_cfg, "base_url", "https://api.elevenlabs.io"),
     )
 
@@ -42,7 +43,7 @@ def register_audio_transcription_routes(
         if not request_origin_allowed(request, config):
             return forbidden_origin_response()
         if config.auth.mode == "token":
-            if config.auth.token and _extract_authorization_token(request) != config.auth.token:
+            if config.auth.token and not _authorization_token_matches(config, request):
                 return JSONResponse(
                     {
                         "error": (

@@ -60,7 +60,10 @@ async def test_effective_envelope_and_provenance(cfg: GatewayConfig) -> None:
     assert set(result) == {"fields"}
     fields = result["fields"]
     assert fields["llm.provider"] == {"value": "tokenrhythm", "source": "default"}
-    assert fields["llm.model"] == {"value": "deepseek-v4-pro", "source": "default"}
+    assert fields["llm.model"] == {
+        "value": "deepseek-v4-pro-0813",
+        "source": "default",
+    }
     assert fields["squilla_router.tiers.c1.model"]["source"] == "preset"
     for record in fields.values():
         assert set(record) == {"value", "source"}
@@ -78,6 +81,23 @@ async def test_effective_reflects_config_overrides(
     fields = result["fields"]
     assert fields["llm.model"] == {"value": "synthetic/custom-model", "source": "config"}
     assert fields["llm.max_tokens"] == {"value": 2_048, "source": "config"}
+
+
+async def test_effective_reports_tokenrhythm_qwen_output_limit(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENSQUILLA_STATE_DIR", str(tmp_path / "state"))
+    config = GatewayConfig(
+        config_path=str(tmp_path / "opensquilla.toml"),
+        llm={"provider": "tokenrhythm", "model": "qwen3.7-max"},
+    )
+
+    result = await rpc_config._handle_config_effective(None, _ctx(config))
+
+    assert result["fields"]["llm.max_tokens"] == {
+        "value": 131_072,
+        "source": "catalog",
+    }
 
 
 async def test_effective_requires_config() -> None:

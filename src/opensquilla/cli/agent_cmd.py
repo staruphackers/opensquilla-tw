@@ -17,6 +17,7 @@ from rich.panel import Panel
 from rich.text import Text
 from typer.models import OptionInfo
 
+from opensquilla.cli.agent_event_stream import AgentEventSink, StderrAgentEventSink
 from opensquilla.cli.attachments import attachments_from_paths
 from opensquilla.cli.ui import console
 
@@ -135,6 +136,7 @@ async def run_agent_once(
     length_capped_continuations: int | None = None,
     transcript_path: str | None = None,
     usage_path: str | None = None,
+    event_sink: AgentEventSink | None = None,
     config: Any | None = None,
     session_db_path: str = ":memory:",
     no_memory_capture: bool = False,
@@ -151,14 +153,21 @@ async def run_agent_once(
     """Run a single agent turn through build_services() and TurnRunner.run()."""
     from opensquilla.agents.scope import resolve_agent_workspace_dir
     from opensquilla.artifacts import artifact_payload
-    from opensquilla.engine.types import ArtifactEvent, DoneEvent, ErrorEvent, TextDeltaEvent
+    from opensquilla.engine.types import (
+        AnswerGenerationResetEvent,
+        ArtifactEvent,
+        DoneEvent,
+        ErrorEvent,
+        TextDeltaEvent,
+        done_text_snapshot,
+    )
     from opensquilla.gateway import attachment_ingest as _attachment_ingest
     from opensquilla.gateway import build_services, build_turn_runner_from_services
     from opensquilla.gateway.config import GatewayConfig
     from opensquilla.gateway.routing import build_cli_route_envelope, tool_context_from_envelope
     from opensquilla.paths import media_root_from_config
     from opensquilla.permissions import configured_default_run_mode
-    from opensquilla.sandbox.run_mode import normalize_run_mode
+    from opensquilla.run_mode import normalize_run_mode
     from opensquilla.session.keys import canonicalize_session_key, normalize_agent_id
     from opensquilla.tools.types import InteractionMode
 
@@ -171,14 +180,23 @@ async def run_agent_once(
     permissions_override = (
         permissions is not None or os.environ.get("OPENSQUILLA_AGENT_PERMISSIONS") is not None
     )
-    sandbox_settings = getattr(cfg, "sandbox", None)
-    explicit_run_mode = getattr(sandbox_settings, "run_mode", None)
-    run_mode = None
-    if not permissions_override:
-        if explicit_run_mode:
-            run_mode = normalize_run_mode(explicit_run_mode).value
-        elif permissions_profile == "restricted":
-            run_mode = configured_default_run_mode(cfg).value
+    run_mode = configured_default_run_mode(cfg).value
+    accepted_run_mode_override = None
+    if permissions_override:
+        from opensquilla.gateway.project_workspace_runtime import (
+            AcceptedRunModeOverride,
+        )
+
+        run_mode = (
+            "full"
+            if permissions_profile in {"bypass", "full"}
+            else "safe"
+        )
+        accepted_run_mode_override = AcceptedRunModeOverride(
+            run_mode=normalize_run_mode(run_mode),
+            run_mode_source="user",
+            source="request",
+        )
     run_attachments: list[dict[str, Any]] = list(attachments or [])
     if attachment_paths:
         run_attachments.extend(attachments_from_paths(tuple(attachment_paths)))
@@ -298,12 +316,50 @@ async def run_agent_once(
             elevated=elevated,
             run_mode=run_mode,
         )
+        from opensquilla.gateway.project_workspace_runtime import (
+            apply_accepted_run_mode_override,
+            authoritative_project_run_context,
+        )
+        from opensquilla.gateway.session_services import get_session_storage
+
+        storage = get_session_storage(svc.session_manager)
+        if storage is not None:
+            session = await storage.get_session(session_key)
+            if session is None:
+                raise KeyError(f"Session not found: {session_key}")
+            run_context, workspace_guard = await authoritative_project_run_context(
+                storage=storage,
+                session_manager=svc.session_manager,
+                session=session,
+                config=service_cfg,
+                default_workspace=tool_workspace_dir,
+            )
+            run_context = apply_accepted_run_mode_override(
+                run_context,
+                accepted_run_mode_override,
+            )
+            from opensquilla.gateway.rpc_sessions import (
+                _apply_run_context_route_metadata,
+            )
+
+            _apply_run_context_route_metadata(
+                route_envelope,
+                run_context,
+                principal_is_owner=True,
+            )
+            if run_context.workspace is not None:
+                tool_workspace_dir = run_context.workspace
+            if workspace_guard is not None and not isinstance(workspace_strict, bool):
+                effective_workspace_strict = True
         tool_ctx = tool_context_from_envelope(
             route_envelope,
             is_owner=True,
             workspace_dir=tool_workspace_dir,
             workspace_strict=effective_workspace_strict,
         )
+        from opensquilla.sandbox.policy_store import pin_sandbox_policy
+
+        pin_sandbox_policy(tool_ctx, service_cfg)
         tool_ctx.scratch_dir = effective_scratch_dir
         tool_ctx.workspace_lockdown = workspace_lockdown
         tool_ctx.workspace_write_deny_globs = list(effective_workspace_write_deny_globs)
@@ -338,8 +394,33 @@ async def run_agent_once(
             attachments=run_attachments,
             bootstrap_context_mode=bootstrap_context_mode,
         ):
+            if event_sink is not None:
+                event_sink(event)
+
             if isinstance(event, TextDeltaEvent):
                 text_parts.append(event.text)
+            elif isinstance(event, AnswerGenerationResetEvent):
+                authoritative_text = str(event.authoritative_text_snapshot or "")
+                text_parts[:] = [authoritative_text] if authoritative_text else []
+                if event.terminal:
+                    terminal_text = str(
+                        event.terminal_text_snapshot
+                        or authoritative_text
+                        or "The model could not complete this answer."
+                    )
+                    text_parts[:] = [terminal_text]
+                    errors.append(
+                        {
+                            "message": (
+                                event.terminal_error_message
+                                or "The model provider request failed."
+                            ),
+                            "code": (
+                                event.terminal_error_code
+                                or "ensemble_fixed_error"
+                            ),
+                        }
+                    )
             elif isinstance(event, ErrorEvent):
                 errors.append({"message": event.message, "code": event.code})
             elif isinstance(event, ArtifactEvent):
@@ -357,11 +438,12 @@ async def run_agent_once(
     if usage_path:
         _write_json(usage_path, usage)
 
+    done_text_present, done_text = done_text_snapshot(done) if done is not None else (False, "")
     return AgentRunResult(
         status="error" if errors else "ok",
         agent_id=agent_id,
         session_key=session_key,
-        text=done.text if done and done.text else "".join(text_parts),
+        text=done_text if done_text_present else "".join(text_parts),
         usage=usage,
         errors=errors,
         workspace=tool_workspace_dir,
@@ -711,11 +793,11 @@ def _print_no_provider_error() -> None:
             "  opensquilla onboard\n\n"
             "Option 2 — set an environment variable for your provider:\n"
             "  export OPENROUTER_API_KEY=sk-or-...        # POSIX / macOS / Linux\n"
-            "  setx OPENROUTER_API_KEY \"sk-or-...\"  "
+            '  setx OPENROUTER_API_KEY "sk-or-..."  '
             "# Windows cmd: set OPENROUTER_API_KEY=...\n\n"
             "Option 3 — edit ~/.opensquilla/config.toml and add:\n"
             "  [llm]\n"
-            "  api_key = \"your-key-here\"\n"
+            '  api_key = "your-key-here"\n'
         ),
     )
     console.print(Panel(body, title="No Provider Configured", border_style="red"))
@@ -798,6 +880,11 @@ def run_agent_command(
         "", "--transcript-path", help="Write benchmark-compatible JSONL transcript"
     ),
     usage_path: str = typer.Option("", "--usage-path", help="Write usage JSON to this file"),
+    event_stream_stderr: bool = typer.Option(
+        False,
+        "--event-stream-stderr",
+        help="Write stable v1 progress event JSONL to stderr",
+    ),
     session_db_path: str = typer.Option(
         ":memory:",
         "--session-db-path",
@@ -867,6 +954,7 @@ def run_agent_command(
     thinking = _unwrap_typer_default(thinking)
     transcript_path = _unwrap_typer_default(transcript_path)
     usage_path = _unwrap_typer_default(usage_path)
+    event_stream_stderr = _unwrap_typer_default(event_stream_stderr)
     session_db_path = _unwrap_typer_default(session_db_path)
     no_memory_capture = _unwrap_typer_default(no_memory_capture)
     file_paths = _unwrap_typer_default(file_paths)
@@ -876,9 +964,7 @@ def run_agent_command(
     stateless_keep_project_rules = _unwrap_typer_default(stateless_keep_project_rules)
     permissions = _unwrap_typer_default(permissions)
     json_output = _unwrap_typer_default(json_output)
-    workspace_write_deny_globs = _parse_workspace_write_deny_globs(
-        workspace_lockdown_deny_paths
-    )
+    workspace_write_deny_globs = _parse_workspace_write_deny_globs(workspace_lockdown_deny_paths)
 
     result = asyncio.run(
         run_agent_once(
@@ -901,6 +987,7 @@ def run_agent_command(
             length_capped_continuations=length_capped_continuations,
             transcript_path=transcript_path or None,
             usage_path=usage_path or None,
+            event_sink=StderrAgentEventSink() if event_stream_stderr else None,
             session_db_path=session_db_path,
             no_memory_capture=no_memory_capture,
             attachment_paths=list(file_paths or []),
@@ -948,3 +1035,5 @@ def run_agent_command(
                     _print_no_provider_error()
                     raise typer.Exit(1)
                 typer.echo(f"Error: {error['message']}", err=True)
+    if result.errors:
+        raise typer.Exit(1)

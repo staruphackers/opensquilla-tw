@@ -15,11 +15,16 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from opensquilla.sandbox.legacy_codec import (
+    LegacyModeContext,
+    decode_legacy_config_mode,
+    decode_legacy_run_mode,
+)
 from opensquilla.sandbox.run_mode import RunMode, normalize_run_mode
 from opensquilla.sandbox.types import SecurityLevel
 
@@ -33,7 +38,8 @@ BackendName = Literal[
     "windows_default",
 ]
 NetworkDefault = Literal["none", "proxy_allowlist"]
-RunModeName = Literal["standard", "trusted", "full"]
+RunModeName = Literal["safe", "full"]
+ApprovalsReviewerName = Literal["user", "auto_review"]
 
 
 @dataclass(frozen=True)
@@ -72,10 +78,11 @@ class SandboxSettings(BaseSettings):
       active. When false, the system uses a fixed ``STANDARD`` policy with no
       dynamic escalation.
 
-    Both default to ``True`` so fresh local/operator installs start in the
-    Managed Execution posture. Invalid combinations are coerced with an explicit
-    warning via :meth:`validate_combination`; the coercion is deliberate so
-    upgrades of existing deployments do not hard-fail.
+    Fresh local/operator installs default to Full host access. Safe remains
+    available as an explicit persisted preference. Invalid combinations are
+    coerced with an explicit warning via :meth:`validate_combination`; the
+    coercion is deliberate so upgrades of existing deployments do not
+    hard-fail.
     """
 
     model_config = SettingsConfigDict(env_prefix="OPENSQUILLA_SANDBOX_")
@@ -85,18 +92,47 @@ class SandboxSettings(BaseSettings):
     default_level: SecurityLevel = SecurityLevel.STANDARD
     backend: BackendName = "auto"
     allow_legacy_mode: bool = False
-    run_mode: RunModeName | None = None
+    run_mode: RunModeName = "full"
     auto_setup: bool = True
+    host_root_readonly: bool = True
+    exclude_slash_tmp: bool = False
+    exclude_tmpdir_env_var: bool = False
+    approvals_reviewer: ApprovalsReviewerName = "auto_review"
 
     network_default: NetworkDefault = "proxy_allowlist"
     denial_threshold: int = 3
 
     extra_ro_mounts: list[str] = Field(default_factory=list)
     extra_rw_mounts: list[str] = Field(default_factory=list)
+    denied_read_roots: list[str] = Field(default_factory=list)
+    denied_read_globs: list[str] = Field(default_factory=list)
 
     cpu_seconds: int = 30
     memory_mb: int = 1024
     wall_seconds: int = 60
+
+    @model_validator(mode="before")
+    @classmethod
+    def _discard_removed_model_review_settings(cls, values: Any) -> Any:
+        if not isinstance(values, dict):
+            return values
+        cleaned = dict(values)
+        cleaned.pop("approval_review_timeout_seconds", None)
+        cleaned.pop("approval_review_max_attempts", None)
+        raw_run_mode = cleaned.get("run_mode")
+        if raw_run_mode is not None and str(raw_run_mode).strip():
+            cleaned["run_mode"] = decode_legacy_run_mode(
+                raw_run_mode,
+                context=LegacyModeContext.CONFIG,
+            ).value
+        elif "sandbox" in cleaned or "security_grading" in cleaned:
+            legacy_fields: dict[str, object] = {}
+            if "sandbox" in cleaned:
+                legacy_fields["sandbox_enabled"] = cleaned["sandbox"]
+            if "security_grading" in cleaned:
+                legacy_fields["grading_enabled"] = cleaned["security_grading"]
+            cleaned["run_mode"] = decode_legacy_config_mode(**legacy_fields).value
+        return cleaned
 
     @field_validator("backend", mode="before")
     @classmethod
@@ -124,7 +160,7 @@ class SandboxSettings(BaseSettings):
             )
         if self.run_mode is not None:
             mode = normalize_run_mode(self.run_mode)
-            if mode in {RunMode.STANDARD, RunMode.TRUSTED}:
+            if mode is RunMode.SAFE:
                 self.sandbox = True
                 self.security_grading = True
             elif mode == RunMode.FULL:
@@ -183,6 +219,7 @@ class SandboxSettings(BaseSettings):
 
 
 __all__ = [
+    "ApprovalsReviewerName",
     "BackendName",
     "EffectiveMode",
     "NetworkDefault",

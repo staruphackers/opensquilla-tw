@@ -22,6 +22,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal, cast
 
+from opensquilla.engine.usage_accounting import (
+    account_provider_stream,
+    current_usage_accounting_scope,
+    provider_accounts_physical_usage,
+)
 from opensquilla.memory.archive import RawArchiveWriteResult, write_raw_fallback_archive
 from opensquilla.memory.flush import (
     build_flush_user_prompt_with_audit,
@@ -30,8 +35,17 @@ from opensquilla.memory.flush import (
     validate_flush_save_arguments,
 )
 from opensquilla.memory.protocols import MemoryProviderCapability, MemoryToolHandler
+from opensquilla.provider.auxiliary_budget import (
+    AuxiliaryRequestTooLargeError,
+    ensure_auxiliary_text_fits,
+    resolve_auxiliary_request_budget,
+)
+from opensquilla.provider.correlation_context import (
+    bind_provider_request_correlation,
+    current_provider_request_correlation,
+)
 from opensquilla.provider.protocol import provider_metadata
-from opensquilla.provider.types import ChatConfig, Message
+from opensquilla.provider.types import ChatConfig, Message, ProviderRequestCorrelation
 from opensquilla.tool_boundary import ToolCall
 from opensquilla.tools.types import CallerKind, InteractionMode, ToolContext, current_tool_context
 
@@ -822,19 +836,38 @@ def _zero_usage(*, model: str = "") -> dict[str, Any]:
     }
 
 
-def _estimate_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
+def _estimate_cost_usd(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    *,
+    provider: str = "",
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+) -> float:
     if not model or (input_tokens <= 0 and output_tokens <= 0):
         return 0.0
     try:
-        from opensquilla.engine.pricing import lookup_price
+        from opensquilla.engine.pricing import estimate_cost, lookup_price
 
-        price = lookup_price(model)
-        return (input_tokens * price.input_per_m + output_tokens * price.output_per_m) / 1_000_000
+        price = lookup_price(model, provider=provider)
+        return estimate_cost(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
+            price=price,
+        ).cost_usd
     except Exception:  # noqa: BLE001
         return 0.0
 
 
-def _usage_from_event(event: Any | None, *, request_count: int | None = None) -> dict[str, Any]:
+def _usage_from_event(
+    event: Any | None,
+    *,
+    request_count: int | None = None,
+    provider: str = "",
+) -> dict[str, Any]:
     if event is None:
         return _zero_usage()
     input_tokens = _coerce_int(getattr(event, "input_tokens", 0))
@@ -845,8 +878,16 @@ def _usage_from_event(event: Any | None, *, request_count: int | None = None) ->
     billed_cost = _coerce_float(getattr(event, "billed_cost", 0.0))
     estimated_cost = _coerce_float(getattr(event, "cost_usd", 0.0))
     model = str(getattr(event, "model", "") or "")
+    provider_id = str(provider or getattr(event, "provider", "") or "")
     if estimated_cost <= 0.0:
-        estimated_cost = _estimate_cost_usd(model, input_tokens, output_tokens)
+        estimated_cost = _estimate_cost_usd(
+            model,
+            input_tokens,
+            output_tokens,
+            provider=provider_id,
+            cache_read_tokens=cached_tokens,
+            cache_write_tokens=cache_write_tokens,
+        )
     resolved_request_count = (
         request_count
         if request_count is not None
@@ -888,6 +929,7 @@ def _provider_allows_billed_usage(provider: Any) -> bool:
 
 def _usage_from_complete_response(resp: Any, provider: Any) -> dict[str, Any]:
     allow_billed_cost = _provider_allows_billed_usage(provider)
+    provider_id = _provider_pricing_id(provider)
     usage = getattr(resp, "usage", None)
     if isinstance(usage, dict):
         input_tokens = _coerce_int(usage.get("input_tokens", usage.get("prompt_tokens")))
@@ -917,7 +959,7 @@ def _usage_from_complete_response(resp: Any, provider: Any) -> dict[str, Any]:
             cost_usd=_coerce_float(usage.get("estimated_cost_usd")),
             model=str(usage.get("model") or getattr(resp, "model", "") or ""),
         )
-        return _usage_from_event(event, request_count=1)
+        return _usage_from_event(event, request_count=1, provider=provider_id)
     event_model = getattr(resp, "model", None) or _provider_model_id(provider) or ""
     event = SimpleNamespace(
         input_tokens=getattr(resp, "input_tokens", 0),
@@ -929,7 +971,7 @@ def _usage_from_complete_response(resp: Any, provider: Any) -> dict[str, Any]:
         cost_usd=getattr(resp, "cost_usd", 0.0),
         model=event_model,
     )
-    return _usage_from_event(event, request_count=1)
+    return _usage_from_event(event, request_count=1, provider=provider_id)
 
 
 def _merge_usage(*items: dict[str, Any] | None) -> dict[str, Any]:
@@ -1122,10 +1164,29 @@ async def _provider_complete(
     both provider shapes instead of silently falling back to raw memory on the
     production OpenRouter path.
     """
+    budget = resolve_auxiliary_request_budget(
+        provider,
+        max_output_tokens=max_tokens,
+    )
+    try:
+        ensure_auxiliary_text_fits(
+            messages,
+            max_chars=budget.provider_request_max_chars,
+            max_tokens=budget.max_input_tokens,
+        )
+    except AuxiliaryRequestTooLargeError as exc:
+        raise ProviderCompletionError(
+            str(exc),
+            code="provider_request_too_large",
+        ) from exc
+
     complete = getattr(provider, "complete", None)
     if callable(complete):
         try:
-            resp = await complete(messages=messages, max_tokens=max_tokens)
+            resp = await complete(
+                messages=messages,
+                max_tokens=budget.max_output_tokens,
+            )
         except ProviderCompletionError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -1141,24 +1202,54 @@ async def _provider_complete(
     if not callable(chat):
         raise TypeError(
             f"Provider {type(provider).__name__} supports neither complete() nor chat()"
+    )
+
+    config = ChatConfig(
+        max_tokens=budget.max_output_tokens,
+        provider_request_max_chars=budget.provider_request_max_chars,
+        provider_request_correlation=current_provider_request_correlation(),
+    )
+    scope = current_usage_accounting_scope()
+    close_stream = None
+    if scope is None:
+        stream = chat(messages, config=config)
+    elif provider_accounts_physical_usage(provider):
+        stream = chat(messages, config=config)
+        close_stream = stream
+    else:
+        metadata = provider_metadata(provider)
+        stream = account_provider_stream(
+            lambda: chat(messages, config=config),
+            provider=_provider_pricing_id(provider),
+            model=metadata.model,
         )
+        close_stream = stream
 
     chunks: list[str] = []
     done_event: Any | None = None
-    async for event in chat(messages, config=ChatConfig(max_tokens=max_tokens)):
-        kind = getattr(event, "kind", "")
-        if kind == "error" or type(event).__name__ == "ErrorEvent":
-            message = getattr(event, "message", "") or "provider error"
-            code = getattr(event, "code", "") or ""
-            raise ProviderCompletionError(message, code=str(code))
-        if kind == "done" or type(event).__name__ == "DoneEvent":
-            done_event = event
-        text = getattr(event, "text", "") or ""
-        if text and (kind == "text_delta" or "Delta" in type(event).__name__):
-            chunks.append(text)
+    try:
+        async for event in stream:
+            kind = getattr(event, "kind", "")
+            if kind == "error" or type(event).__name__ == "ErrorEvent":
+                message = getattr(event, "message", "") or "provider error"
+                code = getattr(event, "code", "") or ""
+                raise ProviderCompletionError(message, code=str(code))
+            if kind == "done" or type(event).__name__ == "DoneEvent":
+                done_event = event
+            text = getattr(event, "text", "") or ""
+            if text and (kind == "text_delta" or "Delta" in type(event).__name__):
+                chunks.append(text)
+    finally:
+        aclose = getattr(close_stream, "aclose", None)
+        if callable(aclose):
+            await aclose()
     return _CompletionResult(
         text="".join(chunks),
-        usage=_usage_from_event(done_event, request_count=1),
+        usage=_usage_from_event(
+            done_event,
+            request_count=1,
+            provider=_provider_pricing_id(provider),
+        ),
     )
 
 
@@ -1729,6 +1820,12 @@ def _provider_model_id(provider: Any) -> str | None:
     return None
 
 
+def _provider_pricing_id(provider: Any) -> str:
+    """Return the configured provider identity used by the price resolver."""
+    metadata = provider_metadata(provider)
+    return str(metadata.provider_id or metadata.provider_name or metadata.provider_kind or "")
+
+
 def _pure_flush_prompt(messages: list[Message]) -> str:
     blocks = []
     for idx, message in enumerate(messages, start=1):
@@ -2217,6 +2314,41 @@ class SessionFlushService:
             )
 
     async def execute(
+        self,
+        transcript: list[Any],
+        session_key: str,
+        agent_id: str = "main",
+        *,
+        timeout: float | None = None,
+        message_window: int | None = None,
+        flush_max_chars: int | None = None,
+        segment_mode: SegmentMode = "off",
+        segment_max_chars: int | None = None,
+        segment_overlap_messages: int = 0,
+        checkpoint_exists: bool | None = None,
+        turn_id: str | None = None,
+        raw_capture_policy: RawCapturePolicy = "best_effort",
+        provider_request_correlation: ProviderRequestCorrelation | None = None,
+    ) -> FlushReceipt:
+        """Run one flush under the caller's explicit provider correlation scope."""
+
+        with bind_provider_request_correlation(provider_request_correlation):
+            return await self._execute(
+                transcript,
+                session_key,
+                agent_id,
+                timeout=timeout,
+                message_window=message_window,
+                flush_max_chars=flush_max_chars,
+                segment_mode=segment_mode,
+                segment_max_chars=segment_max_chars,
+                segment_overlap_messages=segment_overlap_messages,
+                checkpoint_exists=checkpoint_exists,
+                turn_id=turn_id,
+                raw_capture_policy=raw_capture_policy,
+            )
+
+    async def _execute(
         self,
         transcript: list[Any],
         session_key: str,
@@ -3125,6 +3257,7 @@ class SessionFlushService:
                 self._tool_handler,
                 relative_path=plan.relative_path,
             ),
+            provider_request_correlation=current_provider_request_correlation(),
         )
 
         save_results: list[_MemorySaveResult] = []
@@ -3160,6 +3293,7 @@ class SessionFlushService:
     ) -> FlushReceipt:
         t0 = started_at if started_at is not None else time.monotonic()
         plan = resolve_flush_plan()
+        provider_id = _provider_pricing_id(provider)
         slug, slug_usage = await self._generate_slug_with_usage(
             [message for segment in segments for message in segment.messages],
             provider,
@@ -3205,7 +3339,7 @@ class SessionFlushService:
             saved_paths = [result.path for result in save_results]
             flushed = sorted(set(saved_paths)) or [segment_plan.relative_path]
             all_saved_paths.extend(flushed)
-            usage_items.append(_usage_from_event(done_event))
+            usage_items.append(_usage_from_event(done_event, provider=provider_id))
 
             payload = _segment_receipt_payload(
                 index=index,

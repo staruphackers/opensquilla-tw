@@ -8,8 +8,9 @@ These lock the chat() protocol invariants (provider/protocol.py):
   when the upstream supplies its real id only in a later chunk.
 - A tool-call delta without ``index`` never fails the stream, on any
   provider kind (Gemini's compat endpoint and local gateways omit it).
-- The Anthropic stream always terminates with DoneEvent — including streams
-  truncated before ``message_stop`` — closing any open tool calls first.
+- Anthropic only commits completed tool calls after ``message_stop``; a
+  truncated response preserves Start/Delta diagnostics but emits neither an
+  executable End nor a successful Done.
 - Text-to-tool-call synthesis only runs for provider kinds that leak the
   MiniMax text protocol (minimax, openrouter), never for e.g. plain openai.
 - A non-UTF-8 HTTP error body from Ollama yields an ErrorEvent, not a crash.
@@ -61,8 +62,16 @@ def _anthropic_sse(events: list[dict[str, Any]]) -> bytes:
     return b"".join(parts)
 
 
-def _patch_transport(monkeypatch: Any, module: str, response: httpx.Response) -> None:
+def _patch_transport(
+    monkeypatch: Any,
+    module: str,
+    response: httpx.Response,
+    *,
+    calls: list[httpx.Request] | None = None,
+) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
+        if calls is not None:
+            calls.append(request)
         return response
 
     transport = httpx.MockTransport(handler)
@@ -75,22 +84,34 @@ def _patch_transport(monkeypatch: Any, module: str, response: httpx.Response) ->
     monkeypatch.setattr(f"opensquilla.provider.{module}.httpx.AsyncClient", patched_async_client)
 
 
-def _patch_stream_body(monkeypatch: Any, module: str, body: bytes) -> None:
+def _patch_stream_body(
+    monkeypatch: Any,
+    module: str,
+    body: bytes,
+    *,
+    calls: list[httpx.Request] | None = None,
+) -> None:
     _patch_transport(
         monkeypatch,
         module,
         httpx.Response(200, headers={"content-type": "text/event-stream"}, content=body),
+        calls=calls,
     )
 
 
-def _collect(provider: Any, *, tools: list[ToolDefinition] | None = None) -> list[Any]:
+def _collect(
+    provider: Any,
+    *,
+    tools: list[ToolDefinition] | None = None,
+    config: ChatConfig | None = None,
+) -> list[Any]:
     async def _run() -> list[Any]:
         return [
             ev
             async for ev in provider.chat(
                 [Message(role="user", content="hi")],
                 tools=tools,
-                config=ChatConfig(),
+                config=config or ChatConfig(),
             )
         ]
 
@@ -238,6 +259,82 @@ def test_empty_stream_falls_back_to_non_stream_for_policy_kind(monkeypatch: Any)
     assert any(isinstance(e, DoneEvent) for e in events)
 
 
+def test_coordinator_attempt_does_not_retry_empty_stream_as_non_stream(
+    monkeypatch: Any,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        calls.append(payload)
+        if payload.get("stream") is True:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=b"data: [DONE]\n\n",
+            )
+        raise AssertionError("coordinator-owned attempt must not resend non-stream")
+
+    transport = httpx.MockTransport(handler)
+    real_async_client = httpx.AsyncClient
+
+    def patched_async_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+        kwargs["transport"] = transport
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr("opensquilla.provider.openai.httpx.AsyncClient", patched_async_client)
+    provider = OpenAIProvider(api_key="k", model="kimi-for-coding", provider_kind="moonshot")
+    events = _collect(provider, config=ChatConfig(physical_attempt_limit=1))
+
+    assert len(calls) == 1
+    assert calls[0]["stream"] is True
+    assert not any(isinstance(event, ProviderHeartbeatEvent) for event in events)
+    assert not any(isinstance(event, DoneEvent) for event in events)
+    assert any(isinstance(event, ErrorEvent) for event in events)
+
+
+def test_coordinator_attempt_does_not_retry_stream_timeout(
+    monkeypatch: Any,
+) -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        raise httpx.ReadTimeout("stream stalled")
+
+    transport = httpx.MockTransport(handler)
+    real_async_client = httpx.AsyncClient
+
+    def patched_async_client(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
+        kwargs["transport"] = transport
+        return real_async_client(*args, **kwargs)
+
+    monkeypatch.setattr("opensquilla.provider.openai.httpx.AsyncClient", patched_async_client)
+    provider = OpenAIProvider(api_key="k", model="kimi-for-coding", provider_kind="moonshot")
+    events = _collect(provider, config=ChatConfig(physical_attempt_limit=1))
+
+    assert len(calls) == 1
+    assert not any(isinstance(event, ProviderHeartbeatEvent) for event in events)
+    assert not any(isinstance(event, DoneEvent) for event in events)
+    assert any(isinstance(event, ErrorEvent) and event.code == "timeout" for event in events)
+
+
+def test_openai_auth_failure_uses_one_physical_request(monkeypatch: Any) -> None:
+    calls: list[httpx.Request] = []
+    _patch_transport(
+        monkeypatch,
+        "openai",
+        httpx.Response(401, json={"error": {"message": "expired"}}),
+        calls=calls,
+    )
+    provider = OpenAIProvider(api_key="k", model="m", provider_kind="openai")
+    events = _collect(provider, config=ChatConfig(physical_attempt_limit=1))
+
+    assert len(calls) == 1
+    assert any(isinstance(event, ErrorEvent) and event.code == "401" for event in events)
+    assert not any(isinstance(event, DoneEvent) for event in events)
+
+
 def test_reasoning_only_stream_does_not_trigger_empty_stream_fallback(monkeypatch: Any) -> None:
     """A stream that delivered reasoning deltas is not empty: retrying it
     non-stream would deliver (and bill) the same turn twice."""
@@ -287,7 +384,7 @@ def test_internal_parse_error_yields_error_event_not_raise(monkeypatch: Any) -> 
 
     errors = [e for e in events if isinstance(e, ErrorEvent)]
     assert len(errors) == 1
-    assert errors[0].code == "provider_internal"
+    assert errors[0].code == "invalid_stream_frame"
 
 
 # ---------------------------------------------------------------------------
@@ -317,15 +414,14 @@ def test_text_tool_synthesis_disabled_for_plain_openai(monkeypatch: Any) -> None
     assert not any(isinstance(e, ToolUseStartEvent) for e in events)
 
 
-def test_text_tool_synthesis_enabled_for_openrouter(monkeypatch: Any) -> None:
+def test_plain_text_tool_synthesis_is_not_blanket_enabled_for_openrouter(
+    monkeypatch: Any,
+) -> None:
     _patch_stream_body(monkeypatch, "openai", _openai_sse(_text_only_chunks(_PLAIN_TOOL_TEXT)))
     provider = OpenAIProvider(api_key="k", model="m", provider_kind="openrouter")
     events = _collect(provider, tools=[_SEARCH_TOOL])
-    ends = [e for e in events if isinstance(e, ToolUseEndEvent)]
-    assert len(ends) == 1
-    assert ends[0].tool_name == "search"
-    assert ends[0].synthetic_from_text is True
-    assert ends[0].arguments == {"query": "x"}
+    assert [e.text for e in events if isinstance(e, TextDeltaEvent)] == [_PLAIN_TOOL_TEXT]
+    assert not any(isinstance(e, ToolUseEndEvent) for e in events)
 
 
 def test_minimax_xml_synthesis_for_minimax_kind(monkeypatch: Any) -> None:
@@ -402,19 +498,22 @@ def test_anthropic_streaming_tool_call_assembly(monkeypatch: Any) -> None:
     assert dones[0].stop_reason == "tool_use"
 
 
-def test_anthropic_truncated_stream_still_yields_done(monkeypatch: Any) -> None:
-    """A stream dropped before message_stop must close tools and emit Done."""
+def test_anthropic_truncated_stream_does_not_commit_tool_or_done(monkeypatch: Any) -> None:
+    """A stream dropped before message_stop must not authorize partial tools."""
     body = _anthropic_sse(_anthropic_tool_events(include_stop=False))
-    _patch_stream_body(monkeypatch, "anthropic", body)
+    calls: list[httpx.Request] = []
+    _patch_stream_body(monkeypatch, "anthropic", body, calls=calls)
     provider = AnthropicProvider(api_key="k", model="claude-x")
     events = _collect(provider, tools=[_SEARCH_TOOL])
 
+    assert len(calls) == 1
     ends = [e for e in events if isinstance(e, ToolUseEndEvent)]
     dones = [e for e in events if isinstance(e, DoneEvent)]
-    assert len(ends) == 1, "open tool call must be closed on truncation"
-    assert ends[0].arguments == {"query": "x"}
-    assert len(dones) == 1, "stream must terminate with DoneEvent, not fall off the end"
-    assert events.index(ends[0]) < events.index(dones[0])
+    errors = [e for e in events if isinstance(e, ErrorEvent)]
+    assert ends == []
+    assert dones == []
+    assert len(errors) == 1
+    assert errors[0].code == "incomplete_stream"
 
 
 def test_anthropic_internal_error_yields_error_event(monkeypatch: Any) -> None:
@@ -434,7 +533,7 @@ def test_anthropic_internal_error_yields_error_event(monkeypatch: Any) -> None:
     events = _collect(provider, tools=[_SEARCH_TOOL])
     errors = [e for e in events if isinstance(e, ErrorEvent)]
     assert len(errors) == 1
-    assert errors[0].code == "provider_internal"
+    assert errors[0].code == "invalid_stream_order"
 
 
 # ---------------------------------------------------------------------------
@@ -448,9 +547,11 @@ def test_ollama_non_utf8_error_body_yields_error_event(monkeypatch: Any) -> None
         headers={"content-type": "text/plain"},
         content=b"\xff\xfe boom",
     )
-    _patch_transport(monkeypatch, "ollama", response)
+    calls: list[httpx.Request] = []
+    _patch_transport(monkeypatch, "ollama", response, calls=calls)
     provider = OllamaProvider(model="llama3")
     events = _collect(provider)
+    assert len(calls) == 1
     errors = [e for e in events if isinstance(e, ErrorEvent)]
     assert len(errors) == 1
     assert errors[0].code == "500"

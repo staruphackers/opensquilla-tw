@@ -182,6 +182,15 @@ async function mockStreamingEnsembleRun(page: Page) {
             stream_seq: 2,
             to_state: 'thinking',
           }))
+          ws.send(wsEvent('session.event.ensemble_progress', {
+            key: STREAM_SESSION_KEY,
+            task_id: 'ensemble-stream-task',
+            stream_seq: 3,
+            event_type: 'proposer_start',
+            proposer_label: 'anchor',
+            proposer_provider: 'openrouter',
+            proposer_model: 'qwen/qwen3.7-plus',
+          }))
           return
         }
         const payloads: Record<string, unknown> = {
@@ -272,6 +281,299 @@ async function mockStreamingEnsembleWithProgress(page: Page) {
   })
 }
 
+const LIFECYCLE_SESSION_KEY = 'agent:main:webchat:e2e-ensemble-lifecycle'
+
+async function mockControlledEnsembleLifecycle(page: Page) {
+  let sendFrame: ((frame: string) => void) | null = null
+  let streamSeq = 3
+  const taskId = 'ensemble-lifecycle-task'
+
+  const emit = (event: string, payload: Record<string, unknown>) => {
+    if (!sendFrame) throw new Error('ensemble lifecycle websocket is not connected')
+    sendFrame(wsEvent(event, {
+      key: LIFECYCLE_SESSION_KEY,
+      task_id: taskId,
+      stream_seq: streamSeq++,
+      ...payload,
+    }))
+  }
+
+  await page.addInitScript(() => {
+    window.localStorage.setItem('opensquilla-locale', 'en')
+    window.localStorage.setItem('opensquilla.routerVisualEffects', '1')
+  })
+  await page.route('**/api/approvals', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ pending: [] }),
+  }))
+  await page.routeWebSocket(/\/ws$/, ws => {
+    sendFrame = frame => ws.send(frame)
+    ws.send(JSON.stringify({ type: 'event', event: 'connect.challenge', payload: {} }))
+    ws.onMessage(message => {
+      try {
+        const frame = JSON.parse(String(message))
+        if (frame?.type !== 'req') return
+        const method = String(frame.method || '')
+        if (method === 'connect') {
+          ws.send(JSON.stringify({
+            protocol: 3,
+            policy: { tick_interval_ms: 30000, webui_stream_idle_grace_ms: 1_260_000 },
+          }))
+          return
+        }
+        if (method === 'chat.send') {
+          ws.send(wsResponse(String(frame.id), {
+            accepted: true,
+            session: LIFECYCLE_SESSION_KEY,
+            task_id: taskId,
+            stream_seq: 1,
+          }))
+          ws.send(wsEvent('task.running', {
+            key: LIFECYCLE_SESSION_KEY,
+            task_id: taskId,
+            stream_seq: 1,
+          }))
+          ws.send(wsEvent('session.event.state_change', {
+            key: LIFECYCLE_SESSION_KEY,
+            task_id: taskId,
+            stream_seq: 2,
+            to_state: 'thinking',
+          }))
+          emit('session.event.ensemble_progress', {
+            event_type: 'proposer_start', proposer_index: 0, proposer_label: 'anchor',
+            proposer_provider: 'openrouter', proposer_model: 'qwen/qwen3.7-plus',
+          })
+          return
+        }
+        const payloads: Record<string, unknown> = {
+          'agents.list': { agents: [] },
+          'chat.history': { messages: [], has_more: false },
+          'commands.list_for_surface': { commands: [] },
+          'config.get': {
+            squilla_router: { enabled: true, rollout_phase: 'full', tiers: {} },
+            llm_ensemble: { enabled: true },
+            permissions: {},
+            skills: {},
+          },
+          'sessions.list': { sessions: [], has_more: false },
+          'sessions.messages.subscribe': {
+            subscribed: true, replay_complete: true, current_stream_seq: 0, run_status: 'idle',
+          },
+          'usage.status': { sessions: [] },
+        }
+        ws.send(wsResponse(String(frame.id), payloads[method] ?? {}))
+      } catch {}
+    })
+  })
+
+  return { emit }
+}
+
+const SCROLL_SESSION_KEY = 'agent:main:webchat:e2e-ensemble-scroll-retention'
+const SCROLL_TASK_ID = 'ensemble-scroll-retention-task'
+const LATE_TEXT = 'Issue 549 late text delta'
+const TINY_SCROLL_TEXT_ONE = 'Tiny scroll retention delta one'
+const TINY_SCROLL_TEXT_TWO = 'Tiny scroll retention delta two'
+const TINY_SCROLL_TEXT_THREE = 'Tiny scroll follow resumed delta'
+const LATE_MODEL = 'openai/gpt-5.4-mini'
+
+async function mockEnsembleScrollRetention(page: Page) {
+  let sendFrame: ((frame: string) => void) | null = null
+  let streamSeq = 4
+
+  await page.addInitScript(() => {
+    window.localStorage.setItem('opensquilla-locale', 'en')
+    window.localStorage.setItem('opensquilla.routerVisualEffects', '1')
+  })
+  await page.route('**/api/system/update', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({}),
+  }))
+  await page.route('**/api/elevated-mode', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ enabled: false }),
+  }))
+  await page.route('**/api/approvals', route => route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({ pending: [] }),
+  }))
+  await page.routeWebSocket(/\/ws$/, ws => {
+    sendFrame = frame => ws.send(frame)
+    ws.send(JSON.stringify({ type: 'event', event: 'connect.challenge', payload: {} }))
+    ws.onMessage(message => {
+      try {
+        const frame = JSON.parse(String(message))
+        if (frame?.type !== 'req') return
+        const method = String(frame.method || '')
+        if (method === 'connect') {
+          ws.send(JSON.stringify({ protocol: 3, policy: { tick_interval_ms: 30000 } }))
+          return
+        }
+        if (method === 'chat.send') {
+          ws.send(wsResponse(String(frame.id), {
+            accepted: true,
+            session: SCROLL_SESSION_KEY,
+            task_id: SCROLL_TASK_ID,
+            stream_seq: 1,
+          }))
+          ws.send(wsEvent('task.running', { key: SCROLL_SESSION_KEY, task_id: SCROLL_TASK_ID, stream_seq: 1 }))
+          ws.send(wsEvent('session.event.state_change', {
+            key: SCROLL_SESSION_KEY,
+            task_id: SCROLL_TASK_ID,
+            stream_seq: 2,
+            to_state: 'streaming',
+          }))
+          ws.send(wsEvent('session.event.text_delta', {
+            key: SCROLL_SESSION_KEY,
+            task_id: SCROLL_TASK_ID,
+            stream_seq: 3,
+            text: Array.from(
+              { length: 80 },
+              (_, index) => `Initial streaming paragraph ${index + 1}: this fills the conversation so the reader can leave the live edge.`,
+            ).join('\n\n'),
+          }))
+          return
+        }
+        const payloads: Record<string, unknown> = {
+          'agents.list': { agents: [] },
+          'chat.history': { messages: [], has_more: false },
+          'commands.list_for_surface': { commands: [] },
+          'config.get': {
+            squilla_router: { enabled: true, rollout_phase: 'full', tiers: {} },
+            llm_ensemble: { enabled: true },
+            permissions: {},
+            skills: {},
+          },
+          'sessions.list': { sessions: [], has_more: false },
+          'sessions.messages.subscribe': { subscribed: true, replay_complete: true, current_stream_seq: 0, run_status: 'idle' },
+          'usage.status': { sessions: [] },
+        }
+        ws.send(wsResponse(String(frame.id), payloads[method] ?? {}))
+      } catch {}
+    })
+  })
+
+  function emit(event: string, payload: Record<string, unknown>) {
+    if (!sendFrame) throw new Error('WebSocket fixture is not connected')
+    sendFrame(wsEvent(event, {
+      key: SCROLL_SESSION_KEY,
+      task_id: SCROLL_TASK_ID,
+      stream_seq: streamSeq++,
+      ...payload,
+    }))
+  }
+
+  return {
+    emitText: (text: string) => emit('session.event.text_delta', { text }),
+    emitLateText: () => emit('session.event.text_delta', { text: LATE_TEXT }),
+    emitLateProgress: () => emit('session.event.ensemble_progress', {
+      event_type: 'proposer_start',
+      proposer_label: 'late',
+      proposer_provider: 'openai',
+      proposer_model: LATE_MODEL,
+    }),
+  }
+}
+
+function threadMetrics(page: Page) {
+  return page.locator('.chat-thread').evaluate(el => {
+    const thread = el as HTMLElement
+    return {
+      scrollTop: Math.round(thread.scrollTop),
+      gap: Math.round(thread.scrollHeight - thread.scrollTop - thread.clientHeight),
+      scrollHeight: Math.round(thread.scrollHeight),
+    }
+  })
+}
+
+async function openEnsembleScrollRetention(page: Page) {
+  const stream = await mockEnsembleScrollRetention(page)
+  await page.goto(CONTROL_URL + 'chat?session=' + encodeURIComponent(SCROLL_SESSION_KEY))
+  await page.waitForSelector('.conn-pill.connected', { timeout: 15000 })
+  await page.locator('.chat-textarea').fill('Keep streaming while I read earlier content.')
+  await page.locator('.chat-send-btn[aria-label="Send"]').click()
+  await expect.poll(
+    () => threadMetrics(page).then(metrics => metrics.scrollHeight > 1600),
+    { timeout: 10000 },
+  ).toBe(true)
+  await expect.poll(() => threadMetrics(page).then(metrics => metrics.gap)).toBeLessThanOrEqual(2)
+  return stream
+}
+
+test('ensemble events do not re-pin a reader who left the live edge', async ({ page }) => {
+  const stream = await openEnsembleScrollRetention(page)
+  const beforeLateEvents = await page.locator('.chat-thread').evaluate(el => {
+    const thread = el as HTMLElement
+    thread.scrollTop = Math.max(0, thread.scrollHeight - thread.clientHeight - 300)
+    thread.dispatchEvent(new Event('scroll'))
+    return {
+      scrollTop: Math.round(thread.scrollTop),
+      gap: Math.round(thread.scrollHeight - thread.scrollTop - thread.clientHeight),
+    }
+  })
+  expect(beforeLateEvents.gap).toBeGreaterThan(60)
+  await expect(page.locator('.chat-jump-latest')).toBeVisible()
+
+  stream.emitLateText()
+  await expect(page.locator('.chat-thread')).toContainText(LATE_TEXT)
+  const afterLateText = await threadMetrics(page)
+  expect(afterLateText.gap).toBeGreaterThan(60)
+
+  stream.emitLateProgress()
+  const ensembleStrip = page.locator('.router-fx[data-panel="llm-ensemble"]')
+  await ensembleStrip.locator('[data-testid="router-ensemble-toggle"]').click()
+  await expect(ensembleStrip.locator('[data-testid="router-ensemble-inspector"]')).toContainText('gpt-5.4-mini')
+  const afterLateProgress = await threadMetrics(page)
+  expect(afterLateProgress.gap).toBeGreaterThan(60)
+  await expect(page.locator('.chat-jump-latest')).toBeVisible()
+})
+
+test('a tiny upward wheel pauses an active stream until the reader returns', async ({ page }) => {
+  const stream = await openEnsembleScrollRetention(page)
+  const thread = page.locator('.chat-thread')
+  const latest = page.locator('.chat-jump-latest')
+
+  await thread.hover({ position: { x: 120, y: 120 } })
+  await page.mouse.wheel(0, -8)
+  await expect(latest).toBeVisible()
+  const paused = await threadMetrics(page)
+  expect(paused.gap).toBeGreaterThan(2)
+  expect(paused.gap).toBeLessThan(60)
+
+  // Cross both the 120ms intent window and delayed IntersectionObserver
+  // delivery before proving that later stream deltas preserve the reader.
+  await page.waitForTimeout(150)
+  stream.emitText(TINY_SCROLL_TEXT_ONE)
+  await expect(thread).toContainText(TINY_SCROLL_TEXT_ONE)
+  const afterFirstDelta = await threadMetrics(page)
+  expect(Math.abs(afterFirstDelta.scrollTop - paused.scrollTop)).toBeLessThanOrEqual(1)
+  expect(afterFirstDelta.gap).toBeGreaterThan(2)
+  await expect(latest).toBeVisible()
+
+  stream.emitText(TINY_SCROLL_TEXT_TWO)
+  await expect(thread).toContainText(TINY_SCROLL_TEXT_TWO)
+  const afterSecondDelta = await threadMetrics(page)
+  expect(Math.abs(afterSecondDelta.scrollTop - paused.scrollTop)).toBeLessThanOrEqual(1)
+  expect(afterSecondDelta.gap).toBeGreaterThan(2)
+  await expect(latest).toBeVisible()
+
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    if ((await threadMetrics(page)).gap <= 2) break
+    await page.mouse.wheel(0, 64)
+  }
+  await expect.poll(() => threadMetrics(page).then(metrics => metrics.gap)).toBeLessThanOrEqual(2)
+  await expect(latest).toHaveCount(0)
+
+  stream.emitText(TINY_SCROLL_TEXT_THREE)
+  await expect(thread).toContainText(TINY_SCROLL_TEXT_THREE)
+  await expect.poll(() => threadMetrics(page).then(metrics => metrics.gap)).toBeLessThanOrEqual(2)
+  await expect(latest).toHaveCount(0)
+})
+
 test('ensemble routing reveals members incrementally from ensemble_progress events', async ({ page }) => {
   await mockStreamingEnsembleWithProgress(page)
   await page.goto(CONTROL_URL + 'chat?session=' + encodeURIComponent(PROGRESS_SESSION_KEY))
@@ -297,6 +599,95 @@ test('ensemble routing reveals members incrementally from ensemble_progress even
   // Finished proposers report token usage; the still-running one shows a spinner.
   await expect(inspector.locator('.router-fx-inspector__row[data-status="done"]')).toHaveCount(2)
   await expect(inspector.locator('.router-fx-inspector__row[data-status="running"] .router-fx-inspector__spin')).toHaveCount(1)
+})
+
+test('ensemble lifecycle replaces telemetry pending immediately and completes after aggregation', async ({ page }) => {
+  const lifecycle = await mockControlledEnsembleLifecycle(page)
+  await page.goto(CONTROL_URL + 'chat?session=' + encodeURIComponent(LIFECYCLE_SESSION_KEY))
+  await page.waitForSelector('.conn-pill', { timeout: 10000 })
+
+  await page.locator('.chat-textarea').fill('Compare three slow candidates and synthesize.')
+  await page.locator('.chat-send-btn[aria-label="Send"]').click()
+
+  const strip = page.locator('.router-fx[data-panel="llm-ensemble"]')
+  await expect(strip).toBeVisible({ timeout: 10000 })
+  await strip.locator('[data-testid="router-ensemble-toggle"]').click()
+  const inspector = strip.locator('[data-testid="router-ensemble-inspector"]')
+
+  // The first lifecycle frame must replace the empty telemetry state by itself.
+  await expect(inspector.locator('.router-fx-inspector__row[data-status="running"]')).toHaveCount(1)
+  await expect(inspector).toContainText('qwen3.7-plus')
+  await expect(inspector).not.toContainText('telemetry pending')
+
+  lifecycle.emit('session.event.ensemble_progress', {
+    event_type: 'proposer_start', proposer_index: 1, proposer_label: 'research',
+    proposer_provider: 'openrouter', proposer_model: 'moonshotai/kimi-k2.6',
+  })
+  lifecycle.emit('session.event.ensemble_progress', {
+    event_type: 'proposer_start', proposer_index: 2, proposer_label: 'critic',
+    proposer_provider: 'openrouter', proposer_model: 'z-ai/glm-5.2',
+  })
+  await expect(inspector.locator('.router-fx-inspector__row[data-status="running"]')).toHaveCount(3)
+
+  lifecycle.emit('session.event.ensemble_progress', {
+    event_type: 'proposer_finish', proposer_index: 0, proposer_label: 'anchor',
+    proposer_provider: 'openrouter', proposer_model: 'qwen/qwen3.7-plus',
+    input_tokens: 120, output_tokens: 30, elapsed_ms: 105_000,
+  })
+  lifecycle.emit('session.event.ensemble_progress', {
+    event_type: 'proposer_finish', proposer_index: 1, proposer_label: 'research',
+    proposer_provider: 'openrouter', proposer_model: 'moonshotai/kimi-k2.6',
+    input_tokens: 140, output_tokens: 42, elapsed_ms: 118_000,
+  })
+  lifecycle.emit('session.event.ensemble_progress', {
+    event_type: 'proposer_finish', proposer_index: 2, proposer_label: 'critic',
+    proposer_provider: 'openrouter', proposer_model: 'z-ai/glm-5.2',
+    input_tokens: 160, output_tokens: 48, elapsed_ms: 130_000,
+  })
+  await expect(inspector.locator('.router-fx-inspector__row[data-status="done"]')).toHaveCount(3)
+  await expect(inspector).toContainText('105s')
+  await expect(inspector).toContainText('118s')
+  await expect(inspector).toContainText('130s')
+  await expect(strip.locator('[data-testid="router-ensemble-toggle"]')).toHaveAttribute('aria-busy', 'true')
+  await expect(strip.locator('.router-fx-ensemble__scan')).toBeVisible()
+
+  lifecycle.emit('session.event.ensemble_progress', {
+    event_type: 'aggregator_start', proposer_index: -1, proposer_label: 'aggregator',
+    proposer_provider: 'openrouter', proposer_model: 'anthropic/claude-sonnet',
+  })
+  await expect(inspector.locator('.router-fx-inspector__row[data-status="running"]')).toContainText('claude-sonnet')
+
+  lifecycle.emit('session.event.ensemble_progress', {
+    event_type: 'aggregator_finish', proposer_index: -1, proposer_label: 'aggregator',
+    proposer_provider: 'openrouter', proposer_model: 'anthropic/claude-sonnet',
+    input_tokens: 500, output_tokens: 80, elapsed_ms: 12_000,
+  })
+  await expect(inspector.locator('.router-fx-inspector__row[data-status="done"]')).toHaveCount(4)
+  await expect(inspector).toContainText('12s')
+  await expect(strip.locator('[data-testid="router-ensemble-toggle"]')).toHaveAttribute('aria-busy', 'false')
+  await expect(strip.locator('.router-fx-ensemble__scan')).toHaveCount(0)
+
+  lifecycle.emit('session.event.text_delta', { text: 'Lifecycle answer complete.' })
+  lifecycle.emit('session.event.done', {
+    text: 'Lifecycle answer complete.', model: 'ensemble/default', input_tokens: 920, output_tokens: 200,
+    model_usage_breakdown: [
+      { role: 'proposer', label: 'anchor', provider: 'openrouter', model: 'qwen/qwen3.7-plus', input_tokens: 120, output_tokens: 30, elapsed_ms: 105_000 },
+      { role: 'proposer', label: 'research', provider: 'openrouter', model: 'moonshotai/kimi-k2.6', input_tokens: 140, output_tokens: 42, elapsed_ms: 118_000 },
+      { role: 'proposer', label: 'critic', provider: 'openrouter', model: 'z-ai/glm-5.2', input_tokens: 160, output_tokens: 48, elapsed_ms: 130_000 },
+      { role: 'aggregator', label: 'aggregator', provider: 'openrouter', model: 'anthropic/claude-sonnet', input_tokens: 500, output_tokens: 80, elapsed_ms: 12_000 },
+    ],
+    ensemble_trace: {
+      profile: 'default', total_candidates: 3, llm_request_count: 4, fallback_used: false,
+    },
+  })
+  await expect(page.locator('.chat-thread')).toContainText('Lifecycle answer complete.')
+  await expect(strip.locator('[data-testid="router-ensemble-toggle"]')).toContainText('3 candidates synthesized')
+  await expect(strip.locator('[data-testid="router-ensemble-toggle"]'))
+    .toHaveAttribute('aria-expanded', 'true')
+  await expect(inspector).toContainText('105s')
+  await expect(inspector).toContainText('118s')
+  await expect(inspector).toContainText('130s')
+  await expect(inspector).toContainText('12s')
 })
 
 const TIER_SESSION_KEY = 'agent:main:webchat:e2e-ensemble-router-tier'
@@ -362,7 +753,7 @@ test('ensemble mode does not render the tier candidate grid for the live turn', 
   await page.locator('.chat-textarea').fill('Synthesize an answer from several models.')
   await page.locator('.chat-send-btn[aria-label="Send"]').click()
 
-  await expect(page.locator('.work-card')).toBeVisible({ timeout: 10000 })
+  await expect(page.locator('.assistant-activity--live')).toBeVisible({ timeout: 10000 })
   // The regression: a squilla_router tier decision must NOT paint the grid strip
   // while ensemble mode is active — it belongs to the ensemble surface instead.
   await expect(page.locator('.router-fx[data-panel="real-candidates"]')).toHaveCount(0)
@@ -491,7 +882,7 @@ for (const complexity of ['simple', 'medium', 'complex'] as const) {
   })
 }
 
-test('live ensemble routing shows the strip alongside the work card', async ({ page }) => {
+test('live ensemble routing shows the strip alongside flat activity', async ({ page }) => {
   await mockStreamingEnsembleRun(page)
   await page.goto(CONTROL_URL + 'chat?session=' + encodeURIComponent(STREAM_SESSION_KEY))
   await page.waitForSelector('.conn-pill', { timeout: 10000 })
@@ -499,10 +890,10 @@ test('live ensemble routing shows the strip alongside the work card', async ({ p
   await page.locator('.chat-textarea').fill('Build a tiny team collaboration app.')
   await page.locator('.chat-send-btn[aria-label="Send"]').click()
 
-  // The work-card runs its normal execution phase...
-  await expect(page.locator('.work-card')).toBeVisible({ timeout: 10000 })
-  // ...and the ensemble strip is surfaced independently — here as the pre-decision
-  // reserve, before any member arrives — instead of being hidden behind it.
+  // The flat activity surface runs its normal execution phase...
+  await expect(page.locator('.assistant-activity--live')).toBeVisible({ timeout: 10000 })
+  // ...and the ensemble strip is surfaced independently after authoritative
+  // proposer activity arrives, instead of being inferred before Router work.
   await expect(page.locator('.router-fx[data-panel="llm-ensemble"]')).toHaveCount(1)
   // It is live, not settled.
   await expect(page.locator('.router-fx[data-panel="llm-ensemble"][data-settled="true"]')).toHaveCount(0)

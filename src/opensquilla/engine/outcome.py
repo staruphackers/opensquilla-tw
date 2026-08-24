@@ -53,12 +53,31 @@ _BLOCKED_CODES = frozenset(
         "approval_required",
         "external_dependency",
         "provider_unavailable",
+        "usage_accounting_busy",
+        "usage_accounting_unavailable",
         "sandbox_threshold_exceeded",
         "tool_policy_denied",
         "compaction_refused_flush_timeout",
         "compaction_refused_memory_flush",
         "compaction_refused_empty_summary",
         "context_unsalvageable",
+    }
+)
+_RETRYABLE_PROVIDER_CODES = frozenset(
+    {
+        "provider_pretext_buffer_exhausted",
+    }
+)
+_RETRYABLE_PROVIDER_FAILURE_KINDS = frozenset(
+    {
+        "rate_limited",
+        "provider_overloaded",
+        "transport_transient",
+        "reasoning_only",
+        "empty_response",
+        "stream_incomplete",
+        "invalid_response",
+        "context_overflow",
     }
 )
 
@@ -69,6 +88,7 @@ class TurnOutcome:
     reason: str
     error_class: str | None = None
     error_message: str | None = None
+    failure_kind: str | None = None
     retryable: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -84,8 +104,10 @@ def outcome_from_error(
     code: str | None,
     message: str | None = None,
     error_class: str | None = None,
+    failure_kind: str | None = None,
 ) -> TurnOutcome:
     normalized = _normalize_code(code)
+    normalized_failure_kind = _normalize_code(failure_kind)
     text = message or None
     if normalized in _BUDGET_CODES:
         return TurnOutcome(
@@ -93,6 +115,7 @@ def outcome_from_error(
             reason=normalized,
             error_class=error_class or normalized,
             error_message=text,
+            failure_kind=failure_kind or None,
             retryable=True,
         )
     if normalized in _PARTIAL_CODES:
@@ -101,6 +124,7 @@ def outcome_from_error(
             reason=normalized,
             error_class=error_class or normalized,
             error_message=text,
+            failure_kind=failure_kind or None,
             retryable=normalized == "provider_output_truncated",
         )
     if normalized in _INTERRUPTED_CODES:
@@ -109,6 +133,7 @@ def outcome_from_error(
             reason=normalized,
             error_class=error_class or normalized,
             error_message=text,
+            failure_kind=failure_kind or None,
             retryable=True,
         )
     if normalized in _BLOCKED_CODES:
@@ -117,6 +142,7 @@ def outcome_from_error(
             reason=normalized,
             error_class=error_class or normalized,
             error_message=text,
+            failure_kind=failure_kind or None,
             retryable=True,
         )
     return TurnOutcome(
@@ -124,6 +150,11 @@ def outcome_from_error(
         reason=normalized or "error",
         error_class=error_class or normalized or "error",
         error_message=text,
+        failure_kind=failure_kind or None,
+        retryable=(
+            normalized in _RETRYABLE_PROVIDER_CODES
+            or normalized_failure_kind in _RETRYABLE_PROVIDER_FAILURE_KINDS
+        ),
     )
 
 

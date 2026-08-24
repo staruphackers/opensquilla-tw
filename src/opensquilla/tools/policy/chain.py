@@ -1,7 +1,7 @@
 """Ordered chain of policy checks.
 
-The chain order is owner_only first, then
-denied_tools, denied_tools before private_memory_scope, and so on. The
+The chain order is owner_only first, then guest_safe and denied_tools before
+private_memory_scope, and so on. The
 :func:`run_chain` function returns the first denying decision (the
 "first denial wins" contract codified in
 ``test_dispatch_properties.test_first_denial_wins_*``).
@@ -20,6 +20,8 @@ from typing import cast
 from opensquilla.tools.policy.checks import (
     AllowListPolicy,
     DenyListPolicy,
+    ExclusiveToolCeilingPolicy,
+    GuestSafePolicy,
     OwnerOnlyPolicy,
     PermissionMatrixPolicy,
     PrivateMemoryScopePolicy,
@@ -29,8 +31,10 @@ from opensquilla.tools.policy.types import DispatchInput, PolicyCheck, PolicyDec
 
 POLICY_CHAIN: tuple[PolicyCheck, ...] = cast(tuple[PolicyCheck, ...], (
     OwnerOnlyPolicy(),
+    GuestSafePolicy(),
     DenyListPolicy(),
     PrivateMemoryScopePolicy(),
+    ExclusiveToolCeilingPolicy(),
     AllowListPolicy(),
     ProfilePolicy(),
     PermissionMatrixPolicy(),

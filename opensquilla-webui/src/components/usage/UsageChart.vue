@@ -41,14 +41,17 @@
           <div>{{ t('usageLogs.chart.emptyWindow') }}</div>
         </div>
       </template>
-      <button
+      <component
         v-for="(row, i) in rows"
         :key="i"
+        :is="row.sessionKey ? 'button' : 'div'"
         class="usage-bar-row"
-        type="button"
-        :title="t('usageLogs.chart.openSession', { session: row.sessionKey })"
+        :class="{ 'is-static': !row.sessionKey }"
+        :type="row.sessionKey ? 'button' : undefined"
+        :title="row.sessionKey ? t('usageLogs.chart.openTask', { task: row.label }) : row.label"
+        :aria-label="row.sessionKey ? t('usageLogs.chart.openTask', { task: row.label }) : undefined"
         :style="`--i:${i}`"
-        @click="emit('openSession', row.sessionKey)"
+        @click="row.sessionKey && emit('openSession', row.sessionKey)"
       >
         <span class="usage-bar-row__label">{{ row.label }}</span>
         <span class="usage-bar-row__track">
@@ -58,10 +61,9 @@
             class="usage-bar-row__fill usage-bar-row__fill--output"
             :style="`width:${row.outputPct.toFixed(1)}%`"
           />
-          <span class="usage-bar-row__cap" :style="`left:${Math.min(100, row.totalPct).toFixed(1)}%`" />
         </span>
         <span class="usage-bar-row__value usage-mono">{{ row.valueLabel }}</span>
-      </button>
+      </component>
     </div>
   </section>
 </template>

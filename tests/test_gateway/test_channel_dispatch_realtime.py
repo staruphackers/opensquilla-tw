@@ -3,18 +3,31 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
+import structlog
 
 from opensquilla.artifacts import ArtifactStore
 from opensquilla.channels.contract import ChannelCapabilityProfile
 from opensquilla.channels.stream_policy import resolve_channel_stream_policy
-from opensquilla.channels.types import Attachment, IncomingMessage, OutgoingMessage
+from opensquilla.channels.types import (
+    Attachment,
+    AuthenticatedPrincipal,
+    IncomingMessage,
+    IngressProvenance,
+    IngressVerification,
+    OutgoingMessage,
+)
 from opensquilla.engine.types import (
+    AnswerGenerationResetEvent,
     ArtifactEvent,
     DoneEvent,
+    ErrorEvent,
     TextDeltaEvent,
     ToolResultEvent,
     ToolUseStartEvent,
@@ -27,6 +40,7 @@ from opensquilla.gateway.attachment_ingest import (
 from opensquilla.gateway.channel_dispatch import (
     _artifact_fallback_lines,
     _build_reply_message,
+    _clarify_tool_arguments,
     _deliver_artifacts_as_channel_files,
     _deliver_runtime_channel_reply,
     _dispatch_channel_slash_command,
@@ -41,8 +55,16 @@ from opensquilla.gateway.channel_dispatch import (
 from opensquilla.gateway.config import AgentEntryConfig, GatewayConfig
 from opensquilla.gateway.protocol import make_ok_res
 from opensquilla.gateway.routing import build_channel_route_envelope
+from opensquilla.project_workspaces import (
+    ProjectWorkspaceStateError,
+    project_path_key,
+)
 from opensquilla.safety.permission_matrix import Principal, is_tool_allowed
+from opensquilla.sandbox.run_context import RUN_CONTEXT_ORIGIN_KEY
 from opensquilla.sandbox.run_mode import RunMode
+from opensquilla.session.manager import SessionManager
+from opensquilla.session.models import SessionNode
+from opensquilla.session.storage import SessionStorage
 from opensquilla.tools.types import CallerKind
 
 
@@ -54,12 +76,77 @@ class _FakeChannel:
         self.sent.append(message)
 
 
+class _StableReplaceableFakeChannel(_FakeChannel):
+    @property
+    def capability_profile(self) -> ChannelCapabilityProfile:
+        return ChannelCapabilityProfile(
+            channel_type="stable-replaceable-test",
+            edit=True,
+            delete=True,
+            streamed_message_replacement=True,
+        )
+
+    async def edit(self, message_id: str, content: str, **kwargs) -> None:
+        del message_id, content, kwargs
+
+
 class _FakeEventBridge:
     def __init__(self) -> None:
         self.events: list[tuple[str, str, dict]] = []
 
     async def emit(self, session_key: str, event_name: str, payload: dict) -> None:
         self.events.append((session_key, event_name, payload))
+
+
+def _retarget_directory_link(link: Path, target: Path, backup: Path) -> None:
+    link.rename(backup)
+    if os.name != "nt":
+        link.symlink_to(target, target_is_directory=True)
+        return
+    result = subprocess.run(
+        [
+            "cmd",
+            "/d",
+            "/s",
+            "/c",
+            "mklink",
+            "/J",
+            str(link),
+            str(target),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        backup.rename(link)
+        pytest.skip(f"could not create junction: {result.stderr or result.stdout}")
+
+
+def _restore_retargeted_directory(link: Path, backup: Path) -> None:
+    if not backup.exists():
+        return
+    if os.path.lexists(link):
+        if os.name == "nt":
+            os.rmdir(link)
+        else:
+            link.unlink()
+    backup.rename(link)
+
+
+@pytest.mark.asyncio
+async def test_atomic_channel_acceptance_does_not_hold_session_lock() -> None:
+    from opensquilla.gateway.channel_dispatch import _channel_acceptance_lock
+
+    lock = asyncio.Lock()
+
+    async with _channel_acceptance_lock(lock, atomic=True):
+        assert lock.locked() is False
+
+    async with _channel_acceptance_lock(lock, atomic=False):
+        assert lock.locked() is True
+
+    assert lock.locked() is False
 
 
 class _RunContextSessionManager:
@@ -70,8 +157,48 @@ class _RunContextSessionManager:
         return self.node
 
 
+def test_clarify_protocol_can_be_recovered_from_tool_result_json() -> None:
+    protocol = {
+        "kind": "user_input",
+        "paused": True,
+        "step": "plan",
+        "run_id": "plan-turn-1",
+        "clarify_schema": {
+            "mode": "form",
+            "fields": [
+                {
+                    "name": "scope",
+                    "type": "enum",
+                    "required": True,
+                    "choices": ["Core", "Full"],
+                }
+            ],
+        },
+    }
+    event = ToolResultEvent(
+        tool_use_id="request-input-1",
+        tool_name="request_user_input",
+        result=json.dumps(protocol),
+        arguments={"questions": [{"id": "scope", "question": "Which scope?"}]},
+    )
+
+    assert _clarify_tool_arguments(event) == protocol
+
+
 def _message() -> IncomingMessage:
     return IncomingMessage(sender_id="u1", channel_id="c1", content="hello")
+
+
+def _authenticated_message() -> IncomingMessage:
+    return _message().model_copy(
+        update={
+            "provenance": IngressProvenance(
+                provider="feishu",
+                verification=IngressVerification.SDK_SESSION,
+                principal=AuthenticatedPrincipal(subject_id="u1"),
+            )
+        }
+    )
 
 
 def _tool_ctx(agent_id: str = "main") -> SimpleNamespace:
@@ -116,6 +243,30 @@ def test_preserve_route_channel_metadata_for_registry_thread_reply() -> None:
 
     assert fixed.reply_to == "1700000000.000100"
     assert fixed.metadata == {"command": "compact", "channel": "C42"}
+
+
+def test_preserve_route_metadata_allows_only_interaction_reply_context() -> None:
+    route_envelope = SimpleNamespace(
+        channel_id="C42",
+        thread_id=None,
+        metadata={
+            "interaction_token": "interaction-secret",
+            "application_id": "app-1",
+            "interaction_deferred": True,
+            "authorization": "must-not-leak",
+            "guild_id": "must-not-leak",
+        },
+    )
+    reply = OutgoingMessage(content="done", metadata={"command": "help"})
+
+    fixed = _preserve_route_channel_metadata(reply, route_envelope)
+
+    assert fixed.metadata == {
+        "command": "help",
+        "interaction_token": "interaction-secret",
+        "application_id": "app-1",
+        "interaction_deferred": True,
+    }
 
 
 @pytest.mark.asyncio
@@ -203,6 +354,614 @@ def test_channel_stream_policy_allows_adapter_final_only_override() -> None:
 
 
 @pytest.mark.asyncio
+async def test_direct_channel_batch_uses_authoritative_done_snapshot() -> None:
+    class FakeTurnRunner:
+        async def run(self, message: str, session_key: str, **kwargs):
+            yield TextDeltaEvent(text="stale")
+            yield DoneEvent(text="canonical", text_snapshot="canonical")
+
+    channel = _FakeChannel()
+
+    await _run_turn_batch_path(
+        channel,
+        FakeTurnRunner(),
+        _message(),
+        "agent:main:done-snapshot",
+        _tool_ctx(),
+        None,
+        None,
+        SimpleNamespace(agent_stream_idle_timeout_seconds=1.0),
+    )
+
+    assert [message.content for message in channel.sent] == ["canonical"]
+
+
+@pytest.mark.asyncio
+async def test_direct_channel_batch_terminal_reset_replaces_partial_with_failure() -> None:
+    drained = False
+
+    class FakeTurnRunner:
+        async def run(self, message: str, session_key: str, **kwargs):
+            nonlocal drained
+            yield TextDeltaEvent(text="superseded partial")
+            yield AnswerGenerationResetEvent(
+                terminal=True,
+                terminal_text_snapshot="The fallback model also failed.",
+                terminal_error_message="internal safe failure",
+                terminal_error_code="ensemble_fixed_error",
+                terminal_failure_kind="provider_error",
+            )
+            await asyncio.sleep(0.01)
+            drained = True
+
+    channel = _FakeChannel()
+    bridge = _FakeEventBridge()
+
+    await _run_turn_batch_path(
+        channel,
+        FakeTurnRunner(),
+        _message(),
+        "agent:main:terminal-reset-batch",
+        _tool_ctx(),
+        bridge,
+        None,
+        SimpleNamespace(agent_stream_idle_timeout_seconds=1.0),
+    )
+
+    assert [message.content for message in channel.sent] == [
+        "The fallback model also failed."
+    ]
+    assert drained is True
+    reset_payload = next(
+        payload
+        for _, event_name, payload in bridge.events
+        if event_name == "session.event.answer_generation_reset"
+    )
+    assert reset_payload["terminal"] is True
+    assert "terminal_error_message" not in reset_payload
+    assert "terminal_error_code" not in reset_payload
+    assert "terminal_failure_kind" not in reset_payload
+
+
+@pytest.mark.asyncio
+async def test_direct_channel_error_log_does_not_expose_provider_prose() -> None:
+    raw_detail = "RAW_PROVIDER_BODY_DO_NOT_PERSIST"
+
+    class FakeTurnRunner:
+        async def run(self, message: str, session_key: str, **kwargs):
+            del message, session_key, kwargs
+            yield ErrorEvent(
+                message=f"provider rejected request: {raw_detail}",
+                code="400",
+                failure_kind="bad_request",
+            )
+
+    channel = _FakeChannel()
+    with structlog.testing.capture_logs() as logs:
+        await _run_turn_batch_path(
+            channel,
+            FakeTurnRunner(),
+            _message(),
+            "agent:main:provider-error",
+            _tool_ctx(),
+            None,
+            None,
+            SimpleNamespace(
+                agent_stream_heartbeat_interval_seconds=0.0,
+                agent_stream_idle_timeout_seconds=1.0,
+            ),
+        )
+
+    assert raw_detail not in json.dumps(logs)
+    agent_error = next(
+        row for row in logs if row["event"] == "channel_dispatch.agent_error"
+    )
+    assert agent_error["failure_kind"] == "bad_request"
+    assert "message" not in agent_error
+    assert channel.sent[-1].content == "The task failed before it could finish."
+
+
+@pytest.mark.asyncio
+async def test_direct_channel_stream_replaces_preview_with_done_snapshot() -> None:
+    class StreamingChannel(_StableReplaceableFakeChannel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.preview_chunks: list[str] = []
+            self.edits: list[tuple[str, str, str | None]] = []
+
+        def streaming_reply_kwargs(self, inbound: IncomingMessage) -> dict[str, str]:
+            return {"room_id": inbound.channel_id}
+
+        async def send_streaming(self, chunks, *, room_id: str | None = None):
+            assert room_id == "c1"
+            async for chunk in chunks:
+                self.preview_chunks.append(chunk)
+            return "message-1"
+
+        async def edit(
+            self,
+            message_id: str,
+            content: str,
+            *,
+            room_id: str | None = None,
+        ) -> None:
+            self.edits.append((message_id, content, room_id))
+
+    class FakeTurnRunner:
+        async def run(self, message: str, session_key: str, **kwargs):
+            yield TextDeltaEvent(text="stale")
+            yield DoneEvent(text="canonical", text_snapshot="canonical")
+
+    channel = StreamingChannel()
+
+    await _run_turn_with_streaming(
+        channel,
+        FakeTurnRunner(),
+        _message(),
+        "agent:main:done-snapshot-stream",
+        None,
+        None,
+        SimpleNamespace(agent_stream_idle_timeout_seconds=1.0),
+    )
+
+    assert channel.preview_chunks == ["stale"]
+    assert channel.edits == [("message-1", "canonical", "c1")]
+    assert channel.sent == []
+
+
+@pytest.mark.asyncio
+async def test_direct_channel_stream_terminal_reset_replaces_preview_with_failure() -> None:
+    drained = False
+
+    class StreamingChannel(_StableReplaceableFakeChannel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.preview_chunks: list[str] = []
+            self.edits: list[tuple[str, str, str | None]] = []
+
+        def streaming_reply_kwargs(self, inbound: IncomingMessage) -> dict[str, str]:
+            return {"room_id": inbound.channel_id}
+
+        async def send_streaming(self, chunks, *, room_id: str | None = None):
+            assert room_id == "c1"
+            async for chunk in chunks:
+                self.preview_chunks.append(chunk)
+            return "message-1"
+
+        async def edit(
+            self,
+            message_id: str,
+            content: str,
+            *,
+            room_id: str | None = None,
+        ) -> None:
+            self.edits.append((message_id, content, room_id))
+
+    class FakeTurnRunner:
+        async def run(self, message: str, session_key: str, **kwargs):
+            nonlocal drained
+            yield TextDeltaEvent(text="superseded partial")
+            yield AnswerGenerationResetEvent(
+                terminal=True,
+                terminal_text_snapshot="The fallback model also failed.",
+                terminal_error_code="ensemble_fixed_error",
+                terminal_failure_kind="provider_error",
+            )
+            await asyncio.sleep(0.01)
+            drained = True
+
+    channel = StreamingChannel()
+
+    await _run_turn_with_streaming(
+        channel,
+        FakeTurnRunner(),
+        _message(),
+        "agent:main:terminal-reset-stream",
+        None,
+        None,
+        SimpleNamespace(agent_stream_idle_timeout_seconds=1.0),
+    )
+
+    assert channel.preview_chunks == ["superseded partial"]
+    assert channel.edits == [
+        ("message-1", "The fallback model also failed.", "c1")
+    ]
+    assert channel.sent == []
+    assert drained is True
+
+
+@pytest.mark.asyncio
+async def test_direct_channel_stream_deletes_preview_for_explicit_empty_snapshot() -> None:
+    class StreamingChannel(_StableReplaceableFakeChannel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.preview_chunks: list[str] = []
+            self.deleted: list[tuple[str, str | None]] = []
+
+        def streaming_reply_kwargs(self, inbound: IncomingMessage) -> dict[str, str]:
+            return {"channel": inbound.channel_id}
+
+        async def send_streaming(self, chunks, *, channel: str | None = None):
+            assert channel == "c1"
+            async for chunk in chunks:
+                self.preview_chunks.append(chunk)
+            return "message-1"
+
+        async def delete(
+            self,
+            message_id: str,
+            *,
+            channel: str | None = None,
+        ) -> None:
+            self.deleted.append((message_id, channel))
+
+        async def edit(self, message_id: str, content: str) -> None:
+            raise AssertionError("explicit empty snapshot should prefer delete")
+
+    class FakeTurnRunner:
+        async def run(self, message: str, session_key: str, **kwargs):
+            yield TextDeltaEvent(text="stale")
+            yield DoneEvent(text="", text_snapshot="")
+
+    channel = StreamingChannel()
+
+    await _run_turn_with_streaming(
+        channel,
+        FakeTurnRunner(),
+        _message(),
+        "agent:main:done-snapshot-empty",
+        None,
+        None,
+        SimpleNamespace(agent_stream_idle_timeout_seconds=1.0),
+    )
+
+    assert channel.preview_chunks == ["stale"]
+    assert channel.deleted == [("message-1", "c1")]
+    assert channel.sent == []
+
+
+@pytest.mark.asyncio
+async def test_typed_stream_without_edit_method_buffers_terminal_snapshot() -> None:
+    class UnreplaceableStreamingChannel(_FakeChannel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.chunks: list[str] = []
+
+        @property
+        def capability_profile(self) -> ChannelCapabilityProfile:
+            return ChannelCapabilityProfile(channel_type="misdeclared", edit=True)
+
+        async def send_streaming(self, chunks, **kwargs):
+            async for chunk in chunks:
+                self.chunks.append(chunk)
+
+    class FakeTurnRunner:
+        async def run(self, message: str, session_key: str, **kwargs):
+            yield TextDeltaEvent(text="stale")
+            yield DoneEvent(text="canonical", text_snapshot="canonical")
+
+    channel = UnreplaceableStreamingChannel()
+
+    await _run_turn_with_streaming(
+        channel,
+        FakeTurnRunner(),
+        _message(),
+        "agent:main:done-snapshot-unreplaceable",
+        None,
+        None,
+        SimpleNamespace(agent_stream_idle_timeout_seconds=1.0),
+    )
+
+    assert channel.chunks == ["canonical"]
+    assert channel.sent == []
+
+
+@pytest.mark.asyncio
+async def test_direct_channel_terminal_edit_uses_stream_creation_route() -> None:
+    class RoutedStreamingChannel(_StableReplaceableFakeChannel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.stream_routes: list[str | None] = []
+            self.edits: list[tuple[str, str, str | None]] = []
+
+        def streaming_reply_kwargs(self, inbound: IncomingMessage) -> dict[str, str]:
+            return {"channel": inbound.channel_id}
+
+        async def send_streaming(self, chunks, *, channel: str | None = None):
+            self.stream_routes.append(channel)
+            async for _ in chunks:
+                pass
+            return "message-1"
+
+        async def edit(
+            self,
+            message_id: str,
+            content: str,
+            *,
+            channel: str | None = None,
+        ) -> None:
+            self.edits.append((message_id, content, channel))
+
+    class FakeTurnRunner:
+        async def run(self, message: str, session_key: str, **kwargs):
+            yield TextDeltaEvent(text="stale")
+            yield DoneEvent(text="canonical", text_snapshot="canonical")
+
+    channel = RoutedStreamingChannel()
+    inbound = IncomingMessage(sender_id="u1", channel_id="dynamic-room", content="hello")
+
+    await _run_turn_with_streaming(
+        channel,
+        FakeTurnRunner(),
+        inbound,
+        "agent:main:done-snapshot-route",
+        None,
+        None,
+        SimpleNamespace(agent_stream_idle_timeout_seconds=1.0),
+    )
+
+    assert channel.stream_routes == ["dynamic-room"]
+    assert channel.edits == [("message-1", "canonical", "dynamic-room")]
+
+
+@pytest.mark.asyncio
+async def test_append_only_channel_buffers_until_done_snapshot() -> None:
+    class AppendOnlyChannel(_FakeChannel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.chunks: list[str] = []
+
+        @property
+        def capability_profile(self) -> ChannelCapabilityProfile:
+            return ChannelCapabilityProfile(channel_type="append-only")
+
+        async def send_streaming(self, chunks, **kwargs):
+            async for chunk in chunks:
+                self.chunks.append(chunk)
+
+    class FakeTurnRunner:
+        async def run(self, message: str, session_key: str, **kwargs):
+            yield TextDeltaEvent(text="stale")
+            yield DoneEvent(text="canonical", text_snapshot="canonical")
+
+    channel = AppendOnlyChannel()
+
+    await _run_turn_with_streaming(
+        channel,
+        FakeTurnRunner(),
+        _message(),
+        "agent:main:done-snapshot-append-only",
+        None,
+        None,
+        SimpleNamespace(agent_stream_idle_timeout_seconds=1.0),
+    )
+
+    assert channel.chunks == ["canonical"]
+    assert channel.sent == []
+
+
+@pytest.mark.asyncio
+async def test_append_only_channel_sends_nothing_for_explicit_empty_snapshot() -> None:
+    class AppendOnlyChannel(_FakeChannel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.chunks: list[str] = []
+
+        @property
+        def capability_profile(self) -> ChannelCapabilityProfile:
+            return ChannelCapabilityProfile(channel_type="append-only")
+
+        async def send_streaming(self, chunks, **kwargs):
+            async for chunk in chunks:
+                self.chunks.append(chunk)
+
+    class FakeTurnRunner:
+        async def run(self, message: str, session_key: str, **kwargs):
+            yield TextDeltaEvent(text="stale")
+            yield DoneEvent(text="", text_snapshot="")
+
+    channel = AppendOnlyChannel()
+
+    await _run_turn_with_streaming(
+        channel,
+        FakeTurnRunner(),
+        _message(),
+        "agent:main:done-snapshot-append-only-empty",
+        None,
+        None,
+        SimpleNamespace(agent_stream_idle_timeout_seconds=1.0),
+    )
+
+    assert channel.chunks == []
+    assert channel.sent == []
+
+
+@pytest.mark.asyncio
+async def test_untyped_stream_with_edit_but_no_handle_contract_buffers_snapshot() -> None:
+    class CustomStreamingChannel(_FakeChannel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.chunks: list[str] = []
+            self.edits: list[tuple[str, str]] = []
+
+        async def send_streaming(self, chunks, **kwargs):
+            async for chunk in chunks:
+                self.chunks.append(chunk)
+            return None
+
+        async def edit(self, message_id: str, content: str) -> None:
+            self.edits.append((message_id, content))
+
+    class FakeTurnRunner:
+        async def run(self, message: str, session_key: str, **kwargs):
+            yield TextDeltaEvent(text="stale")
+            yield DoneEvent(text="canonical", text_snapshot="canonical")
+
+    channel = CustomStreamingChannel()
+
+    await _run_turn_with_streaming(
+        channel,
+        FakeTurnRunner(),
+        _message(),
+        "agent:main:done-snapshot-custom-unreplaceable",
+        None,
+        None,
+        SimpleNamespace(agent_stream_idle_timeout_seconds=1.0),
+    )
+
+    assert channel.chunks == ["canonical"]
+    assert channel.edits == []
+    assert channel.sent == []
+
+
+@pytest.mark.asyncio
+async def test_untyped_stream_with_edit_but_no_handle_contract_honors_empty_snapshot() -> None:
+    class CustomStreamingChannel(_FakeChannel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.chunks: list[str] = []
+            self.edits: list[tuple[str, str]] = []
+
+        async def send_streaming(self, chunks, **kwargs):
+            async for chunk in chunks:
+                self.chunks.append(chunk)
+            return None
+
+        async def edit(self, message_id: str, content: str) -> None:
+            self.edits.append((message_id, content))
+
+    class FakeTurnRunner:
+        async def run(self, message: str, session_key: str, **kwargs):
+            yield TextDeltaEvent(text="stale")
+            yield DoneEvent(text="", text_snapshot="")
+
+    channel = CustomStreamingChannel()
+
+    await _run_turn_with_streaming(
+        channel,
+        FakeTurnRunner(),
+        _message(),
+        "agent:main:done-snapshot-custom-empty",
+        None,
+        None,
+        SimpleNamespace(agent_stream_idle_timeout_seconds=1.0),
+    )
+
+    assert channel.chunks == []
+    assert channel.edits == []
+    assert channel.sent == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("snapshot", "expected_chunks"),
+    [("canonical", ["canonical"]), ("", [])],
+)
+async def test_runtime_untyped_stream_with_edit_but_no_handle_contract_buffers_snapshot(
+    snapshot: str,
+    expected_chunks: list[str],
+) -> None:
+    class CustomStreamingChannel(_FakeChannel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.chunks: list[str] = []
+            self.edits: list[tuple[str, str]] = []
+
+        async def send_streaming(self, chunks, **kwargs):
+            async for chunk in chunks:
+                self.chunks.append(chunk)
+            return None
+
+        async def edit(self, message_id: str, content: str) -> None:
+            self.edits.append((message_id, content))
+
+    class FakeTaskRuntime:
+        async def enqueue(self, envelope, message: str, *, stream_event_sink=None):
+            return None
+
+    channel = CustomStreamingChannel()
+    relay = _RuntimeChannelStreamRelay.maybe_start(
+        channel,
+        _message(),
+        FakeTaskRuntime(),
+    )
+    assert relay is not None
+
+    await relay.emit(TextDeltaEvent(text="stale"))
+    await relay.emit(DoneEvent(text=snapshot, text_snapshot=snapshot))
+    await relay.close()
+
+    assert channel.chunks == expected_chunks
+    assert channel.edits == []
+    assert channel.sent == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_stream_relay_reconciles_against_persisted_final_text() -> None:
+    class StreamingChannel(_StableReplaceableFakeChannel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.preview_chunks: list[str] = []
+            self.edits: list[tuple[str, str, str | None]] = []
+
+        def streaming_reply_kwargs(self, inbound: IncomingMessage) -> dict[str, str]:
+            return {"room_id": inbound.channel_id}
+
+        async def send_streaming(self, chunks, *, room_id: str | None = None):
+            assert room_id == "c1"
+            async for chunk in chunks:
+                self.preview_chunks.append(chunk)
+            return "message-1"
+
+        async def edit(
+            self,
+            message_id: str,
+            content: str,
+            *,
+            room_id: str | None = None,
+        ) -> None:
+            self.edits.append((message_id, content, room_id))
+
+    class FakeTaskRuntime:
+        async def enqueue(self, envelope, message: str, *, stream_event_sink=None):
+            return None
+
+        async def wait(self, task_id: str):
+            return SimpleNamespace(status="succeeded")
+
+    class SessionManager:
+        async def read_transcript(self, session_key: str):
+            return [SimpleNamespace(role="assistant", content="canonical")]
+
+    channel = StreamingChannel()
+    runtime = FakeTaskRuntime()
+    inbound = _message()
+    relay = _RuntimeChannelStreamRelay.maybe_start(channel, inbound, runtime)
+    assert relay is not None
+    await relay.emit(TextDeltaEvent(text="stale"))
+
+    await _deliver_runtime_channel_reply(
+        channel=channel,
+        task_runtime=runtime,
+        session_manager=SessionManager(),
+        session_key="agent:main:runtime-done-snapshot",
+        task_id="task-1",
+        route_envelope=build_channel_route_envelope(
+            inbound,
+            session_key="agent:main:runtime-done-snapshot",
+            session_prefix="test",
+        ),
+        inbound=inbound,
+        transcript_watermark=0,
+        stream_relay=relay,
+    )
+
+    assert channel.preview_chunks == ["stale"]
+    assert channel.edits == [("message-1", "canonical", "c1")]
+    assert channel.sent == []
+
+
+@pytest.mark.asyncio
 async def test_direct_channel_turn_emits_run_heartbeat_while_stream_is_quiet() -> None:
     class FakeTurnRunner:
         async def run(self, message: str, session_key: str, **kwargs):
@@ -245,7 +1004,12 @@ def test_direct_channel_batch_turn_emits_tool_events_to_webui() -> None:
                 result="outline done",
                 arguments={"kind": "llm_chat", "output_chars": 12},
             )
-            yield TextDeltaEvent(text="ok")
+            yield TextDeltaEvent(
+                text="ok",
+                generation_epoch=4,
+                model_call_id="3.0",
+                iteration=3,
+            )
             yield DoneEvent()
 
     channel = _FakeChannel()
@@ -285,6 +1049,17 @@ def test_direct_channel_batch_turn_emits_tool_events_to_webui() -> None:
         and payload["arguments"]["kind"] == "llm_chat"
         for _, event_name, payload in bridge.events
     )
+    assert (
+        "agent:main:channel-test",
+        "session.event.text_delta",
+        {
+            "text": "ok",
+            "presentation": "answer",
+            "generation_epoch": 4,
+            "model_call_id": "3.0",
+            "iteration": 3,
+        },
+    ) in bridge.events
     assert channel.sent[-1].content == "ok"
 
 
@@ -466,7 +1241,9 @@ async def test_direct_channel_batch_turn_sends_artifact_fallback() -> None:
         config,
     )
 
-    assert channel.sent[-1].content == "Generated file: report.txt -> available in WebUI"
+    assert channel.sent[-1].content == (
+        "Generated file: report.txt -> available in the OpenSquilla task"
+    )
     assert "/api/v1/artifacts" not in channel.sent[-1].content
     assert "sessionKey" not in channel.sent[-1].content
     event_artifact = bridge.events[-1][2]
@@ -698,7 +1475,7 @@ async def test_channel_admin_sender_gets_owner_tool_context_for_agent_turn(tmp_p
             yield TextDeltaEvent(text="ok")
             yield DoneEvent()
 
-    msg = _message()
+    msg = _authenticated_message()
     envelope = build_channel_route_envelope(
         msg,
         session_key="agent:main:feishu:u1",
@@ -724,6 +1501,7 @@ async def test_channel_admin_sender_gets_owner_tool_context_for_agent_turn(tmp_p
 
     tool_context = captured["tool_context"]
     assert tool_context.is_owner is True
+    assert tool_context.channel_admin_verified is True
     assert tool_context.caller_kind is CallerKind.CHANNEL
     assert tool_context.channel_kind == "feishu"
     assert tool_context.sender_id == "u1"
@@ -740,7 +1518,7 @@ async def test_channel_admin_sender_gets_owner_tool_context_for_agent_turn(tmp_p
 async def test_saved_channel_run_context_is_applied_to_route_envelope(tmp_path) -> None:
     from opensquilla.gateway.channel_dispatch import _apply_saved_channel_run_context
 
-    msg = _message()
+    msg = _authenticated_message()
     envelope = build_channel_route_envelope(
         msg,
         session_key="agent:main:feishu:u1",
@@ -779,6 +1557,35 @@ async def test_saved_channel_run_context_is_applied_to_route_envelope(tmp_path) 
 
 
 @pytest.mark.asyncio
+async def test_global_full_mode_is_applied_to_channel_without_saved_override(tmp_path) -> None:
+    from opensquilla.gateway.channel_dispatch import _apply_saved_channel_run_context
+
+    envelope = build_channel_route_envelope(
+        _message(),
+        session_key="agent:main:feishu:u1",
+        session_prefix="feishu",
+        agent_id="main",
+    )
+    manager = _RunContextSessionManager(None)
+    config = SimpleNamespace(
+        sandbox=SimpleNamespace(run_mode="full", sandbox=False, security_grading=False),
+        permissions=SimpleNamespace(default_mode="full"),
+    )
+
+    await _apply_saved_channel_run_context(
+        envelope,
+        session_manager=manager,
+        config=config,
+        workspace_dir=str(tmp_path),
+        principal_is_owner=True,
+    )
+
+    assert envelope.metadata["run_mode"] == RunMode.FULL.value
+    assert envelope.metadata["elevated"] == "full"
+    assert envelope.metadata["sandbox_run_context"]["run_mode"] == "full"
+
+
+@pytest.mark.asyncio
 async def test_unlisted_channel_sender_keeps_restricted_tool_context_for_agent_turn(
     tmp_path,
 ) -> None:
@@ -790,7 +1597,7 @@ async def test_unlisted_channel_sender_keeps_restricted_tool_context_for_agent_t
             yield TextDeltaEvent(text="ok")
             yield DoneEvent()
 
-    msg = _message()
+    msg = _authenticated_message()
     envelope = build_channel_route_envelope(
         msg,
         session_key="agent:main:feishu:u1",
@@ -816,6 +1623,7 @@ async def test_unlisted_channel_sender_keeps_restricted_tool_context_for_agent_t
 
     tool_context = captured["tool_context"]
     assert tool_context.is_owner is False
+    assert tool_context.channel_admin_verified is False
     assert tool_context.caller_kind is CallerKind.CHANNEL
     assert tool_context.channel_kind == "feishu"
     assert tool_context.sender_id == "u1"
@@ -830,7 +1638,7 @@ def test_channel_artifact_fallback_uses_only_channel_safe_absolute_links() -> No
                 "download_url": "/api/v1/artifacts/art-1?sessionKey=secret",
             }
         ]
-    ) == ["Generated file: report.txt -> available in WebUI"]
+    ) == ["Generated file: report.txt -> available in the OpenSquilla task"]
 
     assert _artifact_fallback_lines(
         [
@@ -840,10 +1648,7 @@ def test_channel_artifact_fallback_uses_only_channel_safe_absolute_links() -> No
                 "signed_download_url": "https://gateway.example/artifacts/art-2?sig=short",
             }
         ]
-    ) == [
-        "Generated file: signed.txt -> "
-        "https://gateway.example/artifacts/art-2?sig=short"
-    ]
+    ) == ["Generated file: signed.txt -> https://gateway.example/artifacts/art-2?sig=short"]
 
     assert _artifact_fallback_lines(
         [
@@ -853,7 +1658,7 @@ def test_channel_artifact_fallback_uses_only_channel_safe_absolute_links() -> No
                 "channel_download_url": "/api/v1/artifacts/art-3?token=long",
             }
         ]
-    ) == ["Generated file: bad.txt -> available in WebUI"]
+    ) == ["Generated file: bad.txt -> available in the OpenSquilla task"]
 
 
 @pytest.mark.asyncio
@@ -885,7 +1690,9 @@ async def test_runtime_channel_stream_relay_emits_artifact_fallback() -> None:
     )
     await relay.close()
 
-    assert channel.chunks == ["Generated file: stream.txt -> available in WebUI"]
+    assert channel.chunks == [
+        "Generated file: stream.txt -> available in the OpenSquilla task"
+    ]
     assert relay.text_emitted is True
 
 
@@ -921,8 +1728,116 @@ async def test_runtime_channel_stream_relay_appends_artifact_fallback_to_text() 
 
     assert channel.chunks == [
         "done",
-        "\n\nGenerated file: stream.txt -> available in WebUI",
+        "\n\nGenerated file: stream.txt -> available in the OpenSquilla task",
     ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_channel_stream_relay_replaces_preview_with_terminal_reset() -> None:
+    class StreamingChannel(_StableReplaceableFakeChannel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.chunks: list[str] = []
+            self.edits: list[str] = []
+
+        async def send_streaming(self, chunks, **kwargs):
+            async for chunk in chunks:
+                self.chunks.append(chunk)
+            return "stream-message-1"
+
+        async def edit(self, message_id: str, content: str, **kwargs) -> None:
+            assert message_id == "stream-message-1"
+            self.edits.append(content)
+
+    class FakeTaskRuntime:
+        async def enqueue(self, envelope, message: str, *, stream_event_sink=None):
+            return None
+
+        async def wait(self, task_id: str):
+            return SimpleNamespace(status="failed", error_message="provider failed")
+
+    channel = StreamingChannel()
+    runtime = FakeTaskRuntime()
+    relay = _RuntimeChannelStreamRelay.maybe_start(channel, _message(), runtime)
+
+    assert relay is not None
+
+    await relay.emit(TextDeltaEvent(text="superseded partial"))
+    await relay.emit(
+        {
+            "kind": "answer_generation_reset",
+            "terminal": True,
+            "authoritative_text_snapshot": "",
+            "terminal_text_snapshot": "The fallback model also failed.",
+            # A runtime sink must never turn internal accounting metadata into
+            # visible channel content, even if a custom producer includes it.
+            "terminal_error_message": "INTERNAL_DO_NOT_RENDER",
+        }
+    )
+    await _deliver_runtime_channel_reply(
+        channel=channel,
+        task_runtime=runtime,
+        session_manager=None,
+        session_key="agent:main:channel-reset",
+        task_id="task-reset",
+        route_envelope=SimpleNamespace(reply_target=None),
+        inbound=_message(),
+        transcript_watermark=0,
+        stream_relay=relay,
+    )
+
+    assert channel.chunks == ["superseded partial"]
+    assert channel.edits == ["The fallback model also failed."]
+    assert channel.sent == []
+    assert relay.has_terminal_generation_reset is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_channel_buffered_relay_publishes_only_terminal_reset() -> None:
+    class BufferedChannel(_FakeChannel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.chunks: list[str] = []
+
+        async def send_streaming(self, chunks, **kwargs):
+            async for chunk in chunks:
+                self.chunks.append(chunk)
+
+    class FakeTaskRuntime:
+        async def enqueue(self, envelope, message: str, *, stream_event_sink=None):
+            return None
+
+        async def wait(self, task_id: str):
+            return SimpleNamespace(status="failed", error_message="provider failed")
+
+    channel = BufferedChannel()
+    runtime = FakeTaskRuntime()
+    relay = _RuntimeChannelStreamRelay.maybe_start(channel, _message(), runtime)
+
+    assert relay is not None
+
+    await relay.emit(TextDeltaEvent(text="superseded partial"))
+    await relay.emit(
+        {
+            "kind": "answer_generation_reset",
+            "terminal": True,
+            "terminal_text_snapshot": "The fallback model also failed.",
+        }
+    )
+    await _deliver_runtime_channel_reply(
+        channel=channel,
+        task_runtime=runtime,
+        session_manager=None,
+        session_key="agent:main:channel-reset-buffered",
+        task_id="task-reset-buffered",
+        route_envelope=SimpleNamespace(reply_target=None),
+        inbound=_message(),
+        transcript_watermark=0,
+        stream_relay=relay,
+    )
+
+    assert channel.chunks == ["The fallback model also failed."]
+    assert channel.sent == []
 
 
 @pytest.mark.asyncio
@@ -975,6 +1890,88 @@ async def test_runtime_channel_stream_relay_sends_artifact_with_adapter_upload(
     assert channel.chunks == ["done"]
     assert channel.files == [("c1", "report.pptx")]
     assert channel.sent == []
+
+
+@pytest.mark.asyncio
+async def test_stream_failure_does_not_replay_attempted_artifact_at_terminal_reply(
+    tmp_path: Path,
+) -> None:
+    store = ArtifactStore(tmp_path)
+    ref = store.publish_bytes(
+        b"%PDF-1.4\nreport",
+        session_id="session-1",
+        session_key="agent:main:channel-test",
+        name="report.pdf",
+        mime="application/pdf",
+        source="publish_artifact",
+    )
+
+    class FailingStreamingFileChannel(_FakeChannel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.file_attempts = 0
+
+        async def send_streaming(self, chunks, **kwargs):
+            del chunks, kwargs
+            raise RuntimeError("stream transport failed")
+
+        async def send_file(self, chat_id: str, file_path: str) -> None:
+            del chat_id, file_path
+            self.file_attempts += 1
+            raise RuntimeError("visible artifact result is unknown")
+
+    class FakeTaskRuntime:
+        async def enqueue(self, envelope, message: str, *, stream_event_sink=None):
+            del envelope, message, stream_event_sink
+
+        async def wait(self, task_id: str):
+            del task_id
+            return SimpleNamespace(status="succeeded")
+
+    class FakeSessionManager:
+        async def read_transcript(self, key: str):
+            del key
+            return [
+                {"role": "user", "content": "make report"},
+                {
+                    "role": "assistant",
+                    "content": json.dumps(
+                        {"text": "Report ready.", "artifacts": [ref.to_dict()]}
+                    ),
+                },
+            ]
+
+    channel = FailingStreamingFileChannel()
+    runtime = FakeTaskRuntime()
+    config = SimpleNamespace(attachments=SimpleNamespace(media_root=str(tmp_path)))
+    inbound = _message()
+    relay = _RuntimeChannelStreamRelay.maybe_start(channel, inbound, runtime, config)
+    assert relay is not None
+    await relay.emit(TextDeltaEvent(text="Report ready."))
+    await relay.emit(ArtifactEvent(**ref.to_dict()))
+
+    await _deliver_runtime_channel_reply(
+        channel=channel,
+        task_runtime=runtime,
+        session_manager=FakeSessionManager(),
+        session_key="agent:main:channel-test",
+        task_id="task-1",
+        route_envelope=SimpleNamespace(reply_target=None),
+        inbound=inbound,
+        transcript_watermark=1,
+        config=config,
+        stream_relay=relay,
+    )
+
+    assert channel.file_attempts == 1
+    fallback_messages = [
+        message.content
+        for message in channel.sent
+        if "Generated file: report.pdf" in message.content
+    ]
+    assert fallback_messages == [
+        "Generated file: report.pdf -> available in the OpenSquilla task"
+    ]
 
 
 @pytest.mark.asyncio
@@ -1168,7 +2165,7 @@ async def test_direct_channel_turn_honors_final_only_stream_policy() -> None:
 
 @pytest.mark.asyncio
 async def test_direct_streaming_path_falls_back_when_adapter_stream_fails() -> None:
-    class FailingStreamingChannel(_FakeChannel):
+    class FailingStreamingChannel(_StableReplaceableFakeChannel):
         def __init__(self) -> None:
             super().__init__()
             self.delivered_chunks: list[str] = []
@@ -1177,6 +2174,9 @@ async def test_direct_streaming_path_falls_back_when_adapter_stream_fails() -> N
             async for chunk in chunks:
                 self.delivered_chunks.append(chunk)
                 raise RuntimeError("stream edit failed")
+
+        async def edit(self, message_id: str, content: str) -> None:
+            pass
 
     class FakeTurnRunner:
         async def run(self, message: str, session_key: str, **kwargs):
@@ -1225,7 +2225,12 @@ def test_direct_streaming_path_emits_tool_events_to_webui() -> None:
                 tool_name="meta-step:section_introduction",
                 result="section done",
             )
-            yield TextDeltaEvent(text="finished")
+            yield TextDeltaEvent(
+                text="finished",
+                generation_epoch=3,
+                model_call_id="2.1",
+                iteration=2,
+            )
             yield DoneEvent()
 
     channel = StreamingChannel()
@@ -1261,12 +2266,23 @@ def test_direct_streaming_path_emits_tool_events_to_webui() -> None:
         and payload["result"] == "section done"
         for _, event_name, payload in bridge.events
     )
+    assert (
+        "agent:main:stream-tool-events",
+        "session.event.text_delta",
+        {
+            "text": "finished",
+            "presentation": "answer",
+            "generation_epoch": 3,
+            "model_call_id": "2.1",
+            "iteration": 2,
+        },
+    ) in bridge.events
     assert channel.sent[-1].content == "finished"
 
 
 @pytest.mark.asyncio
 async def test_direct_streaming_path_fallback_skips_delivered_chunks() -> None:
-    class FailingLateStreamingChannel(_FakeChannel):
+    class FailingLateStreamingChannel(_StableReplaceableFakeChannel):
         def __init__(self) -> None:
             super().__init__()
             self.delivered_chunks: list[str] = []
@@ -1278,6 +2294,9 @@ async def test_direct_streaming_path_fallback_skips_delivered_chunks() -> None:
                 if count == 3:
                     raise RuntimeError("late stream edit failed")
                 self.delivered_chunks.append(chunk)
+
+        async def edit(self, message_id: str, content: str) -> None:
+            pass
 
     class FakeTurnRunner:
         async def run(self, message: str, session_key: str, **kwargs):
@@ -1312,7 +2331,7 @@ async def test_direct_streaming_path_fallback_skips_delivered_chunks() -> None:
 
 @pytest.mark.asyncio
 async def test_direct_streaming_fallback_sanitizes_queued_directive_tags() -> None:
-    class FailingStreamingChannel(_FakeChannel):
+    class FailingStreamingChannel(_StableReplaceableFakeChannel):
         def __init__(self) -> None:
             super().__init__()
             self.delivered_chunks: list[str] = []
@@ -1321,6 +2340,9 @@ async def test_direct_streaming_fallback_sanitizes_queued_directive_tags() -> No
             async for chunk in chunks:
                 self.delivered_chunks.append(chunk)
                 raise RuntimeError("stream edit failed")
+
+        async def edit(self, message_id: str, content: str) -> None:
+            pass
 
     class FakeTurnRunner:
         async def run(self, message: str, session_key: str, **kwargs):
@@ -1526,9 +2548,7 @@ async def test_channel_ingest_honors_opaque_byte_cap_config() -> None:
             )
         ],
     )
-    capped = SimpleNamespace(
-        attachments=SimpleNamespace(accept_opaque=True, opaque_max_bytes=1024)
-    )
+    capped = SimpleNamespace(attachments=SimpleNamespace(accept_opaque=True, opaque_max_bytes=1024))
 
     result = await _ingest_channel_message_attachments(
         channel=ResolvingChannel(), msg=msg, config=capped
@@ -1717,6 +2737,285 @@ async def test_channel_streaming_turn_uses_agent_registry_model() -> None:
 
 
 @pytest.mark.asyncio
+async def test_direct_channel_turn_uses_authoritative_project_workspace(
+    tmp_path: Path,
+) -> None:
+    storage = await SessionStorage.open(str(tmp_path / "channel-project.db"))
+    manager = SessionManager(storage, inject_time_prefix=False)
+    project_path = tmp_path / "project"
+    outside = tmp_path / "outside"
+    project_path.mkdir()
+    outside.mkdir()
+    project = await storage.create_or_restore_project_workspace(
+        path=str(project_path.resolve()),
+        path_key=project_path_key(project_path, strict=True),
+        display_name="project",
+        trusted_at=1,
+    )
+    key = "agent:main:matrix:project-channel"
+    await storage.upsert_session(
+        SessionNode(
+            session_key=key,
+            workspace_id=project.workspace_id,
+            origin={
+                RUN_CONTEXT_ORIGIN_KEY: {
+                    "run_mode": "standard",
+                    "workspace": str(outside),
+                }
+            },
+        )
+    )
+    envelope = build_channel_route_envelope(
+        _message(),
+        session_key=key,
+        session_prefix="matrix",
+    )
+    envelope.metadata["sandbox_run_context"] = {
+        "run_mode": "standard",
+        "workspace": str(outside),
+    }
+    object.__setattr__(envelope, "sandbox_run_context_fresh", True)
+
+    class RecordingTurnRunner:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def run(self, message: str, session_key: str, **kwargs: Any):
+            self.calls.append(kwargs)
+            yield DoneEvent()
+
+    runner = RecordingTurnRunner()
+    try:
+        await _run_turn_with_streaming(
+            _FakeChannel(),
+            runner,
+            _message(),
+            key,
+            _FakeEventBridge(),
+            None,
+            GatewayConfig(
+                workspace_dir=str(tmp_path / "default"),
+                agent_stream_heartbeat_interval_seconds=0.0,
+                agent_stream_idle_timeout_seconds=1.0,
+            ),
+            route_envelope=envelope,
+            session_manager=manager,
+        )
+    finally:
+        await storage.close()
+
+    assert runner.calls[0]["tool_context"].workspace_dir == project.path
+
+
+@pytest.mark.asyncio
+async def test_direct_channel_unbound_turn_refreshes_durable_context(
+    tmp_path: Path,
+) -> None:
+    from opensquilla.gateway.project_workspace_runtime import (
+        authoritative_project_run_context,
+    )
+    from opensquilla.gateway.rpc_sessions import _apply_run_context_route_metadata
+
+    storage = await SessionStorage.open(str(tmp_path / "channel-unbound.db"))
+    manager = SessionManager(storage, inject_time_prefix=False)
+    stale_workspace = tmp_path / "stale"
+    current_workspace = tmp_path / "current"
+    default_workspace = tmp_path / "default"
+    stale_workspace.mkdir()
+    current_workspace.mkdir()
+    key = "agent:main:matrix:unbound"
+    await manager.create(
+        key,
+        origin={
+            RUN_CONTEXT_ORIGIN_KEY: {
+                "run_mode": "full",
+                "run_mode_source": "user",
+                "workspace": str(stale_workspace),
+                "domains": [
+                    {
+                        "domain": "revoked.example",
+                        "scope": "chat",
+                        "source": "manual",
+                    }
+                ],
+            }
+        },
+    )
+    config = GatewayConfig(
+        workspace_dir=str(default_workspace),
+        channel_admin_senders={"matrix": ["u1"]},
+        agent_stream_heartbeat_interval_seconds=0.0,
+        agent_stream_idle_timeout_seconds=1.0,
+    )
+    envelope = build_channel_route_envelope(
+        _message(),
+        session_key=key,
+        session_prefix="matrix",
+    )
+    session = await storage.get_session(key)
+    assert session is not None
+    stale_context, workspace_guard = await authoritative_project_run_context(
+        storage=storage,
+        session_manager=manager,
+        session=session,
+        config=config,
+        default_workspace=str(default_workspace),
+    )
+    assert workspace_guard is None
+    _apply_run_context_route_metadata(
+        envelope,
+        stale_context,
+        principal_is_owner=True,
+    )
+    await manager.update(
+        key,
+        origin={
+            RUN_CONTEXT_ORIGIN_KEY: {
+                "run_mode": "standard",
+                "run_mode_source": "operator_default",
+                "workspace": str(current_workspace),
+                "domains": [
+                    {
+                        "domain": "current.example",
+                        "scope": "chat",
+                        "source": "manual",
+                    }
+                ],
+            }
+        },
+    )
+
+    class RecordingTurnRunner:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def run(self, message: str, session_key: str, **kwargs: Any):
+            self.calls.append(kwargs)
+            yield DoneEvent(text="ok")
+
+    channel = _FakeChannel()
+    runner = RecordingTurnRunner()
+    try:
+        await _run_turn_with_streaming(
+            channel,
+            runner,
+            _message(),
+            key,
+            _FakeEventBridge(),
+            None,
+            config,
+            route_envelope=envelope,
+            session_manager=manager,
+        )
+    finally:
+        await storage.close()
+
+    tool_context = runner.calls[0]["tool_context"]
+    assert tool_context.run_mode == "safe"
+    assert tool_context.workspace_dir == str(current_workspace.resolve())
+    assert tool_context.sandbox_run_context.run_mode_source == "operator_default"
+    assert [grant.domain for grant in tool_context.sandbox_run_context.domains] == [
+        "current.example"
+    ]
+    assert getattr(tool_context, "_sandbox_run_context_fresh", False) is True
+
+
+@pytest.mark.asyncio
+async def test_direct_channel_revalidates_post_accept_retarget_before_tool_context(
+    tmp_path: Path,
+) -> None:
+    storage = await SessionStorage.open(str(tmp_path / "channel-retarget.db"))
+    manager = SessionManager(storage, inject_time_prefix=False)
+    project_path = tmp_path / "project"
+    project_backup = tmp_path / "project-old"
+    replacement = tmp_path / "replacement"
+    project_path.mkdir()
+    replacement.mkdir()
+    project = await storage.create_or_restore_project_workspace(
+        path=str(project_path.resolve()),
+        path_key=project_path_key(project_path, strict=True),
+        display_name="project",
+        trusted_at=1,
+    )
+    key = "agent:main:matrix:retargeted-project-channel"
+    await storage.upsert_session(
+        SessionNode(
+            session_key=key,
+            workspace_id=project.workspace_id,
+            origin={
+                RUN_CONTEXT_ORIGIN_KEY: {
+                    "run_mode": "standard",
+                    "workspace": project.path,
+                }
+            },
+        )
+    )
+    accepted_entry = await manager.append_message(key, "user", "hello")
+    original_get_session = storage.get_session
+    retargeted = False
+
+    async def retarget_at_execution(session_key: str):
+        nonlocal retargeted
+        session = await original_get_session(session_key)
+        if session_key == key and not retargeted:
+            retargeted = True
+            _retarget_directory_link(project_path, replacement, project_backup)
+        return session
+
+    storage.get_session = retarget_at_execution  # type: ignore[method-assign]
+
+    class StreamingChannel(_StableReplaceableFakeChannel):
+        def __init__(self) -> None:
+            super().__init__()
+            self.stream_calls = 0
+
+        async def send_streaming(self, chunks, **kwargs):
+            self.stream_calls += 1
+            async for _ in chunks:
+                pass
+
+    class RecordingTurnRunner:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def run(self, message: str, session_key: str, **kwargs: Any):
+            self.calls.append(kwargs)
+            yield DoneEvent()
+
+    channel = StreamingChannel()
+    runner = RecordingTurnRunner()
+    transcript: list[Any] = []
+    try:
+        with pytest.raises(ProjectWorkspaceStateError) as raised:
+            await _run_turn_with_streaming(
+                channel,
+                runner,
+                _message(),
+                key,
+                _FakeEventBridge(),
+                None,
+                GatewayConfig(
+                    workspace_dir=str(tmp_path / "default"),
+                    agent_stream_heartbeat_interval_seconds=0.0,
+                    agent_stream_idle_timeout_seconds=1.0,
+                ),
+                session_manager=manager,
+            )
+        transcript = await manager.get_transcript(key)
+    finally:
+        if retargeted:
+            _restore_retargeted_directory(project_path, project_backup)
+        await storage.close()
+
+    assert raised.value.reason == "canonical_changed"
+    assert retargeted is True
+    assert [entry.content for entry in transcript] == [accepted_entry.content]
+    assert runner.calls == []
+    assert channel.stream_calls == 0
+    assert channel.sent == []
+
+
+@pytest.mark.asyncio
 async def test_channel_streaming_turn_passes_normalized_attachments() -> None:
     class StreamingChannel(_FakeChannel):
         async def send_streaming(self, chunks, **kwargs):
@@ -1804,8 +3103,10 @@ async def test_debounce_channel_turn_honors_attachment_persistence_config(tmp_pa
     class FakeTaskRuntime:
         def __init__(self) -> None:
             self.enqueue_calls: list[dict] = []
+            self.envelopes: list[object] = []
 
         async def enqueue(self, envelope, message: str, **kwargs):
+            self.envelopes.append(envelope)
             self.enqueue_calls.append({"message": message, **kwargs})
             return SimpleNamespace(task_id="t1")
 
@@ -1821,10 +3122,16 @@ async def test_debounce_channel_turn_honors_attachment_persistence_config(tmp_pa
         channel_id="c1",
         content="read this",
         attachments=[Attachment(name="doc.pdf", mime_type="application/pdf", url="mxc://doc")],
+        provenance=IngressProvenance(
+            provider="matrix",
+            verification=IngressVerification.SDK_SESSION,
+            principal=AuthenticatedPrincipal(subject_id="u1"),
+        ),
     )
     runtime = FakeTaskRuntime()
     session_manager = FakeSessionManager()
     config = SimpleNamespace(
+        channel_admin_senders={"matrix": ["u1"]},
         attachments=SimpleNamespace(
             persist_transcripts=False,
             media_root=str(tmp_path),
@@ -1853,6 +3160,7 @@ async def test_debounce_channel_turn_honors_attachment_persistence_config(tmp_pa
     assert "sha256_ref" not in persisted["attachments"][0]
     assert not (tmp_path / "transcripts").exists()
     assert runtime.enqueue_calls[0]["attachments"][0]["_was_staged"] is True
+    assert runtime.envelopes[0].metadata["principal_is_owner"] is True
 
 
 @pytest.mark.asyncio
@@ -1984,8 +3292,9 @@ async def test_runtime_channel_stream_relay_coalesces_consecutive_deltas() -> No
     char threshold once the window expires.
     """
 
-    class StreamingChannel:
+    class StreamingChannel(_StableReplaceableFakeChannel):
         def __init__(self) -> None:
+            super().__init__()
             self.chunks: list[str] = []
 
         async def send_streaming(self, chunks, **kwargs):
@@ -2031,8 +3340,9 @@ async def test_runtime_channel_stream_relay_coalesces_consecutive_deltas() -> No
 async def test_runtime_channel_stream_relay_coalesces_at_char_threshold() -> None:
     """A single delta exceeding the char threshold yields immediately."""
 
-    class StreamingChannel:
+    class StreamingChannel(_StableReplaceableFakeChannel):
         def __init__(self) -> None:
+            super().__init__()
             self.chunks: list[str] = []
 
         async def send_streaming(self, chunks, **kwargs):
@@ -2077,7 +3387,7 @@ async def test_runtime_channel_stream_relay_falls_back_on_mid_stream_failure() -
     rest of the reply.
     """
 
-    class FailingStreamingChannel(_FakeChannel):
+    class FailingStreamingChannel(_StableReplaceableFakeChannel):
         def __init__(self) -> None:
             super().__init__()
             self.delivered_chunks: list[str] = []
@@ -2089,6 +3399,9 @@ async def test_runtime_channel_stream_relay_falls_back_on_mid_stream_failure() -
                 count += 1
                 if count == 1:
                     raise RuntimeError("network blip")
+
+        async def edit(self, message_id: str, content: str) -> None:
+            pass
 
     class FakeTaskRuntime:
         async def enqueue(self, envelope, message: str, *, stream_event_sink=None):
@@ -2176,7 +3489,7 @@ async def test_runtime_channel_stream_relay_no_fallback_on_success() -> None:
 async def test_runtime_channel_stream_relay_disabled_coalescing_yields_each_delta() -> None:
     """Both window=0 and chars=0 disables coalescing — each delta yields."""
 
-    class StreamingChannel(_FakeChannel):
+    class StreamingChannel(_StableReplaceableFakeChannel):
         def __init__(self) -> None:
             super().__init__()
             self.chunks: list[str] = []
@@ -2184,6 +3497,9 @@ async def test_runtime_channel_stream_relay_disabled_coalescing_yields_each_delt
         async def send_streaming(self, chunks, **kwargs):
             async for chunk in chunks:
                 self.chunks.append(chunk)
+
+        async def edit(self, message_id: str, content: str) -> None:
+            pass
 
     class FakeTaskRuntime:
         async def enqueue(self, envelope, message: str, *, stream_event_sink=None):
@@ -2219,7 +3535,7 @@ async def test_runtime_channel_stream_relay_handles_late_failure_gracefully() ->
     not duplicated.
     """
 
-    class FailingLateChannel(_FakeChannel):
+    class FailingLateChannel(_StableReplaceableFakeChannel):
         def __init__(self) -> None:
             super().__init__()
             self.delivered: list[str] = []
@@ -2231,6 +3547,9 @@ async def test_runtime_channel_stream_relay_handles_late_failure_gracefully() ->
                 if count == 3:
                     raise RuntimeError("very late blip")
                 self.delivered.append(chunk)
+
+        async def edit(self, message_id: str, content: str) -> None:
+            pass
 
     class FakeTaskRuntime:
         async def enqueue(self, envelope, message: str, *, stream_event_sink=None):

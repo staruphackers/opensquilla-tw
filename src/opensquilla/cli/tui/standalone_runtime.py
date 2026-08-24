@@ -126,19 +126,18 @@ def standalone_slash_services_from_runtime(
     flush_service = getattr(svc, "flush_service", None)
 
     create_session = (
-        getattr(session_manager, "get_or_create", None)
+        getattr(session_manager, "get_or_create", None) if session_manager is not None else None
+    )
+    get_session = (
+        getattr(session_manager, "get_session", None)
         if session_manager is not None
         else None
     )
     truncate_session = (
-        getattr(session_manager, "truncate", None)
-        if session_manager is not None
-        else None
+        getattr(session_manager, "truncate", None) if session_manager is not None else None
     )
     compact_session = (
-        getattr(session_manager, "compact", None)
-        if session_manager is not None
-        else None
+        getattr(session_manager, "compact", None) if session_manager is not None else None
     )
     compact_with_result = (
         getattr(session_manager, "compact_with_result", None)
@@ -146,13 +145,26 @@ def standalone_slash_services_from_runtime(
         else None
     )
     flush_transcript = (
-        getattr(flush_service, "execute", None)
-        if flush_service is not None
+        getattr(flush_service, "execute", None) if flush_service is not None else None
+    )
+    get_session_routing = (
+        getattr(session_manager, "get_session_routing", None)
+        if session_manager is not None
+        else None
+    )
+    set_session_routing = (
+        getattr(session_manager, "set_session_routing", None)
+        if session_manager is not None
         else None
     )
     create_session_callable = (
         cast(_standalone_slash_adapter.StandaloneCreateSession, create_session)
         if callable(create_session)
+        else None
+    )
+    get_session_callable = (
+        cast(_standalone_slash_adapter.StandaloneGetSession, get_session)
+        if callable(get_session)
         else None
     )
     truncate_session_callable = (
@@ -182,13 +194,55 @@ def standalone_slash_services_from_runtime(
             session_key,
         )
 
+    async def _get_session_routing(session_key: str) -> dict[str, Any]:
+        assert callable(get_session_routing)
+        from opensquilla.gateway.model_routing import model_routing_snapshot
+
+        config = getattr(svc, "config", None)
+        return cast(
+            dict[str, Any],
+            await get_session_routing(
+                session_key,
+                fallback_mode=model_routing_snapshot(config)["mode"],
+            ),
+        )
+
+    async def _set_session_routing(
+        session_key: str,
+        mode: str,
+        *,
+        expected_revision: int,
+    ) -> dict[str, Any]:
+        assert callable(set_session_routing)
+        from opensquilla.gateway.model_routing import model_routing_patches
+
+        # Match the Gateway RPC's capability validation without mutating the
+        # global config. In particular, Ensemble must already have a viable
+        # lineup before a standalone Session can select it.
+        model_routing_patches(getattr(svc, "config", None), mode)
+        return cast(
+            dict[str, Any],
+            await set_session_routing(
+                session_key,
+                mode,
+                expected_revision=expected_revision,
+            ),
+        )
+
     return _standalone_slash_adapter.StandaloneSlashServices(
         create_session=create_session_callable,
+        get_session=get_session_callable,
         read_transcript=_read_transcript if session_manager is not None else None,
         truncate_session=truncate_session_callable,
         compact_session=compact_session_callable,
         compact_with_result=compact_with_result_callable,
         flush_transcript=flush_transcript_callable,
+        get_session_routing=(
+            _get_session_routing if callable(get_session_routing) else None
+        ),
+        set_session_routing=(
+            _set_session_routing if callable(set_session_routing) else None
+        ),
         config=getattr(svc, "config", None),
         provider_selector=getattr(svc, "provider_selector", None),
     )
@@ -237,6 +291,52 @@ async def run_standalone_chat(
             default_elevated=configured_default_elevated(svc.config),
         )
 
+    async def _build_authoritative_tool_ctx(active_session_key: str) -> object:
+        from opensquilla.gateway.project_workspace_runtime import (
+            authoritative_project_run_context,
+        )
+        from opensquilla.gateway.session_services import get_session_storage
+
+        storage = get_session_storage(session_manager)
+        if storage is None:
+            return _build_tool_ctx(active_session_key)
+        session = await storage.get_session(active_session_key)
+        if session is None:
+            raise KeyError(f"Session not found: {active_session_key}")
+        run_context, workspace_guard = await authoritative_project_run_context(
+            storage=storage,
+            session_manager=session_manager,
+            session=session,
+            config=svc.config,
+            default_workspace=active_workspace,
+        )
+        route_envelope = build_cli_route_envelope(
+            session_key=active_session_key,
+            agent_id="main",
+            channel_id="cli:chat",
+            sender_id=cli_sender_id(),
+            source_name="chat",
+        )
+        from opensquilla.gateway.rpc_sessions import (
+            _apply_run_context_route_metadata,
+        )
+
+        _apply_run_context_route_metadata(
+            route_envelope,
+            run_context,
+            principal_is_owner=True,
+        )
+        project_workspace_strict = effective_workspace_strict
+        if workspace_guard is not None and not isinstance(workspace_strict, bool):
+            project_workspace_strict = True
+        return tool_context_from_envelope(
+            route_envelope,
+            is_owner=True,
+            workspace_dir=run_context.workspace or active_workspace,
+            workspace_strict=project_workspace_strict,
+            default_elevated=configured_default_elevated(svc.config),
+        )
+
     tool_ctx = _build_tool_ctx(session_key)
     state = ChatSessionState(session_key=session_key, model=model)
     turn_runner = build_turn_runner_from_services(svc)
@@ -261,6 +361,18 @@ async def run_standalone_chat(
         stripped = user_input.strip()
         if not stripped:
             return True
+
+        try:
+            refreshed_tool_ctx = await _build_authoritative_tool_ctx(session_context.session_key)
+        except Exception as exc:
+            _report_dispatch_failure(exc)
+            return True
+        session_context.replace_session(
+            session_key=session_context.session_key,
+            tool_ctx=refreshed_tool_ctx,
+            state=session_context.state,
+            model=session_context.model,
+        )
 
         if stripped.startswith("/"):
             deps.sync_slash_adapter_io()

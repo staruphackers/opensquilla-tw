@@ -8,6 +8,7 @@ const connectCalls: Array<{ url: string; token?: string }> = []
 const clients: Array<{
   emit: (event: string, ...args: unknown[]) => void
   disconnect: ReturnType<typeof vi.fn>
+  waitForConnection: ReturnType<typeof vi.fn>
 }> = []
 
 vi.mock('@/lib/rpc', () => ({
@@ -54,6 +55,7 @@ describe('rpc link-token bootstrap', () => {
     clients.length = 0
     localStorage.clear()
     sessionStorage.clear()
+    delete window.opensquillaDesktop
     window.history.replaceState(null, '', '/control/sessions')
   })
 
@@ -81,6 +83,24 @@ describe('rpc link-token bootstrap', () => {
     expect(sessionStorage.getItem('opensquilla.wsToken')).toBe('new-token')
     expect(sessionStorage.getItem('opensquilla.cachedAuth')).toBeNull()
     expect(window.location.href).toBe('http://localhost:3000/control/')
+  })
+
+  it('delegates an aborted wait even when the reactive store is connected', async () => {
+    const store = useRpcStore()
+    store.init()
+    const controller = new AbortController()
+    controller.abort()
+    const abortError = new Error('aborted')
+    clients[0].waitForConnection.mockRejectedValueOnce(abortError)
+
+    await expect(
+      store.waitForConnection(123, controller.signal, { abortAction: 'reconnect' }),
+    ).rejects.toBe(abortError)
+    expect(clients[0].waitForConnection).toHaveBeenCalledWith(
+      123,
+      controller.signal,
+      { abortAction: 'reconnect' },
+    )
   })
 
   it('reconnects with a URL token when an already-loaded app navigates to a token link', () => {
@@ -112,18 +132,140 @@ describe('rpc link-token bootstrap', () => {
     clients[0].emit('_hello', {
       policy: { allowedRunModes: ['full'] },
       auth: { principal: { isOwner: true } },
+      features: {
+        methods: ['usage.status', 'usage.query'],
+        events: ['session.event.turn_committed'],
+      },
     })
     expect(store.policy).toEqual({ allowedRunModes: ['full'] })
     expect(store.auth).toEqual({ principal: { isOwner: true } })
+    expect(store.supportsMethod('usage.query')).toBe(true)
+    expect(store.supportsEvent('session.event.turn_committed')).toBe(true)
+
+    store.markMethodUnavailable('usage.query')
+    expect(store.supportsMethod('usage.query')).toBe(false)
 
     window.history.replaceState(null, '', '/control/?token=new-token')
 
     expect(store.applyLinkTokenFromUrl()).toBe(true)
     expect(store.policy).toBeNull()
     expect(store.auth).toBeNull()
+    expect(store.methods).toEqual([])
+    expect(store.events).toEqual([])
     expect(connectCalls[connectCalls.length - 1]).toEqual({
       url: 'ws://localhost:3000/ws',
       token: 'new-token',
     })
+  })
+
+  it('treats missing or malformed Hello capabilities as unsupported', () => {
+    const store = useRpcStore()
+    store.init()
+
+    clients[0].emit('_hello', {
+      features: {
+        methods: ['usage.status', 42, null],
+        events: ['session.event.turn_committed', 42, null],
+      },
+    })
+
+    expect(store.methods).toEqual(['usage.status'])
+    expect(store.events).toEqual(['session.event.turn_committed'])
+    expect(store.supportsMethod('usage.status')).toBe(true)
+    expect(store.supportsMethod('usage.query')).toBe(false)
+    expect(store.supportsEvent('session.event.turn_committed')).toBe(true)
+    expect(store.supportsEvent('session.event.unknown')).toBe(false)
+
+    clients[0].emit('_hello', {})
+    expect(store.methods).toEqual([])
+    expect(store.events).toEqual([])
+    expect(store.supportsEvent('session.event.turn_committed')).toBe(false)
+  })
+
+  it('derives project capabilities from the current Hello owner and methods', () => {
+    const store = useRpcStore()
+    store.init()
+
+    clients[0].emit('_hello', {
+      auth: { principal: { isOwner: true } },
+      features: { methods: ['workspaces.list', 'workspaces.open'] },
+    })
+    expect(store.isLocalOwner).toBe(true)
+    expect(store.canManageProjectWorkspaces).toBe(true)
+    expect(store.canChooseProject).toBe(true)
+
+    clients[0].emit('_state', 'connecting')
+    expect(store.auth).toBeNull()
+    expect(store.methods).toEqual([])
+    expect(store.events).toEqual([])
+    expect(store.canManageProjectWorkspaces).toBe(false)
+
+    clients[0].emit('_state', 'connected')
+    clients[0].emit('_hello', {
+      auth: { principal: { isOwner: false } },
+      features: { methods: ['workspaces.list', 'workspaces.open'] },
+    })
+    expect(store.isLocalOwner).toBe(false)
+    expect(store.canManageProjectWorkspaces).toBe(false)
+    expect(store.canChooseProject).toBe(false)
+  })
+
+  it('waits for the Desktop supervisor and reconnects only for a ready runtime instance', async () => {
+    const publishRef: { current?: (payload: unknown) => void } = {}
+    window.opensquillaDesktop = {
+      getGatewayConnection: vi.fn(async () => ({
+        schemaVersion: 1,
+        revision: 1,
+        status: 'starting',
+        instanceId: 'runtime-a',
+        profileFingerprint: 'profile-a',
+        httpUrl: 'http://127.0.0.1:18791',
+        wsUrl: null,
+        authToken: null,
+        error: null,
+      })),
+      onGatewayConnectionChanged: vi.fn((callback) => {
+        publishRef.current = callback as (payload: unknown) => void
+        return () => undefined
+      }),
+    } as unknown as OpenSquillaDesktopApi
+
+    const store = useRpcStore()
+    store.init()
+    await vi.waitFor(() => expect(window.opensquillaDesktop?.getGatewayConnection).toHaveBeenCalled())
+    expect(connectCalls).toEqual([])
+
+    publishRef.current?.({
+      schemaVersion: 1,
+      revision: 2,
+      status: 'ready',
+      instanceId: 'runtime-a',
+      profileFingerprint: 'profile-a',
+      httpUrl: 'http://127.0.0.1:18791',
+      wsUrl: 'ws://127.0.0.1:18791/ws',
+      authToken: 'desktop-instance-token',
+      error: null,
+    })
+    expect(connectCalls).toEqual([{
+      url: 'ws://127.0.0.1:18791/ws',
+      token: 'desktop-instance-token',
+    }])
+    expect(sessionStorage.getItem('opensquilla.wsToken')).toBe('desktop-instance-token')
+    expect(localStorage.getItem('opensquilla.wsUrl')).toBeNull()
+
+    publishRef.current?.({
+      schemaVersion: 1,
+      revision: 3,
+      status: 'error',
+      instanceId: 'runtime-a',
+      profileFingerprint: 'profile-a',
+      httpUrl: 'http://127.0.0.1:18791',
+      wsUrl: null,
+      authToken: null,
+      error: 'runtime stopped',
+    })
+    expect(clients[0].disconnect).toHaveBeenCalledOnce()
+    expect(store.error).toBe('runtime stopped')
+    expect(sessionStorage.getItem('opensquilla.wsToken')).toBeNull()
   })
 })

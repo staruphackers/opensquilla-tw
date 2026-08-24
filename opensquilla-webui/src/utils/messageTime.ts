@@ -22,40 +22,77 @@ export function messageDate(ts: string | number | null | undefined): Date | null
   return Number.isNaN(date.getTime()) ? null : date
 }
 
-// Coarse relative label: "just now" / "5m ago" / "2h ago" / "3d ago".
+// Minimal translator shape shared by chat bubbles: resolves a named i18n key
+// (e.g. "chat.time.minutesAgo") into a display string. vue-i18n's `t` satisfies
+// it, and keeping this narrow structural type lets messageTime stay decoupled
+// from the i18n runtime.
+export type TimeTranslator = (key: string, named?: Record<string, string | number>) => string
+
+// Compact English forms preserve existing non-UI callers and tests that don't
+// carry a translator. Chat UI projections and bubbles inject vue-i18n's t, so
+// their labels follow the active locale instead of being hardcoded.
+const DEFAULT_TRANSLATOR: TimeTranslator = (key, named = {}) => {
+  if (key === 'chat.time.justNow') return 'just now'
+  if (key === 'chat.time.minutesAgo') return `${named.n}m ago`
+  if (key === 'chat.time.hoursAgo') return `${named.n}h ago`
+  return key
+}
+
+// Coarse relative label for messages less than one day old. Older messages keep
+// their absolute timestamp without a redundant age suffix.
 // Pass a ticking `now` (epoch ms) to keep the label live without per-component
 // timers; it defaults to the current time for one-shot callers (e.g. export).
+// An optional translator resolves the bucket labels through the active locale.
 export function relativeTime(
   ts: string | number | null | undefined,
   now: number = Date.now(),
+  t: TimeTranslator = DEFAULT_TRANSLATOR,
 ): string {
   const date = messageDate(ts)
   if (!date) return ''
   // Clamp future timestamps (client/server clock skew) to "just now" rather than
   // letting a negative diff fall through the buckets incidentally.
   const diff = Math.max(0, (now - date.getTime()) / 1000)
-  if (diff < 60) return 'just now'
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
-  return `${Math.floor(diff / 86400)}d ago`
+  if (diff < 60) return t('chat.time.justNow')
+  if (diff < 3600) return t('chat.time.minutesAgo', { n: Math.floor(diff / 60) })
+  if (diff < 86400) return t('chat.time.hoursAgo', { n: Math.floor(diff / 3600) })
+  return ''
 }
 
-// Compact absolute local time: time-only for today, "Mon DD, HH:MM" within the
-// current year, and a full date otherwise. Always in the browser locale + tz.
+// Locale-aware coarse relative label for status readouts ("5 minutes ago",
+// "5 分钟前"). Chat bubbles use the i18n-key `relativeTime` above; this Intl
+// formatter is for readouts that pass a raw locale string.
+export function localizedRelativeTime(
+  ts: string | number | null | undefined,
+  locale: string,
+  now: number = Date.now(),
+): string {
+  const date = messageDate(ts)
+  if (!date) return ''
+  const diff = Math.max(0, (now - date.getTime()) / 1000)
+  let formatter: Intl.RelativeTimeFormat
+  try {
+    formatter = new Intl.RelativeTimeFormat(locale, { numeric: 'always' })
+  } catch {
+    formatter = new Intl.RelativeTimeFormat('en', { numeric: 'always' })
+  }
+  if (diff < 60) return formatter.format(-Math.max(1, Math.floor(diff)), 'second')
+  if (diff < 3600) return formatter.format(-Math.floor(diff / 60), 'minute')
+  if (diff < 86400) return formatter.format(-Math.floor(diff / 3600), 'hour')
+  return formatter.format(-Math.floor(diff / 86400), 'day')
+}
+
+// Full local date and minute-level time. Keeping the year visible makes every
+// message timestamp self-contained, regardless of how old the task is.
 export function absoluteTime(ts: string | number | null | undefined): string {
   const date = messageDate(ts)
   if (!date) return ''
   const time = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  const startOfToday = new Date()
-  startOfToday.setHours(0, 0, 0, 0)
-  if (date.getTime() >= startOfToday.getTime()) return time
-  const sameYear = date.getFullYear() === startOfToday.getFullYear()
-  const day = date.toLocaleDateString(
-    [],
-    sameYear
-      ? { month: 'short', day: 'numeric' }
-      : { year: 'numeric', month: 'short', day: 'numeric' },
-  )
+  const day = date.toLocaleDateString([], {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  })
   return `${day}, ${time}`
 }
 

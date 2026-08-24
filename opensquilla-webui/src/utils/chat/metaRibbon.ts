@@ -1,7 +1,6 @@
 // MetaSkill run-progress ribbon: pure transforms, helpers, and derived
-// selectors. Ported 1:1 from the vanilla static/js/views/chat/meta-ribbon.js
-// render logic. No DOM, no escaping (Vue interpolation auto-escapes) — the
-// SFC consumes these for its computed()/template.
+// selectors. The helpers are DOM-free; the SFC consumes them from its
+// computed state and Vue interpolation performs output escaping.
 
 import type {
   MetaRunAnnouncedPayload,
@@ -61,6 +60,14 @@ export const RESCUE_ACTION_IDS = new Set<string>([
   'switch-meta-skill',
   'install-dependency',
   'continue-text-only',
+  'review-paid-submit',
+])
+
+// The backend still accepts this action for compatibility, but today it has
+// the same seed semantics as retry-step. Do not render two controls that imply
+// a choice the runtime does not actually provide.
+const SUPPRESSED_EQUIVALENT_RESCUE_ACTION_IDS = new Set<string>([
+  'retry-with-partial-context',
 ])
 
 const STATE_VALUES: MetaStepState[] = [
@@ -247,7 +254,7 @@ export function shouldShowActions(state: MetaRibbonState): boolean {
   return state.runOutcome === 'failed' && state.steps.some((s) => s.state === 'failed')
 }
 
-/* ── Derived selectors (ported from renderRibbon) ─────────────────────── */
+/* ── Derived selectors for ribbon presentation ───────────────────────── */
 
 export function completedCount(state: MetaRibbonState): number {
   return state.steps.filter(
@@ -316,7 +323,11 @@ export function failSummary(
   const summary = copy.failedSummary(failedStep.label, truncate(errText, 80))
   const rescueActions =
     failedStep.rescue && Array.isArray(failedStep.rescue.actions)
-      ? failedStep.rescue.actions.filter((action) => action && RESCUE_ACTION_IDS.has(String(action.id)))
+      ? failedStep.rescue.actions.filter((action) => (
+          action
+          && RESCUE_ACTION_IDS.has(String(action.id))
+          && !SUPPRESSED_EQUIVALENT_RESCUE_ACTION_IDS.has(String(action.id))
+        ))
       : []
   const buttons: RibbonRescueButton[] =
     rescueActions.length > 0

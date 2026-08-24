@@ -62,6 +62,7 @@ def test_owner_cron_route_does_not_apply_non_owner_cron_allowlist() -> None:
         id="owner-policy",
         name="Owner Policy",
         creator_is_owner=True,
+        creator_host_execute=True,
         tool_policy={
             "profile": "minimal",
             "also_allow": ["memory_search", "exec_command"],
@@ -194,7 +195,7 @@ def test_channel_sender_policy_can_enable_drive_for_one_sender() -> None:
             }
         }
     }
-    available = ["session_status", "create_pptx", "feishu_drive_upload_artifact"]
+    available = ["session_status", "create_pptx"]
 
     allowed = apply_tool_policy_from_config(
         ToolContext(
@@ -219,9 +220,5 @@ def test_channel_sender_policy_can_enable_drive_for_one_sender() -> None:
         config=cfg,
     )
 
-    assert allowed.allowed_tools == {
-        "session_status",
-        "create_pptx",
-        "feishu_drive_upload_artifact",
-    }
+    assert allowed.allowed_tools == {"session_status", "create_pptx"}
     assert other.allowed_tools == {"session_status"}

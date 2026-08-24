@@ -598,6 +598,7 @@ def test_cleanup_apply_contends_with_replacement_history_authority(
     assert (user_data / "opensquilla").is_dir()
 
 
+@pytest.mark.ci_serial
 def test_cleanup_apply_refuses_running_legacy_gateway(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -620,8 +621,12 @@ def test_cleanup_apply_refuses_running_legacy_gateway(
         args=(str(primary), ready, release),
     )
     process.start()
-    assert ready.wait(5)
+    startup_timeout = 15 if sys.platform == "win32" else 5
     try:
+        assert ready.wait(startup_timeout), (
+            "legacy gateway lock holder did not start within "
+            f"{startup_timeout}s (exitcode={process.exitcode})"
+        )
         result = cleanup_apply(
             user_data,
             mode="delete-current-profile",
@@ -633,6 +638,9 @@ def test_cleanup_apply_refuses_running_legacy_gateway(
     finally:
         release.set()
         process.join(10)
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
 
     assert result.outcome == "blocked"
     assert result.stable_code == "legacy_gateway_running"
@@ -719,7 +727,10 @@ def test_cleanup_never_deletes_canonical_profile_recreated_after_quarantine(
                 args=(str(primary), ready, release),
             )
             process.start()
-            assert ready.wait(5)
+            # Windows spawn must import the test module before acquiring the
+            # synthetic Gateway lock. Under a fully loaded high-risk shard that
+            # can legitimately exceed five seconds without indicating failure.
+            assert ready.wait(15)
         original_remove(path)
 
     monkeypatch.setattr(
@@ -957,7 +968,7 @@ def test_recovery_profile_inspection_sees_global_partial_cleanup_journal(
 
     assert result.outcome == "partial"
     assert recovery_home.is_dir()
-    assert report.outcome == "recovery_required"
+    assert report.outcome == "attention"
     assert report.stable_code == "cleanup_transaction_incomplete"
     assert "recover-transaction" not in report.allowed_actions
 
@@ -983,7 +994,7 @@ def test_incomplete_cleanup_journal_blocks_fresh_primary_bootstrap(tmp_path: Pat
 
     report = inspect_profile(home, profile_kind="desktop-primary")
 
-    assert report.outcome == "recovery_required"
+    assert report.outcome == "attention"
     assert report.stable_code == "cleanup_transaction_incomplete"
     assert "recover-transaction" not in report.allowed_actions
 

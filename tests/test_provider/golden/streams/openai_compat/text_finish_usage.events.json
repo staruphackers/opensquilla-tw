@@ -1,9 +1,11 @@
 [
   {
+    "generation_epoch": null,
     "text": "Hel",
     "type": "TextDeltaEvent"
   },
   {
+    "generation_epoch": null,
     "text": "lo!",
     "type": "TextDeltaEvent"
   },
@@ -13,14 +15,17 @@
     "cached_tokens": 0,
     "cost_source": "none",
     "ensemble_trace": null,
+    "generation_epoch": null,
     "input_tokens": 12,
     "model": "gpt-test-1",
     "model_usage_breakdown": [],
     "output_tokens": 5,
+    "provider": "openai",
     "reasoning_content": null,
     "reasoning_tokens": 0,
     "stop_reason": "stop",
     "thinking_signature": null,
-    "type": "DoneEvent"
+    "type": "DoneEvent",
+    "usage_missing_count": 0
   }
 ]

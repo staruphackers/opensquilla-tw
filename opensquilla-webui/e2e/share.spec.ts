@@ -18,6 +18,9 @@ type SeededMessage = {
     output_tokens: number
     cost_usd: number
   }
+  turn_context?: {
+    turn_id: string
+  }
 }
 
 interface ShareStageProbe {
@@ -32,6 +35,7 @@ interface ShareStageProbe {
   roles: string[]
   costEls: number
   modelEls: number
+  usageDetailEls: number
   finalVisibleContentRole: string | null
   finalVisibleContentSelector: string | null
   finalVisibleContentBottomGap: number | null
@@ -43,6 +47,7 @@ interface ShareStageProbe {
 
 interface SeedHistoryOptions {
   includeAssistantMeta?: boolean
+  includeTurnOutcome?: boolean
   trailingUser?: boolean
 }
 
@@ -96,6 +101,9 @@ async function seedHistory(page: Page, withMessages: boolean, options: SeedHisto
                       },
                     }
                   : {}),
+                ...(options.includeTurnOutcome
+                  ? { turn_context: { turn_id: 'turn-share-assistant' } }
+                  : {}),
               },
             ]
             : [
@@ -117,6 +125,17 @@ async function seedHistory(page: Page, withMessages: boolean, options: SeedHisto
           frame.payload = {
             messages,
             has_more: false,
+            ...(options.includeTurnOutcome
+              ? {
+                  turn_outcomes: [{
+                    turn_id: 'turn-share-assistant',
+                    status: 'completed',
+                    started_at: now - 122,
+                    finished_at: now - 120,
+                    outcome: { kind: 'completed' },
+                  }],
+                }
+              : {}),
           }
           ws.send(JSON.stringify(frame))
           return
@@ -189,6 +208,9 @@ async function installShareStageProbe(page: Page) {
               roles: clones.map(cloneRole).filter(Boolean) as string[],
               costEls: node.querySelectorAll('.msg-meta__cost').length,
               modelEls: node.querySelectorAll('.msg-meta__model').length,
+              usageDetailEls: node.querySelectorAll(
+                '.turn-usage-details, [data-turn-usage-details]',
+              ).length,
               finalVisibleContentRole: cloneRole(lastClone),
               finalVisibleContentSelector: final.selector,
               finalVisibleContentBottomGap: finalBox ? stageBox.bottom - finalBox.bottom : null,
@@ -388,9 +410,10 @@ test.describe('Share mode interaction shell', () => {
     await openSeededSession(page, SESSION_KEY, true)
     await expect(page.locator('.msg-ai-main').last()).toBeVisible({ timeout: 10000 })
 
-    const entry = page.locator('.chat-header').getByRole('button', { name: 'Share' })
+    const entry = page.getByTestId('chat-header-primary-action')
     await expect(entry).toBeVisible()
-    await expect(entry.locator('.chat-share-btn__label')).toBeHidden()
+    await expect(entry).toHaveAttribute('data-action', 'share')
+    await expect(entry).toHaveAccessibleName('Share')
 
     const iconBox = await entry.locator('svg').boundingBox()
     expect(iconBox).not.toBeNull()
@@ -403,45 +426,31 @@ test.describe('Share mode interaction shell', () => {
     expect(entryBox!.height).toBeGreaterThanOrEqual(43)
   })
 
-  test('at 375px the entry stays clear of the floating topbar cluster and opens share mode', async ({ page }) => {
+  test('at 375px the responsive session action opens share mode without occlusion', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 812 })
     await openSeededSession(page, SESSION_KEY, true)
     await expect(page.locator('.msg-ai-main').last()).toBeVisible({ timeout: 10000 })
 
-    const entry = page.locator('.chat-header').getByRole('button', { name: 'Share' })
-    await expect(entry).toBeVisible()
+    const header = page.locator('.chat-header')
+    const layout = await header.getAttribute('data-layout')
+    expect(layout).toMatch(/^(compact|tight)$/)
 
-    // Reproduce the occlusion probe: a tap at the button center must land on
-    // the button, not on the floating conn pill that overlays the header band.
-    const probe = await page.evaluate(() => {
-      const btn = document.querySelector<HTMLElement>('.chat-header .chat-share-btn[aria-label="Share"]')
-      const pill = document.querySelector<HTMLElement>('.conn-pill')
-      if (!btn || !pill) return null
+    let entry = page.getByTestId('chat-header-primary-action')
+    if (layout === 'tight') {
+      await page.getByTestId('chat-session-actions-trigger').click()
+      entry = page.getByTestId('chat-session-action-share')
+    }
+    await expect(entry).toBeVisible()
+    await expect(entry).toHaveAccessibleName('Share')
+
+    // A tap at the action center must land on that action, not another piece
+    // of app chrome. This holds whether Share is primary or menu-contained.
+    const hitIsEntry = await entry.evaluate((btn) => {
       const r = btn.getBoundingClientRect()
       const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2)
-      // Worst-case cluster intrusion: the fixed chrome right of the pill plus
-      // the pill rendered with its longest state label. The pill text varies
-      // (CONNECTED/CONNECTING/DISCONNECTED), so asserting against the current
-      // state alone would under-test.
-      const cs = getComputedStyle(pill)
-      const ctx = document.createElement('canvas').getContext('2d')!
-      ctx.font = `${cs.fontStyle} ${cs.fontWeight} ${cs.fontSize} ${cs.fontFamily}`
-      const text = 'DISCONNECTED'
-      const letterSpacing = parseFloat(cs.letterSpacing) || 0
-      const chrome = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight)
-        + parseFloat(cs.borderLeftWidth) + parseFloat(cs.borderRightWidth)
-      const worstPill = ctx.measureText(text).width + letterSpacing * text.length + chrome
-      const worstIntrusion = (window.innerWidth - pill.getBoundingClientRect().right) + worstPill
-      return {
-        hitIsButton: hit === btn || btn.contains(hit),
-        btnRight: r.right,
-        clearance: window.innerWidth - worstIntrusion - r.right,
-      }
+      return hit === btn || btn.contains(hit)
     })
-    expect(probe).not.toBeNull()
-    expect(probe!.hitIsButton).toBe(true)
-    // Clear of the cluster even in its widest (disconnected) state.
-    expect(probe!.clearance).toBeGreaterThanOrEqual(0)
+    expect(hitIsEntry).toBe(true)
 
     await entry.click()
     await expect(page.getByTestId('share-banner')).toBeVisible()
@@ -461,10 +470,17 @@ test.describe('Share mode interaction shell', () => {
 
   test('Save opens the preview modal; Escape closes only the modal and keeps share mode', async ({ page }) => {
     await installShareStageProbe(page)
-    await openSeededSession(page, SESSION_KEY, true, { includeAssistantMeta: true })
+    await openSeededSession(page, SESSION_KEY, true, {
+      includeAssistantMeta: true,
+      includeTurnOutcome: true,
+    })
+    const usageTrigger = page.locator('.msg-ai .msg-meta__more-btn')
+    await expect(usageTrigger).toBeVisible()
+    await usageTrigger.click()
+    const usagePopover = page.locator('.msg-ai .msg-meta-popover')
+    await expect(usagePopover).toContainText(SEEDED_MODEL)
+    await expect(usagePopover).toContainText(SEEDED_COST)
     await enterShareMode(page)
-    await expect(page.locator('.chat-thread .msg-meta__model')).toContainText(SEEDED_MODEL)
-    await expect(page.locator('.chat-thread .msg-meta__cost')).toContainText(SEEDED_COST)
 
     // Select both bubbles, then Save renders the PNG and opens the preview.
     await page.locator('.msg-user-bubble').first().click()
@@ -503,13 +519,16 @@ test.describe('Share mode interaction shell', () => {
     expect(probe!.stageWidth).toBe(probe!.metrics.contentWidth)
     expect(probe!.roles).toEqual(['user', 'assistant'])
     expect(probe!.finalVisibleContentRole).toBe('assistant')
-    expect(probe!.finalVisibleContentSelector).toBe('.msg-ai-meta')
+    expect(probe!.finalVisibleContentSelector).toBe('.msg-ai-ending')
     expectBottomSafeArea(probe!)
     expectNoExtraInterMessageGap(probe!)
     expect(probe!.costEls).toBe(0)
-    expect(probe!.modelEls).toBeGreaterThan(0)
-    expect(probe!.text).toContain(SEEDED_MODEL)
+    expect(probe!.modelEls).toBe(0)
+    expect(probe!.usageDetailEls).toBe(0)
+    expect(probe!.text).not.toContain(SEEDED_MODEL)
     expect(probe!.text).not.toContain(SEEDED_COST)
+    expect(probe!.text).not.toContain('321')
+    expect(probe!.text).not.toContain('45')
     expect(probe!.text).not.toMatch(/\$\d/)
 
     // Escape closes the preview but leaves share mode active (the banner stays),

@@ -20,7 +20,7 @@ from opensquilla.recovery import (
     RestoreValidationError,
     inspect_profile,
 )
-from opensquilla.recovery.atomic import no_follow_manifest
+from opensquilla.recovery.atomic import PathIdentity, no_follow_manifest
 from opensquilla.recovery.errors import ProfileLockBusyError
 from opensquilla.recovery.locking import ProfileOperationLock
 from opensquilla.recovery.restore import _identity_payload, restore_profile
@@ -63,6 +63,43 @@ def _profile(home: Path, value: str, *, with_legacy_lock: bool = False) -> None:
     )
 
 
+def _profile_file_bytes(
+    root: Path,
+    manifest: dict[str, PathIdentity],
+) -> dict[str, bytes]:
+    return {
+        relative: (root / relative).read_bytes()
+        for relative, identity in manifest.items()
+        if relative != "." and stat.S_ISREG(identity.mode)
+    }
+
+
+def _assert_profile_snapshot_unchanged(
+    root: Path,
+    before: dict[str, PathIdentity],
+    file_bytes: dict[str, bytes],
+) -> None:
+    after = no_follow_manifest(root)
+    assert after.keys() == before.keys()
+    for relative, expected in before.items():
+        current = after[relative]
+        if sys.platform == "win32" and stat.S_ISDIR(expected.mode):
+            # NTFS can publish a delayed directory mtime after a child handle
+            # closes or a directory is atomically moved away and restored.
+            # Recursive membership, directory identity/mode, every regular
+            # file's full metadata, and file bytes remain the data contract.
+            assert (current.device, current.inode, current.mode) == (
+                expected.device,
+                expected.inode,
+                expected.mode,
+            )
+        else:
+            assert current == expected
+    assert {
+        relative: (root / relative).read_bytes() for relative in file_bytes
+    } == file_bytes
+
+
 def _record_backup(target: Path, backup: Path, transaction_id: str) -> Path:
     history = target.parent / "profile-replacement-history.json"
     history.write_text(
@@ -88,6 +125,29 @@ def _record_backup(target: Path, backup: Path, transaction_id: str) -> Path:
         encoding="utf-8",
     )
     return history
+
+
+def test_profile_snapshot_comparison_ignores_only_windows_directory_mtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    profile = tmp_path / "profile"
+    _profile(profile, "original")
+    before = no_follow_manifest(profile)
+    file_bytes = _profile_file_bytes(profile, before)
+    workspace = profile / "workspace"
+    value = workspace.stat()
+    os.utime(
+        workspace,
+        ns=(value.st_atime_ns, value.st_mtime_ns + 1_000_000_000),
+    )
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    _assert_profile_snapshot_unchanged(profile, before, file_bytes)
+
+    (workspace / "SOUL.md").write_text("modified\n", encoding="utf-8")
+    with pytest.raises(AssertionError):
+        _assert_profile_snapshot_unchanged(profile, before, file_bytes)
 
 
 def test_restore_profile_swaps_recorded_backup_and_indexes_previous_target(
@@ -118,6 +178,54 @@ def test_restore_profile_swaps_recorded_backup_and_indexes_previous_target(
     assert history["backups"][0]["restored_to"] == _normalized_path(target)
     assert history["backups"][0]["consumed_by_transaction_id"]
     assert not (tmp_path / ".opensquilla.profile-replace.json").exists()
+
+
+def test_restore_profile_preserves_workspace_links_and_opaque_code_task(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("OPENSQUILLA_USER_STATE_DIR", str(tmp_path / "user-state"))
+    target = tmp_path / "opensquilla"
+    transaction_id = str(uuid.uuid4())
+    backup = target.with_name(f"{target.name}.backup.{transaction_id}")
+    _profile(target, "current")
+    _profile(backup, "recorded backup", with_legacy_lock=True)
+
+    def add_links(profile: Path) -> None:
+        code_task_bin = profile / "code-task" / "run" / "repo" / ".venv" / "bin"
+        code_task_bin.mkdir(parents=True)
+        (profile / "workspace" / "SOUL.alias.md").symlink_to("SOUL.md")
+        historical_workspace = profile / "state" / "workspace"
+        historical_workspace.mkdir(parents=True, exist_ok=True)
+        (historical_workspace / "COPYING").write_text("license\n", encoding="utf-8")
+        (historical_workspace / "LICENSE").symlink_to("COPYING")
+        (code_task_bin / "python").symlink_to("../../../../missing-python")
+
+    try:
+        add_links(target)
+        add_links(backup)
+    except OSError:
+        pytest.skip("symlink creation is unavailable")
+    _record_backup(target, backup, transaction_id)
+
+    report = restore_profile(backup)
+
+    # Both canonical and historical workspaces intentionally remain present,
+    # so post-restore reconciliation asks the user to resolve that ambiguity.
+    assert report.outcome == "attention"
+    assert report.stable_code == "workspace_conflict"
+    assert os.readlink(target / "workspace" / "SOUL.alias.md") == "SOUL.md"
+    assert os.readlink(target / "state" / "workspace" / "LICENSE") == "COPYING"
+    assert os.readlink(
+        target / "code-task" / "run" / "repo" / ".venv" / "bin" / "python"
+    ) == "../../../../missing-python"
+    parked = [path for path in tmp_path.glob("opensquilla.backup.*") if path != backup]
+    assert len(parked) == 1
+    assert os.readlink(parked[0] / "workspace" / "SOUL.alias.md") == "SOUL.md"
+    assert os.readlink(parked[0] / "state" / "workspace" / "LICENSE") == "COPYING"
+    assert os.readlink(
+        parked[0] / "code-task" / "run" / "repo" / ".venv" / "bin" / "python"
+    ) == "../../../../missing-python"
 
 
 def test_restore_cli_uses_history_target_and_primary_profile_kind(
@@ -229,11 +337,7 @@ def test_restore_missing_backup_lock_authority_fails_without_mutating_backup(
     _profile(backup, "recorded backup")
     _record_backup(target, backup, transaction_id)
     backup_before = no_follow_manifest(backup)
-    backup_file_bytes = {
-        relative: (backup / relative).read_bytes()
-        for relative, identity in backup_before.items()
-        if relative != "." and stat.S_ISREG(identity.mode)
-    }
+    backup_file_bytes = _profile_file_bytes(backup, backup_before)
 
     with pytest.raises(
         RestoreValidationError,
@@ -242,24 +346,9 @@ def test_restore_missing_backup_lock_authority_fails_without_mutating_backup(
         restore_profile(backup)
 
     assert exc_info.value.stable_code == "restore_backup_lock_authority_missing"
-    backup_after = no_follow_manifest(backup)
-    assert backup_after.keys() == backup_before.keys()
-    for relative, expected in backup_before.items():
-        current = backup_after[relative]
-        if stat.S_ISDIR(expected.mode):
-            # Windows can report a delayed directory mtime after a child was
-            # created before this operation. Membership and object identity
-            # are the mutation contract; directory timestamps are not data.
-            assert (current.device, current.inode, current.mode) == (
-                expected.device,
-                expected.inode,
-                expected.mode,
-            )
-        else:
-            assert current == expected
-    assert {
-        relative: (backup / relative).read_bytes() for relative in backup_file_bytes
-    } == backup_file_bytes
+    assert "recovery profile" not in str(exc_info.value).lower()
+    assert "primary profile" in str(exc_info.value).lower()
+    _assert_profile_snapshot_unchanged(backup, backup_before, backup_file_bytes)
     assert not (backup / "state" / "gateway.pid.lock").exists()
     assert (target / "workspace" / "SOUL.md").read_text(encoding="utf-8") == "current\n"
     assert not (tmp_path / ".opensquilla.profile-replace.json").exists()
@@ -328,6 +417,7 @@ def test_restore_validation_failure_rolls_back_both_profiles(
     history_path = _record_backup(target, backup, transaction_id)
     history_before = history_path.read_bytes()
     backup_before = no_follow_manifest(backup)
+    backup_file_bytes = _profile_file_bytes(backup, backup_before)
 
     def fail_validation(_target: Path):
         raise RestoreValidationError("synthetic validation failure")
@@ -339,7 +429,7 @@ def test_restore_validation_failure_rolls_back_both_profiles(
 
     assert (target / "workspace" / "SOUL.md").read_text(encoding="utf-8") == "current\n"
     assert (backup / "workspace" / "SOUL.md").read_text(encoding="utf-8") == ("recorded backup\n")
-    assert no_follow_manifest(backup) == backup_before
+    _assert_profile_snapshot_unchanged(backup, backup_before, backup_file_bytes)
     assert history_path.read_bytes() == history_before
     assert not (tmp_path / ".opensquilla.profile-replace.json").exists()
 
@@ -407,7 +497,7 @@ def test_restore_post_move_unknown_state_preserves_journal_and_observed_paths(
             encoding="utf-8"
         ) == "current\n"
     report = inspect_profile(target, profile_kind="desktop-primary")
-    assert report.outcome == "recovery_required"
+    assert report.outcome == "attention"
     assert report.stable_code == "transaction_incomplete"
 
 

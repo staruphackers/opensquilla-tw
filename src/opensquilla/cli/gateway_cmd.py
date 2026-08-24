@@ -7,8 +7,12 @@ import json
 import os
 import signal
 import socket
+import sys
+import threading
+import time
 from collections.abc import Callable
 
+import structlog
 import typer
 
 from opensquilla.cli.gateway_lifecycle import (
@@ -25,13 +29,62 @@ from opensquilla.gateway.boot import (
     start_gateway_server,
 )
 from opensquilla.gateway.config import GatewayConfig, is_public_bind, resolve_listen_address
+from opensquilla.gateway.config_migration import ConfigParseError
 from opensquilla.paths import default_opensquilla_home
+
+log = structlog.get_logger(__name__)
 
 _SHUTDOWN_SIGNALS: tuple[signal.Signals, ...] = tuple(
     sig
     for sig in (getattr(signal, "SIGINT", None), getattr(signal, "SIGTERM", None))
     if sig is not None
 )
+
+
+def _flush_shutdown_streams() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except (OSError, ValueError):
+            # A closed or failed stream must not prevent the watchdog exit.
+            continue
+
+
+def _force_process_exit(exit_code: int) -> None:
+    """End the real Gateway process without running cancellation cleanup again."""
+
+    os._exit(exit_code)
+
+
+class _GatewayShutdownWatchdog:
+    """Process boundary for a close path that cannot cooperatively finish."""
+
+    def __init__(self, *, timeout: float, exit_code: int) -> None:
+        self._timeout = max(0.0, timeout)
+        self._exit_code = exit_code
+        self._disarmed = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run,
+            name="opensquilla-gateway-shutdown-watchdog",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def disarm(self) -> None:
+        self._disarmed.set()
+
+    def _run(self) -> None:
+        if self._disarmed.wait(self._timeout):
+            return
+        log.error(
+            "gateway.shutdown_watchdog_expired",
+            timeout=self._timeout,
+            exit_code=self._exit_code,
+        )
+        _flush_shutdown_streams()
+        _force_process_exit(self._exit_code)
 
 
 def _install_shutdown_handlers(
@@ -107,6 +160,18 @@ def _gateway_bind_available(host: str, port: int) -> bool:
     return False if last_error is not None else True
 
 
+def _load_gateway_config(config_path: str | None, *, read_only: bool = False) -> GatewayConfig:
+    try:
+        return GatewayConfig.load(config_path, read_only=read_only)
+    except ConfigParseError as exc:
+        console.print(f"[red]Invalid gateway config:[/red] {exc}")
+        console.print(
+            "Fix the file, or restore the newest valid backup with "
+            "[bold]opensquilla recovery recover-config --home <profile>[/bold]."
+        )
+        raise typer.Exit(code=1) from None
+
+
 def run_gateway(
     port: int | None = typer.Option(18791, "--port", "-p", help="Port to bind"),
     bind: str | None = typer.Option("127.0.0.1", "--bind", "-b", help="Host to bind"),
@@ -125,6 +190,7 @@ def run_gateway(
     honoured as the fallback when no CLI flag or env var is supplied,
     matching what the field name promises.
     """
+    gateway_startup_started_at = time.monotonic()
     requested_config = config_path or os.environ.get("OPENSQUILLA_GATEWAY_CONFIG_PATH")
     if not desktop_config_path_is_profile_local(requested_config):
         console.print("DESKTOP_CONFIG_OUTSIDE_PROFILE")
@@ -135,7 +201,9 @@ def run_gateway(
         raise typer.Exit(code=1)
     # Load config FIRST so its ``host`` field can act as the final
     # fallback below ``OPENSQUILLA_GATEWAY_HOST``.
-    config = GatewayConfig.load(config_path or os.environ.get("OPENSQUILLA_GATEWAY_CONFIG_PATH"))
+    config = _load_gateway_config(
+        config_path or os.environ.get("OPENSQUILLA_GATEWAY_CONFIG_PATH")
+    )
     if config_path and not config.config_path:
         config.config_path = str(config_path)
     # Treat the CLI ``--bind`` default as "not explicitly supplied" so the
@@ -200,7 +268,7 @@ def run_gateway(
             "self-disable that pill.[/yellow]"
         )
 
-    async def _run() -> None:
+    async def _run() -> bool:
         # Subscription manager is gateway-specific (WS event routing)
         from opensquilla.gateway.websocket import SubscriptionManager
 
@@ -213,6 +281,7 @@ def run_gateway(
             config=config,
             subscription_manager=subscription_mgr,
             run=True,
+            _startup_started_at=gateway_startup_started_at,
         )
         assert server._task is not None
 
@@ -237,27 +306,74 @@ def run_gateway(
         # Windows, where SIGTERM maps to an immediate TerminateProcess.
         app = getattr(server, "app", None)
         if app is not None and hasattr(app, "state"):
-            app.state.request_shutdown = _request_shutdown
+            install_shutdown_handler = getattr(
+                app.state, "install_shutdown_handler", None
+            )
+            if callable(install_shutdown_handler):
+                install_shutdown_handler(_request_shutdown)
+            else:
+                app.state.request_shutdown = _request_shutdown
         server_task = server._task
         waiter = asyncio.ensure_future(shutdown.wait())
+        explicit_shutdown = False
         try:
             await asyncio.wait(
                 {server_task, waiter}, return_when=asyncio.FIRST_COMPLETED
             )
-            await server.close(shutdown_reason)
+            close_reason = shutdown_reason
+            explicit_shutdown = shutdown.is_set()
         except (KeyboardInterrupt, asyncio.CancelledError):
             # Fallback for platforms where add_signal_handler is unavailable
             # (Windows / non-main-thread): SIGINT arrives as KeyboardInterrupt.
             shutdown.set()
-            await server.close("keyboard_interrupt")
+            close_reason = "keyboard_interrupt"
+            explicit_shutdown = True
         finally:
             waiter.cancel()
             _remove_shutdown_handlers(loop, installed_signals)
-        if shutdown.is_set():
+
+        exit_code = 0 if explicit_shutdown else 1
+        watchdog = _GatewayShutdownWatchdog(
+            timeout=gateway_shutdown_deadline(),
+            exit_code=exit_code,
+        )
+        watchdog.start()
+        close_result = await server.close(close_reason)
+        clean = close_result is None or bool(getattr(close_result, "clean", False))
+        if not clean:
+            log.error(
+                "gateway.shutdown_incomplete_force_exit",
+                reason=close_reason,
+                exit_code=exit_code,
+                remaining_drivers=getattr(
+                    close_result,
+                    "remaining_driver_count",
+                    None,
+                ),
+                remaining_reservations=getattr(
+                    close_result,
+                    "remaining_reservation_count",
+                    None,
+                ),
+                remaining_auxiliary=getattr(
+                    close_result,
+                    "remaining_auxiliary_count",
+                    None,
+                ),
+            )
+            watchdog.disarm()
+            _flush_shutdown_streams()
+            _force_process_exit(exit_code)
+            return explicit_shutdown
+        watchdog.disarm()
+        if explicit_shutdown:
             console.print("\n[yellow]Gateway stopped.[/yellow]")
+        return explicit_shutdown
 
     try:
-        asyncio.run(_run())
+        explicit_shutdown = asyncio.run(_run())
+        if not explicit_shutdown:
+            raise typer.Exit(code=1)
     except ValueError as exc:
         from opensquilla.onboarding.next_steps import env_recovery_commands
         from opensquilla.onboarding.status import get_onboarding_status
@@ -318,7 +434,7 @@ def _lifecycle_manager(
     health_timeout: float = 60.0,
     shutdown_timeout: float = 10.0,
 ) -> GatewayLifecycleManager:
-    config = GatewayConfig.load(
+    config = _load_gateway_config(
         config_path or os.environ.get("OPENSQUILLA_GATEWAY_CONFIG_PATH"),
         read_only=desktop_profile_lifecycle_active(),
     )

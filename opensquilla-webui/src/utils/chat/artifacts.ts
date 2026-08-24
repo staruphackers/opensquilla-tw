@@ -8,13 +8,26 @@ const ARTIFACT_MIME_CATEGORIES: Record<string, string> = {
 }
 
 const ARTIFACT_EXTENSION_CATEGORIES: Record<string, string> = {
+  aac: 'audio', flac: 'audio', m4a: 'audio', mp3: 'audio', oga: 'audio', ogg: 'audio', opus: 'audio', wav: 'audio',
+  avi: 'video', m4v: 'video', mkv: 'video', mov: 'video', mp4: 'video', ogv: 'video', webm: 'video',
+  avif: 'visual', bmp: 'visual', gif: 'visual', ico: 'visual', jpeg: 'visual',
+  jpg: 'visual', png: 'visual', svg: 'visual', webp: 'visual',
   csv: 'data', htm: 'document', html: 'document', ipynb: 'data', json: 'data',
   jsonl: 'data', log: 'document', markdown: 'document', md: 'document',
   ndjson: 'data', pdf: 'document', sql: 'code', tsv: 'data', txt: 'document',
 }
 
+const VIDEO_EXTENSIONS = new Set(['m4v', 'mov', 'mp4', 'ogv', 'webm'])
+const OFFICE_EXTENSIONS = new Set([
+  'doc', 'docm', 'docx', 'dot', 'dotm', 'dotx', 'odt', 'ott', 'rtf',
+  'csv', 'fods', 'ods', 'ots', 'xls', 'xlsb', 'xlsm', 'xlsx', 'xlt', 'xltm', 'xltx',
+  'odp', 'otp', 'pot', 'potm', 'potx', 'pps', 'ppsm', 'ppsx', 'ppt', 'pptm', 'pptx',
+])
+
 export function artifactMime(artifact: ArtifactPayload): string {
-  return artifact?.mime ? String(artifact.mime).toLowerCase() : ''
+  return artifact?.mime
+    ? String(artifact.mime).split(';', 1)[0].trim().toLowerCase()
+    : ''
 }
 
 export function artifactName(artifact: ArtifactPayload): string {
@@ -28,9 +41,22 @@ export function artifactExtension(name: string): string {
   return trimmed.slice(idx + 1)
 }
 
+export function isOfficeArtifact(artifact: ArtifactPayload): boolean {
+  return OFFICE_EXTENSIONS.has(artifactExtension(artifactName(artifact)))
+}
+
+export function isVideoArtifact(artifact: ArtifactPayload): boolean {
+  const mime = artifactMime(artifact)
+  if (mime.startsWith('video/')) return true
+  if (mime && mime !== 'application/octet-stream') return false
+  return VIDEO_EXTENSIONS.has(artifactExtension(artifactName(artifact)))
+}
+
 export function artifactCategory(artifact: ArtifactPayload): string {
   const mime = artifactMime(artifact)
   if (mime.startsWith('image/')) return 'visual'
+  if (mime.startsWith('audio/')) return 'audio'
+  if (mime.startsWith('video/')) return 'video'
   if (ARTIFACT_MIME_CATEGORIES[mime]) return ARTIFACT_MIME_CATEGORIES[mime]
   if (!mime || mime === 'application/octet-stream') {
     const ext = artifactExtension(artifactName(artifact))
@@ -45,6 +71,8 @@ export function artifactCategoryLabel(artifact: ArtifactPayload): string {
     case 'data': return 'data'
     case 'document': return 'doc'
     case 'code': return 'code'
+    case 'audio': return 'audio'
+    case 'video': return 'video'
     default: return 'file'
   }
 }
@@ -54,7 +82,15 @@ export function artifactIconName(artifact: ArtifactPayload): IconName {
   if (cat === 'visual') return 'image'
   if (cat === 'data') return 'table'
   if (cat === 'code') return 'fileCode'
+  if (cat === 'audio') return 'music'
+  if (cat === 'video') return 'video'
   return 'fileText'
+}
+
+/** Media that is playable in the chat transcript rather than the Workbench. */
+export function isInlineMediaArtifact(artifact: ArtifactPayload): boolean {
+  const category = artifactCategory(artifact)
+  return category === 'audio' || category === 'video'
 }
 
 export function artifactFileTitle(artifact: ArtifactPayload): string {
@@ -110,6 +146,21 @@ export interface ArtifactUrlOptions {
   includeSessionKey?: boolean
 }
 
+function artifactUrlsShareOrigin(candidate: URL, base: URL): boolean {
+  if (candidate.origin !== 'null' || base.origin !== 'null') {
+    return candidate.origin === base.origin
+  }
+  return candidate.protocol === 'opensquilla-app:'
+    && base.protocol === 'opensquilla-app:'
+    && candidate.hostname === 'desktop'
+    && base.hostname === 'desktop'
+    && candidate.port === base.port
+    && !candidate.username
+    && !candidate.password
+    && !base.username
+    && !base.password
+}
+
 export function artifactDownloadUrl(
   artifact: ArtifactPayload,
   baseOrigin: string,
@@ -121,7 +172,7 @@ export function artifactDownloadUrl(
   try {
     const url = new URL(raw, baseOrigin)
     const base = new URL(baseOrigin)
-    const sameOrigin = url.origin === base.origin
+    const sameOrigin = artifactUrlsShareOrigin(url, base)
     if (sameOrigin) {
       url.searchParams.delete('token')
       url.searchParams.delete('sessionKey')

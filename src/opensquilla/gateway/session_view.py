@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from typing import Any
 
+from opensquilla.chat.flattened_tool_markers import is_flattened_tool_result_dump
 from opensquilla.session.keys import derive_chat_type, parse_agent_id
 
 _CHANNEL_SURFACES = frozenset(
@@ -34,14 +36,21 @@ def build_session_view_item(
     task_rows: list[Any],
     now_ms: int,
     transcript_title: str | None = None,
+    channel_types: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Return additive Web UI contract fields for one session row."""
+    """Return additive Web UI contract fields for one session row.
+
+    ``channel_types`` maps configured channel NAMES (lowercased) to their
+    platform type. Operators name channels freely ("飞书", "slack-eng"), so
+    surface classification by the type vocabulary alone would misfile every
+    custom-named channel's sessions as unknown.
+    """
 
     key = str(getattr(session, "session_key", "") or "")
     origin = getattr(session, "origin", None)
     origin_map = origin if isinstance(origin, dict) else {}
     effective_agent_id = _effective_agent_id(session, key)
-    surface = _surface(session, key, origin_map)
+    surface = _surface(session, key, origin_map, channel_types)
     session_kind = _session_kind(session, key, surface, origin_map)
     conversation_kind = _conversation_kind(session, key, session_kind)
     run_status = _run_status(task_rows)
@@ -90,11 +99,23 @@ def _effective_agent_id(session: Any, key: str) -> str:
     return stored
 
 
-def _surface(session: Any, key: str, origin: dict[str, Any]) -> str:
+def _surface(
+    session: Any,
+    key: str,
+    origin: dict[str, Any],
+    channel_types: dict[str, str] | None = None,
+) -> str:
     last_channel = _lower(getattr(session, "last_channel", None))
     channel = _lower(getattr(session, "channel", None))
     origin_kind = _lower(origin.get("kind"))
 
+    named = channel_types or {}
+    # The configured name→type map may carry plugin types outside the pinned
+    # surface enum; those must degrade to the fall-through checks (ending in
+    # "unknown") rather than widen the contract's closed union.
+    mapped = named.get(last_channel) or named.get(channel)
+    if mapped in _CHANNEL_SURFACES:
+        return mapped
     if last_channel in _CHANNEL_SURFACES:
         return last_channel
     if channel in _CHANNEL_SURFACES:
@@ -414,18 +435,104 @@ def _humanize(value: str) -> str:
     return cleaned[:1].upper() + cleaned[1:] if cleaned else ""
 
 
+def _is_regional_indicator(char: str) -> bool:
+    return 0x1F1E6 <= ord(char) <= 0x1F1FF
+
+
+def _is_grapheme_extend(char: str) -> bool:
+    codepoint = ord(char)
+    return (
+        unicodedata.category(char) in {"Mn", "Mc", "Me"}
+        or 0xFE00 <= codepoint <= 0xFE0F
+        or 0xE0100 <= codepoint <= 0xE01EF
+        or 0x1F3FB <= codepoint <= 0x1F3FF
+        or 0xE0020 <= codepoint <= 0xE007F
+    )
+
+
+def _hangul_syllable_type(char: str) -> str | None:
+    """Return the UAX #29 Hangul class used by grapheme rules GB6-GB8."""
+
+    codepoint = ord(char)
+    if 0x1100 <= codepoint <= 0x115F or 0xA960 <= codepoint <= 0xA97C:
+        return "L"
+    if 0x1160 <= codepoint <= 0x11A7 or 0xD7B0 <= codepoint <= 0xD7C6:
+        return "V"
+    if 0x11A8 <= codepoint <= 0x11FF or 0xD7CB <= codepoint <= 0xD7FB:
+        return "T"
+    if 0xAC00 <= codepoint <= 0xD7A3:
+        return "LV" if (codepoint - 0xAC00) % 28 == 0 else "LVT"
+    return None
+
+
+def _hangul_extends_cluster(previous: str, current: str) -> bool:
+    previous_type = _hangul_syllable_type(previous)
+    current_type = _hangul_syllable_type(current)
+    return bool(
+        (previous_type == "L" and current_type in {"L", "V", "LV", "LVT"})
+        or (previous_type in {"LV", "V"} and current_type in {"V", "T"})
+        or (previous_type in {"LVT", "T"} and current_type == "T")
+    )
+
+
+def _title_grapheme_clusters(text: str) -> list[str]:
+    """Group display-title text without splitting common user graphemes."""
+
+    clusters: list[str] = []
+    cluster = ""
+    join_next = False
+    regional_indicators = 0
+    for char in text:
+        regional = _is_regional_indicator(char)
+        extends_cluster = (
+            bool(cluster)
+            and (
+                join_next
+                or char == "\u200d"
+                or _is_grapheme_extend(char)
+                or _hangul_extends_cluster(cluster[-1], char)
+                or (regional and regional_indicators == 1)
+            )
+        )
+        if cluster and not extends_cluster:
+            clusters.append(cluster)
+            cluster = ""
+            regional_indicators = 0
+        cluster += char
+        regional_indicators = regional_indicators + 1 if regional else 0
+        join_next = char == "\u200d" or "VIRAMA" in unicodedata.name(char, "")
+    if cluster:
+        clusters.append(cluster)
+    return clusters
+
+
+def _truncate_title_graphemes(text: str, max_chars: int) -> str:
+    suffix = "..."
+    prefix_budget = max(0, max_chars - len(suffix))
+    prefix: list[str] = []
+    prefix_chars = 0
+    for cluster in _title_grapheme_clusters(text):
+        if prefix_chars + len(cluster) > prefix_budget:
+            break
+        prefix.append(cluster)
+        prefix_chars += len(cluster)
+    return "".join(prefix).rstrip() + suffix
+
+
 def derive_transcript_title(content: Any, *, max_chars: int = 34) -> str:
     text = _content_text(content)
     if not text:
         return ""
     text = _TIME_PREFIX_RE.sub("", text, count=1)
+    if is_flattened_tool_result_dump(text):
+        return ""
     cleaned = re.sub(r"\s+", " ", text).strip()
     cleaned = cleaned.strip("\"'` ")
     if not cleaned:
         return ""
     if len(cleaned) <= max_chars:
         return cleaned
-    return cleaned[: max_chars - 3].rstrip() + "..."
+    return _truncate_title_graphemes(cleaned, max_chars)
 
 
 def _content_text(content: Any) -> str:

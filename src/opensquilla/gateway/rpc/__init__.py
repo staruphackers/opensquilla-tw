@@ -52,6 +52,8 @@ __all__ = [
 # METHOD_NOT_FOUND.
 import opensquilla.gateway.rpc_agents  # noqa: E402, F401
 import opensquilla.gateway.rpc_approvals  # noqa: E402, F401
+import opensquilla.gateway.rpc_artifact_editing  # noqa: E402, F401
+import opensquilla.gateway.rpc_artifacts  # noqa: E402, F401
 import opensquilla.gateway.rpc_channels  # noqa: E402, F401
 import opensquilla.gateway.rpc_chat  # noqa: E402, F401
 import opensquilla.gateway.rpc_commands  # noqa: E402, F401
@@ -59,11 +61,15 @@ import opensquilla.gateway.rpc_config  # noqa: E402, F401
 import opensquilla.gateway.rpc_cron  # noqa: E402, F401
 import opensquilla.gateway.rpc_diagnostics  # noqa: E402, F401
 import opensquilla.gateway.rpc_doctor  # noqa: E402, F401
+import opensquilla.gateway.rpc_goals  # noqa: E402, F401
 import opensquilla.gateway.rpc_logs  # noqa: E402, F401
 import opensquilla.gateway.rpc_memory  # noqa: E402, F401
+import opensquilla.gateway.rpc_memory_import  # noqa: E402, F401
 import opensquilla.gateway.rpc_meta_runs  # noqa: E402, F401
+import opensquilla.gateway.rpc_migration  # noqa: E402, F401
 import opensquilla.gateway.rpc_models  # noqa: E402, F401
 import opensquilla.gateway.rpc_onboarding  # noqa: E402, F401
+import opensquilla.gateway.rpc_prompt_cache_keepalive  # noqa: E402, F401
 import opensquilla.gateway.rpc_proposals  # noqa: E402, F401
 import opensquilla.gateway.rpc_router  # noqa: E402, F401
 import opensquilla.gateway.rpc_routing  # noqa: E402, F401
@@ -75,6 +81,8 @@ import opensquilla.gateway.rpc_system  # noqa: E402, F401
 import opensquilla.gateway.rpc_tools  # noqa: E402, F401
 import opensquilla.gateway.rpc_usage  # noqa: E402, F401
 import opensquilla.gateway.rpc_wizard  # noqa: E402, F401
+import opensquilla.gateway.rpc_workbench_resources  # noqa: E402, F401
+import opensquilla.gateway.rpc_workspaces  # noqa: E402, F401
 
 # Fail fast if any registered handler disagrees with ``gateway.scopes``.
 validate_classification()

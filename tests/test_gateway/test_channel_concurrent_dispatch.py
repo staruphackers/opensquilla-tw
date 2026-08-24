@@ -128,6 +128,13 @@ def test_compute_channel_cap_env_override(monkeypatch: pytest.MonkeyPatch) -> No
     assert _compute_channel_cap(cfg) == 1
 
 
+def test_compute_channel_cap_missing_runtime_value_uses_desktop_default() -> None:
+    config = MagicMock()
+    config.task_runtime = MagicMock(spec=["channel_inflight_cap"])
+    config.task_runtime.channel_inflight_cap = 16
+    assert _compute_channel_cap(config) == 16
+
+
 # ── _ChannelInFlightSet docstring must mention SEPARATE second-layer semaphore
 
 
@@ -190,6 +197,9 @@ async def test_relay_close_on_success() -> None:
     relay.close = AsyncMock()
     relay.text_emitted = False
     relay.stream_error = None
+    relay.has_terminal_snapshot = False
+    relay.delivered_artifact_keys = set()
+    relay.reconcile_final_text = AsyncMock(return_value=True)
 
     rt = _make_task_runtime(succeed=True)
 
@@ -206,6 +216,7 @@ async def test_relay_close_on_success() -> None:
     )
 
     relay.close.assert_awaited_once()
+    relay.reconcile_final_text.assert_awaited_once_with("reply text")
 
 
 # ── done_callback surfaces exceptions ────────────────────────────────────────

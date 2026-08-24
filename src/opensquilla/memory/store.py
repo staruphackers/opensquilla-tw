@@ -494,8 +494,10 @@ class LongTermMemoryStore:
             import sqlite_vec  # type: ignore
 
             await self._db.enable_load_extension(True)
-            await self._db.load_extension(sqlite_vec.loadable_path())
-            await self._db.enable_load_extension(False)
+            try:
+                await self._db.load_extension(sqlite_vec.loadable_path())
+            finally:
+                await self._db.enable_load_extension(False)
 
             # Create vec table if needed
             # We need to know embedding dims; defer table creation until first insert
@@ -809,7 +811,7 @@ class LongTermMemoryStore:
                 (path, source.value, file_hash, mtime, size),
             )
             await self._db.commit()
-        except Exception:
+        except BaseException:
             await self._db.rollback()
             raise
 
@@ -818,19 +820,25 @@ class LongTermMemoryStore:
 
     async def remove_file(self, path: str) -> None:
         assert self._db is not None
-        # Vec first — needs chunk IDs before they're deleted (same pattern as index_file)
-        if self._vec_available:
-            try:
-                await self._db.execute(
-                    "DELETE FROM chunks_vec WHERE id IN (SELECT id FROM chunks WHERE path = ?)",
-                    (path,),
-                )
-            except Exception:
-                pass
-        await self._db.execute("DELETE FROM chunks_fts WHERE path = ?", (path,))
-        await self._db.execute("DELETE FROM chunks WHERE path = ?", (path,))
-        await self._db.execute("DELETE FROM files WHERE path = ?", (path,))
-        await self._db.commit()
+        await self._db.execute("BEGIN IMMEDIATE")
+        try:
+            # Vec first — needs chunk IDs before they're deleted (same pattern as index_file)
+            if self._vec_available:
+                try:
+                    await self._db.execute(
+                        "DELETE FROM chunks_vec WHERE id IN "
+                        "(SELECT id FROM chunks WHERE path = ?)",
+                        (path,),
+                    )
+                except Exception:
+                    pass
+            await self._db.execute("DELETE FROM chunks_fts WHERE path = ?", (path,))
+            await self._db.execute("DELETE FROM chunks WHERE path = ?", (path,))
+            await self._db.execute("DELETE FROM files WHERE path = ?", (path,))
+            await self._db.commit()
+        except BaseException:
+            await self._db.rollback()
+            raise
 
     async def rebuild(self) -> None:
         """Clear rebuildable index rows.

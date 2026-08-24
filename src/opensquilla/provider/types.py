@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from opensquilla.contracts.turn_execution import StickyExecutionRole
 from opensquilla.execution_status import ExecutionStatus
+from opensquilla.redaction import redact_error_text
 
 if TYPE_CHECKING:
     from opensquilla.provider.failures import ProviderFailureKind
@@ -22,6 +24,7 @@ class TextDeltaEvent:
 
     kind: Literal["text_delta"] = field(default="text_delta", init=False)
     text: str = ""
+    generation_epoch: int | None = None
 
 
 @dataclass
@@ -38,6 +41,7 @@ class ReasoningDeltaEvent:
 
     kind: Literal["reasoning_delta"] = field(default="reasoning_delta", init=False)
     text: str = ""
+    generation_epoch: int | None = None
 
 
 @dataclass
@@ -48,6 +52,7 @@ class ToolUseStartEvent:
     tool_use_id: str = ""
     tool_name: str = ""
     synthetic_from_text: bool = False
+    generation_epoch: int | None = None
 
 
 @dataclass
@@ -57,6 +62,7 @@ class ToolUseDeltaEvent:
     kind: Literal["tool_use_delta"] = field(default="tool_use_delta", init=False)
     tool_use_id: str = ""
     json_fragment: str = ""
+    generation_epoch: int | None = None
 
 
 @dataclass
@@ -68,6 +74,25 @@ class ToolUseEndEvent:
     tool_name: str = ""
     arguments: dict[str, Any] = field(default_factory=dict)
     synthetic_from_text: bool = False
+    generation_epoch: int | None = None
+
+
+@dataclass(frozen=True)
+class ProviderBillingReceipt:
+    """Provider-native billing receipt attached to one physical request.
+
+    Amounts use integer nanos so adapters can preserve an upstream bill without
+    routing it through binary floating-point arithmetic. ``billed_cost`` on the
+    enclosing :class:`DoneEvent` remains the canonical USD-compatible value for
+    existing callers.
+    """
+
+    currency: str
+    status: Literal["confirmed", "pending"]
+    amount_nanos: int | None
+    usd_equivalent_nanos: int | None
+    fx_native_per_usd_nanos: int
+    schema_version: int = 1
 
 
 @dataclass
@@ -90,11 +115,76 @@ class DoneEvent:
     cost_source: str = "none"
     model_usage_breakdown: list[dict[str, Any]] = field(default_factory=list)
     ensemble_trace: dict[str, Any] | None = None
+    # Number of physical ensemble legs that ended without a usage receipt.
+    # Appended for source compatibility with positional constructors.
+    usage_missing_count: int = 0
+    # Configured registry identity serving this response.  Appended for
+    # positional-construction compatibility; generic adapters default it to
+    # their family identity when constructed outside a selector.
+    provider: str = ""
+    # Provider-native receipt for this physical request. Ensemble envelopes do
+    # not carry a synthetic receipt; their physical breakdown rows do.
+    billing_receipt: ProviderBillingReceipt | None = None
+    generation_epoch: int | None = None
 
     @property
     def upstream_cost_usd(self) -> float:
         """Backward-compatible alias for earlier OpenRouter cost consumers."""
         return self.billed_cost
+
+
+@dataclass(frozen=True)
+class ProviderMessageCountProjection:
+    """Pure projection of one provider request's final wire-message count.
+
+    ``additional_messages`` lets wrappers account for provider-local synthetic
+    messages (for example, an ensemble aggregator's candidate bundle) without
+    manufacturing ``Message`` objects or duplicating an adapter's expansion
+    rules.
+    """
+
+    actual_wire_messages: int
+    logical_messages: int
+    system_messages: int
+    tool_result_messages: int
+    additional_messages: int = 0
+    provider_kind: str = ""
+    model: str = ""
+    base_host: str = ""
+
+
+@dataclass(frozen=True)
+class ProviderFinalRequestProjection:
+    """Pure admission evidence for one adapter's exact outbound payload.
+
+    ``payload`` is retained so tests and higher-level admission coordinators
+    can prove that projection and transport use the same envelope.  It is
+    deliberately excluded from ``repr`` because provider requests may contain
+    user content.  ``fits_message_count`` is ``None`` when the adapter has no
+    authoritative message limit; the exact wire count remains available
+    without pretending that an unknown limit was proved.
+    """
+
+    payload: dict[str, Any] = field(repr=False, compare=False)
+    proof: dict[str, Any]
+    wire_message_count: int
+    message_limit: int | None
+    fits_message_count: bool | None
+    fits: bool
+
+
+@dataclass(frozen=True)
+class ProviderMessageLimitProof:
+    """Structured proof of an upstream wire-message cardinality rejection."""
+
+    actual_wire_messages: int
+    limit: int
+    logical_messages: int
+    system_messages: int
+    tool_result_messages: int
+    provider_kind: str = ""
+    model: str = ""
+    base_host: str = ""
 
 
 @dataclass
@@ -110,6 +200,40 @@ class ErrorEvent:
     message: str = ""
     code: str = ""
     retry_after_s: float | None = None
+    # Appended so positional construction of the long-standing fields remains
+    # source-compatible.  Only populated when an adapter has exact structured
+    # evidence for a provider request limit.
+    message_limit_proof: ProviderMessageLimitProof | None = None
+    # Ensemble wrappers may have consumed billable legs before the terminal
+    # failure.  Carry their known receipts so outer accounting can finalize a
+    # partial envelope instead of discarding it as wholly unknown.
+    model_usage_breakdown: list[dict[str, Any]] = field(default_factory=list)
+    usage_missing_count: int = 0
+    generation_epoch: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderGenerationResetEvent:
+    """Internal signal that the current answer generation must be replaced."""
+
+    kind: Literal["provider_generation_reset"] = field(
+        default="provider_generation_reset",
+        init=False,
+    )
+    from_role: StickyExecutionRole = StickyExecutionRole.PRIMARY_AGGREGATOR
+    to_role: StickyExecutionRole = StickyExecutionRole.FIXED_AGGREGATOR
+    safe_reason: str = "provider fallback"
+    terminal: bool = False
+    terminal_text_snapshot: str | None = None
+    # Terminal fixed-model failure is represented by this reset alone on the
+    # public stream.  Keep the consumed physical-attempt evidence on the
+    # internal provider event so Agent accounting does not need a second
+    # user-visible ErrorEvent or DoneEvent to recover it.
+    terminal_error_message: str = ""
+    terminal_error_code: str = ""
+    model_usage_breakdown: list[dict[str, Any]] = field(default_factory=list)
+    usage_missing_count: int = 0
+    ensemble_trace: dict[str, Any] | None = None
 
 
 @dataclass
@@ -119,6 +243,102 @@ class ProviderHeartbeatEvent:
     kind: Literal["provider_heartbeat"] = field(default="provider_heartbeat", init=False)
     phase: str = "provider"
     message: str = ""
+    # Additive provenance: synthetic polling/keepalive remains false; a
+    # provider may mark a heartbeat true when it represents real upstream
+    # activity that should refresh the coordinator's idle deadline.
+    upstream_activity: bool = False
+    generation_epoch: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderAttemptFailure:
+    """Internal, redacted outcome for one provider-call attempt.
+
+    This is deliberately not part of :data:`StreamEvent`: provider failures
+    are coordinator input, not user-facing stream output.  ``safe_message``
+    is bounded and redacted at construction so an adapter cannot accidentally
+    put credentials or an unbounded upstream payload on a diagnostic path.
+    ``lease_id`` is only the opaque admission identity; the lease itself and
+    its authority are never embedded here.
+    """
+
+    kind: Literal["provider_attempt_failure"] = field(
+        default="provider_attempt_failure",
+        init=False,
+    )
+    turn_id: str = ""
+    assistant_message_id: str = ""
+    role: StickyExecutionRole = StickyExecutionRole.PRIMARY_AGGREGATOR
+    logical_call_index: int = 0
+    attempt_index: int = 0
+    lease_id: str = ""
+    provider: str = ""
+    model: str = ""
+    # Keep this lowest-level module free of a runtime dependency on
+    # ``provider.failures`` (which imports the provider registry). Coordinators
+    # normally pass ``ProviderFailureKind``; the string default preserves the
+    # same wire value without creating the package-layer cycle.
+    failure_kind: ProviderFailureKind | str = "unknown"
+    retryable: bool = False
+    request_started: bool = False
+    safe_message: str = ""
+    generation_epoch: int = 0
+    sequence: int = 0
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "safe_message", redact_error_text(self.safe_message))
+
+    @property
+    def is_public(self) -> bool:
+        """Whether this event may enter a public stream (always false)."""
+
+        return False
+
+    @property
+    def message(self) -> str:
+        """Compatibility alias for consumers that use the ErrorEvent name."""
+
+        return self.safe_message
+
+    @property
+    def lease(self) -> str:
+        """Compatibility alias for the opaque admission identity."""
+
+        return self.lease_id
+
+
+@dataclass
+class ProviderActivityEvent:
+    """Safe, structured lifecycle signal for one upstream model activity.
+
+    This provider-domain shape intentionally contains no raw upstream error,
+    response body, prompt, or reasoning text.  The engine mirrors it onto the
+    public ``session.event.provider_activity`` contract.
+    """
+
+    kind: Literal["provider_activity"] = field(default="provider_activity", init=False)
+    schema_version: int = 1
+    activity_id: str = ""
+    phase: Literal["requesting", "reasoning", "retry_wait", "retrying", "fallback"] = (
+        "requesting"
+    )
+    reason: Literal[
+        "initial",
+        "rate_limited",
+        "provider_overloaded",
+        "transport_transient",
+        "reasoning_only",
+        "empty_response",
+        "stream_incomplete",
+        "invalid_response",
+        "context_overflow",
+        "unknown",
+    ] = "initial"
+    retry_attempt: int = 0
+    retry_limit: int = 0
+    retry_after_ms: int = 0
+    started_at: int = 0
+    heartbeat: bool = False
 
 
 @dataclass
@@ -139,6 +359,7 @@ class EnsembleProgressEvent:
     output_tokens: int = 0
     cost_usd: float = 0.0
     error: str = ""
+    generation_epoch: int | None = None
 
 
 @dataclass
@@ -153,6 +374,9 @@ class QuotaStatus:
     tokens_remaining: int = -1
     tool_calls_remaining: int = -1
     abort_reason: str | None = None
+
+
+VisionSupport = Literal["supported", "unsupported", "unknown"]
 
 
 @dataclass(frozen=True)
@@ -175,7 +399,9 @@ StreamEvent = (
     | ToolUseEndEvent
     | DoneEvent
     | ErrorEvent
+    | ProviderGenerationResetEvent
     | ProviderHeartbeatEvent
+    | ProviderActivityEvent
     | EnsembleProgressEvent
 )
 
@@ -184,7 +410,14 @@ StreamEvent = (
 # Tool definition (Pydantic BaseModel — external API boundary)
 # ---------------------------------------------------------------------------
 
-from pydantic import BaseModel, ConfigDict, Field  # noqa: E402
+from pydantic import (  # noqa: E402
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+)
 
 
 class ToolParam(BaseModel):
@@ -209,6 +442,10 @@ class ToolInputSchema(BaseModel):
     )
 
 
+class _StringItemSchemaProjectionCapability:
+    """Unserializable identity token for trusted registry construction."""
+
+
 class ToolDefinition(BaseModel):
     """Tool definition passed to the LLM."""
 
@@ -218,6 +455,28 @@ class ToolDefinition(BaseModel):
     execution_timeout_seconds: float | None = None
     execution_timeout_argument: str | None = None
     execution_timeout_padding: float = 0.0
+    # Runtime-only metadata. Provider adapters must never put this field on
+    # the model-facing tool schema.
+    cancellation_policy: Literal["bounded", "must_settle"] = Field(
+        default="bounded",
+        exclude=True,
+    )
+    # Process-local semantic capability. It is deliberately private so an
+    # external ToolDefinition payload cannot opt itself into a lossy provider
+    # projection. Trusted registry construction grants it after validation.
+    _string_item_schema_projection_capability: object | None = PrivateAttr(default=None)
+
+    @property
+    def allow_string_item_schema_projection(self) -> bool:
+        return (
+            self._string_item_schema_projection_capability
+            is _StringItemSchemaProjectionCapability
+        )
+
+    def _enable_string_item_schema_projection(self) -> None:
+        self._string_item_schema_projection_capability = (
+            _StringItemSchemaProjectionCapability
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -239,11 +498,54 @@ class ModelInfo(BaseModel):
     supports_vision: bool = False
     input_cost_per_1k: float = 0.0
     output_cost_per_1k: float = 0.0
+    # Additive, normalized provider facts for discovery/RPC projection.
+    # Never contains an upstream raw row. Providers without a typed metadata
+    # contract leave it as None.
+    metadata: dict[str, Any] | None = None
+
+    @model_serializer(mode="wrap")
+    def _serialize_without_absent_metadata(
+        self,
+        handler: SerializerFunctionWrapHandler,
+    ):
+        """Preserve the pre-metadata dump shape on every supported Pydantic 2.x."""
+        serialized = cast(dict[str, Any], handler(self))
+        if self.metadata is None:
+            serialized.pop("metadata", None)
+        return serialized
 
 
 # ---------------------------------------------------------------------------
 # Chat config (Pydantic BaseModel — call-time settings)
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderRequestCorrelation:
+    """Opaque request identities exposed only to trusted provider transports."""
+
+    session_id: str
+    turn_id: str
+    execution_id: str
+    call_kind: str
+
+
+def derive_provider_request_correlation(
+    correlation: ProviderRequestCorrelation | None,
+    *,
+    execution_id: str | None = None,
+    call_kind: str | None = None,
+) -> ProviderRequestCorrelation | None:
+    """Derive one physical-call identity without changing its session or root turn."""
+
+    if correlation is None:
+        return None
+    updates: dict[str, str] = {}
+    if execution_id is not None:
+        updates["execution_id"] = execution_id
+    if call_kind is not None:
+        updates["call_kind"] = call_kind
+    return replace(correlation, **updates) if updates else correlation
 
 
 class ChatConfig(BaseModel):
@@ -261,15 +563,87 @@ class ChatConfig(BaseModel):
     # Prompt caching: when set, system prompt is split into cached/dynamic blocks
     cache_breakpoints: list[dict[str, str]] | None = None
     cache_mode: Literal["off", "auto", "on"] = "off"
+    output_json_schema: dict[str, Any] | None = None
+    output_json_schema_strict: bool = True
     model_capabilities: ModelCapabilities | None = None
+    # Runtime-only evidence for the vision field.  ``ModelCapabilities`` keeps
+    # its long-standing boolean contract, while this sidecar distinguishes an
+    # authoritative false value from a synthesized catalog default.
+    model_vision_support: VisionSupport = Field(
+        default="unknown",
+        exclude=True,
+        repr=False,
+    )
     thinking_level: Any | None = None
     provider_request_max_chars: int = 0
+    # Runtime-only provenance for an explicit global
+    # ``llm.context_window_tokens`` override. Selector fallback must resolve the
+    # new physical model with this same operator setting; zero means the active
+    # window came from per-model/catalog/default resolution and may be rebound.
+    context_window_tokens_global_override: int = Field(
+        default=0,
+        ge=0,
+        exclude=True,
+        repr=False,
+    )
+    # Preserve the operator-owned portion of ``provider_request_max_chars``
+    # separately from the cap derived for one physical deployment.  Selector
+    # fallback may replace a derived cap when it rebinds to a different
+    # context window, but it must never enlarge an explicit caller limit.
+    provider_request_max_chars_explicit_cap: int | None = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+    )
+    # Index of the real active user request in the final logical ``messages``
+    # list.  Provider wrappers may append synthetic user-role context (for
+    # example an ensemble candidate bundle); carrying the anchor separately
+    # prevents request compaction from protecting the synthetic message while
+    # rewriting the user's actual prompt.
+    active_user_message_index: int | None = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+    )
     tool_choice: Any | None = None
+    candidate_output_mode: Literal["normal", "inert_artifact"] = Field(
+        default="normal",
+        exclude=True,
+        repr=False,
+    )
+    # Runtime-only bound for adapter-internal physical transport attempts.
+    # Zero preserves each adapter's compatibility behavior; auxiliary
+    # compaction binds this to one so its operation-level two-call cap is real.
+    physical_attempt_limit: int = Field(
+        default=0,
+        ge=0,
+        exclude=True,
+        repr=False,
+    )
+    # Runtime-only absolute turn deadline. Provider selectors use it to avoid
+    # violating an upstream Retry-After when the same account/endpoint owns the
+    # next fallback leg. Adapters never serialize or send this value upstream.
+    turn_deadline_at_monotonic: float | None = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+    )
+    provider_request_correlation: ProviderRequestCorrelation | None = Field(
+        default=None,
+        exclude=True,
+        repr=False,
+    )
 
     def model_post_init(self, __context: Any) -> None:
         if self.thinking_budget_explicit is None:
             self.thinking_budget_explicit = (
                 "thinking_budget_tokens" in self.model_fields_set
+            )
+        if self.provider_request_max_chars_explicit_cap is None:
+            self.provider_request_max_chars_explicit_cap = (
+                max(0, int(self.provider_request_max_chars or 0))
+                if "provider_request_max_chars" in self.model_fields_set
+                else 0
             )
 
 
@@ -387,6 +761,27 @@ def synthetic_failure_event(kind: ProviderFailureKind) -> ErrorEvent:
     return ErrorEvent(message=message, code=code)
 
 
+class _InjectedFailureStream:
+    """One-shot synthetic stream that proves no provider request was made."""
+
+    _provider_request_started = False
+
+    def __init__(self, outcome: ProviderFailureKind | Exception) -> None:
+        self._outcome = outcome
+        self._consumed = False
+
+    def __aiter__(self) -> _InjectedFailureStream:
+        return self
+
+    async def __anext__(self) -> StreamEvent:
+        if self._consumed:
+            raise StopAsyncIteration
+        self._consumed = True
+        if isinstance(self._outcome, Exception):
+            raise self._outcome
+        return synthetic_failure_event(self._outcome)
+
+
 @dataclass
 class FailureInjector:
     """Scripted provider-failure seam for offline retry/fallback-chain tests.
@@ -432,6 +827,8 @@ class FailureInjector:
         messages: list[Message],
         tools: list[ToolDefinition] | None = None,
         config: ChatConfig | None = None,
+        *,
+        execution_context: Any = None,
     ) -> AsyncIterator[StreamEvent]:
         """Apply the next scripted outcome to one provider chat call.
 
@@ -442,8 +839,15 @@ class FailureInjector:
         """
         outcome = self.next_outcome()
         if outcome == "succeed":
+            provider_chat_kwargs: dict[str, Any] = {
+                "tools": tools,
+                "config": config,
+            }
+            if getattr(provider, "execution_context_aware", False):
+                provider_chat_kwargs["execution_context"] = execution_context
             stream: AsyncIterator[StreamEvent] = provider.chat(
-                messages, tools=tools, config=config
+                messages,
+                **provider_chat_kwargs,
             )
             return stream
         # Equality above rules out the "succeed" literal (no failure kind
@@ -452,9 +856,7 @@ class FailureInjector:
         return self._injected_stream(failure)
 
     @staticmethod
-    async def _injected_stream(
+    def _injected_stream(
         outcome: ProviderFailureKind | Exception,
     ) -> AsyncIterator[StreamEvent]:
-        if isinstance(outcome, Exception):
-            raise outcome
-        yield synthetic_failure_event(outcome)
+        return _InjectedFailureStream(outcome)

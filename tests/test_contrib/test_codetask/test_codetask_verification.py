@@ -1,6 +1,7 @@
 """Unit tests for opensquilla.contrib.codetask.verification."""
 
 import json
+import logging
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,26 @@ from opensquilla.contrib.codetask.types import (
     RegressionResult,
     TaskState,
 )
+from opensquilla.git_runtime import (
+    GitCapability,
+    GitCapabilityState,
+    GitRunResult,
+    GitRunState,
+)
+
+
+def _git_unavailable_result() -> GitRunResult:
+    capability = GitCapability(
+        state=GitCapabilityState.UNAVAILABLE,
+        reason="git_not_found",
+    )
+    return GitRunResult(
+        state=GitRunState.UNAVAILABLE,
+        returncode=None,
+        stdout=b"",
+        stderr=b"git_not_found",
+        capability=capability,
+    )
 
 
 class TestManifestLoading:
@@ -97,6 +118,27 @@ class TestPathSafety:
             ["tests/ok.py", "/etc/passwd", "../../secret", "a/../b", ""]
         )
         assert safe == ["tests/ok.py"]
+
+
+def test_base_worktree_reports_unavailable_git_without_launching_literal_git(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def unavailable(args, **_kwargs):
+        calls.append(tuple(args))
+        return _git_unavailable_result()
+
+    monkeypatch.setattr(verification, "run_git", unavailable)
+
+    with pytest.raises(verification._WorktreeError, match="Git is unavailable"):
+        with verification._BaseWorktree(tmp_path, "deadbeef"):
+            pass
+
+    assert len(calls) == 1
+    assert calls[0][:3] == ("worktree", "add", "--detach")
+    assert calls[0][-1] == "deadbeef"
 
 
 class TestRegressionFailClosed:
@@ -337,10 +379,10 @@ def test_run_shell_resolves_python_from_repo_venv_in_foreign_cwd(tmp_path):
     from opensquilla.contrib.codetask import verification
 
     repo = tmp_path / "repo"
-    venv_bin = repo / ".venv" / "bin"
+    venv_bin = repo / ".venv" / ("Scripts" if os.name == "nt" else "bin")
     venv_bin.mkdir(parents=True)
     fake = venv_bin / "python"
-    fake.write_text("#!/bin/sh\necho VENV_PY_OK\n")
+    fake.write_text("#!/usr/bin/env bash\necho VENV_PY_OK\n", newline="\n")
     fake.chmod(0o755)
     foreign = tmp_path / "wt"  # like the base worktree: no .venv here
     foreign.mkdir()
@@ -429,6 +471,7 @@ def test_write_python_shim_falls_back_to_wrapper_when_symlink_fails(tmp_path, mo
         "#!/usr/bin/env bash\n"
         'exec /c/repo/.venv/Scripts/python.exe "$@"\n'
     )
+    assert b"\r" not in shim.read_bytes()
     assert chmod_calls == [("python", 0o755)]
 
 
@@ -515,10 +558,11 @@ def test_tail_bounds_output():
 # ─────────────── bash resolution (probe-past-fake-stub) ──────────────────
 # Field report: on Windows a fake `bash.cmd` ahead of real Git Bash on PATH
 # hijacks `shutil.which("bash")` and the verifier dies on the stub instead
-# of falling through to the real shell. The class also covers WSL launchers
-# that exist but exit non-zero when WSL is not configured. POSIX is bit-
-# equivalent to the old shutil.which path (the bug is Windows-only), so the
-# enumeration/probe tests below are skipped there.
+# of falling through to the real shell. The class also covers WSL launchers:
+# unconfigured WSL exits non-zero, and configured WSL is a real Linux bash but
+# not a native Windows shell. POSIX is bit-equivalent to the old shutil.which
+# path (the bug is Windows-only), so the enumeration/probe tests below are
+# skipped there.
 
 import os  # noqa: E402
 import sys  # noqa: E402  -- used by the busybox-mimic test below
@@ -532,10 +576,15 @@ def _reset_bash_cache_between_tests():
 
 
 def _real_bash() -> str:
-    real = shutil.which("bash")
-    if real is None:
-        pytest.skip("real bash not available")
-    return real
+    if os.name != "nt":
+        real = shutil.which("bash")
+        if real is None:
+            pytest.skip("real bash not available")
+        return real
+    for candidate in verification._windows_bash_candidates():
+        if verification._probe_bash(candidate):
+            return candidate
+    pytest.skip("native Windows bash not available")
 
 
 @pytest.mark.skipif(os.name != "nt", reason="fake bash.cmd hijack is Windows-only")
@@ -580,6 +629,39 @@ def test_resolve_bash_skips_failing_probe(tmp_path, monkeypatch):
     resolved = verification._resolve_bash()
     assert resolved is not None
     assert os.path.normcase(resolved) != os.path.normcase(str(stub))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows WSL launcher is Windows-only")
+def test_probe_bash_rejects_configured_wsl_launcher(tmp_path):
+    """A configured WSL launcher is a real bash, but not a native Windows shell.
+
+    The verifier runs Windows worktrees and Windows subprocesses; treating WSL
+    as native breaks Windows path and command-line variable semantics, so the
+    native probe must reject a WSL launcher — it is never accepted as native
+    bash.
+    """
+    mimic_py = tmp_path / "configured_wsl_bash.py"
+    mimic_py.write_text(
+        "import sys\n"
+        "argv = sys.argv[1:]\n"
+        "if len(argv) >= 2 and argv[0] == '-lc':\n"
+        "    script = argv[1]\n"
+        "    if 'BASH_VERSION' in script and 'uname -s' in script:\n"
+        "        sys.exit(42)\n"
+        "sys.exit(2)\n",
+        encoding="ascii",
+    )
+    stub = tmp_path / "bash.cmd"
+    stub.write_text(f'@"{sys.executable}" "{mimic_py}" %*\r\n', encoding="ascii")
+
+    # A ``bash.cmd`` wrapper cannot faithfully stand in for a real WSL launcher
+    # on real Windows: CreateProcess routes ``.cmd`` through cmd.exe, whose
+    # quote/metacharacter parsing mangles the probe's ``-lc`` script (``&&``,
+    # ``$( )``, quotes) before it reaches the wrapped mimic, so the exit-42 WSL
+    # sentinel never survives and the classifier reports "unusable", not "wsl".
+    # Assert only the platform-honest contract: the launcher is not native bash.
+    assert verification._probe_bash(str(stub)) is False
+    assert verification._probe_bash_kind(str(stub)) != verification._BASH_KIND_NATIVE
 
 
 @pytest.mark.skipif(os.name != "nt", reason="busybox-vs-bash discrimination is Windows-only")
@@ -684,3 +766,148 @@ def test_resolve_bash_memoizes(tmp_path, monkeypatch):
 
     assert first == second == real
     assert calls["n"] == 0, "cached resolution must not re-probe"
+
+
+def test_windows_bash_candidates_follow_runtime_pack_precedence(tmp_path, monkeypatch):
+    monkeypatch.setattr(os, "name", "nt")
+    managed = str(tmp_path / "managed" / "bash.exe")
+    explicit = str(tmp_path / "host" / "bash.exe")
+    monkeypatch.setattr(verification, "_runtime_pack_bash_binary", lambda: managed)
+    monkeypatch.setenv("OPENSQUILLA_BASH", explicit)
+    monkeypatch.setenv("PATH", "")
+    for env_var in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        monkeypatch.setenv(env_var, str(tmp_path / "missing"))
+
+    monkeypatch.setattr(verification, "_runtime_pack_precedes_host", lambda: True)
+    assert verification._windows_bash_candidates()[:2] == [managed, explicit]
+
+    monkeypatch.setattr(verification, "_runtime_pack_precedes_host", lambda: False)
+    candidates = verification._windows_bash_candidates()
+    assert candidates[0] == explicit
+    assert candidates[-1] == managed
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    (("safe", True), ("full", False), (None, False)),
+)
+def test_runtime_pack_precedence_normalizes_tool_run_mode(monkeypatch, mode, expected):
+    from opensquilla.tools import run_mode as tool_run_mode
+
+    monkeypatch.setattr(tool_run_mode, "current_run_mode", lambda: mode)
+
+    assert verification._runtime_pack_precedes_host() is expected
+
+
+def test_resolve_bash_rechecks_when_runtime_pack_inventory_changes(monkeypatch):
+    monkeypatch.setattr(os, "name", "nt")
+    candidates: list[str] = []
+    monkeypatch.setattr(verification, "_windows_bash_candidates", lambda: list(candidates))
+    monkeypatch.setattr(
+        verification,
+        "_probe_bash_kind",
+        lambda _path: verification._BASH_KIND_NATIVE,
+    )
+
+    assert verification._resolve_bash() is None
+    candidates.append(r"C:\managed-runtime\bash.exe")
+    assert verification._resolve_bash() == candidates[0]
+
+
+# The WSL-fallback tests below drive `_resolve_bash`'s Windows arm on any host
+# OS: `os.name` is pinned to "nt" and candidate enumeration + probing are
+# replaced with canned results, so they are offline and platform-neutral.
+
+
+def _fake_windows_resolution(monkeypatch, kinds: dict[str, str]) -> None:
+    monkeypatch.setattr(os, "name", "nt")
+    monkeypatch.setattr(
+        verification, "_windows_bash_candidates", lambda: list(kinds)
+    )
+    monkeypatch.setattr(verification, "_probe_bash_kind", lambda p: kinds[p])
+
+
+def test_resolve_bash_falls_back_to_wsl_with_warning(monkeypatch, caplog):
+    """A Windows host with only a WSL bash (no Git Bash) must fall back to
+    the WSL launcher — loudly — instead of failing every verification
+    command. Such setups worked before the native-bash probe existed."""
+    stub = r"C:\fake\stub\bash.cmd"
+    wsl = r"C:\Windows\System32\bash.exe"
+    _fake_windows_resolution(
+        monkeypatch,
+        {
+            stub: verification._BASH_KIND_UNUSABLE,
+            wsl: verification._BASH_KIND_WSL,
+        },
+    )
+
+    with caplog.at_level(logging.WARNING, logger=verification.__name__):
+        resolved = verification._resolve_bash()
+
+    assert resolved == wsl
+    assert "WSL" in caplog.text and "Git Bash" in caplog.text
+
+    # Memoized: later calls reuse the fallback without re-probing/re-warning.
+    monkeypatch.setattr(
+        verification,
+        "_probe_bash_kind",
+        lambda p: pytest.fail("cached fallback must not re-probe"),
+    )
+    caplog.clear()
+    assert verification._resolve_bash() == wsl
+    assert not caplog.records
+
+
+def test_resolve_bash_prefers_native_over_earlier_wsl(monkeypatch, caplog):
+    """Native bash stays preferred even when a WSL launcher appears first in
+    candidate order (System32 bash.exe commonly precedes Git Bash on PATH)."""
+    wsl = r"C:\Windows\System32\bash.exe"
+    native = r"C:\Program Files\Git\usr\bin\bash.exe"
+    _fake_windows_resolution(
+        monkeypatch,
+        {
+            wsl: verification._BASH_KIND_WSL,
+            native: verification._BASH_KIND_NATIVE,
+        },
+    )
+
+    with caplog.at_level(logging.WARNING, logger=verification.__name__):
+        assert verification._resolve_bash() == native
+    assert "WSL" not in caplog.text
+
+
+def test_resolve_bash_fails_closed_without_native_or_wsl(monkeypatch, tmp_path):
+    """Only-unusable candidates still resolve to None with the actionable
+    OSERROR hint — the WSL fallback must not resurrect broken stubs."""
+    _fake_windows_resolution(
+        monkeypatch, {r"C:\fake\bash.cmd": verification._BASH_KIND_UNUSABLE}
+    )
+
+    assert verification._resolve_bash() is None
+    rc, out = verification._run_shell("true", cwd=tmp_path, timeout=5)
+    assert rc == -1 and "OSERROR" in out and "Git Bash" in out, out
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell-script stubs")
+def test_probe_bash_kind_classifies_candidates(tmp_path):
+    """The probe classifier separates the three candidate classes: real bash
+    (sentinel echoed), a WSL launcher (reserved exit 42 after the bash check),
+    and stubs that exit non-zero or exit 0 without the sentinel."""
+
+    def _stub(name: str, body: str) -> str:
+        p = tmp_path / name
+        p.write_text(f"#!/bin/sh\n{body}\n", encoding="ascii")
+        p.chmod(0o755)
+        return str(p)
+
+    native_like = _stub("native-bash", f"echo {verification._BASH_PROBE_SENTINEL}")
+    wsl_like = _stub("wsl-bash", f"exit {verification._BASH_PROBE_WSL_EXIT}")
+    broken = _stub("broken-bash", "exit 1")
+    silent_zero = _stub("silent-bash", "exit 0")
+
+    kind = verification._probe_bash_kind
+    assert kind(native_like) == verification._BASH_KIND_NATIVE
+    assert kind(wsl_like) == verification._BASH_KIND_WSL
+    assert kind(broken) == verification._BASH_KIND_UNUSABLE
+    assert kind(silent_zero) == verification._BASH_KIND_UNUSABLE
+    assert kind(str(tmp_path / "missing-bash")) == verification._BASH_KIND_UNUSABLE

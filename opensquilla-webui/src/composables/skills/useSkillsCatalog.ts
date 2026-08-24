@@ -1,7 +1,16 @@
 import { computed, ref, type ComputedRef, type Ref } from 'vue'
 import i18n from '@/i18n'
 import type { useRpcStore } from '@/stores/rpc'
-import type { AutoEnabledSkill, ProposalsSettings, Skill, SkillLayerGroup, SkillStatTile } from '@/types/skills'
+import type {
+  AutoEnabledSkill,
+  ProposalsSettings,
+  Skill,
+  SkillDependencyCounts,
+  SkillDependencySummary,
+  SkillInstall,
+  SkillLayerGroup,
+  SkillStatTile,
+} from '@/types/skills'
 
 interface SkillsListData {
   skills?: Skill[]
@@ -24,7 +33,7 @@ export interface SkillsCatalog {
   installedEmpty: ComputedRef<boolean>
   emptyMessage: ComputedRef<string>
   statTiles: ComputedRef<SkillStatTile[]>
-  loadData: () => Promise<void>
+  loadData: () => Promise<boolean>
   setStatusFilter: (key: string) => void
 }
 
@@ -33,8 +42,251 @@ const LAYER_ORDER = ['workspace', 'bundled', 'managed', 'personal', 'project', '
 // Known layer keys; labels/help text resolve through i18n by key.
 const KNOWN_LAYERS = new Set(LAYER_ORDER)
 
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+}
+
+function stringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter((item): item is string => typeof item === 'string')
+    .map(item => item.trim())
+    .filter(Boolean)
+}
+
+function stringGroups(value: unknown): string[][] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map(stringList)
+    .filter(group => group.length > 0)
+}
+
+function text(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+function number(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+function boolean(value: unknown): boolean {
+  return value === true
+}
+
+function unique(values: string[]): string[] {
+  return [...new Set(values)]
+}
+
+function normalizeDependencySummary(
+  raw: unknown,
+  fallback: Pick<Skill, 'missing_bins' | 'missing_env' | 'missing_env_any'> = {},
+  depth = 0,
+): SkillDependencySummary {
+  const root = asRecord(raw)
+  const declared = asRecord(root.declared)
+  const declaredBinaries = asRecord(declared.binaries)
+  const declaredApiEnv = asRecord(declared.api_env)
+  const missing = asRecord(root.missing)
+  const missingBinaries = asRecord(missing.binaries)
+  const missingApiEnv = asRecord(missing.api_env)
+  const inferred = asRecord(root.inferred)
+  const subSkills = asRecord(root.sub_skill_dependencies)
+
+  const legacyBins = stringList(fallback.missing_bins)
+  const legacyEnv = stringList(fallback.missing_env)
+  const legacyEnvAny = stringGroups(fallback.missing_env_any)
+  const missingBinAll = stringList(missingBinaries.all)
+  const missingBinAny = stringGroups(missingBinaries.any)
+  const missingEnvAll = stringList(missingApiEnv.all)
+  const missingEnvAny = stringGroups(missingApiEnv.any)
+  const resolvedMissingBins = missingBinAll.length || missingBinAny.length
+    ? missingBinAll
+    : legacyBins
+  const resolvedMissingEnv = missingEnvAll.length || missingEnvAny.length
+    ? missingEnvAll
+    : legacyEnv
+  const resolvedMissingEnvAny = missingEnvAny.length ? missingEnvAny : legacyEnvAny
+
+  const pythonPackages = Array.isArray(declared.python_packages)
+    ? declared.python_packages.map((item) => {
+      const packageRecord = asRecord(item)
+      return {
+        install_id: text(packageRecord.install_id),
+        label: text(packageRecord.label),
+        package: text(packageRecord.package),
+        module: text(packageRecord.module),
+      }
+    }).filter(item => item.install_id || item.package || item.module)
+    : []
+
+  const pythonImports = Array.isArray(inferred.python_imports)
+    ? inferred.python_imports.map((item) => {
+      const importRecord = asRecord(item)
+      return {
+        module: text(importRecord.module),
+        source: text(importRecord.source),
+        not_enforced: boolean(importRecord.not_enforced),
+      }
+    }).filter(item => item.module)
+    : []
+
+  const inferredApiEnv = Array.isArray(inferred.api_env)
+    ? inferred.api_env.map((item) => {
+      const envRecord = asRecord(item)
+      return {
+        name: text(envRecord.name),
+        sources: stringList(envRecord.sources),
+        not_enforced: boolean(envRecord.not_enforced),
+      }
+    }).filter(item => item.name)
+    : []
+
+  // Dependency summaries can recursively contain sub-skill summaries. Bound
+  // client-side recursion so a malformed Gateway payload cannot grow the UI
+  // tree without limit; the current backend emits one-hop composition here.
+  const childSkills = depth >= 4 || !Array.isArray(subSkills.skills)
+    ? []
+    : subSkills.skills.map((item) => {
+      const child = asRecord(item)
+      const name = text(child.name)
+      if (!name) return null
+      return {
+        name,
+        summary: normalizeDependencySummary(child.summary, {}, depth + 1),
+      }
+    }).filter((item): item is NonNullable<typeof item> => item !== null)
+
+  const declaredBinAll = stringList(declaredBinaries.all)
+  const declaredBinAny = stringList(declaredBinaries.any)
+  const declaredEnvAll = stringList(declaredApiEnv.all)
+  const declaredEnvAny = stringList(declaredApiEnv.any)
+  const hasStructuredSummary = Object.keys(root).length > 0
+
+  const summary: SkillDependencySummary = {
+    declared: {
+      binaries: {
+        all: declaredBinAll.length || hasStructuredSummary ? declaredBinAll : legacyBins,
+        any: declaredBinAny,
+      },
+      python_packages: pythonPackages,
+      api_env: {
+        all: declaredEnvAll.length || hasStructuredSummary ? declaredEnvAll : legacyEnv,
+        any: declaredEnvAny.length || hasStructuredSummary
+          ? declaredEnvAny
+          : unique(legacyEnvAny.flat()),
+      },
+    },
+    missing: {
+      binaries: {
+        all: resolvedMissingBins,
+        any: missingBinAny,
+      },
+      api_env: {
+        all: resolvedMissingEnv,
+        any: resolvedMissingEnvAny,
+      },
+      count: 0,
+    },
+    inferred: {
+      python_imports: pythonImports,
+      api_env: inferredApiEnv,
+      scan_errors: stringList(inferred.scan_errors),
+    },
+    sub_skill_dependencies: {
+      skills: childSkills,
+      missing_count: number(subSkills.missing_count),
+      inferred_count: number(subSkills.inferred_count),
+      missing_references: stringList(subSkills.missing_references),
+    },
+    declaration_quality: text(root.declaration_quality) || (
+      legacyBins.length || legacyEnv.length || legacyEnvAny.length ? 'declared' : 'none'
+    ),
+  }
+
+  // OR groups each represent one readiness requirement, so their alternatives
+  // must not inflate the missing count.
+  summary.missing.count = summary.missing.binaries.all.length
+    + summary.missing.binaries.any.length
+    + summary.missing.api_env.all.length
+    + summary.missing.api_env.any.length
+  return summary
+}
+
+export function normalizeSkill(skill: Skill): Skill {
+  return {
+    ...skill,
+    missing_bins: stringList(skill.missing_bins),
+    missing_env: stringList(skill.missing_env),
+    missing_env_any: stringGroups(skill.missing_env_any),
+    dependency_summary: normalizeDependencySummary(skill.dependency_summary, skill),
+  }
+}
+
+export function skillDependencySummary(skill: Skill): SkillDependencySummary {
+  return normalizeDependencySummary(skill.dependency_summary, skill)
+}
+
+export function skillDependencyCounts(skill: Skill): SkillDependencyCounts {
+  const summary = skillDependencySummary(skill)
+  return {
+    python: summary.declared.python_packages.length,
+    binaries: summary.declared.binaries.all.length + (summary.declared.binaries.any.length ? 1 : 0),
+    env: summary.declared.api_env.all.length + (summary.declared.api_env.any.length ? 1 : 0),
+    missing: summary.missing.count,
+    advisory: summary.inferred.python_imports.length
+      + summary.inferred.api_env.length
+      + summary.inferred.scan_errors.length
+      + summary.sub_skill_dependencies.inferred_count
+      + summary.sub_skill_dependencies.missing_references.length,
+  }
+}
+
+export function installActionsForCurrentDependencies(skill: Skill): SkillInstall[] {
+  // Lifecycle-v2 can expose same-name managed candidates that are shadowed,
+  // disabled, hidden, or otherwise not the live winner. The dependency RPC is
+  // intentionally still name-based, so offering an action for one of those
+  // candidates could execute the current winner's different install spec.
+  if (skill.active === false) return []
+  if (skill.lifecycle && (
+    skill.lifecycle.selection_state !== 'active'
+    || !['loaded', 'serving_previous'].includes(skill.lifecycle.load_state)
+  )) return []
+
+  const summary = skillDependencySummary(skill)
+  const missingBins = new Set([
+    ...summary.missing.binaries.all,
+    ...summary.missing.binaries.any.flat(),
+  ])
+  const declaredPackageIds = new Set(
+    summary.declared.python_packages.map(item => item.install_id).filter(Boolean),
+  )
+
+  return (skill.install || []).filter((action) => {
+    const actionBins = stringList(action.bins)
+    if (actionBins.length) return actionBins.some(bin => missingBins.has(bin))
+    return action.kind === 'uv'
+      && skill.status !== 'ready'
+      && declaredPackageIds.has(action.id)
+  })
+}
+
 export function isMetaSkill(skill: Skill): boolean {
   return skill.kind === 'meta' || skill.kind === 'meta_sop'
+}
+
+// Pick the description matching the active UI locale, falling back to the
+// English `description` when no localized variant exists. Only Simplified
+// Chinese has a dedicated field today (`description_zh`); other locales and
+// remote/community skills (no `description_zh`) get the English description.
+export function localizedSkillDescription(
+  skill: Pick<Skill, 'description' | 'description_zh'>,
+  localeStr: string,
+): string {
+  const zh = skill.description_zh || ''
+  if (zh && localeStr.startsWith('zh')) return zh
+  return skill.description || ''
 }
 
 export function skillReadyRank(skill: Skill): number {
@@ -52,19 +304,39 @@ export function sortSkillsByReady(list: Skill[]): Skill[] {
   })
 }
 
+export function skillProviderCheckAtLaunch(skill: Skill): boolean {
+  const status = skill.status || (skill.eligible ? 'ready' : 'needs_setup')
+  return skill.provider_check_at_launch === true && (
+    status === 'ready' || status === 'not_declared'
+  )
+}
+
+export function skillCatalogKey(skill: Skill): string {
+  const instanceId = (skill.instance_id || '').trim()
+  if (instanceId) return `instance:${instanceId}`
+  const installId = (skill.install_id || '').trim()
+  if (installId) return `install:${installId}`
+  return `legacy:${skill.layer || 'unknown'}:${skill.name}`
+}
+
 export function skillStatusDotClass(skill: Skill): string {
   const status = skill.status || (skill.eligible ? 'ready' : 'needs_setup')
+  if (skillProviderCheckAtLaunch(skill)) return 'is-provider-check'
   if (status === 'ready') return 'is-ready'
   if (status === 'needs_setup') return 'is-needs'
   return 'is-unverified'
 }
 
 export function skillStatusDotTitle(skill: Skill): string {
+  if (skillProviderCheckAtLaunch(skill)) {
+    return i18n.global.t('cronSkills.skills.statusProviderAtLaunch')
+  }
   return skill.status_detail || (skill.eligible ? i18n.global.t('cronSkills.skills.dotReady') : i18n.global.t('cronSkills.skills.dotNeedsSetup'))
 }
 
 export function skillStatusChipClass(skill: Skill): string {
   const status = skill.status || (skill.eligible ? 'ready' : 'needs_setup')
+  if (skillProviderCheckAtLaunch(skill)) return 'sk-chip--unverified'
   if (status === 'ready') return 'sk-chip--ok'
   if (status === 'not_declared') return 'sk-chip--unverified'
   return 'sk-chip--warn'
@@ -72,9 +344,104 @@ export function skillStatusChipClass(skill: Skill): string {
 
 export function skillStatusChipText(skill: Skill): string {
   const status = skill.status || (skill.eligible ? 'ready' : 'needs_setup')
+  if (skillProviderCheckAtLaunch(skill)) {
+    return i18n.global.t('cronSkills.skills.statusProviderAtLaunch')
+  }
   if (status === 'ready') return i18n.global.t('cronSkills.skills.statusReady')
   if (status === 'not_declared') return i18n.global.t('cronSkills.skills.statusNoDeps')
   return i18n.global.t('cronSkills.skills.statusNeedsDeps')
+}
+
+export type SkillLifecycleSurface = 'installed' | 'registry'
+export type SkillLifecycleTone = 'success' | 'info' | 'warning' | 'danger' | 'neutral'
+
+export interface SkillLifecyclePresentation {
+  label: string
+  tone: SkillLifecycleTone
+}
+
+export function skillLifecyclePresentation(
+  skill: Skill,
+  surface: SkillLifecycleSurface,
+): SkillLifecyclePresentation | null {
+  const lifecycle = skill.lifecycle
+  if (!lifecycle) return null
+  if (lifecycle.install_state === 'missing') {
+    return {
+      label: i18n.global.t('cronSkills.registry.stateMissing'),
+      tone: 'danger',
+    }
+  }
+  if (
+    lifecycle.load_state === 'rejected'
+    || lifecycle.compatibility_state === 'unsupported'
+  ) {
+    return {
+      label: i18n.global.t('cronSkills.registry.stateRejected'),
+      tone: 'danger',
+    }
+  }
+  if (lifecycle.load_state === 'serving_previous') {
+    return {
+      label: i18n.global.t('cronSkills.registry.stateRestored'),
+      tone: 'warning',
+    }
+  }
+  if (lifecycle.install_state === 'drifted') {
+    return {
+      label: i18n.global.t('cronSkills.registry.stateDrifted'),
+      tone: 'warning',
+    }
+  }
+  if (lifecycle.load_state === 'validated_offline') {
+    return {
+      label: i18n.global.t('cronSkills.registry.stateNextStart'),
+      tone: 'info',
+    }
+  }
+  if (lifecycle.load_state === 'not_discovered') return null
+  if (lifecycle.selection_state === 'shadowed') {
+    return {
+      label: i18n.global.t('cronSkills.registry.stateShadowed'),
+      tone: 'neutral',
+    }
+  }
+  if (lifecycle.selection_state === 'disabled') {
+    return {
+      label: i18n.global.t('cronSkills.registry.stateDisabled'),
+      tone: 'neutral',
+    }
+  }
+  if (lifecycle.selection_state === 'hidden') {
+    return {
+      label: i18n.global.t('cronSkills.registry.stateHidden'),
+      tone: 'neutral',
+    }
+  }
+  if (lifecycle.readiness_state === 'needs_setup') {
+    return {
+      label: i18n.global.t('cronSkills.registry.stateNeedsSetup'),
+      tone: 'warning',
+    }
+  }
+  if (lifecycle.compatibility_state === 'degraded') {
+    return {
+      label: i18n.global.t('cronSkills.registry.stateDegraded'),
+      tone: 'warning',
+    }
+  }
+  if (
+    lifecycle.install_state === 'tracked'
+    && lifecycle.load_state === 'loaded'
+    && lifecycle.selection_state === 'active'
+  ) {
+    if (surface === 'installed') return null
+    return {
+      label: i18n.global.t('cronSkills.registry.stateActive'),
+      tone: 'success',
+    }
+  }
+  return null
 }
 
 export function skillLayerLabel(layer: string | undefined): string {
@@ -173,14 +540,16 @@ export function useSkillsCatalog(
     try {
       await rpc.waitForConnection()
     } catch {
-      return
+      return false
     }
     try {
-      const data = await rpc.call<SkillsListData>('skills.list')
-      allSkills.value = data.skills || []
+      const data = await rpc.call<SkillsListData>('skills.list', { includeLifecycle: true })
+      allSkills.value = (data.skills || []).map(normalizeSkill)
       await options.loadProposals()
+      return true
     } catch (err) {
       console.warn('Failed to load skills:', (err as Error).message)
+      return false
     }
   }
 

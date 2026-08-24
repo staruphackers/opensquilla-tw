@@ -2,9 +2,20 @@
 import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import ControlSwitch from '@/components/ControlSwitch.vue'
+import LoadingSpinner from '@/components/LoadingSpinner.vue'
 import MemoryLearningGroup from '@/components/settings/MemoryLearningGroup.vue'
 
+defineProps<{
+  autoCapture: boolean
+  loaded: boolean
+}>()
+
 const { t } = useI18n()
+const emit = defineEmits<{
+  'update-auto-capture': [enabled: boolean]
+  'open-agent-configuration': []
+  'open-data-maintenance': []
+}>()
 
 // Client-only "Labs" preferences. Each row reads/writes ONE localStorage key
 // directly. The chat composables that consume these read the value once at
@@ -14,7 +25,6 @@ const { t } = useI18n()
 
 // --- boolean '1'/'0' flags (absent => off) ---
 const APPROVAL_KEY = 'opensquilla.chat.approvalPoll'
-const HISTORY_KEY = 'opensquilla.chat.historyMerge'
 const RUNTRACE_KEY = 'opensquilla.logs.runTrace'
 
 function readBool(key: string): boolean {
@@ -25,10 +35,8 @@ function writeBool(key: string, on: boolean) {
 }
 
 const approvalPoll = ref(readBool(APPROVAL_KEY))
-const historyMerge = ref(readBool(HISTORY_KEY))
 const runTrace = ref(readBool(RUNTRACE_KEY))
 function setApprovalPoll(on: boolean) { approvalPoll.value = on; writeBool(APPROVAL_KEY, on) }
-function setHistoryMerge(on: boolean) { historyMerge.value = on; writeBool(HISTORY_KEY, on) }
 function setRunTrace(on: boolean) { runTrace.value = on; writeBool(RUNTRACE_KEY, on) }
 
 // --- foldLiveTurn: default ON; '0' is the only OFF value ---
@@ -69,6 +77,10 @@ function commitReveal() {
 function localStorageGet(key: string): string | null {
   try { return localStorage.getItem(key) } catch { return null }
 }
+
+const agentConfigAriaLabel = computed(() =>
+  `${t('setup.advanced.agentConfigAction')}: ${t('setup.advanced.agentConfigLabel')}`,
+)
 </script>
 
 <template>
@@ -77,6 +89,33 @@ function localStorageGet(key: string): string | null {
       <h3 class="control-section__title">{{ t('setup.advanced.title') }}</h3>
       <p class="control-section__desc">{{ t('setup.advanced.desc') }} <em>{{ t('setup.advanced.reload') }}</em> {{ t('setup.advanced.descReloadSuffix') }}</p>
     </div>
+
+    <div class="advanced-memory" data-testid="advanced-memory-group">
+      <h4 class="advanced-group">{{ t('settings.memoryOverview.title') }}</h4>
+
+      <label v-if="loaded" class="control-row">
+        <div class="control-row__label-block">
+          <span class="control-row__label">{{ t('settings.memoryOverview.autoCaptureLabel') }}</span>
+          <span class="control-row__desc">{{ t('settings.memoryOverview.autoCaptureDesc') }}</span>
+        </div>
+        <div class="control-row__control">
+          <ControlSwitch
+            :checked="autoCapture"
+            name="memory_auto_capture"
+            :aria-label="t('settings.memoryOverview.autoCaptureLabel')"
+            @change="emit('update-auto-capture', $event)"
+          />
+        </div>
+      </label>
+      <div v-else class="advanced-memory__loading" role="status">
+        <LoadingSpinner />
+        <span>{{ t('shared.loading') }}</span>
+      </div>
+
+      <MemoryLearningGroup />
+    </div>
+
+    <h4 class="advanced-group advanced-group--section">{{ t('setup.advanced.experimentsGroup') }}</h4>
 
     <label class="control-row">
       <div class="control-row__label-block">
@@ -132,19 +171,6 @@ function localStorageGet(key: string): string | null {
 
     <label class="control-row">
       <div class="control-row__label-block">
-        <span class="control-row__label">{{ t('setup.advanced.historyMergeLabel') }} <span class="labs-exp">{{ t('setup.advanced.experimental') }}</span></span>
-        <span class="control-row__desc">{{ t('setup.advanced.historyMergeDesc') }}</span>
-      </div>
-      <div class="control-row__control">
-        <span class="labs-hint">{{ t('setup.advanced.reload') }}</span>
-        <ControlSwitch name="labs_history_merge" :checked="historyMerge" :aria-label="t('setup.advanced.historyMergeAria')" @change="setHistoryMerge" />
-      </div>
-    </label>
-
-    <MemoryLearningGroup />
-
-    <label class="control-row">
-      <div class="control-row__label-block">
         <span class="control-row__label">{{ t('setup.advanced.runTraceLabel') }}</span>
         <span class="control-row__desc">{{ t('setup.advanced.runTraceDesc') }}</span>
       </div>
@@ -153,10 +179,66 @@ function localStorageGet(key: string): string | null {
         <ControlSwitch name="labs_run_trace" :checked="runTrace" :aria-label="t('setup.advanced.runTraceAria')" @change="setRunTrace" />
       </div>
     </label>
+
+    <h4 class="advanced-group advanced-group--management">{{ t('setup.advanced.managementGroup') }}</h4>
+
+    <div class="control-row">
+      <div class="control-row__label-block">
+        <span class="control-row__label">{{ t('setup.advanced.agentConfigLabel') }}</span>
+        <span class="control-row__desc">{{ t('setup.advanced.agentConfigDesc') }}</span>
+      </div>
+      <div class="control-row__control">
+        <button
+          type="button"
+          class="btn btn--ghost"
+          :aria-label="agentConfigAriaLabel"
+          @click="emit('open-agent-configuration')"
+        >
+          {{ t('setup.advanced.agentConfigAction') }}
+        </button>
+      </div>
+    </div>
+
+    <div class="control-row advanced-maintenance" data-testid="advanced-data-maintenance">
+      <div class="control-row__label-block">
+        <span class="control-row__label">{{ t('setup.advanced.dataMaintenanceLabel') }}</span>
+        <span class="control-row__desc">{{ t('setup.advanced.dataMaintenanceDesc') }}</span>
+      </div>
+      <div class="control-row__control">
+        <button
+          type="button"
+          class="btn btn--ghost"
+          :aria-label="t('setup.advanced.dataMaintenanceAria')"
+          @click="emit('open-data-maintenance')"
+        >
+          {{ t('setup.advanced.dataMaintenanceAction') }}
+        </button>
+      </div>
+    </div>
   </section>
 </template>
 
 <style scoped>
+.advanced-group {
+  color: var(--text-dim);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.08em;
+  margin: var(--sp-4) 0 var(--sp-1);
+  text-transform: uppercase;
+}
+
+.advanced-group--management { margin-top: var(--sp-6); }
+.advanced-group--section { margin-top: var(--sp-6); }
+
+.advanced-memory__loading {
+  align-items: center;
+  color: var(--text-muted);
+  display: flex;
+  font-size: var(--fs-sm);
+  gap: var(--sp-2);
+  padding: var(--sp-4) 0;
+}
+
 .labs-hint {
   border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--border));
   border-radius: var(--radius-full);
@@ -165,18 +247,6 @@ function localStorageGet(key: string): string | null {
   font-weight: 600;
   letter-spacing: 0.03em;
   padding: 1px 7px;
-  text-transform: uppercase;
-}
-
-.labs-exp {
-  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
-  border-radius: var(--radius-full);
-  color: var(--accent);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.03em;
-  margin-left: var(--sp-1);
-  padding: 1px 6px;
   text-transform: uppercase;
 }
 
@@ -195,5 +265,15 @@ function localStorageGet(key: string): string | null {
   color: var(--danger);
   font-size: var(--fs-xs);
   width: 100%;
+}
+
+.advanced-maintenance {
+  margin-top: var(--sp-3);
+  opacity: 0.82;
+}
+
+.advanced-maintenance:focus-within,
+.advanced-maintenance:hover {
+  opacity: 1;
 }
 </style>

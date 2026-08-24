@@ -8,11 +8,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import Any, cast
 
-from opensquilla.gateway.config import (
-    STATIC_B5_SELECTION_MODE_PROVIDERS,
-    GatewayConfig,
-    static_b5_ensemble_enabled,
-)
+from opensquilla.gateway.config import GatewayConfig
 from opensquilla.gateway.rpc import RpcContext, get_dispatcher
 from opensquilla.gateway.rpc_channels import _handle_channels_status
 from opensquilla.gateway.rpc_logs import _build_logs_status
@@ -21,7 +17,6 @@ from opensquilla.gateway.rpc_tools import _handle_providers_status, _handle_sear
 from opensquilla.health.evaluator import (
     evaluate_channels,
     evaluate_image_generation,
-    evaluate_legacy_home,
     evaluate_llm_ensemble,
     evaluate_logs,
     evaluate_memory,
@@ -54,7 +49,6 @@ _COLLECTION_INSPECT_COMMANDS = {
     "search": "opensquilla search status --json",
     "image_generation": "opensquilla onboard status --json",
     "llm_ensemble": "opensquilla diagnostics status",
-    "migration": "opensquilla migrate opensquilla",
 }
 _READINESS_CRITICAL_COLLECTIONS = {"provider"}
 _UNKNOWN_SEARCH_PROVIDER_RE = re.compile(
@@ -235,6 +229,7 @@ def _router_payload(ctx: RpcContext, *, deep: bool = False) -> dict[str, Any]:
             "runtimeValid": True,
             "requireRouterRuntime": False,
             "runtimeErrorKind": None,
+            "routerProviderRoles": {},
         }
 
     router = config.squilla_router
@@ -248,6 +243,7 @@ def _router_payload(ctx: RpcContext, *, deep: bool = False) -> dict[str, Any]:
             "runtimeValid": True,
             "requireRouterRuntime": False,
             "runtimeErrorKind": None,
+            "routerProviderRoles": {},
         }
 
     runtime_valid = True
@@ -273,13 +269,44 @@ def _router_payload(ctx: RpcContext, *, deep: bool = False) -> dict[str, Any]:
     active_provider = str(getattr(getattr(config, "llm", None), "provider", "") or "")
     mismatched_tier_providers: dict[str, str] = {}
     tiers = getattr(router, "tiers", {}) or {}
-    if isinstance(tiers, dict) and active_provider.strip():
-        from opensquilla.router_tiers import TierConfig
+    from opensquilla.router_tiers import (
+        TierConfig,
+        effective_ensemble_selection_mode,
+        router_dynamic_tier_members_active,
+        router_tier_provider_roles,
+        tier_provider_role,
+    )
 
+    shared_selection_mode = effective_ensemble_selection_mode(config)
+    ensemble_globally_enabled = bool(
+        getattr(getattr(config, "llm_ensemble", None), "enabled", False)
+    )
+    provider_roles = router_tier_provider_roles(
+        tiers if isinstance(tiers, dict) else {},
+        shared_selection_mode=shared_selection_mode,
+        ensemble_globally_enabled=ensemble_globally_enabled,
+    )
+    dynamic_members_active = router_dynamic_tier_members_active(
+        tiers if isinstance(tiers, dict) else {},
+        shared_selection_mode=shared_selection_mode,
+        ensemble_globally_enabled=ensemble_globally_enabled,
+    )
+    if isinstance(tiers, dict) and active_provider.strip():
         active_l = active_provider.strip().lower()
         for tier_name, tier_value in tiers.items():
             tier = TierConfig.from_value(tier_value)
-            if tier.provider and tier.provider.lower() != active_l:
+            provider_role = tier_provider_role(
+                tier_name,
+                tier_value,
+                shared_selection_mode=shared_selection_mode,
+                router_dynamic_members_active=dynamic_members_active,
+                ensemble_globally_enabled=ensemble_globally_enabled,
+            )
+            if (
+                provider_role in {"direct", "dynamic_member"}
+                and tier.provider
+                and tier.provider.lower() != active_l
+            ):
                 mismatched_tier_providers[str(tier_name)] = tier.provider
 
     return {
@@ -298,6 +325,7 @@ def _router_payload(ctx: RpcContext, *, deep: bool = False) -> dict[str, Any]:
             getattr(router, "tier_provider_mismatch", "route") or "route"
         ),
         "mismatchedTierProviders": mismatched_tier_providers,
+        "routerProviderRoles": provider_roles,
     }
 
 
@@ -327,69 +355,63 @@ def _squilla_router_runtime_payload(ctx: RpcContext) -> dict[str, Any]:
 
 def _llm_ensemble_payload(ctx: RpcContext) -> dict[str, Any]:
     config = getattr(ctx, "config", None)
-    ensemble_cfg = getattr(config, "llm_ensemble", None) if config is not None else None
-    payload: dict[str, Any] = {
-        "enabled": bool(getattr(ensemble_cfg, "enabled", False)),
-        "selectionMode": str(getattr(ensemble_cfg, "selection_mode", "") or ""),
-        "activeProvider": str(
-            getattr(getattr(config, "llm", None), "provider", "") or ""
-        ),
+    if config is None:
+        return {
+            "enabled": False,
+            "selectionMode": "",
+            "activeProvider": "",
+            "runtimeStatus": "disabled",
+            "configurationReady": None,
+            "configuredAllFailedPolicy": "fallback_single",
+            "effectiveAllFailedPolicy": "fallback_single",
+            "policyDeprecated": False,
+            "tierEnsembleStatuses": {},
+        }
+
+    from opensquilla.provider.ensemble import (
+        ensemble_runtime_status,
+        tier_ensemble_runtime_statuses,
+    )
+    from opensquilla.router_tiers import (
+        CUSTOM_B5_SELECTION_MODE,
+        static_b5_profile,
+    )
+
+    def decorate(runtime: dict[str, Any]) -> dict[str, Any]:
+        decorated = {
+            **runtime,
+            "activeProvider": str(getattr(config.llm, "provider", "") or ""),
+        }
+        static_profile = static_b5_profile(str(decorated["selectionMode"]))
+        if static_profile is not None and decorated["enabled"]:
+            from opensquilla.provider.registry import get_provider_spec
+
+            decorated["memberProvider"] = static_profile.provider_id
+            decorated["apiKeyEnv"] = str(
+                get_provider_spec(static_profile.provider_id).env_key or ""
+            )
+            decorated["credentialAvailable"] = bool(
+                decorated["configurationReady"]
+            )
+        elif decorated["enabled"] and decorated["selectionMode"] == CUSTOM_B5_SELECTION_MODE:
+            decorated["lineupReady"] = bool(decorated["configurationReady"])
+            decorated["lineupBlockedReason"] = str(
+                decorated["blockedReason"] or ""
+            )
+        return decorated
+
+    payload = decorate(ensemble_runtime_status(config))
+    configured_policy = str(
+        getattr(config.llm_ensemble, "all_failed_policy", "fallback_single")
+        or "fallback_single"
+    ).strip()
+    payload.setdefault("configuredAllFailedPolicy", configured_policy)
+    payload.setdefault("effectiveAllFailedPolicy", configured_policy)
+    payload.setdefault("policyDeprecated", False)
+    payload["tierEnsembleStatuses"] = {
+        tier: decorate(runtime)
+        for tier, runtime in tier_ensemble_runtime_statuses(config).items()
     }
-    if config is not None and static_b5_ensemble_enabled(config):
-        from opensquilla.provider.ensemble import static_b5_credential_available
-        from opensquilla.provider.registry import get_provider_spec
-
-        selection_mode = str(getattr(ensemble_cfg, "selection_mode", "") or "")
-        member_provider = STATIC_B5_SELECTION_MODE_PROVIDERS.get(selection_mode, "openrouter")
-        payload["memberProvider"] = member_provider
-        payload["apiKeyEnv"] = str(get_provider_spec(member_provider).env_key or "")
-        payload["credentialAvailable"] = static_b5_credential_available(
-            config,
-            getattr(config, "llm", None),
-            selection_mode,
-        )
-    elif payload["enabled"] and payload["selectionMode"] == "custom_b5":
-        from opensquilla.provider.ensemble import custom_b5_lineup_ready
-
-        ready, reason = custom_b5_lineup_ready(config)
-        payload["lineupReady"] = ready
-        payload["lineupBlockedReason"] = reason
-    return payload
-
-
-def _legacy_home_payload(ctx: RpcContext) -> dict[str, Any]:
-    """Read-only legacy-home detection for the migration advisory surface.
-
-    Detection is a pure path scan and safe under a running gateway; the
-    import itself stays at the CLI layer (``opensquilla migrate
-    opensquilla``), which requires a quiesced gateway. ``targetFresh``
-    mirrors the boot warning's freshness signal (no ``sessions.db`` yet) so
-    the finding can say whether this install already holds session data.
-    """
-    import importlib
-
-    from opensquilla.paths import default_opensquilla_home
-
-    legacy_detect = importlib.import_module("opensquilla.migration.legacy_detect")
-
-    config = getattr(ctx, "config", None)
-    if config is not None:
-        from opensquilla.gateway.boot import _gateway_home, _state_path
-
-        target = _gateway_home(config)
-        sessions_db = _state_path(config, "sessions.db")
-    else:
-        target = default_opensquilla_home()
-        sessions_db = target / "state" / "sessions.db"
-    candidate = legacy_detect.detect_legacy_home(target)
-    payload: dict[str, Any] = {
-        "detected": candidate is not None,
-        "targetFresh": not sessions_db.exists(),
-    }
-    if candidate is not None:
-        payload["path"] = str(candidate.path)
-        payload["kind"] = candidate.kind
-        payload["command"] = legacy_detect.suggested_migrate_command(candidate)
     return payload
 
 
@@ -454,6 +476,7 @@ async def _handle_doctor_status(params: dict | None, ctx: RpcContext) -> dict[st
     params = params or {}
     agent_id = normalize_agent_id(str(params.get("agentId") or "main"))
     deep = bool(params.get("deep", True))
+    probe_providers = bool(params.get("probeProviders", False))
 
     findings: list[HealthFinding] = [
         HealthFinding(
@@ -469,7 +492,10 @@ async def _handle_doctor_status(params: dict | None, ctx: RpcContext) -> dict[st
     collectors: list[tuple[str, Collector, Evaluator]] = [
         (
             "provider",
-            lambda: _handle_providers_status({"probeModels": False}, ctx),
+            lambda: _handle_providers_status(
+                {"probeModels": probe_providers},
+                ctx,
+            ),
             evaluate_provider,
         ),
         ("logs", lambda: _build_logs_status(ctx), evaluate_logs),
@@ -501,11 +527,6 @@ async def _handle_doctor_status(params: dict | None, ctx: RpcContext) -> dict[st
             "llm_ensemble",
             lambda: _llm_ensemble_payload(ctx),
             evaluate_llm_ensemble,
-        ),
-        (
-            "migration",
-            lambda: _legacy_home_payload(ctx),
-            evaluate_legacy_home,
         ),
     ]
 

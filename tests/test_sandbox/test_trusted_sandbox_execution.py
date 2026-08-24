@@ -1,11 +1,87 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from opensquilla.tools.types import CallerKind, ToolContext, ToolError, current_tool_context
+from opensquilla.tools.types import CallerKind, ToolContext, current_tool_context
+
+
+@pytest.mark.parametrize("run_mode", ["safe", "full"])
+@pytest.mark.asyncio
+async def test_shell_echo_succeeds_when_git_is_unavailable(
+    run_mode: str,
+    tmp_path: Path,
+    unavailable_git_runtime: SimpleNamespace,
+) -> None:
+    from opensquilla.sandbox.config import SandboxSettings
+    from opensquilla.sandbox.integration import configure_runtime, reset_runtime
+    from opensquilla.tools.builtin import shell
+
+    configure_runtime(
+        SandboxSettings(run_mode="safe", backend="noop", allow_legacy_mode=True),
+        workspace=tmp_path,
+    )
+    runtime_events: list[dict[str, object]] = []
+    token = current_tool_context.set(
+        ToolContext(
+            is_owner=True,
+            caller_kind=CallerKind.CLI,
+            session_key=f"no-git-shell-{run_mode}",
+            run_mode=run_mode,
+            workspace_dir=str(tmp_path),
+            on_runtime_event=runtime_events.append,
+        )
+    )
+    try:
+        result = await shell.exec_command("echo opensquilla_no_git", workdir=str(tmp_path))
+    finally:
+        current_tool_context.reset(token)
+        reset_runtime()
+
+    assert "opensquilla_no_git" in result
+    assert "exit_code=0" in result
+    assert unavailable_git_runtime.resolution_calls
+
+
+@pytest.mark.parametrize("run_mode", ["safe", "full"])
+@pytest.mark.asyncio
+async def test_execute_code_succeeds_when_git_is_unavailable(
+    run_mode: str,
+    tmp_path: Path,
+    unavailable_git_runtime: SimpleNamespace,
+) -> None:
+    from opensquilla.sandbox.config import SandboxSettings
+    from opensquilla.sandbox.integration import configure_runtime, reset_runtime
+    from opensquilla.tools.builtin import code_exec
+
+    configure_runtime(
+        SandboxSettings(run_mode="safe", backend="noop", allow_legacy_mode=True),
+        workspace=tmp_path,
+    )
+    runtime_events: list[dict[str, object]] = []
+    token = current_tool_context.set(
+        ToolContext(
+            is_owner=True,
+            caller_kind=CallerKind.CLI,
+            session_key=f"no-git-code-{run_mode}",
+            run_mode=run_mode,
+            workspace_dir=str(tmp_path),
+            on_runtime_event=runtime_events.append,
+        )
+    )
+    try:
+        result = await code_exec.execute_code("print('opensquilla_no_git')")
+    finally:
+        current_tool_context.reset(token)
+        reset_runtime()
+
+    payload = json.loads(result)
+    assert payload["exit_code"] == 0
+    assert payload["stdout"].splitlines() == ["opensquilla_no_git"]
+    assert unavailable_git_runtime.resolution_calls
 
 
 @pytest.mark.asyncio
@@ -126,7 +202,7 @@ async def test_warnlist_shell_uses_sandbox_gate_without_exec_approval(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_trusted_workspace_shell_cleanup_stays_out_of_locked_approval(
+async def test_trusted_workspace_shell_cleanup_requires_exact_brokered_delete(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -186,15 +262,266 @@ async def test_trusted_workspace_shell_cleanup_stays_out_of_locked_approval(
         current_tool_context.reset(token)
         reset_approval_queue()
 
-    assert "shell-workspace-ok" in result
+    payload = json.loads(result)
+    assert payload["status"] == "blocked"
+    assert payload["reason"] == "recursive_delete_target_not_static"
+    assert get_approval_queue().list_pending("exec") == []
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_trusted_workspace_code_delete_stays_out_of_locked_approval(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from opensquilla.gateway.approval_queue import get_approval_queue, reset_approval_queue
+    from opensquilla.tools.builtin import code_exec
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    calls: list[tuple[str, object]] = []
+    reset_approval_queue()
+
+    runtime = SimpleNamespace(
+        effective=SimpleNamespace(sandbox_enabled=True),
+        workspace=workspace,
+    )
+
+    async def _fake_gate_action(**kwargs):
+        calls.append(("gate", kwargs))
+        policy = SimpleNamespace()
+        request = SimpleNamespace(
+            cwd=workspace,
+            action_kind="code.exec",
+            policy=policy,
+            reason="",
+            session_id="s1",
+            run_mode="trusted",
+        )
+        return object(), policy, request
+
+    async def _fake_run_under_backend(request, *, runtime=None):
+        calls.append(("backend", request))
+        return SimpleNamespace(
+            returncode=0,
+            stdout="exists=False\n",
+            stderr="",
+            backend_notes=(),
+            timed_out=False,
+        )
+
+    monkeypatch.setattr(code_exec, "get_runtime", lambda: runtime)
+    monkeypatch.setattr(code_exec, "gate_action", _fake_gate_action)
+    monkeypatch.setattr(code_exec, "run_under_backend", _fake_run_under_backend)
+    monkeypatch.setattr(
+        code_exec,
+        "_resolve_python_bin",
+        lambda *, sandbox_enabled: "/usr/bin/python3",
+    )
+
+    token = current_tool_context.set(
+        ToolContext(
+            is_owner=True,
+            caller_kind=CallerKind.WEB,
+            session_key="s1",
+            run_mode="trusted",
+            workspace_dir=str(workspace),
+        )
+    )
+    try:
+        result = await code_exec.execute_code(
+            "from pathlib import Path\n"
+            "p = Path('rpo-contract-generator.html')\n"
+            "if p.exists():\n"
+            "    p.unlink()\n"
+            "print('exists=' + str(p.exists()))"
+        )
+    finally:
+        current_tool_context.reset(token)
+        reset_approval_queue()
+
+    payload = json.loads(result)
+    assert payload["exit_code"] == 0
     assert get_approval_queue().list_pending("exec") == []
     assert [name for name, _ in calls] == ["gate", "backend"]
     hints = calls[0][1]["hints"]  # type: ignore[index]
     assert hints.high_impact is False
 
 
+async def _capture_trusted_code_exec_high_impact(
+    monkeypatch,
+    tmp_path,
+    code: str,
+) -> bool:
+    from opensquilla.gateway.approval_queue import reset_approval_queue
+    from opensquilla.tools.builtin import code_exec
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    calls: list[tuple[str, object]] = []
+    reset_approval_queue()
+
+    runtime = SimpleNamespace(
+        effective=SimpleNamespace(sandbox_enabled=True),
+        workspace=workspace,
+    )
+
+    async def _fake_gate_action(**kwargs):
+        calls.append(("gate", kwargs))
+        policy = SimpleNamespace()
+        request = SimpleNamespace(
+            cwd=workspace,
+            action_kind="code.exec",
+            policy=policy,
+            reason="",
+            session_id="s1",
+            run_mode="trusted",
+        )
+        return object(), policy, request
+
+    async def _fake_run_under_backend(request, *, runtime=None):
+        calls.append(("backend", request))
+        return SimpleNamespace(
+            returncode=0,
+            stdout="ok\n",
+            stderr="",
+            backend_notes=(),
+            timed_out=False,
+        )
+
+    monkeypatch.setattr(code_exec, "get_runtime", lambda: runtime)
+    monkeypatch.setattr(code_exec, "gate_action", _fake_gate_action)
+    monkeypatch.setattr(code_exec, "run_under_backend", _fake_run_under_backend)
+    monkeypatch.setattr(
+        code_exec,
+        "_resolve_python_bin",
+        lambda *, sandbox_enabled: "/usr/bin/python3",
+    )
+
+    token = current_tool_context.set(
+        ToolContext(
+            is_owner=True,
+            caller_kind=CallerKind.WEB,
+            session_key="s1",
+            run_mode="trusted",
+            workspace_dir=str(workspace),
+        )
+    )
+    try:
+        result = await code_exec.execute_code(code)
+    finally:
+        current_tool_context.reset(token)
+        reset_approval_queue()
+
+    payload = json.loads(result)
+    assert payload["exit_code"] == 0
+    assert [name for name, _ in calls] == ["gate", "backend"]
+    hints = calls[0][1]["hints"]  # type: ignore[index]
+    return bool(hints.high_impact)
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        (
+            "from pathlib import Path\n"
+            "p = Path('/some/extra-rw-mount/file')\n"
+            "def unused():\n"
+            "    p = Path('safe.txt')\n"
+            "p.unlink()\n"
+        ),
+        (
+            "from pathlib import Path\n"
+            "p = Path('/some/extra-rw-mount/file')\n"
+            "if cond:\n"
+            "    p = Path('safe.txt')\n"
+            "p.unlink()\n"
+        ),
+        (
+            "import os\n"
+            "fd = os.open('/some/extra-rw-mount', os.O_RDONLY)\n"
+            "os.remove('target', dir_fd=fd)\n"
+        ),
+        (
+            "class Path:\n"
+            "    def __init__(self, value):\n"
+            "        self.value = value\n"
+            "    def unlink(self):\n"
+            "        pass\n"
+            "p = Path('safe.txt')\n"
+            "p.unlink()\n"
+        ),
+    ],
+)
 @pytest.mark.asyncio
-async def test_backend_denial_does_not_fall_back_to_host(monkeypatch) -> None:
+async def test_trusted_code_delete_keeps_high_impact_when_target_proof_is_unsound(
+    monkeypatch,
+    tmp_path,
+    code: str,
+) -> None:
+    assert await _capture_trusted_code_exec_high_impact(monkeypatch, tmp_path, code)
+
+
+@pytest.mark.asyncio
+async def test_trusted_mode_allows_without_hidden_approval_wait(
+    tmp_path,
+) -> None:
+    from opensquilla.sandbox.config import SandboxSettings
+    from opensquilla.sandbox.integration import configure_runtime, gate_action, reset_runtime
+    from opensquilla.sandbox.policy import LevelHints
+    from opensquilla.sandbox.types import ALLOW
+
+    class _Queue:
+        requests: list[dict | None]
+
+        def __init__(self) -> None:
+            self.requests = []
+
+        def request(self, namespace: str = "exec", params: dict | None = None) -> str:
+            self.requests.append(params)
+            return "approval:hidden"
+
+        async def wait(self, approval_id: str, timeout: float | None = None) -> bool:
+            raise AssertionError("trusted mode must not wait on hidden approval")
+
+        def resolve(self, approval_id: str, approved: bool) -> None:
+            return None
+
+    queue = _Queue()
+    configure_runtime(
+        SandboxSettings(run_mode="standard", backend="noop", allow_legacy_mode=True),
+        approval_queue=queue,
+        workspace=tmp_path,
+    )
+    token = current_tool_context.set(
+        ToolContext(
+            is_owner=True,
+            caller_kind=CallerKind.WEB,
+            session_key="s1",
+            run_mode="trusted",
+            workspace_dir=str(tmp_path),
+        )
+    )
+    try:
+        decision, policy, _request = await gate_action(
+            action_kind="code.exec",
+            argv=("python", "-c", "import shutil; shutil.rmtree('build')"),
+            cwd=tmp_path,
+            hints=LevelHints(high_impact=True),
+        )
+    finally:
+        current_tool_context.reset(token)
+        reset_runtime()
+
+    assert policy.require_approval is False
+    assert decision is ALLOW
+    assert _request.run_mode == "safe"
+    assert queue.requests == []
+
+
+@pytest.mark.asyncio
+async def test_backend_denial_suspends_before_any_host_retry(monkeypatch) -> None:
+    from opensquilla.sandbox.elevation import ElevationGateResult
     from opensquilla.tools.builtin import shell
 
     calls: list[str] = []
@@ -247,7 +574,12 @@ async def test_backend_denial_does_not_fall_back_to_host(monkeypatch) -> None:
 
     async def _fake_escalate_backend_denial(*args, **kwargs):
         calls.append("escalate")
-        return object()
+        return ElevationGateResult(
+            requested=True,
+            allowed=False,
+            status="approval_required",
+            approval_id="approval:test",
+        )
 
     async def _fake_create_subprocess_shell(*args, **kwargs):
         calls.append("host")
@@ -289,11 +621,11 @@ async def test_backend_denial_does_not_fall_back_to_host(monkeypatch) -> None:
         ToolContext(is_owner=True, caller_kind=CallerKind.CLI, session_key="s1")
     )
     try:
-        with pytest.raises(ToolError, match="host fallback disabled"):
-            await shell.exec_command("echo hi")
+        result = await shell.exec_command("echo hi")
     finally:
         current_tool_context.reset(token)
 
+    assert json.loads(result)["status"] == "approval_required"
     assert calls == ["gate", "backend", "escalate"]
 
 
@@ -309,6 +641,7 @@ async def test_full_host_access_code_exec_resolves_host_python(monkeypatch, tmp_
         workspace = tmp_path
 
     class _Proc:
+        pid = 6301
         returncode = 0
 
         async def communicate(self):
@@ -330,7 +663,16 @@ async def test_full_host_access_code_exec_resolves_host_python(monkeypatch, tmp_
     monkeypatch.setenv("TMP", str(tmp_path / "temp"))
     monkeypatch.setattr(code_exec, "get_runtime", lambda: _Runtime())
     monkeypatch.setattr(code_exec, "_resolve_python_bin", _fake_resolve_python_bin)
-    monkeypatch.setattr(code_exec.asyncio, "create_subprocess_exec", _fake_create_subprocess_exec)
+    monkeypatch.setattr(code_exec, "create_owned_subprocess_exec", _fake_create_subprocess_exec)
+
+    def fail_safety_preflight(*args, **kwargs):
+        pytest.fail("Full Host Access code execution must skip safety preflight")
+
+    monkeypatch.setattr(code_exec, "_check_code_sensitive_access", fail_safety_preflight)
+    monkeypatch.setattr(code_exec, "_check_code_destructive", fail_safety_preflight)
+    monkeypatch.setattr(code_exec, "_code_needs_network", fail_safety_preflight)
+    monkeypatch.setattr(code_exec, "snapshot_current_workspace_mutations", lambda: {})
+    monkeypatch.setattr(code_exec, "gate_action", fail_safety_preflight)
 
     token = current_tool_context.set(
         ToolContext(
@@ -464,6 +806,7 @@ async def test_full_host_access_background_strips_managed_proxy_environment(
         effective = SimpleNamespace(sandbox_enabled=True)
 
     class _FakeProcess:
+        pid = 6302
         stdout = None
         stdin = None
         returncode = 0
@@ -479,7 +822,7 @@ async def test_full_host_access_background_strips_managed_proxy_environment(
     monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:48123")
     monkeypatch.setenv("OPENSQUILLA_SANDBOX_NETWORK", "proxy_allowlist")
     monkeypatch.setattr(shell, "get_runtime", lambda: _Runtime())
-    monkeypatch.setattr(shell.asyncio, "create_subprocess_shell", _fake_create_subprocess_shell)
+    monkeypatch.setattr(shell, "create_owned_subprocess_shell", _fake_create_subprocess_shell)
     monkeypatch.setattr(
         shell,
         "check_safe_bin",

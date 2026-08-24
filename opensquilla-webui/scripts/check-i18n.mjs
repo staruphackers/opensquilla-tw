@@ -18,6 +18,8 @@ const OTHER_LOCALES = ['zh-Hans', 'zh-Hant', 'ja', 'fr', 'de', 'es']
 // English, so we enforce only KEY PARITY there and check leakage for
 // zh-Hans/zh-Hant (both non-Latin scripts).
 const LEAKAGE_LOCALES = new Set(['zh-Hans', 'zh-Hant'])
+// Product terminology that deliberately remains in English in Simplified Chinese.
+const ZH_HANS_ENGLISH_TERMS = new Set(['chat.routerFx.ensembleTokens'])
 
 function load(name) {
   return JSON.parse(readFileSync(resolve(localesDir, `${name}.json`), 'utf8'))
@@ -44,7 +46,12 @@ for (const loc of OTHER_LOCALES) {
   const extra = keys.filter((k) => !(k in enFlat))
   const untranslated = LEAKAGE_LOCALES.has(loc)
     ? enKeys.filter(
-        (k) => k in flat && typeof flat[k] === 'string' && flat[k] === enFlat[k] && /[A-Za-z]/.test(flat[k]),
+        (k) =>
+          k in flat
+          && typeof flat[k] === 'string'
+          && flat[k] === enFlat[k]
+          && /[A-Za-z]/.test(flat[k])
+          && !ZH_HANS_ENGLISH_TERMS.has(k),
       )
     : []
 

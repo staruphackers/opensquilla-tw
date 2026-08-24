@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import copy
+import ipaddress
+import logging
 import os
 import re
 import threading
@@ -27,13 +29,34 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, Settings
 from opensquilla import __version__
 from opensquilla.gateway.config_migration import (
     LATEST_CONFIG_VERSION,
+    ConfigParseError,
     backup_and_write_migrated_config,
     migrate_config_payload,
 )
-from opensquilla.paths import default_opensquilla_home
+from opensquilla.paths import default_opensquilla_home, native_io_path
+from opensquilla.provider.credentials import (
+    credential_provider_hint,
+    endpoint_provider_hint,
+)
 from opensquilla.provider.preset_registry import get_preset, legacy_profile_ids
 from opensquilla.router_tiers import (
+    CUSTOM_B5_MAX_PROPOSERS,
+    CUSTOM_B5_MAX_TOTAL_CALLS,
+    CUSTOM_B5_MIN_PROPOSERS,
+    CUSTOM_B5_SELECTION_MODE,
     DEFAULT_TEXT_TIER,
+    ENSEMBLE_CANDIDATE_ROLES,
+    LEGACY_OPENROUTER_MODEL_OPTIONS,
+    ROUTER_TIER_ENSEMBLE_SELECTION_MODES,
+    STATIC_B5_SELECTION_MODE_PROVIDERS,  # noqa: F401 - legacy import surface
+    STATIC_B5_SELECTION_MODES,
+    STATIC_OPENROUTER_B5_SELECTION_MODE,
+    STATIC_TOKENRHYTHM_B5_SELECTION_MODE,  # noqa: F401 - legacy import surface
+    TEXT_TIERS,
+    EnsembleSelectionMode,
+    TierConfig,
+    effective_ensemble_selection_mode,
+    effective_tier_ensemble_selection_modes,
     normalize_text_tier,
     normalize_tier_mapping,
 )
@@ -43,6 +66,14 @@ from opensquilla.session.compaction_lifecycle import (
     DEFAULT_FLUSH_TRIGGERS,
     FlushTrigger,
     normalize_flush_triggers_strict,
+)
+
+logger = logging.getLogger(__name__)
+
+_LEGACY_CONTROL_UI_FRONTEND_WARNING = (
+    "control_ui.frontend='legacy' is deprecated and no longer selects the "
+    "retired vanilla-JS UI; Vue is always served. Remove this setting or set "
+    "it to 'vue'."
 )
 
 
@@ -70,6 +101,38 @@ class AuthConfig(BaseSettings):
     trusted_proxy: str | None = None
     token_scopes: list[str] = Field(default_factory=lambda: ["operator.admin"])
     allowed_roles: list[str] = Field(default_factory=lambda: ["operator", "node"])
+    # Empty means the built-in loopback/RFC1918/ULA set.  Custom values may
+    # narrow that set but can never widen it to public address space.
+    allowed_client_cidrs: list[str] = Field(default_factory=list)
+
+    @field_validator("allowed_client_cidrs")
+    @classmethod
+    def _validate_allowed_client_cidrs(cls, values: list[str]) -> list[str]:
+        private_v4 = tuple(
+            ipaddress.IPv4Network(value)
+            for value in ("127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+        )
+        private_v6 = tuple(
+            ipaddress.IPv6Network(value)
+            for value in ("::1/128", "fc00::/7")
+        )
+        normalized: list[str] = []
+        for raw in values:
+            network = ipaddress.ip_network(str(raw).strip(), strict=False)
+            allowed = (
+                any(network.subnet_of(parent) for parent in private_v4)
+                if isinstance(network, ipaddress.IPv4Network)
+                else any(network.subnet_of(parent) for parent in private_v6)
+            )
+            if not allowed:
+                raise ValueError(
+                    "auth.allowed_client_cidrs may only narrow loopback, "
+                    "RFC1918, or IPv6 ULA networks"
+                )
+            text = network.with_prefixlen
+            if text not in normalized:
+                normalized.append(text)
+        return normalized
 
 
 class CorsConfig(BaseSettings):
@@ -130,10 +193,15 @@ class ControlUiConfig(BaseSettings):
 
     enabled: bool = True
     base_path: str = "/control"
-    frontend: Literal["vue", "legacy"] = "vue"
+    # Retained temporarily so existing TOML files and environment overrides do
+    # not fail gateway validation after the vanilla-JS client is retired. Vue
+    # is the only runtime value; the validator below maps the historical
+    # ``legacy`` spelling to it with a deprecation warning.
+    frontend: Literal["vue"] = "vue"
     # Default UI locale served on first paint when the browser has no saved
-    # preference. The client (localStorage) and a manual switch always override
-    # it. zh-Hant/zh-TW/zh-HK/zh-MO clamp to zh-Hant; every other zh* clamps
+    # preference, and the Gateway-wide language for fixed channel notices.
+    # The client (localStorage) and a manual switch always override it.
+    # zh-Hant/zh-TW/zh-HK/zh-MO clamp to zh-Hant; every other zh* clamps
     # to zh-Hans; anything else to en.
     default_locale: Literal["en", "zh-Hans", "zh-Hant", "ja", "fr", "de", "es"] = "en"
     allowed_origins: list[str] = Field(default_factory=list)
@@ -141,13 +209,25 @@ class ControlUiConfig(BaseSettings):
     @field_validator("base_path")
     @classmethod
     def _strip_trailing_slash(cls, v: str) -> str:
-        return v.rstrip("/")
+        # Keep the root mount explicit.  Returning ``""`` for ``"/"`` makes
+        # prefix checks such as ``path.startswith(base_path)`` match every
+        # request, including authenticated API routes.
+        return v.rstrip("/") or "/"
 
     @field_validator("frontend", mode="before")
     @classmethod
     def _normalize_frontend(cls, v: object) -> object:
         if isinstance(v, str):
-            return v.strip().lower()
+            normalized = v.strip().lower()
+            if normalized == "legacy":
+                warnings.warn(
+                    _LEGACY_CONTROL_UI_FRONTEND_WARNING,
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                logger.warning(_LEGACY_CONTROL_UI_FRONTEND_WARNING)
+                return "vue"
+            return normalized
         return v
 
     @field_validator("default_locale", mode="before")
@@ -230,6 +310,12 @@ class ToolsConfig(BaseModel):
     allow: list[str] = Field(default_factory=list)
     deny: list[str] = Field(default_factory=list)
     also_allow: list[str] = Field(default_factory=list)
+    # Model-facing tool description overrides. Keys name a tool
+    # ("exec_command") or a parameter ("exec_command.command" — dotted keys
+    # must be quoted in TOML); values replace the matching description
+    # verbatim. Inert unless the OPENSQUILLA_TOOL_DESCRIPTION_OVERRIDES env
+    # var enables them ("config"/"on", or a .toml/.json override file path).
+    description_overrides: dict[str, str] = Field(default_factory=dict)
     workspace_write_deny_globs: list[str] = Field(default_factory=list)
     file_edit_requires_fresh_read: bool | None = None
     file_edit_flexible_recovery: bool | None = None
@@ -254,7 +340,7 @@ class PermissionsConfig(BaseModel):
 class TaskRuntimeConfig(BaseModel):
     """Server-side task-runtime queue settings."""
 
-    max_concurrency: int = Field(default=4, ge=1)
+    max_concurrency: int = Field(default=8, ge=1)
     max_pending_per_session: int = Field(default=64, ge=1)
     # Per-channel-adapter in-flight semaphore (separate from
     # task_runtime._global_sem). Configured here so OPENSQUILLA_CHANNEL_INFLIGHT_CAP
@@ -324,13 +410,15 @@ class TaskRuntimeConfig(BaseModel):
 LEGACY_DEFAULT_LLM_PROVIDER = "openrouter"
 LEGACY_DEFAULT_LLM_MODEL = "deepseek/deepseek-v4-pro"
 LEGACY_DEFAULT_LLM_BASE_URL = "https://openrouter.ai/api/v1"
+TOKENRHYTHM_DEFAULT_LLM_PROVIDER = "tokenrhythm"
+TOKENRHYTHM_DEFAULT_LLM_BASE_URL = "https://tokenrhythm.studio/v1"
 
 
 class LlmProviderConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="OPENSQUILLA_LLM_")
 
     provider: str = "tokenrhythm"
-    model: str = "deepseek-v4-pro"
+    model: str = "deepseek-v4-pro-0813"
     api_key: str = ""
     api_key_env: str = ""
     base_url: str = "https://tokenrhythm.studio/v1"
@@ -345,7 +433,18 @@ class LlmProviderConfig(BaseSettings):
     top_p: float | None = None
     # Optional global thinking level: off|minimal|low|medium|high|xhigh|adaptive.
     # When unset, squilla_router may suggest thinking for selected tiers.
-    thinking: str | None = None
+    # Accepts both "thinking" and "thinking_level" spellings in TOML and env
+    # (OPENSQUILLA_LLM_THINKING / OPENSQUILLA_LLM_THINKING_LEVEL) for parity
+    # with squilla_router.tiers field names. model_dump emits only "thinking".
+    thinking: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "thinking",
+            "thinking_level",
+            "OPENSQUILLA_LLM_THINKING",
+            "OPENSQUILLA_LLM_THINKING_LEVEL",
+        ),
+    )
     # Explicit provider-request proof budget in characters. 0 = derive from the
     # context-budget ladder (window minus output+thinking reserve, times the
     # overflow threshold). A positive value bypasses that derivation and feeds
@@ -371,17 +470,6 @@ class LlmProviderConfig(BaseSettings):
         return self
 
 
-LEGACY_OPENROUTER_MODEL_OPTIONS = [
-    "deepseek/deepseek-v4-pro",
-    "z-ai/glm-5.2",
-    "qwen/qwen3.7-plus",
-    "deepseek/deepseek-v4-flash",
-    "qwen/qwen3.7-max",
-    "moonshotai/kimi-k2.6",
-    "moonshotai/kimi-k2.7-code",
-    "minimax/minimax-m3",
-]
-
 # Backward-compatible alias for older imports. New configs do not use these as
 # defaults; they are only recognized as the old OpenRouter preset payload.
 DEFAULT_LLM_ENSEMBLE_MODEL_OPTIONS = LEGACY_OPENROUTER_MODEL_OPTIONS
@@ -392,25 +480,10 @@ def _default_llm_ensemble_model_options() -> list[str]:
     return []
 
 
-# Candidate roles for the custom B5 lineup. Proposer roles are advisory
-# labels surfaced in the UI and the decision trace; "aggregator" is
-# structural — it marks the single member that fuses drafts and produces
-# the final answer. Empty string = unassigned (runs as a proposer).
-LLM_ENSEMBLE_CANDIDATE_ROLES = (
-    "",
-    "primary",
-    "contrast",
-    "fast_check",
-    "critic",
-    "aggregator",
-)
-
-# custom_b5 lineup bounds. The proposer cap covers total per-turn proposer
-# calls; the aggregator adds one more. See the ensemble builder for how the
-# lineup maps onto the shared B5 fusion defaults.
-CUSTOM_B5_MIN_PROPOSERS = 2
-CUSTOM_B5_MAX_PROPOSERS = 6
-CUSTOM_B5_MAX_TOTAL_CALLS = 8
+# Candidate roles for the custom B5 lineup. "proposer" drafts independently;
+# "aggregator" fuses those drafts and produces the final answer.
+# Backward-compatible symbol for callers that imported the old gateway table.
+LLM_ENSEMBLE_CANDIDATE_ROLES = ENSEMBLE_CANDIDATE_ROLES
 
 
 class LlmEnsembleCandidateConfig(BaseModel):
@@ -418,10 +491,14 @@ class LlmEnsembleCandidateConfig(BaseModel):
     model: str
     source: Literal["custom", "legacy_model_options"] = "custom"
     enabled: bool = True
-    # Advisory role label; unknown values coerce to "" (unassigned) instead of
-    # failing validation so a hand-edited config never blocks gateway boot.
+    # Released advisory aliases and unknown values coerce to "proposer"
+    # instead of failing validation, so old or hand-edited configs still boot.
     # Strict role/lineup checks live on the RPC save path (upsert mutation).
-    role: str = ""
+    role: str = "proposer"
+    # Per-candidate thinking level override: off|minimal|low|medium|high|xhigh.
+    # Coerced to "" (inherit from turn config) on invalid input so a hand-edited
+    # config never blocks gateway boot, matching the role field policy above.
+    thinking_level: str = ""
 
     @field_validator("provider", "model", mode="before")
     @classmethod
@@ -432,7 +509,16 @@ class LlmEnsembleCandidateConfig(BaseModel):
     @classmethod
     def _normalize_role(cls, value: object) -> str:
         normalized = str(value or "").strip().lower()
-        return normalized if normalized in LLM_ENSEMBLE_CANDIDATE_ROLES else ""
+        return normalized if normalized in ENSEMBLE_CANDIDATE_ROLES else "proposer"
+
+    @field_validator("thinking_level", mode="before")
+    @classmethod
+    def _normalize_thinking_level(cls, value: object) -> str:
+        normalized = str(value or "").strip().lower()
+        if not normalized:
+            return ""
+        valid = {"off", "minimal", "low", "medium", "high", "xhigh", "adaptive"}
+        return normalized if normalized in valid else ""
 
     @model_validator(mode="after")
     def _validate_candidate(self) -> LlmEnsembleCandidateConfig:
@@ -456,17 +542,33 @@ class LlmEnsembleConfig(BaseSettings):
     # operator explicitly enables the ensemble surface.
     enabled: bool = False
     mode: Literal["b5_fusion"] = "b5_fusion"
-    selection_mode: Literal[
-        "router_dynamic", "static_openrouter_b5", "static_tokenrhythm_b5", "custom_b5"
-    ] = "static_openrouter_b5"
+    selection_mode: EnsembleSelectionMode = cast(
+        EnsembleSelectionMode,
+        STATIC_OPENROUTER_B5_SELECTION_MODE,
+    )
+    # Expose tool schemas to proposers as advisory vocabulary only. Proposer
+    # output is never dispatched; only the aggregator owns an executable tool
+    # boundary.
     proposer_tools: bool = False
     min_successful_proposers: int = Field(default=1, ge=1)
+    # Optional quality target above the minimum floor. When set, proposer
+    # collection keeps waiting for this many successful drafts; if the target
+    # becomes unreachable, the turn may still aggregate once the minimum
+    # floor is satisfied.
+    target_successful_proposers: int | None = Field(default=None, ge=1)
+    # Number of in-place retries after the initial proposer request. Zero
+    # preserves the historical single-attempt behavior.
+    proposer_max_retries: int = Field(default=0, ge=0, le=10)
     all_failed_policy: Literal["fallback_single", "error"] = "fallback_single"
     model_options: list[str] = Field(default_factory=_default_llm_ensemble_model_options)
     candidates: list[LlmEnsembleCandidateConfig] = Field(default_factory=list)
     candidate_max_chars: int = Field(default=24_000, ge=0)
     proposer_timeout_seconds: float = Field(default=3600.0, gt=0.0)
     aggregator_timeout_seconds: float = Field(default=3600.0, gt=0.0)
+    # Deprecated read-compatibility field. The ensemble runtime intentionally
+    # ignores it and relies on the per-call proposer/aggregator/fixed-provider
+    # idle timeouts instead.
+    total_timeout_seconds: float | None = Field(default=None, ge=0.0)
     shuffle_candidates: bool = True
     record_candidates: bool = False
 
@@ -481,6 +583,28 @@ class LlmEnsembleConfig(BaseSettings):
             seen_options.add(normalized)
             model_options.append(normalized)
         self.model_options = model_options
+        return self
+
+    @model_validator(mode="after")
+    def _validate_success_targets(self) -> LlmEnsembleConfig:
+        if (
+            self.target_successful_proposers is not None
+            and self.target_successful_proposers < self.min_successful_proposers
+        ):
+            raise ValueError(
+                "llm_ensemble.target_successful_proposers cannot be lower than "
+                "llm_ensemble.min_successful_proposers"
+            )
+        if (
+            self.selection_mode
+            in STATIC_B5_SELECTION_MODES
+            and self.target_successful_proposers is not None
+            and self.target_successful_proposers > 4
+        ):
+            raise ValueError(
+                "llm_ensemble.target_successful_proposers cannot exceed the "
+                "static B5 proposer count (4)"
+            )
         return self
 
     @model_validator(mode="after")
@@ -504,7 +628,7 @@ class LlmEnsembleConfig(BaseSettings):
                 "llm_ensemble.candidates may mark at most one enabled "
                 "candidate with role='aggregator'"
             )
-        if self.selection_mode != "custom_b5":
+        if self.selection_mode != CUSTOM_B5_SELECTION_MODE:
             return self
         proposers = [
             candidate
@@ -533,19 +657,17 @@ class LlmEnsembleConfig(BaseSettings):
                 "llm_ensemble.min_successful_proposers cannot exceed the "
                 f"custom_b5 proposer count ({len(proposers)})"
             )
+        if (
+            self.target_successful_proposers is not None
+            and self.target_successful_proposers > len(proposers)
+        ):
+            raise ValueError(
+                "llm_ensemble.target_successful_proposers cannot exceed the "
+                f"custom_b5 proposer count ({len(proposers)})"
+            )
         return self
 
 
-STATIC_OPENROUTER_B5_SELECTION_MODE = "static_openrouter_b5"
-STATIC_TOKENRHYTHM_B5_SELECTION_MODE = "static_tokenrhythm_b5"
-# selection_mode → member provider id for the static B5 profiles. Must stay
-# in lockstep with provider.ensemble.STATIC_B5_PROFILES (gateway must not be
-# imported from provider, so a parity test pins the two tables together).
-STATIC_B5_SELECTION_MODE_PROVIDERS: dict[str, str] = {
-    STATIC_OPENROUTER_B5_SELECTION_MODE: "openrouter",
-    STATIC_TOKENRHYTHM_B5_SELECTION_MODE: "tokenrhythm",
-}
-STATIC_B5_SELECTION_MODES = frozenset(STATIC_B5_SELECTION_MODE_PROVIDERS)
 STATIC_OPENROUTER_B5_MIN_AGENT_STREAM_IDLE_TIMEOUT_SECONDS = 1200.0
 STATIC_OPENROUTER_B5_MIN_WEBUI_STREAM_IDLE_GRACE_SECONDS = 1260.0
 
@@ -558,13 +680,29 @@ def _non_negative_float(value: Any, default: float) -> float:
     return max(0.0, parsed)
 
 
-def static_b5_ensemble_enabled(config: Any) -> bool:
+def _configured_static_b5_selection_modes(config: Any) -> tuple[str, ...]:
+    modes: list[str] = []
     ensemble_cfg = getattr(config, "llm_ensemble", None)
-    if ensemble_cfg is None:
-        return False
-    return bool(getattr(ensemble_cfg, "enabled", False)) and (
-        str(getattr(ensemble_cfg, "selection_mode", "") or "") in STATIC_B5_SELECTION_MODES
-    )
+    global_mode = effective_ensemble_selection_mode(config)
+    if bool(getattr(ensemble_cfg, "enabled", False)) and global_mode in STATIC_B5_SELECTION_MODES:
+        modes.append(global_mode)
+
+    router = getattr(config, "squilla_router", None)
+    if bool(getattr(router, "enabled", False)):
+        tier_modes = effective_tier_ensemble_selection_modes(
+            getattr(router, "tiers", None),
+            shared_selection_mode=global_mode,
+        )
+        modes.extend(
+            mode for mode in tier_modes.values() if mode in STATIC_B5_SELECTION_MODES
+        )
+    return tuple(dict.fromkeys(modes))
+
+
+def static_b5_ensemble_enabled(config: Any) -> bool:
+    """Whether global or tier-managed configuration can run static B5."""
+
+    return bool(_configured_static_b5_selection_modes(config))
 
 
 def static_b5_ensemble_active(config: Any) -> bool:
@@ -577,15 +715,40 @@ def static_b5_ensemble_active(config: Any) -> bool:
     ``provider`` never imports from ``gateway``, so no cycle) and therefore
     cannot disagree with the turn-time wrap guard.
     """
-    if not static_b5_ensemble_enabled(config):
+    selection_modes = _configured_static_b5_selection_modes(config)
+    if not selection_modes:
         return False
     from opensquilla.provider.ensemble import static_b5_credential_available
 
-    selection_mode = str(
-        getattr(getattr(config, "llm_ensemble", None), "selection_mode", "") or ""
+    return any(
+        static_b5_credential_available(
+            config,
+            getattr(config, "llm", None),
+            selection_mode,
+        )
+        for selection_mode in selection_modes
     )
+
+
+def _global_static_b5_ensemble_active(config: Any) -> bool:
+    """Whether the global ensemble surface will run a static-B5 profile.
+
+    Tier-managed fusion only affects turns routed to that tier, so it must not
+    inflate the gateway-wide stream-idle budget for every other request.
+    """
+
+    ensemble_cfg = getattr(config, "llm_ensemble", None)
+    selection_mode = str(getattr(ensemble_cfg, "selection_mode", "") or "")
+    if not bool(getattr(ensemble_cfg, "enabled", False)):
+        return False
+    if selection_mode not in STATIC_B5_SELECTION_MODES:
+        return False
+    from opensquilla.provider.ensemble import static_b5_credential_available
+
     return static_b5_credential_available(
-        config, getattr(config, "llm", None), selection_mode
+        config,
+        getattr(config, "llm", None),
+        selection_mode,
     )
 
 
@@ -594,7 +757,7 @@ def effective_agent_stream_idle_timeout_seconds(config: Any) -> float:
         getattr(config, "agent_stream_idle_timeout_seconds", 600.0),
         600.0,
     )
-    if static_b5_ensemble_active(config):
+    if _global_static_b5_ensemble_active(config):
         value = max(value, STATIC_OPENROUTER_B5_MIN_AGENT_STREAM_IDLE_TIMEOUT_SECONDS)
     return value
 
@@ -604,7 +767,7 @@ def effective_webui_stream_idle_grace_seconds(config: Any) -> float:
         getattr(config, "webui_stream_idle_grace_seconds", 630.0),
         630.0,
     )
-    if static_b5_ensemble_active(config):
+    if _global_static_b5_ensemble_active(config):
         server_idle = effective_agent_stream_idle_timeout_seconds(config)
         value = max(
             value,
@@ -1085,6 +1248,16 @@ class SquillaRouterConfig(BaseSettings):
     rollout_phase: str = "full"  # "observe" | "prompt_only" | "full"
     strategy: str = "v4_phase3"
     tier_profile: str | None = None
+    # Explicit ownership for the router ladder.  ``follow_primary`` means
+    # OpenSquilla owns the ladder and may replace it with the active
+    # provider's preset when the primary provider changes.  ``custom`` means
+    # the operator owns the ladder and provider switches must preserve it.
+    # ``None`` is deliberately retained for pre-field configs: treating an
+    # unclassified historical ladder as custom is the only non-destructive
+    # upgrade behavior.  A later explicit Router save records one of the two
+    # concrete values.  Additive and downgrade-safe because this settings
+    # section ignores unknown fields in older gateways.
+    preset_binding: Literal["follow_primary", "custom"] | None = None
     visual_mode: str = "real_candidates"
     # Preview: execute router tiers whose provider differs from llm.provider,
     # resolving credentials from [llm_profiles.<id>] or the provider's env
@@ -1199,6 +1372,29 @@ class SquillaRouterConfig(BaseSettings):
         next_values["tiers"] = merged
         return next_values
 
+    @model_validator(mode="after")
+    def _validate_tier_ensemble_selection_modes(self) -> SquillaRouterConfig:
+        allowed = ", ".join(sorted(ROUTER_TIER_ENSEMBLE_SELECTION_MODES))
+        for tier_name in TEXT_TIERS:
+            raw_tier = self.tiers.get(tier_name) if isinstance(self.tiers, dict) else None
+            if isinstance(raw_tier, dict):
+                raw_enabled = raw_tier.get(
+                    "ensemble_enabled",
+                    raw_tier.get("ensembleEnabled"),
+                )
+                if raw_enabled is not None and not isinstance(raw_enabled, bool):
+                    raise ValueError(
+                        f"squilla_router.tiers.{tier_name}.ensemble_enabled "
+                        "must be a boolean"
+                    )
+            selection_mode = TierConfig.from_value(raw_tier).ensemble_selection_mode
+            if selection_mode and selection_mode not in ROUTER_TIER_ENSEMBLE_SELECTION_MODES:
+                raise ValueError(
+                    f"squilla_router.tiers.{tier_name}.ensemble_selection_mode "
+                    f"must be one of: {allowed}"
+                )
+        return self
+
 
 # Eagerly resolve the ``self_learning: RouterSelfLearningConfig`` forward ref
 # (``from __future__ import annotations`` makes it a string). Without this the
@@ -1227,20 +1423,61 @@ class AgentTokenSavingConfig(BaseSettings):
 class CompactionLlmConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="OPENSQUILLA_COMPACTION_")
 
+    # A provider is meaningful only together with ``model``.  Model-only
+    # remains the backwards-compatible "override the selected provider's
+    # model" form; a complete pair selects an explicit physical deployment.
+    provider: str | None = None
     model: str | None = None  # None = use session model
     timeout_seconds: float = 90.0
+    # Absolute budget shared by all summarization chunks and fallbacks.  The
+    # durable commit has separate bounded SQLite semantics and is reconciled if
+    # cancellation races with commit completion.
+    total_timeout_seconds: float = Field(default=120.0, gt=0.0)
+    heartbeat_interval_seconds: float = Field(default=15.0, gt=0.0)
     enabled: bool = True
     compaction_profile: Literal["conversation", "coding", "research", "support"] = "conversation"
     protected_recent_messages: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def _normalize_explicit_deployment(self) -> CompactionLlmConfig:
+        self.provider = str(self.provider or "").strip() or None
+        self.model = str(self.model or "").strip() or None
+        if self.provider and not self.model:
+            logger.warning(
+                "Ignoring compaction.provider=%s because compaction.model is not set",
+                self.provider,
+            )
+            self.provider = None
+        return self
+
+
+def validate_compaction_deployment_write(payload: dict[str, Any]) -> None:
+    """Reject newly saved provider-only compaction deployments.
+
+    Load-time validation remains deliberately tolerant so an older hand-written
+    config cannot brick gateway startup. Config writers call this stricter
+    validator on their post-mutation payload before persistence.
+    """
+
+    compaction = payload.get("compaction")
+    if not isinstance(compaction, dict):
+        return
+    provider = str(compaction.get("provider") or "").strip()
+    model = str(compaction.get("model") or "").strip()
+    if provider and not model:
+        raise ValueError(
+            "compaction.provider requires compaction.model when saving config"
+        )
 
 
 class SessionNamingConfig(BaseSettings):
     """LLM-generated session titles (auto-naming).
 
     After the first user message, a one-shot LLM call summarizes it into a short
-    title written to SessionNode.derived_title. Model selection mirrors compaction
-    but defaults to the router's default text tier rather than the session model:
-    ``model`` (explicit) > ``tier`` model > squilla_router.default_tier model.
+    title written to SessionNode.derived_title. Explicit ``model`` and ``tier``
+    settings override the mode-specific default: direct routing follows the
+    resolved session/provider model, while Router and Ensemble use the router's
+    default text tier.
     """
 
     model_config = SettingsConfigDict(env_prefix="OPENSQUILLA_NAMING_")
@@ -1249,8 +1486,8 @@ class SessionNamingConfig(BaseSettings):
     # Surfaces eligible for auto-naming. webchat/cli are chat; channel covers
     # inbound channel conversations. cron/subagent intentionally excluded.
     surfaces: list[str] = Field(default_factory=lambda: ["webchat", "cli", "channel"])
-    tier: str | None = None  # None = use squilla_router.default_tier
-    model: str | None = None  # None = use the resolved tier's model
+    tier: str | None = None  # None = use the routing mode's default target
+    model: str | None = None  # None = use the explicit tier or mode default
     timeout_seconds: float = 30.0
     max_chars: int = Field(default=48, ge=8)
     language: str = "auto"  # follow the conversation language
@@ -1332,12 +1569,30 @@ class ImageGenerationOpenRouterProviderConfig(BaseModel):
     api_key_env: str = "OPENROUTER_API_KEY"
 
 
+class ImageGenerationTokenRhythmProviderConfig(BaseModel):
+    base_url: str = "https://tokenrhythm.studio/v1"
+    api_key: str = ""
+    api_key_env: str = "TOKENRHYTHM_API_KEY"
+
+
+class ImageGenerationQwenTokenPlanProviderConfig(BaseModel):
+    base_url: str = "https://token-plan.cn-beijing.maas.aliyuncs.com/api/v1"
+    api_key: str = ""
+    api_key_env: str = "QWEN_TOKEN_PLAN_API_KEY"
+
+
 class ImageGenerationProvidersConfig(BaseModel):
     openai: ImageGenerationOpenAIProviderConfig = Field(
         default_factory=ImageGenerationOpenAIProviderConfig
     )
     openrouter: ImageGenerationOpenRouterProviderConfig = Field(
         default_factory=ImageGenerationOpenRouterProviderConfig
+    )
+    tokenrhythm: ImageGenerationTokenRhythmProviderConfig = Field(
+        default_factory=ImageGenerationTokenRhythmProviderConfig
+    )
+    qwen_token_plan: ImageGenerationQwenTokenPlanProviderConfig = Field(
+        default_factory=ImageGenerationQwenTokenPlanProviderConfig
     )
 
 
@@ -1348,6 +1603,10 @@ class ImageGenerationConfig(BaseSettings):
     )
 
     enabled: bool = False
+    # ``follow_llm`` is written only by an explicit provider-configuration
+    # intent. Existing image sections load as ``custom`` so upgrades never
+    # silently replace an operator-owned route or re-enable a disabled tool.
+    binding: Literal["custom", "follow_llm"] = "custom"
     primary: str = "openai/gpt-image-1"
     fallbacks: list[str] = Field(default_factory=list)
     size: str = "1024x1024"
@@ -1413,6 +1672,34 @@ class ConfiguredChannelEntry(BaseModel):
     agent_id: str = "main"
     debounce_window_s: float = 0.0
     status_reactions_enabled: bool = False
+    dm_access: Literal["pairing", "open", "allowlist"] = "pairing"
+    # When a pairing is approved, tell the sender they can start — otherwise
+    # approval is silent and they never know to send another message.
+    pairing_approved_notice: bool = True
+    allowed_senders: list[str] = Field(default_factory=list)
+
+    @field_validator("allowed_senders", mode="before")
+    @classmethod
+    def _normalize_allowed_senders(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            value = value.split(",")
+        if not isinstance(value, list | tuple | set | frozenset):
+            return value
+        return list(
+            dict.fromkeys(str(item).strip() for item in value if str(item).strip())
+        )
+
+    @model_validator(mode="after")
+    def _validate_dm_access(self) -> ConfiguredChannelEntry:
+        if self.dm_access == "allowlist" and not self.allowed_senders:
+            raise ValueError("dm_access=allowlist requires allowed_senders")
+        return self
+    # Group conversations are isolated by sender by default. Deployments that
+    # intentionally want one transcript shared by the whole room can opt in.
+    group_session_scope: Literal["per_sender", "shared_room"] = "per_sender"
+    # Controls what happens when another channel message arrives while the
+    # same session is busy. TaskRuntime validates and executes these modes.
+    busy_input_mode: Literal["followup", "queue", "steer", "interrupt"] = "followup"
 
     @field_validator("debounce_window_s")
     @classmethod
@@ -1458,6 +1745,24 @@ class FeishuChannelEntry(ConfiguredChannelEntry):
     connection_mode: Literal["webhook", "websocket"] = "websocket"
     domain: Literal["feishu", "lark"] = "feishu"
 
+    @model_validator(mode="after")
+    def _validate_webhook_verification(self) -> FeishuChannelEntry:
+        # Webhook ingress authenticates via the encrypt_key HMAC signature
+        # and/or the verification token — either one is a real credential
+        # (configs from earlier releases commonly carry encrypt_key alone).
+        # Disabled entries stay loadable so config migration can park an
+        # unverifiable legacy entry instead of failing the whole boot.
+        if (
+            self.enabled
+            and self.connection_mode == "webhook"
+            and not self.verification_token.strip()
+            and not self.encrypt_key.strip()
+        ):
+            raise ValueError(
+                "feishu webhook channels require verification_token or encrypt_key"
+            )
+        return self
+
 
 class DiscordChannelEntry(ConfiguredChannelEntry):
     """Gateway config entry for a Discord channel."""
@@ -1467,7 +1772,10 @@ class DiscordChannelEntry(ConfiguredChannelEntry):
     application_id: str = ""
     default_channel_id: str = ""
     gateway_url: str = "wss://gateway.discord.gg/?v=10&encoding=json"
-    intents: int = 33281
+    # GUILDS | GUILD_MESSAGES | GUILD_MESSAGE_REACTIONS | DIRECT_MESSAGES |
+    # DIRECT_MESSAGE_REACTIONS | MESSAGE_CONTENT. Keep this aligned with
+    # channels.discord.GATEWAY_INTENTS.
+    intents: int = 46593
 
 
 class DingTalkChannelEntry(ConfiguredChannelEntry):
@@ -1476,6 +1784,11 @@ class DingTalkChannelEntry(ConfiguredChannelEntry):
     type: Literal["dingtalk"] = "dingtalk"
     client_id: str
     client_secret: str
+    # Existing stream-only entries predate native artifact delivery, so these
+    # stay safely defaulted. The onboarding catalog requires robot_code for
+    # newly created entries while legacy TOML continues to load unchanged.
+    robot_code: str = ""
+    cool_app_code: str = ""
 
 
 class WeComChannelEntry(ConfiguredChannelEntry):
@@ -1843,18 +2156,31 @@ class TlsConfig(BaseSettings):
     certfile: str = ""
 
 
-class LlmProviderProfile(BaseSettings):
-    """Named credential profile for a non-primary LLM provider.
+class LlmProviderProfile(BaseModel):
+    """Credential profile for a non-primary or session-pinned LLM deployment.
 
-    Written as ``[llm_profiles.<provider_id>]`` in the config TOML and
+    Provider defaults are written as ``[llm_profiles.<provider_id>]`` and are
     referenced by router tiers through their existing ``provider`` field.
+    A session-pinned named profile may use an exact qualified key such as
+    ``[llm_profiles."openai:work"]``; manual compaction resolves that key only
+    when ``auth_profile_override`` names it and never treats it as a provider
+    default.
     Resolution order per field matches the primary provider: explicit value,
     then ``api_key_env_pool`` (when non-empty), then ``api_key_env`` (or the
     registry env key), then the registry default base URL.
     """
 
-    model_config = SettingsConfigDict(extra="ignore")
+    # Profiles are config records, not independent settings roots.  Reading
+    # process variables here would give every profile the same unscoped
+    # ``API_KEY`` / ``API_KEY_ENV`` values whenever a field is absent (for
+    # example after an explicit credential clear).  Named environment sources
+    # are resolved deliberately by provider.deployment instead.
+    model_config = ConfigDict(extra="ignore")
 
+    # Remember the provider-scoped direct/fallback model while this deployment
+    # is not primary.  Older configs omit it and continue to resolve the
+    # provider catalog default; older binaries ignore this additive field.
+    model: str = ""
     api_key: str = ""
     api_key_env: str = ""
     # Rotation pool of env-var NAMES (never key values) for this profile,
@@ -1984,6 +2310,27 @@ class _EnvWithoutConfigVersion(PydanticBaseSettingsSource):
         return values
 
 
+class GoalConfig(BaseSettings):
+    """Guardrails for session-level Goal execution.
+
+    TOML section ``[goal]``; keys mirror the field names (snake_case).
+    Automatic execution is enabled by default, with a fail-closed operator
+    switch and bounded per-resume execution windows.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="OPENSQUILLA_GOAL_",
+        extra="ignore",
+        populate_by_name=True,
+    )
+
+    execution_enabled: bool = True
+    max_turns: int = Field(default=50, ge=1, le=500)
+    # Accumulated running time only. Queued, paused, and process downtime are
+    # deliberately excluded from this limit.
+    runtime_budget_seconds: int = Field(default=3_600, ge=60, le=86_400)
+
+
 class GatewayConfig(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="OPENSQUILLA_GATEWAY_",
@@ -2025,8 +2372,10 @@ class GatewayConfig(BaseSettings):
     task_runtime: TaskRuntimeConfig = Field(default_factory=TaskRuntimeConfig)
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
     llm: LlmProviderConfig = Field(default_factory=LlmProviderConfig)
-    # Credential profiles for non-primary providers, keyed by registry
-    # provider id; consumed by cross-provider router tiers.
+    # Credential profiles for non-primary providers, normally keyed by
+    # registry provider id and consumed by cross-provider router tiers.
+    # Qualified ``provider:name`` keys are reserved for exact session-pinned
+    # profile selection and are never implicit provider defaults.
     llm_profiles: dict[str, LlmProviderProfile] = Field(default_factory=dict)
     llm_ensemble: LlmEnsembleConfig = Field(default_factory=LlmEnsembleConfig)
     # Model metadata catalog behavior (offline-first; see ModelCatalogConfig).
@@ -2044,6 +2393,7 @@ class GatewayConfig(BaseSettings):
     naming: SessionNamingConfig = Field(default_factory=SessionNamingConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     heartbeat: HeartbeatConfig = Field(default_factory=HeartbeatConfig)
+    goal: GoalConfig = Field(default_factory=GoalConfig)
     image_generation: ImageGenerationConfig = Field(default_factory=ImageGenerationConfig)
     audio: AudioConfig = Field(default_factory=AudioConfig)
     sandbox: SandboxSettings = Field(default_factory=SandboxSettings)
@@ -2058,6 +2408,58 @@ class GatewayConfig(BaseSettings):
     privacy: PrivacyConfig = Field(default_factory=PrivacyConfig)
     diagnostics_enabled: bool = False
     channel_admin_senders: dict[str, list[str]] = Field(default_factory=dict)
+
+    @property
+    def effective_run_mode(self) -> str:
+        """Return the canonical sandbox run mode for this validated config."""
+
+        from opensquilla.run_mode import config_run_mode
+
+        return config_run_mode(self).value
+
+    def _resolve_image_generation_llm_runtime(self) -> object:
+        """Expose primary LLM resolution through a provider-safe capability."""
+
+        from opensquilla.gateway.llm_runtime import resolve_llm_runtime_config
+
+        return resolve_llm_runtime_config(self)
+
+    def _acquire_image_generation_profile_credential(
+        self,
+        provider_id: str,
+        env_pool: list[str],
+        session_key: str,
+    ) -> object | None:
+        """Acquire from the shared profile pool without provider back-imports."""
+
+        from opensquilla.gateway.llm_runtime import profile_credential_pools
+
+        return profile_credential_pools().acquire_for_session(
+            provider_id,
+            env_pool,
+            session_key,
+        )
+
+    def _report_image_generation_profile_credential_failure(
+        self,
+        provider_id: str,
+        session_key: str,
+        kind: object,
+        retry_after_seconds: float | None,
+    ) -> None:
+        """Report an Image request failure to the shared profile pool."""
+
+        from typing import cast
+
+        from opensquilla.gateway.llm_runtime import profile_credential_pools
+        from opensquilla.provider.failures import ProviderFailureKind
+
+        profile_credential_pools().report_failure(
+            provider_id,
+            session_key,
+            cast(ProviderFailureKind, kind),
+            retry_after_seconds=retry_after_seconds,
+        )
 
     @model_validator(mode="after")
     def _resolve_default_llm_provider(self) -> GatewayConfig:
@@ -2084,15 +2486,123 @@ class GatewayConfig(BaseSettings):
         llm = self.llm
         fields_set = set(getattr(llm, "model_fields_set", set()))
         provider = str(llm.provider or "").strip().lower()
+        resolution = {
+            "status": "explicit",
+            "effective_provider": provider,
+            "source": "config",
+            "reason_code": "provider_explicit",
+            "action_required": False,
+            "action_recommended": False,
+        }
         if "provider" not in fields_set:
             profile = str(getattr(self.squilla_router, "tier_profile", "") or "")
+            router_fields_set = set(
+                getattr(self.squilla_router, "model_fields_set", set())
+            )
             legacy_intent = bool(
                 {"model", "base_url", "api_key", "api_key_env"} & fields_set
-            ) or profile.strip().lower() == LEGACY_DEFAULT_LLM_PROVIDER
+            ) or (
+                "tier_profile" in router_fields_set
+                and profile.strip().lower() == LEGACY_DEFAULT_LLM_PROVIDER
+            )
+            credential_hints = {
+                hint
+                for hint in (
+                    credential_provider_hint(
+                        llm.api_key if "api_key" in fields_set else ""
+                    ),
+                    credential_provider_hint(
+                        "",
+                        api_key_env=(
+                            llm.api_key_env if "api_key_env" in fields_set else ""
+                        ),
+                    ),
+                )
+                if hint
+            }
+            origin_hint = endpoint_provider_hint(
+                llm.base_url if "base_url" in fields_set else ""
+            )
+            explicit_profile_hint = (
+                LEGACY_DEFAULT_LLM_PROVIDER
+                if "tier_profile" in router_fields_set
+                and profile.strip().lower() == LEGACY_DEFAULT_LLM_PROVIDER
+                else ""
+            )
             env_openrouter = bool(os.environ.get("OPENROUTER_API_KEY", "").strip())
             env_tokenrhythm = bool(os.environ.get("TOKENRHYTHM_API_KEY", "").strip())
-            if legacy_intent or (env_openrouter and not env_tokenrhythm):
+            ambient_credential_hints = (
+                {
+                    hint
+                    for hint, available in (
+                        (LEGACY_DEFAULT_LLM_PROVIDER, env_openrouter),
+                        (TOKENRHYTHM_DEFAULT_LLM_PROVIDER, env_tokenrhythm),
+                    )
+                    if available
+                }
+                if not ({"api_key", "api_key_env"} & fields_set)
+                else set()
+            )
+            strong_hints = {
+                hint
+                for hint in (
+                    *credential_hints,
+                    *ambient_credential_hints,
+                    origin_hint,
+                    explicit_profile_hint,
+                )
+                if hint
+            }
+            if strong_hints == {TOKENRHYTHM_DEFAULT_LLM_PROVIDER}:
+                provider = TOKENRHYTHM_DEFAULT_LLM_PROVIDER
+                resolution = {
+                    "status": "recovered",
+                    "effective_provider": provider,
+                    "source": "strong_evidence",
+                    "reason_code": "providerless_tokenrhythm_recovered",
+                    "action_required": False,
+                    "action_recommended": True,
+                }
+            elif len(strong_hints) > 1:
                 provider = LEGACY_DEFAULT_LLM_PROVIDER
+                resolution = {
+                    "status": "conflict",
+                    "effective_provider": "",
+                    "source": "conflicting_evidence",
+                    "reason_code": "providerless_provider_conflict",
+                    "action_required": True,
+                    "action_recommended": True,
+                }
+            elif legacy_intent or (env_openrouter and not env_tokenrhythm):
+                provider = LEGACY_DEFAULT_LLM_PROVIDER
+                explicit_openrouter = (
+                    strong_hints == {LEGACY_DEFAULT_LLM_PROVIDER}
+                    or (env_openrouter and not env_tokenrhythm and not legacy_intent)
+                )
+                resolution = {
+                    "status": "legacy_inferred",
+                    "effective_provider": provider,
+                    "source": (
+                        "strong_evidence" if explicit_openrouter else "legacy_compat"
+                    ),
+                    "reason_code": (
+                        "providerless_openrouter_evidence"
+                        if explicit_openrouter
+                        else "providerless_ambiguous_legacy_openrouter"
+                    ),
+                    "action_required": False,
+                    "action_recommended": not explicit_openrouter,
+                }
+            else:
+                resolution = {
+                    "status": "default",
+                    "effective_provider": provider,
+                    "source": "built_in_default",
+                    "reason_code": "provider_unset_default_tokenrhythm",
+                    "action_required": False,
+                    "action_recommended": False,
+                }
+        self._provider_resolution = resolution
         if provider != LEGACY_DEFAULT_LLM_PROVIDER:
             return self
         payload = llm.model_dump(mode="python")
@@ -2115,6 +2625,10 @@ class GatewayConfig(BaseSettings):
         router = self.squilla_router
         if not router or not getattr(router, "enabled", False):
             return self
+        # An explicit custom binding is an operator ownership boundary.  Do
+        # not turn a sparse custom ladder into a provider preset at load time.
+        if getattr(router, "preset_binding", None) == "custom":
+            return self
         if getattr(router, "tier_profile", None):
             return self
         provider = str(getattr(self.llm, "provider", "") or "").strip().lower()
@@ -2135,7 +2649,8 @@ class GatewayConfig(BaseSettings):
         has_custom_tiers = (
             "tiers" in fields_set and getattr(router, "tiers", {}) != _default_tiers()
         )
-        if "tier_profile" in fields_set or has_custom_tiers:
+        follows_primary_preset = getattr(router, "preset_binding", None) == "follow_primary"
+        if "tier_profile" in fields_set or (has_custom_tiers and not follows_primary_preset):
             return self
         payload = router.model_dump(mode="python")
         if curated_inline_preset is None:
@@ -2162,6 +2677,17 @@ class GatewayConfig(BaseSettings):
         provider = str(getattr(self.llm, "provider", "") or "").strip().lower()
         normalized_profile = str(profile).strip().lower()
         if provider != normalized_profile:
+            # An atomic primary/profile swap deliberately leaves the router's
+            # preset and switches untouched while demoting its old provider
+            # into llm_profiles. That is a valid mixed-provider deployment:
+            # keep rejecting stale mismatches unless the profile provider has
+            # an actual stored deployment to execute against.
+            has_profile_deployment = any(
+                str(key or "").strip().lower() == normalized_profile
+                for key in (getattr(self, "llm_profiles", None) or {})
+            )
+            if has_profile_deployment:
+                return self
             raise ValueError(
                 "squilla_router.tier_profile requires llm.provider to match "
                 f"({normalized_profile!r} != {provider!r})"
@@ -2179,6 +2705,10 @@ class GatewayConfig(BaseSettings):
     # Agent runtime timeout (whole turn lifecycle). ``None`` means use the
     # long built-in runtime default; ``0`` disables the runtime budget.
     agent_runtime_timeout_seconds: float | None = None
+    # Optional safety cap for ordinary interactive Web chat turns. Coding and
+    # meta turns retain the regular agent runtime budget. Disabled by default;
+    # an explicit TurnRunner timeout still has priority when the cap is enabled.
+    web_chat_runtime_timeout_seconds: float = Field(default=0.0, ge=0.0)
     # Per-iteration timeout: one LLM call + its tool executions. ``None``
     # means use the AgentConfig default.
     agent_iteration_timeout_seconds: float | None = None
@@ -2424,6 +2954,7 @@ class GatewayConfig(BaseSettings):
     _persist_raw_base: dict[str, Any] | None = PrivateAttr(default=None)
     _runtime_field_overrides: dict[str, tuple[Any, Any]] = PrivateAttr(default_factory=dict)
     _force_persist_paths: set[tuple[str, ...]] = PrivateAttr(default_factory=set)
+    _provider_resolution: dict[str, Any] = PrivateAttr(default_factory=dict)
 
     def to_toml_dict(self) -> dict[str, Any]:
         """Convert config to a TOML-writable dict."""
@@ -2434,12 +2965,32 @@ class GatewayConfig(BaseSettings):
         if isinstance(llm, dict):
             if not llm.get("api_key_env"):
                 llm.pop("api_key_env", None)
-            elif not llm.get("api_key"):
+            if not llm.get("api_key"):
                 llm.pop("api_key", None)
+        llm_profiles = data.get("llm_profiles")
+        if isinstance(llm_profiles, dict):
+            # Empty credential fields are absence, not a stored credential.
+            # Keeping them out of the canonical dump also lets the sparse
+            # persister delete a previously populated field when an explicit
+            # credential-clear mutation sets it back to empty.
+            for profile in llm_profiles.values():
+                if not isinstance(profile, dict):
+                    continue
+                if not profile.get("api_key"):
+                    profile.pop("api_key", None)
+                if not profile.get("api_key_env"):
+                    profile.pop("api_key_env", None)
+                if not profile.get("api_key_env_pool"):
+                    profile.pop("api_key_env_pool", None)
         if not data.get("search_api_key_env"):
             data.pop("search_api_key_env", None)
         elif not data.get("search_api_key"):
             data.pop("search_api_key", None)
+        tools_table = data.get("tools")
+        if isinstance(tools_table, dict) and not tools_table.get("description_overrides"):
+            # Keep written configs byte-identical to pre-mechanism output when
+            # no overrides are configured.
+            tools_table.pop("description_overrides", None)
         # Heuristic guard for the pre-provenance era: a value equal to the
         # env var is assumed env-sourced and dropped. Skipped when the
         # operator explicitly entered the key (recorded by
@@ -2480,14 +3031,23 @@ class GatewayConfig(BaseSettings):
     def to_public_dict(self) -> dict[str, Any]:
         """Return a redacted config view safe for public control surfaces."""
         data = cast(dict[str, Any], redact_public_config(self.model_dump()))
+        ensemble = data.get("llm_ensemble")
+        if isinstance(ensemble, dict):
+            from opensquilla.gateway.model_routing import (
+                ensemble_activation_preview,
+                ensemble_selection_configured,
+            )
+
+            ensemble["selection_configured"] = ensemble_selection_configured(self)
+            ensemble["activation_preview"] = ensemble_activation_preview(self)
         privacy = data.get("privacy")
         if isinstance(privacy, dict):
             from opensquilla.observability.network_policy import (
-                network_observability_disabled,
+                provider_request_correlation_disabled,
             )
 
             privacy["network_observability_disabled_effective"] = (
-                network_observability_disabled(config=self)
+                provider_request_correlation_disabled(config=self)
             )
         return data
 
@@ -2502,6 +3062,12 @@ class GatewayConfig(BaseSettings):
         # in ``to_toml_dict``) must no longer strip the path from persist
         # dumps — an explicit key equal to the env value is still explicit.
         self._explicit_secret_paths.add(path)
+
+    def forget_secret_provenance(self, path: str) -> None:
+        """Forget both runtime and explicit authorship for a removed secret."""
+
+        self._runtime_secret_paths.discard(path)
+        self._explicit_secret_paths.discard(path)
 
     def inherit_runtime_secrets(self, other: GatewayConfig) -> None:
         self._runtime_secret_paths = set(other._runtime_secret_paths)
@@ -2551,6 +3117,43 @@ class GatewayConfig(BaseSettings):
         self._persist_raw_base = copy.deepcopy(other._persist_raw_base)
         self._runtime_field_overrides = dict(other._runtime_field_overrides)
         self._force_persist_paths = set(other._force_persist_paths)
+        self._provider_resolution = dict(other._provider_resolution)
+
+    def provider_resolution(self) -> dict[str, Any]:
+        """Return non-secret provider identity provenance for diagnostics."""
+
+        if self._provider_resolution:
+            return dict(self._provider_resolution)
+        provider = str(getattr(self.llm, "provider", "") or "").strip().lower()
+        return {
+            "status": "explicit",
+            "effective_provider": provider,
+            "source": "config",
+            "reason_code": "provider_explicit",
+            "action_required": False,
+            "action_recommended": False,
+        }
+
+    def set_provider_resolution(
+        self,
+        *,
+        status: str,
+        effective_provider: str,
+        source: str,
+        reason_code: str,
+        action_required: bool = False,
+        action_recommended: bool = False,
+    ) -> None:
+        """Update runtime-only provider identity provenance after a mutation."""
+
+        self._provider_resolution = {
+            "status": str(status),
+            "effective_provider": str(effective_provider),
+            "source": str(source),
+            "reason_code": str(reason_code),
+            "action_required": bool(action_required),
+            "action_recommended": bool(action_recommended),
+        }
 
     def set_persist_snapshot(
         self,
@@ -2606,6 +3209,7 @@ class GatewayConfig(BaseSettings):
         self._persist_baseline = copy.deepcopy(other._persist_baseline)
         self._persist_raw_base = copy.deepcopy(other._persist_raw_base)
         self._force_persist_paths = set(other._force_persist_paths)
+        self._provider_resolution = dict(other._provider_resolution)
 
     def mark_force_persist(self, path: str) -> None:
         """Always write ``path`` on the next persist, even if it equals the
@@ -2671,10 +3275,14 @@ class GatewayConfig(BaseSettings):
         import tomllib
 
         target = Path(path)
-        with open(target, "rb") as f:
-            data = tomllib.load(f)
+        with open(native_io_path(target), "rb") as f:
+            try:
+                data = tomllib.load(f)
+            except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+                raise ConfigParseError(target, exc) from exc
         migration = migrate_config_payload(data)
         cfg = cls(**migration.payload)
+        cfg._mark_env_absorbed_secrets(data)
         cls._apply_profile_path_overrides(cfg, target)
         if migration.changed:
             _rewrite_migrated_config_best_effort(target, migration)
@@ -2707,9 +3315,13 @@ class GatewayConfig(BaseSettings):
             candidates.append((default_opensquilla_home() / "config.toml").expanduser())
 
         for path in candidates:
-            if path.is_file():
-                with open(path, "rb") as f:
-                    data = tomllib.load(f)
+            native_path = native_io_path(path)
+            if native_path.is_file():
+                with open(native_path, "rb") as f:
+                    try:
+                        data = tomllib.load(f)
+                    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
+                        raise ConfigParseError(path, exc) from exc
                 migration = migrate_config_payload(data, emit_diagnostics=not read_only)
                 cfg = cls(**migration.payload)
                 cls._apply_profile_path_overrides(cfg, path)

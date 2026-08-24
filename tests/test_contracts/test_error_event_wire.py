@@ -21,16 +21,27 @@ NORMALIZED_ERROR_KEYS = frozenset(
         "message",
         "code",
         "error_id",
+        "failure_kind",
+        "generation_epoch",
         "terminal_message",
         "terminal_reason",
         "error_message",
         "turn_outcome",
+        "retry_after_ms",
+        "usage_call_index",
+        "no_prior_provider_dispatch",
+        "replay_safe",
     }
 )
 
 
 def _synthetic_error_payload() -> dict:
-    event = ErrorEvent(message="Agent error", code="agent_error", error_id="abcd1234")
+    event = ErrorEvent(
+        message="Agent error",
+        code="agent_error",
+        error_id="abcd1234",
+        failure_kind="transport_transient",
+    )
     payload = asdict(event)
     payload.pop("kind")
     return payload
@@ -39,6 +50,8 @@ def _synthetic_error_payload() -> dict:
 def test_error_event_dataclass_carries_error_id() -> None:
     payload = _synthetic_error_payload()
     assert payload["error_id"] == "abcd1234"
+    assert payload["failure_kind"] == "transport_transient"
+    assert payload["generation_epoch"] == 0
 
 
 def test_normalized_error_payload_keys_are_frozen() -> None:
@@ -78,3 +91,18 @@ def test_channel_reply_carries_ref() -> None:
         event.error_id or None,
     )
     assert reply == "The task failed before it could finish. (ref: abcd1234)"
+
+
+def test_channel_reply_surfaces_actionable_ensemble_image_rejection() -> None:
+    from opensquilla.gateway.channel_dispatch import _terminal_payload_from_error_event
+    from opensquilla.session.terminal_reply import build_terminal_reply
+
+    event = ErrorEvent(
+        message=(
+            "Ensemble does not support image input yet. "
+            "Switch to a single-model routing mode and try again."
+        ),
+        code="ensemble_multimodal_unsupported",
+    )
+
+    assert build_terminal_reply(_terminal_payload_from_error_event(event)) == event.message

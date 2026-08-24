@@ -15,6 +15,8 @@ from opensquilla.sandbox.backend import bubblewrap as bubblewrap_mod
 from opensquilla.sandbox.backend.bubblewrap import BubblewrapBackend, build_bwrap_argv
 from opensquilla.sandbox.backend.linux_readiness import probe_bwrap
 from opensquilla.sandbox.backend.seatbelt import render_seatbelt_profile
+from opensquilla.sandbox.config import SandboxSettings
+from opensquilla.sandbox.policy import build_policy
 from opensquilla.sandbox.run_context import DomainGrant, RunContext
 from opensquilla.sandbox.run_mode import RunMode
 from opensquilla.sandbox.types import (
@@ -118,24 +120,13 @@ def test_bubblewrap_proxy_allowlist_without_proxy_fails_closed(
 @pytest.mark.asyncio
 async def test_noop_backend_passes_request_proxy_env_to_child(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from opensquilla.safety.sandbox import SandboxResult as SafetySandboxResult
     from opensquilla.sandbox.backend import noop as noop_mod
 
     policy = dataclasses.replace(
         _policy(tmp_path, network_proxy=_proxy_spec()),
         env_allowlist=("PATH", "HTTP_PROXY"),
     )
-    seen: dict[str, object] = {}
-
-    def _fake_run_sandboxed(cmd, limits=None, *, stdin=None, env=None):
-        seen["cmd"] = tuple(cmd)
-        seen["stdin"] = stdin
-        seen["env"] = dict(env or {})
-        return SafetySandboxResult(returncode=0, stdout="ok\n", stderr="")
-
-    monkeypatch.setattr(noop_mod, "run_sandboxed", _fake_run_sandboxed)
     request = SandboxRequest(
         argv=(
             sys.executable,
@@ -154,11 +145,7 @@ async def test_noop_backend_passes_request_proxy_env_to_child(
     result = await noop_mod.NoopBackend().run(request)
 
     assert result.returncode == 0
-    assert seen["stdin"] is None
-    assert seen["env"] == {
-        "PATH": "/bin",
-        "HTTP_PROXY": "http://127.0.0.1:18080",
-    }
+    assert result.stdout.strip() == "http://127.0.0.1:18080"
 
 
 def test_seatbelt_proxy_allowlist_without_proxy_fails_closed(
@@ -435,7 +422,72 @@ async def test_real_bubblewrap_network_none_cannot_reach_host_loopback(
 
 @_BWRAP_PROXY_BRIDGE_LINUX_ONLY
 @pytest.mark.asyncio
-async def test_real_bubblewrap_masks_dynamic_sensitive_system_paths(
+async def test_real_bubblewrap_root_read_workspace_write_and_external_readonly(
+    tmp_path: Path,
+) -> None:
+    probe = probe_bwrap()
+    if not probe.available:
+        pytest.skip(probe.message)
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    outside.mkdir()
+    policy = build_policy(
+        SecurityLevel.STANDARD,
+        "shell.exec",
+        workspace,
+        SandboxSettings(
+            backend="bubblewrap",
+            network_default="none",
+            exclude_slash_tmp=True,
+            exclude_tmpdir_env_var=True,
+        ),
+    )
+    policy = dataclasses.replace(
+        policy,
+        network=NetworkMode.NONE,
+        limits=dataclasses.replace(policy.limits, wall_timeout_s=5.0),
+    )
+    workspace_probe = workspace / "inside.txt"
+    outside_probe = outside / "outside.txt"
+    code = (
+        "from pathlib import Path\n"
+        "print('ROOT_LISTED', Path('/etc').is_dir())\n"
+        "print('HOST_READ', bool(Path('/etc/hosts').read_text(encoding='utf-8')))\n"
+        f"Path({str(workspace_probe)!r}).write_text('inside', encoding='utf-8')\n"
+        "print('WORKSPACE_WRITTEN')\n"
+        "try:\n"
+        f"    Path({str(outside_probe)!r}).write_text('outside', encoding='utf-8')\n"
+        "    print('EXTERNAL_WRITTEN')\n"
+        "except OSError as exc:\n"
+        "    print('EXTERNAL_BLOCKED', type(exc).__name__)\n"
+    )
+
+    result = await BubblewrapBackend().run(
+        SandboxRequest(
+            argv=(sys.executable, "-c", code),
+            cwd=workspace,
+            action_kind="shell.exec",
+            policy=policy,
+            env={},
+            session_id="root-read-acceptance",
+            run_mode="standard",
+        )
+    )
+
+    assert result.returncode == 0
+    assert "ROOT_LISTED True" in result.stdout
+    assert "HOST_READ True" in result.stdout
+    assert "WORKSPACE_WRITTEN" in result.stdout
+    assert "EXTERNAL_BLOCKED" in result.stdout
+    assert "EXTERNAL_WRITTEN" not in result.stdout
+    assert workspace_probe.read_text(encoding="utf-8") == "inside"
+    assert not outside_probe.exists()
+
+
+@_BWRAP_PROXY_BRIDGE_LINUX_ONLY
+@pytest.mark.asyncio
+async def test_real_bubblewrap_leaves_unreadable_system_file_to_os_permissions(
     tmp_path: Path,
 ) -> None:
     probe = probe_bwrap()
@@ -448,7 +500,7 @@ async def test_real_bubblewrap_masks_dynamic_sensitive_system_paths(
         "try:\n"
         "    print(target.read_text(encoding='utf-8')[:32])\n"
         "except Exception as exc:\n"
-        "    print('SENSITIVE_BLOCKED', type(exc).__name__)\n"
+        "    print('OS_READ_BLOCKED', type(exc).__name__)\n"
     )
 
     result = await BubblewrapBackend().run(
@@ -464,7 +516,7 @@ async def test_real_bubblewrap_masks_dynamic_sensitive_system_paths(
     )
 
     assert result.returncode == 0
-    assert result.stdout == "\n"
+    assert "OS_READ_BLOCKED PermissionError" in result.stdout
     assert "root:" not in result.stdout
 
 
@@ -684,7 +736,7 @@ async def test_linux_helper_payload_times_out_outer_helper(
             return b"", b""
 
     async def fake_create_subprocess_exec(*argv, **kwargs):
-        assert kwargs["start_new_session"] is True
+        assert "start_new_session" not in kwargs
         return _Proc()
 
     async def fake_terminate(proc):
@@ -692,8 +744,8 @@ async def test_linux_helper_payload_times_out_outer_helper(
         return b"", b""
 
     monkeypatch.setattr(
-        bubblewrap_mod.asyncio,
-        "create_subprocess_exec",
+        bubblewrap_mod,
+        "create_owned_subprocess_exec",
         fake_create_subprocess_exec,
     )
     monkeypatch.setattr(
@@ -707,6 +759,51 @@ async def test_linux_helper_payload_times_out_outer_helper(
         await bubblewrap_mod._run_linux_helper_payload(payload)
 
     assert terminated == [12345]
+
+
+@pytest.mark.asyncio
+async def test_linux_helper_payload_caller_cancel_terminates_outer_process_group(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    payload = bubblewrap_mod.build_process_helper_payload(
+        _request(_policy(tmp_path, network=NetworkMode.NONE, network_proxy=None), tmp_path)
+    )
+    started = asyncio.Event()
+    terminated: list[int] = []
+
+    class _Proc:
+        pid = 12346
+        returncode = None
+        stdout = None
+        stderr = None
+
+        async def communicate(self):
+            started.set()
+            await asyncio.Event().wait()
+
+    async def fake_create_subprocess_exec(*argv, **kwargs):
+        assert "start_new_session" not in kwargs
+        return _Proc()
+
+    async def fake_terminate(proc):
+        terminated.append(proc.pid)
+        return b"", b""
+
+    monkeypatch.setattr(
+        bubblewrap_mod,
+        "create_owned_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    monkeypatch.setattr(bubblewrap_mod, "_terminate_process_group", fake_terminate)
+
+    running = asyncio.create_task(bubblewrap_mod._run_linux_helper_payload(payload))
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    running.cancel()
+    cancelled = await asyncio.gather(running, return_exceptions=True)
+    assert isinstance(cancelled[0], asyncio.CancelledError)
+
+    assert terminated == [12346]
 
 
 @_BWRAP_PROXY_BRIDGE_LINUX_ONLY
@@ -781,7 +878,7 @@ async def test_run_under_backend_populates_proxy_from_current_run_context(
     runtime = SimpleNamespace(backend=FakeBackend())
     policy = _policy(tmp_path, network_proxy=None)
     run_context = RunContext(
-        run_mode=RunMode.STANDARD,
+        run_mode=RunMode.SAFE,
         domains=(DomainGrant(domain="allowed.test"),),
     )
     envelope = build_cli_route_envelope(
@@ -977,7 +1074,7 @@ async def test_windows_proxy_allowlist_starts_proxy_on_allowed_marker_port(
     )
 
     policy = _policy(tmp_path, network_proxy=None)
-    run_context = RunContext(run_mode=RunMode.TRUSTED)
+    run_context = RunContext(run_mode=RunMode.SAFE)
     envelope = build_cli_route_envelope(
         session_key="agent:main:webchat:abc",
         run_mode="trusted",
