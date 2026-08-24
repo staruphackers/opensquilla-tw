@@ -602,7 +602,7 @@ def test_boot_retry_surfaces_failed_restart_and_prevents_repeat_clicks() -> None
         in boot_html
     )
     assert "rawMessage.includes('OPENSQUILLA_PROFILE_IN_USE')" in apply_error
-    assert boot_html.count("profileInUse:") == 6
+    assert boot_html.count("profileInUse:") == 7
 
 
 def test_keychain_startup_recovery_is_actionable_without_plaintext_fallback() -> None:
@@ -636,8 +636,8 @@ def test_keychain_startup_recovery_is_actionable_without_plaintext_fallback() ->
     assert "openKeychainButton.hidden = !keychainUnavailable" in boot_html
     assert "api.openKeychainAccess()" in boot_html
     assert "keychainUnavailable:" in boot_html
-    assert boot_html.count("openKeychain:") == 6
-    assert boot_html.count("keychainUnavailable:") == 6
+    assert boot_html.count("openKeychain:") == 7
+    assert boot_html.count("keychainUnavailable:") == 7
 
     encryption = _section(main_ts, "function encryptSecret", "function decryptSecret")
     assert "catch {\n      return plainSecret(secret)" not in encryption
@@ -1507,8 +1507,8 @@ def test_desktop_onboarding_exposes_immediate_and_slow_submit_feedback() -> None
         in html
     )
     assert "const SUBMIT_SLOW_FEEDBACK_MS = 8_000" in html
-    assert main_ts.count("savingSetup:") == 6
-    assert main_ts.count("setupTakingLonger:") == 6
+    assert main_ts.count("savingSetup:") == 7
+    assert main_ts.count("setupTakingLonger:") == 7
     assert "t.savingSetup" in submitting
     assert "desktopMessage(activeLocale, 'boot.profile')" in submitting
     assert "t.setupTakingLonger" in submitting
