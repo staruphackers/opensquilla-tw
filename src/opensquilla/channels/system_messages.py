@@ -662,6 +662,80 @@ _MESSAGES: dict[str, dict[ChannelSystemMessageKey, str]] = {
         ),
         "command_new_unavailable": "/new falló: comando no disponible",
     },
+    "zh-Hant": {
+        "pairing_required": "需要訪問審批。配對申請：{pairing_code}。請聯絡 OpenSquilla 操作員批准後再傳送訊息。",
+        "pairing_approved": "訪問已獲批准。請傳送一條訊息以開始對話。",
+        "approval_prompt": (
+            "需要批准才能執行特權命令。\n"
+            "{label}：{command}\n"
+            "代碼：{code}\n"
+            "回覆 /approve {code} 以允許，或回覆 /deny {code} 以拒絕。"
+        ),
+        "approval_prompt_always": (
+            "需要批准才能執行特權命令。\n"
+            "{label}：{command}\n"
+            "代碼：{code}\n"
+            "回覆 /approve {code} 以允許，回覆 /approve {code} al"
+            "ways 以不再詢問此類操作，或回覆 /deny {code} 以拒絕。"
+        ),
+        "approval_card_title": "需要批准",
+        "approval_card_question": "要執行特權命令嗎？",
+        "approval_card_details": (
+            "{question}\n"
+            "**{label}：** `{command}`\n"
+            "**{code_label}：** `{code}`"
+        ),
+        "approval_card_approve": "批准",
+        "approval_card_always": "始終允許",
+        "approval_card_deny": "拒絕",
+        "approval_card_note": "或回覆 /approve {code} 或 /deny {code}。",
+        "approval_card_note_always": (
+            "或回覆 /approve {code}、/approve {code} always 或"
+            " /deny {code}。"
+        ),
+        "approval_label_command": "命令",
+        "approval_label_network": "網路",
+        "approval_label_network_host": "網路主機",
+        "approval_label_path": "路徑",
+        "approval_label_code": "代碼",
+        "approval_packages": "軟體包：{bundle_id}",
+        "approval_delete_backup_enabled": "此刪除操作不可撤回。檔案安全備份已開啟，OpenSquilla 會在刪除前建立可恢復副本。",
+        "approval_delete_backup_disabled": "此刪除操作不可撤回，且檔案安全備份未開啟。如需可恢復副本，請先在沙箱設定中開啟備份。",
+        "approval_delete_backup_unavailable": "檔案安全備份目前不可用。繼續會永久刪除目標，且不會留下可恢復副本。",
+        "approval_unknown_command": "（未知命令）",
+        "approval_probe_throttled": "失敗的批准嘗試過多，請等待一分鐘後重試。",
+        "approval_no_pending": "沒有待處理的批准 {code}。",
+        "approval_owner_only": "只有工作階段所有者可以處理此批准。請讓其回覆 /approve {code}。",
+        "approval_always_requires_admin": "“始終允許”需要頻道管理員許可權。回覆 /approve {code} 僅允許這一次。",
+        "approval_invalid_choice": "無法應用批准 {code}，它仍在等待處理。請在控制檯中處理。",
+        "approval_already_resolved": "批准 {code} 已被處理。",
+        "approval_resolution_failed": "無法應用批准 {code}，它仍在等待處理，請重試。",
+        "approval_denied": "已拒絕 {code}。",
+        "approval_approved_once": "已批准 {code}，正在執行……",
+        "approval_approved_always": "已批准 {code}，本次工作階段中將不再詢問此類操作。",
+        "command_usage_sandbox": "用法：/sandbox safe | full",
+        "command_unsupported": "不支援的命令：{command}。請嘗試 /help。",
+        "command_completed": "/{name} 已完成",
+        "command_denied": "/{name} 已被拒絕{reason}",
+        "command_failed": "/{name} 失敗{reason}",
+        "command_sandbox_denied": "沙箱模式被拒絕：{reason}",
+        "command_sandbox_failed": "沙箱模式設定失敗：{reason}",
+        "command_sandbox_updated": "沙箱模式已設為 {mode}。",
+        "command_sandbox_safe": "安全模式",
+        "command_sandbox_full": "完全主機訪問",
+        "command_sandbox_unknown_mode": "已更新",
+        "command_compact_denied": "壓縮被拒絕：{reason}",
+        "command_compact_failed": "壓縮失敗：{reason}",
+        "command_compact_completed": "上下文已壓縮。",
+        "command_compact_skipped": "上下文仍在預算範圍內，未執行壓縮。",
+        "command_meta_denied": "/meta 被拒絕：{reason}",
+        "command_meta_failed": "/meta 失敗：{reason}",
+        "command_meta_empty": "沒有可用的元技能。",
+        "command_meta_heading": "可用的元技能：",
+        "command_missing_scope": "：缺少 {missing}",
+        "command_new_denied": "/new 被拒絕：方法許可權不足：{method}{detail}",
+        "command_new_unavailable": "/new 失敗：命令不可用",
+    },
 }
 
 

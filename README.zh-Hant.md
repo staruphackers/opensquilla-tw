@@ -50,7 +50,7 @@ OpenSquilla 0.5.0 Preview 3 是目前的預覽版本。
 
 OpenSquilla 可在 Windows、macOS 與 Linux 上執行。請選擇符合你使用情境的安裝路徑。
 
-桌面安裝程式與終端機快速安裝，會直接給你預先建置好的**發布版**——不需要 Git。另外兩種——從原始碼安裝與從原始碼開發——則是**從 Git checkout** 建置（`git clone` + Git LFS）。
+桌面安裝程式與終端機快速安裝，會直接給你預先建置好的**發布版**——不需要 Git。另外兩種——從原始碼安裝與從原始碼開發——則是**從 Git checkout** 建置（`git clone` + Git LFS），建置範圍也包含 Vue 控制台。發布 wheel 與桌面安裝程式已內建控制台，使用者不需要安裝 Node.js 或 npm。
 
 發布版安裝指令使用的是已發布在 GitHub Release 上的資產。Python wheel 的安裝方式使用帶版本號的 wheel 檔名，因為安裝程式會驗證內嵌在 wheel 檔名中的版本號。
 
@@ -69,6 +69,7 @@ OpenSquilla 可在 Windows、macOS 與 Linux 上執行。請選擇符合你使�
 | --- | :---: | :---: | :---: |
 | Python 3.12+ | 透過 `uv` | 透過 `uv` 或系統內建 | 透過 `uv` |
 | Git + Git LFS | — | 必要 | 必要 |
+| Node.js 22.12+ 與 npm | — | 建置 Web UI 時必要 | Web UI 與 wheel 建置必要 |
 | `uv` | 缺少時自動安裝 | 建議安裝 | 必要 |
 
 預設的 `recommended` profile 會安裝 **SquillaRouter**——OpenSquilla 的裝置端模型
@@ -218,13 +219,14 @@ opensquilla gateway run
 <details>
 <summary>從原始碼安裝——終端機前置需求與安裝程式選項</summary>
 
-**從終端機安裝前置需求（Git、Git LFS、uv）**
+**從終端機安裝前置需求（Git、Git LFS、Node.js 22.12+ 與 npm、uv）**
 
 Windows PowerShell:
 
 ```powershell
 winget install --id Git.Git -e
 winget install --id GitHub.GitLFS -e
+winget install --id OpenJS.NodeJS.LTS -e
 powershell -ExecutionPolicy Bypass -c "irm https://astral.sh/uv/install.ps1 | iex"
 git lfs install
 ```
@@ -232,14 +234,16 @@ git lfs install
 macOS (Homebrew):
 
 ```sh
-brew install git git-lfs uv
+brew install git git-lfs node uv
 git lfs install
 ```
 
 Debian / Ubuntu:
 
 ```sh
-sudo apt update && sudo apt install -y git git-lfs
+sudo apt update && sudo apt install -y git git-lfs curl
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt install -y nodejs
 curl -LsSf https://astral.sh/uv/install.sh | sh
 git lfs install
 ```
